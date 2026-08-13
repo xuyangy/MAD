@@ -1,0 +1,25 @@
+# CI — typecheck, the AD-1 dependency-direction lint rule, and unit tests
+# (ARCHITECTURE-SPINE.md, Deployment: "CI | Typecheck, lint (including the AD-1
+# dependency-direction rule), unit tests").
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: typecheck
+        run: bun run typecheck
+      - name: lint (AD-1 dependency direction)
+        run: bun run lint
+      - name: test
+        run: bun test

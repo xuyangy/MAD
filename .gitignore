@@ -6,3 +6,6 @@
 _bmad
 /.omo
 /_bmad-output
+
+node_modules
+*.tsbuildinfo

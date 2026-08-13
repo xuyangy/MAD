@@ -1,0 +1,4 @@
+# MAD runs on Bun — opencode's own runtime (ARCHITECTURE-SPINE.md, Stack).
+[test]
+root = "."
+coverage = false

@@ -1,0 +1,236 @@
+/**
+ * AD-4 — roster selection is dedupe THEN rank, in that order.
+ *
+ * (1) Dedupe candidates by normalized model identity — family plus version,
+ *     snapshot date stripped — so one model never occupies two slots regardless
+ *     of how many providers reach it.
+ * (2) Rank, filling slots to maximize distinct lineages first, then distinct
+ *     models within a lineage.
+ *
+ * Getting the order wrong is the single most damaging thing this system can do:
+ * every co-discovery number downstream inherits the error.
+ *
+ * AD-6c is raised here — the roster warning is the stage that detected it.
+ */
+
+import { lineageOf, normalizeModelIdentity, UNVERIFIED_LINEAGE } from "../domain/lineage.ts"
+import type { Candidate, Roster, RosterSlot } from "../domain/roster.ts"
+import type { Warning } from "../domain/warning.ts"
+
+/**
+ * The host config key a user edits to add a provider. Named in the AD-6c
+ * warning so the warning is actionable rather than decorative.
+ *
+ * This is host-shaped, so the caller supplies it (AD-1: no opencode knowledge
+ * in the core). The adapter passes opencode's key.
+ */
+export interface SelectOptions {
+  slots: number
+  /** e.g. `provider` in opencode.json — named verbatim in the AD-6c warning. */
+  providerConfigKey: string
+  /** Slot id prefix; `discovery` yields `discovery-1`, `discovery-2`, ... */
+  slotPrefix?: string
+}
+
+export interface SelectResult {
+  roster: Roster
+  warnings: Warning[]
+}
+
+/** Thrown when the host offers nothing at all — unusable host state, not a domain outcome. */
+export class NoCandidatesError extends Error {
+  constructor(providerConfigKey: string) {
+    super(
+      `No models are available from the host, so there is nothing to review with. ` +
+        `Configure at least one provider in your opencode config (the \`${providerConfigKey}\` key) ` +
+        `or authenticate one with \`opencode auth login\`, then run the review again. ` +
+        `MAD holds no credentials and names no model of its own.`,
+    )
+    this.name = "NoCandidatesError"
+  }
+}
+
+interface Deduped {
+  candidate: Candidate
+  identity: string
+  alsoAvailableVia: string[]
+}
+
+/**
+ * AD-4 step 1. Order is preserved from the input, so the caller's preference
+ * ordering survives; the first provider seen for an identity wins the slot and
+ * the rest are recorded as `alsoAvailableVia` for disclosure.
+ */
+export function dedupeByIdentity(candidates: readonly Candidate[]): Deduped[] {
+  const byIdentity = new Map<string, Deduped>()
+  for (const candidate of candidates) {
+    const identity = normalizeModelIdentity(candidate.modelId)
+    const existing = byIdentity.get(identity)
+    if (existing) {
+      // Same model, second provider: it never occupies a second slot (AD-4).
+      if (!existing.alsoAvailableVia.includes(candidate.providerId)) {
+        existing.alsoAvailableVia.push(candidate.providerId)
+      }
+      continue
+    }
+    byIdentity.set(identity, { candidate, identity, alsoAvailableVia: [] })
+  }
+  return [...byIdentity.values()]
+}
+
+/**
+ * AD-4 step 2 + AD-5. Round-robin across lineages: one model per lineage before
+ * any lineage gets a second. Unverified models are ranked last and grouped into
+ * one bucket, because an unrecognized model is never counted as a fresh lineage
+ * — grouping them is what stops N unknowns from looking like N lineages.
+ */
+export function rankByDiversity(deduped: readonly Deduped[], slots: number): Deduped[] {
+  const verified = new Map<string, Deduped[]>()
+  const unverified: Deduped[] = []
+
+  for (const entry of deduped) {
+    const claim = lineageOf(entry.candidate.modelId)
+    if (!claim.verified) {
+      unverified.push(entry)
+      continue
+    }
+    const bucket = verified.get(claim.lineage)
+    if (bucket) bucket.push(entry)
+    else verified.set(claim.lineage, [entry])
+  }
+
+  const buckets = [...verified.values()]
+  const picked: Deduped[] = []
+
+  // Pass n takes the nth model from each lineage, so distinct lineages fill
+  // first and distinct models within a lineage fill second.
+  for (let depth = 0; picked.length < slots; depth += 1) {
+    let placedThisPass = false
+    for (const bucket of buckets) {
+      if (picked.length >= slots) break
+      const entry = bucket[depth]
+      if (!entry) continue
+      picked.push(entry)
+      placedThisPass = true
+    }
+    if (!placedThisPass) break
+  }
+
+  // Unverified models fill leftover slots — they are real models the host has,
+  // they just cannot be claimed as diversity.
+  for (const entry of unverified) {
+    if (picked.length >= slots) break
+    picked.push(entry)
+  }
+
+  return picked
+}
+
+export function selectRoster(candidates: readonly Candidate[], options: SelectOptions): SelectResult {
+  const { slots, providerConfigKey, slotPrefix = "discovery" } = options
+  if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey)
+  if (slots < 1) throw new Error("selectRoster: slots must be at least 1")
+
+  const deduped = dedupeByIdentity(candidates)
+  const picked = rankByDiversity(deduped, slots)
+
+  const rosterSlots: RosterSlot[] = picked.map((entry, index) => ({
+    slot: `${slotPrefix}-${index + 1}`,
+    providerId: entry.candidate.providerId,
+    modelId: entry.candidate.modelId,
+    identity: entry.identity,
+    lineage: lineageOf(entry.candidate.modelId),
+    toolcall: entry.candidate.toolcall,
+    alsoAvailableVia: entry.alsoAvailableVia,
+  }))
+
+  const verifiedLineages = new Set(
+    rosterSlots.filter((s) => s.lineage.verified).map((s) => s.lineage.lineage),
+  )
+
+  const providers = [...new Set(rosterSlots.map((s) => s.providerId))]
+
+  const roster: Roster = {
+    slots: rosterSlots,
+    requested: slots,
+    distinctLineages: verifiedLineages.size,
+    providers,
+  }
+
+  const warnings: Warning[] = []
+
+  // AD-3 — disclose the provider fan-out a run implies. Disclosure, not a gate.
+  warnings.push({
+    code: "provider-fan-out",
+    stage: "roster",
+    message:
+      `This review sends the change to ${providers.length} provider(s): ${providers.join(", ")}. ` +
+      `Models: ${rosterSlots.map((s) => `${s.providerId}/${s.modelId}`).join(", ")}.`,
+    detail: { providers, models: rosterSlots.map((s) => `${s.providerId}/${s.modelId}`) },
+  })
+
+  // AD-6c — the roster is smaller than asked for. Distinct from the lineage
+  // warning below: "requested 3, filled 1" is a different fact from "filled 3,
+  // all one lineage", and a run can be degraded by either. Without this, an
+  // underfilled roster with a recognized lineage reached the output with no
+  // warning at all, and the shortfall was visible only in the roster header.
+  if (rosterSlots.length < slots) {
+    warnings.push({
+      code: "roster-underfilled",
+      stage: "roster",
+      message:
+        `UNDERFILLED ROSTER: ${slots} discovery slot(s) requested but the host offers only ` +
+        `${rosterSlots.length} distinct model(s) (${candidates.length} candidate(s) before dedupe). ` +
+        `The run proceeds with a smaller roster; every co-discovery fraction is over what ` +
+        `answered, not over ${slots}. Add a provider under the \`${providerConfigKey}\` key in ` +
+        `your opencode config to fill the remaining slot(s).`,
+      detail: {
+        requested: slots,
+        filled: rosterSlots.length,
+        candidatesBeforeDedupe: candidates.length,
+        providerConfigKey,
+      },
+    })
+  }
+
+  // AD-5 — a slot the lineage table does not recognize.
+  for (const slot of rosterSlots) {
+    if (slot.lineage.verified) continue
+    warnings.push({
+      code: "roster-lineage-unverified",
+      stage: "roster",
+      message:
+        `\`${slot.providerId}/${slot.modelId}\` (slot ${slot.slot}) is not in MAD's lineage table, ` +
+        `so it is reported as ${UNVERIFIED_LINEAGE} and is NOT counted as a distinct lineage. ` +
+        `Add a marker to core/domain/lineage.ts if you know its family.`,
+      detail: { slot: slot.slot, providerId: slot.providerId, modelId: slot.modelId },
+    })
+  }
+
+  // AD-6c — a roster resolving to fewer lineages than slots warns loudly, names
+  // the lineage and the host config key, and states the weak-signal consequence.
+  if (verifiedLineages.size < slots) {
+    const named = rosterSlots
+      .map((s) => (s.lineage.verified ? s.lineage.label : `${s.modelId} (${UNVERIFIED_LINEAGE})`))
+      .join(", ")
+    warnings.push({
+      code: "roster-single-lineage",
+      stage: "roster",
+      message:
+        `DEGRADED ROSTER: ${slots} discovery slot(s) requested but only ${verifiedLineages.size} ` +
+        `distinct verified lineage(s) available (${named}). Co-discovery over a roster this narrow ` +
+        `is a WEAK SIGNAL — models from one lineage share training data and therefore share blind ` +
+        `spots. Add a provider from another lineage under the \`${providerConfigKey}\` key in your ` +
+        `opencode config to fix this. Temperature variation across one model is not an accepted ` +
+        `substitute for a diverse roster.`,
+      detail: {
+        requested: slots,
+        distinctLineages: verifiedLineages.size,
+        lineages: [...verifiedLineages],
+        providerConfigKey,
+      },
+    })
+  }
+
+  return { roster, warnings }
+}
