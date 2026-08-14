@@ -19,11 +19,27 @@ import { opencodeRepo } from "./repo.ts"
 import { resolveRoster } from "./roster.ts"
 
 /**
- * Story 1 is the single-model control arm (and story 9 reuses it as exactly
- * that), so one discovery slot is the default. It is a slot COUNT, not a model
- * — MAD still names no model (AD-3).
+ * Three discovery slots on a fresh install (AD-3: no configuration required to
+ * get the real thing). A default of 1 makes CAP-1 unreachable out of the box —
+ * heterogeneous discovery that never fans out is a claim, not a capability.
+ *
+ * Three, specifically, because the contract reasons in threes wherever it counts
+ * model turns. AD-15's amendment is the one that counts DISCOVERY turns —
+ * "three models with five lenses is eighteen discovery turns rather than three".
+ * (`cost-model.md` lever 1's "3 calls per round instead of 27" is the same three
+ * models, but it is counting debate calls per round, not discovery.) It is also
+ * the smallest N at which
+ * `distinctLineages` can express the ideal roster of AD-4 — Claude + GPT +
+ * Gemini — rather than merely two thirds of it.
+ *
+ * It is a slot COUNT, not a model: MAD still names no model (AD-3), and it
+ * triples a fresh install's discovery cost against story 1 deliberately. The
+ * `provider-fan-out` disclosure (AD-3) already names every model a run bills.
+ *
+ * Story 9's single-model control arm is `slots: 1` through this same tool and
+ * the same `review()` seam — a smaller argument, never a second code path.
  */
-const DEFAULT_DISCOVERY_SLOTS = 1
+export const DEFAULT_DISCOVERY_SLOTS = 3
 
 /**
  * An upper bound on the fan-out. Each slot is a billed session against the
@@ -31,7 +47,24 @@ const DEFAULT_DISCOVERY_SLOTS = 1
  * so an unbounded value is an unbounded charge. Well above any roster a real
  * host resolves; there to stop `slots: 200`, not to tune anything.
  */
-const MAX_DISCOVERY_SLOTS = 12
+export const MAX_DISCOVERY_SLOTS = 12
+
+/**
+ * Clamp at BOTH ends. The tool schema bounds the argument too, but the value
+ * arrives from a model calling the tool: over the maximum is an unbounded
+ * charge, and under 1 is a `selectRoster` throw (`slots must be at least 1`)
+ * where the user deserves a review. Exported so the bound is tested rather than
+ * trusted.
+ *
+ * Only ABSENT and NOT-A-NUMBER fall back to the default. The infinities are
+ * clamped like any other out-of-range value — `Infinity` is an explicit request
+ * for more, so it lands on the maximum rather than quietly becoming the default,
+ * which is what this comment already promised and the code did not do.
+ */
+export function clampDiscoverySlots(slots: number | undefined): number {
+  if (slots === undefined || Number.isNaN(slots)) return DEFAULT_DISCOVERY_SLOTS
+  return Math.min(Math.max(Math.trunc(slots), 1), MAX_DISCOVERY_SLOTS)
+}
 
 export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
   return {
@@ -57,14 +90,16 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             .max(MAX_DISCOVERY_SLOTS)
             .optional()
             .describe(
-              `How many discovery models to fan out to. Defaults to ${DEFAULT_DISCOVERY_SLOTS}, ` +
-                `maximum ${MAX_DISCOVERY_SLOTS}. Each slot is a separate billed model call.`,
+              `How many discovery models to fan out to, each reviewing the change independently ` +
+                `and in parallel. Defaults to ${DEFAULT_DISCOVERY_SLOTS}, maximum ` +
+                `${MAX_DISCOVERY_SLOTS}. Each slot is a separate billed model call. Pass 1 for a ` +
+                `single-model review.`,
             ),
         },
         async execute(args) {
           // Belt and braces: the schema bounds it, and so does this, because the
           // value arrives from a model call and each slot costs real money.
-          const slots = Math.min(args.slots ?? DEFAULT_DISCOVERY_SLOTS, MAX_DISCOVERY_SLOTS)
+          const slots = clampDiscoverySlots(args.slots)
 
           let resolved
           try {
@@ -123,9 +158,18 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             priorWarnings: resolved.warnings,
           })
 
+          // AD-6 reaches the headline too, not only the body. Two things this
+          // line must not do: denominate on the FILLED roster, which turns a
+          // 3-requested/1-filled host into a clean-looking "1/1"; and present a
+          // pre-clustering union as a plain finding count, which is the exact
+          // misreading the body's POOL — NOT YET MERGED notice exists to stop.
+          const pooled =
+            record.answered > 1 && record.findings.every((f) => f.clusterId === undefined)
+          const findingLabel = pooled ? "pooled finding(s), not yet merged" : "finding(s)"
+
           // AD-16 — the record stays in memory; nothing is written to the repo.
           return {
-            title: `MAD review — ${record.findings.length} finding(s), ${record.answered}/${record.roster.slots.length} models answered`,
+            title: `MAD review — ${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered`,
             output: rendered,
             metadata: {
               runId: record.runId,

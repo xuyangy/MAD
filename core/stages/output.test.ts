@@ -14,6 +14,7 @@ function finding(partial: Partial<Finding> & { severity: Severity; file: string 
     locus: partial.locus ?? { file: partial.file, startLine: 1, endLine: 1 },
     severity: partial.severity,
     author: partial.author ?? "discovery-1",
+    clusterId: partial.clusterId,
     coDiscovery: partial.coDiscovery,
     unresolved: partial.unresolved,
     history: [],
@@ -190,6 +191,82 @@ describe("rendering (AD-6, AD-9)", () => {
     )
     expect(rendered).not.toContain("1/0")
     expect(rendered).toContain("no model answered")
+  })
+
+  test("AD-6: at N>1 before clustering, the pool is declared unmerged", () => {
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 3 } }),
+          finding({ severity: "high", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } }),
+        ],
+        3,
+      ),
+    )
+    expect(rendered).toContain("POOL — NOT YET MERGED")
+    expect(rendered).toContain("ONE DEFECT MAY APPEAR ONCE PER MODEL")
+    // It names the denominator every fraction below is over (AD-6a).
+    expect(rendered).toContain("1/3")
+  })
+
+  test("the notice says nothing at N=1, where a union of one IS a merged set", () => {
+    const rendered = output(
+      record([finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 1 } })], 1),
+    )
+    expect(rendered).not.toContain("NOT YET MERGED")
+  })
+
+  test("the notice self-deletes as soon as a clusterId exists (story 3)", () => {
+    // `clusterId` is clustering's field (AD-8), so its presence is the
+    // discriminator — nobody has to remember to delete this notice.
+    const rendered = output(
+      record(
+        [
+          finding({
+            severity: "high",
+            file: "a.ts",
+            clusterId: "cluster-1",
+            coDiscovery: { raised: 2, answered: 3 },
+          }),
+          finding({ severity: "low", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } }),
+        ],
+        3,
+      ),
+    )
+    expect(rendered).not.toContain("NOT YET MERGED")
+  })
+
+  test("the notice does not claim a fraction the rows below do not show", () => {
+    // `output` is exported and callable on a record whose findings carry no
+    // coDiscovery — the pair is stamped in `core/run/review.ts`, outside this
+    // stage. Those rows render `—`, so an unconditional "every fraction reads
+    // 1/N" would be a false sentence in the one place AD-6 exists to keep
+    // honest. The notice itself still appears; only the claim it cannot support
+    // is withheld.
+    const rendered = output(
+      record([finding({ severity: "high", file: "a.ts" }), finding({ severity: "low", file: "b.ts" })], 3),
+    )
+    expect(rendered).toContain("POOL — NOT YET MERGED")
+    expect(rendered).toContain("ONE DEFECT MAY APPEAR ONCE PER MODEL")
+    expect(rendered).not.toContain("Every co-discovery fraction below reads")
+  })
+
+  test("a mixed pool — one finding already credited to two models — makes no blanket claim", () => {
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 2, answered: 3 } }),
+          finding({ severity: "low", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } }),
+        ],
+        3,
+      ),
+    )
+    expect(rendered).toContain("POOL — NOT YET MERGED")
+    expect(rendered).not.toContain("Every co-discovery fraction below reads")
+  })
+
+  test("the notice does not appear when there is nothing pooled to describe", () => {
+    expect(output(record([], 3))).not.toContain("NOT YET MERGED")
   })
 
   test("AD-3: the provider fan-out is disclosed, not filed as a degradation", () => {

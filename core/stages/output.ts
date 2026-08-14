@@ -10,7 +10,10 @@
  * renders as a fraction with its denominator.
  *
  * AD-6 — all four degradation reports are carried here and rendered: the
- * denominator, drop-outs, the roster warning, and the unresolved section.
+ * denominator, drop-outs, the roster warning, and the unresolved section. The
+ * same rule covers what the finding list IS while the pipeline is short of
+ * stages: before clustering runs it is a pool, not a merged set, and a
+ * multi-model run says so (`pooledNotYetMerged`).
  */
 
 import { severityRank, type Finding } from "../domain/finding.ts"
@@ -82,6 +85,61 @@ function renderEvidence(finding: Finding): string {
   return finding.evidence ?? "assertion only"
 }
 
+/**
+ * AD-6's honesty rule applied to the state a multi-model run is in before
+ * clustering exists: the finding list is a UNION across models, not a merged
+ * set. Left unsaid, a reader counting entries reads three models describing one
+ * defect as three defects, and reads `1/3` on all of them as three weak
+ * findings rather than one possibly-strong one.
+ *
+ * The discriminator is `clusterId` — the field clustering owns (AD-8) — so this
+ * notice self-deletes the moment story 3 writes it, with nothing to remember to
+ * remove. It says nothing at N=1, where a union of one is a merged set already.
+ *
+ * STORY 3 MUST WRITE `clusterId` ON EVERY FINDING, INCLUDING SINGLETONS.
+ * `clusterId` is a proxy here for "clustering has run", and it only holds if
+ * clustering marks findings it did not merge as well. If story 3 assigns ids
+ * only to multi-member clusters, a post-clustering run in which nothing merged
+ * re-announces this notice over a fully-clustered pool — a false statement, in
+ * the one place AD-6 exists to keep honest. (Reviewed and bound, 2026-08-14.)
+ *
+ * The count is over the findings this notice actually sits above — the resolved
+ * ones. Today nothing is unresolved, but AD-6d's section fills from story 8, and
+ * a header counting findings printed in a different section is the kind of quiet
+ * arithmetic error a reader has no way to catch.
+ */
+function pooledNotYetMerged(record: RunRecord, resolved: readonly Finding[]): string[] {
+  if (record.answered <= 1) return []
+  if (resolved.length === 0) return []
+  if (record.findings.some((finding) => finding.clusterId !== undefined)) return []
+
+  const lines = [
+    `POOL — NOT YET MERGED: these ${resolved.length} finding(s) are the union of what ` +
+      `${record.answered} model(s) reported,`,
+    `  reviewed independently and in parallel. Equivalent findings have not been clustered yet, so`,
+    `  ONE DEFECT MAY APPEAR ONCE PER MODEL.`,
+  ]
+
+  // Only claim what the rows below actually show. The `{raised, answered}` pair
+  // is stamped outside this stage (`core/run/review.ts`), and `output` is
+  // exported and callable on a record whose findings carry none — where every
+  // row renders `—` and an unconditional "every fraction reads 1/N" would be
+  // simply false. AD-6 is an honesty rule; a header that describes rows it never
+  // read is the failure it names, not an exception to it.
+  const uniform = resolved.every(
+    (finding) => finding.coDiscovery?.raised === 1 && finding.coDiscovery.answered === record.answered,
+  )
+  if (uniform) {
+    lines.push(
+      `  Every co-discovery fraction below reads 1/${record.answered}, because no finding has yet`,
+      `  been credited with a second model raising it.`,
+    )
+  }
+
+  lines.push("")
+  return lines
+}
+
 function indent(text: string, prefix = "    "): string {
   return text
     .split("\n")
@@ -139,6 +197,9 @@ export function renderRunRecord(record: RunRecord): string {
   // ---- findings ----
   const resolved = record.findings.filter((f) => !f.unresolved)
   const unresolved = record.findings.filter((f) => f.unresolved)
+
+  // ---- AD-6 — what the finding list below actually is, before clustering ----
+  lines.push(...pooledNotYetMerged(record, resolved))
 
   lines.push(`FINDINGS (${resolved.length})`)
   if (resolved.length === 0) {

@@ -56,6 +56,65 @@ describe("AD-1 dependency-direction rule", () => {
     ).toHaveLength(1)
   })
 
+  test("fails a core file importing from the top-level fixtures/ tree", () => {
+    // Fixture code — seeded defects, scripted answers, recall counting — must not
+    // be reachable from a shipped stage.
+    const violations = scanSource(
+      "core/stages/discover.ts",
+      `import { SEEDED_DEFECTS } from "../../fixtures/seeded-defects/change.ts"\n`,
+    )
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.why).toContain("fixtures/")
+
+    expect(
+      scanSource(
+        "core/run/review.ts",
+        `import {\n  recall,\n  type SeededDefect,\n} from "../../fixtures/recall.ts"\n`,
+      ),
+    ).toHaveLength(1)
+    expect(scanSource("core/stages/output.ts", `import "fixtures/recall.ts"\n`)).toHaveLength(1)
+    expect(
+      scanSource("core/run/review.ts", `const f = await import("../../fixtures/recall.ts")\n`),
+    ).toHaveLength(1)
+  })
+
+  test("a non-canonical specifier cannot slip past the anchors", () => {
+    // Both of these reach the top-level fixtures/ tree while reading as
+    // something else, so a prefix pattern alone never sees them.
+    expect(
+      scanSource("core/clustering/engine.ts", `import { x } from "../../fixtures"\n`),
+    ).toHaveLength(1)
+    expect(
+      scanSource(
+        "core/clustering/engine.ts",
+        `import { x } from "../clustering/../../fixtures/recall.ts"\n`,
+      ),
+    ).toHaveLength(1)
+    // Same hole on the adapters side: a directory import, no trailing slash.
+    expect(scanSource("core/run/review.ts", `import "../../adapters"\n`)).toHaveLength(1)
+    expect(
+      scanSource("core/run/review.ts", `import { x } from "../run/../../adapters/opencode/plugin.ts"\n`),
+    ).toHaveLength(1)
+  })
+
+  test("resolution does not over-reach: a sibling named like a forbidden tree is fine", () => {
+    // `core/fixtures/` is inside core, not the top-level tree.
+    expect(
+      scanSource("core/clustering/engine.test.ts", `import { P } from "../fixtures/pairs.ts"\n`),
+    ).toHaveLength(0)
+  })
+
+  test("allows a fixture harness that ships INSIDE core, which AD-14 requires", () => {
+    // AD-14: clustering's fixture harness ships with the engine. The rule forbids
+    // reaching the top-level tree, not owning a local one.
+    expect(
+      scanSource(
+        "core/clustering/engine.test.ts",
+        `import { PAIRS } from "./fixtures/pairs.ts"\nimport { LABELS } from "../clustering/fixtures/labels.ts"\n`,
+      ),
+    ).toHaveLength(0)
+  })
+
   test("allows the imports the core is supposed to make", () => {
     expect(
       scanSource(

@@ -1,7 +1,7 @@
 {
   "name": "mad",
   "version": "0.1.0",
-  "description": "MAD — multi-agent debate orchestrator for code review. Story 1 slice: opencode adapter, roster resolution, single-model review.",
+  "description": "MAD — multi-agent debate orchestrator for code review. Current slice: opencode adapter, roster resolution, and parallel heterogeneous discovery over N models pooled into one unmerged finding set, with the CAP-1 recall harness over a seeded-defect change.",
   "type": "module",
   "private": true,
   "license": "Apache-2.0",

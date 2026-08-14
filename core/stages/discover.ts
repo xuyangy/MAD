@@ -11,6 +11,41 @@
  *
  * Writes only the fields discovery owns (AD-8): claim, reasoning, locus,
  * severity, author.
+ *
+ * ## The pooling contract (what N>1 means here)
+ *
+ * These four properties are the whole point of fanning out, and each of them is
+ * load-bearing for a downstream stage:
+ *
+ * 1. **The pool is a UNION, not a merge.** Nothing here clusters, deduplicates
+ *    or reconciles: three models describing one defect leave this stage as three
+ *    findings. Merging them is clustering's job and clustering's alone (AD-14,
+ *    story 3), which also owns `clusterId` and `coDiscovery` (AD-8). Until it
+ *    runs, the rendered pool says so (output stage), because a union presented
+ *    as a merged set is a degraded review dressed as a good one (AD-6).
+ *
+ * 2. **Independence.** Every slot receives the identical `input` and the
+ *    identical `instructions`; no slot's answer is ever fed to another
+ *    (`pipeline-stages.md` §1). Correlated blind spots come from shared training
+ *    data, so heterogeneity is the recall mechanism — and it only means anything
+ *    if the models did not see each other's work.
+ *
+ * 3. **Pooled order follows ROSTER order, never completion order.** The fan-out
+ *    is concurrent, so arrival order is whatever the network did that minute.
+ *    `Promise.all` resolves positionally, and the finding-building loop below is
+ *    a SEQUENTIAL post-pass over that positional array — so slot 3 answering
+ *    first changes nothing about the output. Two runs over one change print
+ *    alike, and a diff between two run records is readable.
+ *
+ * 4. **Ids are allocated in that same sequential pass**, one clock tick per
+ *    slot, so every finding id is unique and stable from the moment of discovery
+ *    (spine, Ids). Allocating them inside the concurrent turns instead would
+ *    make id order a function of network timing — and ids survive clustering, so
+ *    anything a transcript references later would move between runs.
+ *
+ * One slot's failure never costs another slot's findings (AD-6b): each turn is
+ * isolated, and a backend that throws is converted into a failure envelope for
+ * its own slot only.
  */
 
 import { z } from "zod"
@@ -87,6 +122,11 @@ export interface DiscoverInput {
 }
 
 export interface DiscoverResult {
+  /**
+   * The pool: every answering model's findings unioned, in roster-slot order.
+   * Not merged, not deduplicated — one defect appears once per model that raised
+   * it until clustering runs (AD-14, story 3).
+   */
   findings: Finding[]
   /** AD-6a — the denominator: how many models actually answered. */
   answered: number
@@ -144,10 +184,19 @@ async function runWithOneRetry(
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const { roster, clock } = input
 
-  // Spine, Concurrency: discovery fans out in parallel across the roster. Every
-  // slot is isolated — `runWithOneRetry` converts a throw into a failure
-  // envelope, so one bad backend cannot abort the whole fan-out and cost the
-  // run every other model's findings.
+  // Spine, Concurrency: discovery fans out in parallel across the roster — every
+  // turn is started before any is awaited, so peak concurrency equals the slot
+  // count rather than the fan-out degenerating into a sequence. Every slot is
+  // isolated: `runWithOneRetry` converts a throw into a failure envelope, so one
+  // bad backend cannot abort the whole fan-out and cost the run every other
+  // model's findings (AD-6b).
+  //
+  // Pooling contract 2 (independence): each slot is handed the SAME
+  // `input.input` and `input.instructions` and nothing else. There is no channel
+  // by which one slot's findings could reach another.
+  //
+  // Pooling contract 3: `Promise.all` resolves POSITIONALLY, so `outcomes` is in
+  // roster order however the turns actually completed.
   const outcomes = await Promise.all(
     roster.slots.map(async (rosterSlot) => ({
       rosterSlot,
@@ -160,6 +209,10 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const droppedOut: string[] = []
   let answered = 0
 
+  // Pooling contracts 1, 3 and 4: one SEQUENTIAL pass over the positional
+  // outcomes. It is what makes the pooled order roster order, the ids unique and
+  // stable, and the result a plain union — no member of `findings` is ever
+  // compared against, folded into, or deduplicated against another here.
   for (const outcome of outcomes) {
     const { rosterSlot, envelope } = outcome
     const modelName = `${rosterSlot.providerId}/${rosterSlot.modelId}`

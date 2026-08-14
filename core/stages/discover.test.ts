@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
+import type { ZodType } from "zod"
+
 import { emptyLedger } from "../domain/run-record.ts"
 import { DISCOVERY_INSTRUCTIONS } from "../instructions/discovery.ts"
+import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate, fakeClock, FakeBackend, type SlotScript } from "../test-support/fakes.ts"
 import { discover } from "./discover.ts"
@@ -281,5 +284,336 @@ describe("discover — drop-out (AD-6a, AD-6b, AD-12)", () => {
     await result
     expect(ledger.entries).toHaveLength(2)
     expect(ledger.entries.map((e) => e.attempt)).toEqual([1, 2])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// N > 1 — the pooling contract in the stage header. These only mean anything at
+// a fan-out wider than one, which is what story 2 turns on by default.
+// ---------------------------------------------------------------------------
+
+const THREE_LINEAGES: [string, string][] = [
+  ["anthropic", "claude-sonnet-4-5"],
+  ["openai", "gpt-5"],
+  ["google", "gemini-2.5-pro"],
+]
+
+function findingFor(slot: string, file = `src/${slot}.ts`) {
+  return {
+    claim: `${slot} says the fee is computed before the rate is validated.`,
+    reasoning: `${slot}: if \`rate\` is NaN the total silently becomes NaN.`,
+    severity: "high",
+    file,
+    startLine: 12,
+    endLine: 14,
+  }
+}
+
+function deferred(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void
+  const promise = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { promise, open }
+}
+
+/**
+ * Peak concurrency, observed with NO wall-clock at all.
+ *
+ * `Promise.all` over `roster.slots.map(async …)` starts every callback
+ * synchronously, so each turn runs up to its first `await` before any of them
+ * resumes. One yield is therefore enough: a parallel stage has all N turns
+ * inside `runTurn` at once and peaks at N; a stage that awaited each slot in a
+ * loop enters, yields, finishes and decrements before the next begins, and
+ * peaks at 1. The earlier version raced a 25 ms fallback timer against the
+ * fan-out, which could report 2 instead of 3 on a loaded runner and fail a
+ * correct implementation.
+ */
+class ConcurrencyProbe implements ModelBackend {
+  peak = 0
+  private inFlight = 0
+
+  constructor(private readonly inner: FakeBackend) {}
+
+  capabilities(slot: string): BackendCapabilities {
+    return this.inner.capabilities(slot)
+  }
+
+  async runTurn<T>(
+    slot: string,
+    instructions: string,
+    input: string,
+    schema: ZodType<T>,
+  ): Promise<Envelope<T>> {
+    this.inFlight += 1
+    this.peak = Math.max(this.peak, this.inFlight)
+    try {
+      // One yield, so every concurrently-started turn is counted before any
+      // completes. A `finally` owns the decrement: a throwing inner turn would
+      // otherwise leave `inFlight` permanently inflated and `peak` meaningless.
+      await Promise.resolve()
+      return await this.inner.runTurn(slot, instructions, input, schema)
+    } finally {
+      this.inFlight -= 1
+    }
+  }
+}
+
+/**
+ * Forces an exact completion order through explicit gates rather than sleeps,
+ * so inverting arrival against roster order is deterministic instead of a race
+ * between 0/15/30 ms timers that a loaded runner can reorder.
+ *
+ * Each slot waits for its predecessor in `order` to finish. A stage that ran the
+ * roster sequentially would deadlock here rather than fail cleanly — which is
+ * why `ConcurrencyProbe` above is the test that diagnoses sequential execution;
+ * this one assumes it and pins the ordering instead.
+ */
+class SequencedBackend implements ModelBackend {
+  readonly completed: string[] = []
+  private readonly gates: Map<string, { promise: Promise<void>; open: () => void }>
+
+  constructor(
+    private readonly inner: FakeBackend,
+    private readonly order: readonly string[],
+  ) {
+    this.gates = new Map(order.map((slot) => [slot, deferred()]))
+    this.gates.get(order[0]!)!.open()
+  }
+
+  capabilities(slot: string): BackendCapabilities {
+    return this.inner.capabilities(slot)
+  }
+
+  async runTurn<T>(
+    slot: string,
+    instructions: string,
+    input: string,
+    schema: ZodType<T>,
+  ): Promise<Envelope<T>> {
+    await this.gates.get(slot)!.promise
+    this.completed.push(slot)
+    const next = this.order[this.order.indexOf(slot) + 1]
+    if (next) this.gates.get(next)!.open()
+    return this.inner.runTurn(slot, instructions, input, schema)
+  }
+}
+
+/** Records exactly what each slot was given. */
+class RecordingBackend implements ModelBackend {
+  readonly seen: { slot: string; instructions: string; input: string }[] = []
+
+  constructor(private readonly inner: FakeBackend) {}
+
+  capabilities(slot: string): BackendCapabilities {
+    return this.inner.capabilities(slot)
+  }
+
+  async runTurn<T>(
+    slot: string,
+    instructions: string,
+    input: string,
+    schema: ZodType<T>,
+  ): Promise<Envelope<T>> {
+    this.seen.push({ slot, instructions, input })
+    return this.inner.runTurn(slot, instructions, input, schema)
+  }
+}
+
+function threeSlotScript(): Record<string, SlotScript> {
+  return {
+    "discovery-1": [{ kind: "ok", value: { findings: [findingFor("discovery-1")] } }],
+    "discovery-2": [{ kind: "ok", value: { findings: [findingFor("discovery-2")] } }],
+    "discovery-3": [{ kind: "ok", value: { findings: [findingFor("discovery-3")] } }],
+  }
+}
+
+/** The one change every slot reviews. Named so identity can be asserted. */
+const THE_INPUT = "the one diff under review"
+
+function discoverWith(backend: ModelBackend, roster: ReturnType<typeof rosterOf>) {
+  return discover({
+    roster,
+    backend,
+    instructions: DISCOVERY_INSTRUCTIONS,
+    input: THE_INPUT,
+    clock: fakeClock(),
+    ledger: emptyLedger(),
+  })
+}
+
+describe("discover — the pooling contract at N>1 (CAP-1)", () => {
+  test("matrix: parallel fan-out — peak concurrency equals the slot count", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const backend = new ConcurrencyProbe(new FakeBackend(threeSlotScript()))
+
+    const discovered = await discoverWith(backend, roster)
+
+    // All three turns were in flight at once. A sequential stage peaks at 1.
+    expect(backend.peak).toBe(3)
+    expect(discovered.answered).toBe(3)
+    expect(discovered.findings).toHaveLength(3)
+  })
+
+  test("matrix: completion order — the pool is ordered by roster slot, not by arrival", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    // Completion order is forced to the exact inverse of roster order, by gates
+    // rather than by racing timers.
+    const backend = new SequencedBackend(new FakeBackend(threeSlotScript()), [
+      "discovery-3",
+      "discovery-2",
+      "discovery-1",
+    ])
+
+    const discovered = await discoverWith(backend, roster)
+
+    // Slot 3 answered first and slot 1 last...
+    expect(backend.completed).toEqual(["discovery-3", "discovery-2", "discovery-1"])
+    // ...and the pool is in roster order regardless.
+    expect(discovered.findings.map((f) => f.author)).toEqual([
+      "discovery-1",
+      "discovery-2",
+      "discovery-3",
+    ])
+    // Ids are allocated in that same order, so they are a function of the roster
+    // and not of the network (spine, Ids).
+    expect(discovered.findings.map((f) => f.id)).toEqual(["finding-1", "finding-2", "finding-3"])
+  })
+
+  test("matrix: independence — every slot gets the identical input and sees no other's findings", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const backend = new RecordingBackend(new FakeBackend(threeSlotScript()))
+
+    const discovered = await discoverWith(backend, roster)
+
+    expect(backend.seen.map((s) => s.slot).sort()).toEqual([
+      "discovery-1",
+      "discovery-2",
+      "discovery-3",
+    ])
+    // Every slot got EXACTLY the strings the caller passed — not a per-slot
+    // variant, not something augmented on the way through.
+    //
+    // The previous version of this test looped over `discovered.findings` and
+    // asserted no turn's input contained another slot's claim. That could not
+    // fail: the claims originate in the FakeBackend script and `input` is a
+    // constant built once before any turn, so the two strings were unrelated by
+    // construction and the assertion held whatever the stage did. Identity
+    // against the caller's own values is falsifiable — a stage that appended a
+    // "previously reported" section per slot fails here, and that is the leak
+    // this row exists to catch (`pipeline-stages.md` §1).
+    for (const turn of backend.seen) {
+      expect(turn.input).toBe(THE_INPUT)
+      expect(turn.instructions).toBe(DISCOVERY_INSTRUCTIONS.text)
+    }
+    expect(new Set(backend.seen.map((s) => s.input)).size).toBe(1)
+    expect(new Set(backend.seen.map((s) => s.instructions)).size).toBe(1)
+
+    // And the findings really were distinct per author, so "identical input"
+    // above is not hiding a stage that simply produced nothing.
+    expect(new Set(discovered.findings.map((f) => f.claim)).size).toBe(3)
+  })
+
+  test("independence is asserted against a leak the stage could actually make", async () => {
+    // A backend that ANSWERS FIRST and then inspects what later slots received.
+    // Sequenced so slot 1 completes before slots 2 and 3 are handed their input,
+    // which is the only ordering in which a leak is even possible.
+    const seen: string[] = []
+    const inner = new FakeBackend(threeSlotScript())
+    const order = ["discovery-1", "discovery-2", "discovery-3"]
+    const backend = new SequencedBackend(inner, order)
+    const recorder: ModelBackend = {
+      capabilities: (slot: string) => backend.capabilities(slot),
+      runTurn: async (slot, instructions, input, schema) => {
+        const envelope = await backend.runTurn(slot, instructions, input, schema)
+        seen.push(input)
+        return envelope
+      },
+    }
+
+    const discovered = await discoverWith(recorder, rosterOf(3, THREE_LINEAGES))
+
+    // Slot 1's claim exists by the time slots 2 and 3 are read, and it is in
+    // none of their inputs.
+    const first = discovered.findings.find((f) => f.author === "discovery-1")!
+    expect(first.claim.length).toBeGreaterThan(0)
+    for (const input of seen) expect(input).not.toContain(first.claim)
+  })
+
+  test("finding ids are unique across the whole pool", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const twoEach = (slot: string) => ({
+      findings: [findingFor(slot), findingFor(slot, `src/${slot}-other.ts`)],
+    })
+    const discovered = await discoverWith(
+      new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: twoEach("discovery-1") }],
+        "discovery-2": [{ kind: "ok", value: twoEach("discovery-2") }],
+        "discovery-3": [{ kind: "ok", value: twoEach("discovery-3") }],
+      }),
+      roster,
+    )
+
+    const ids = discovered.findings.map((f) => f.id)
+    expect(ids).toHaveLength(6)
+    expect(new Set(ids).size).toBe(6)
+  })
+
+  test("the pool is a UNION, not a merge — one defect appears once per model", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    // All three report the SAME defect, at the same locus.
+    const same = { findings: [findingFor("shared", "src/pay.ts")] }
+    const discovered = await discoverWith(
+      new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: same }],
+        "discovery-2": [{ kind: "ok", value: same }],
+        "discovery-3": [{ kind: "ok", value: same }],
+      }),
+      roster,
+    )
+
+    // Nothing merged, nothing deduplicated: that is story 3's job (AD-14).
+    expect(discovered.findings).toHaveLength(3)
+    expect(discovered.findings.every((f) => f.clusterId === undefined)).toBe(true)
+    expect(discovered.findings.every((f) => f.coDiscovery === undefined)).toBe(true)
+  })
+
+  test("matrix: mixed degradation at N=3 — one clean, one partial, one dead", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const discovered = await discoverWith(
+      new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: { findings: [findingFor("discovery-1")] } }],
+        // Answers, but one item is off-scale on the AD-10 severity scale.
+        "discovery-2": [
+          {
+            kind: "ok",
+            value: {
+              findings: [
+                findingFor("discovery-2"),
+                { ...findingFor("discovery-2", "src/bad.ts"), severity: "blocker" },
+              ],
+            },
+          },
+        ],
+        "discovery-3": [{ kind: "fail", failure: "model-error", message: "gone" }],
+      }),
+      roster,
+    )
+
+    // AD-6a — the partial answer keeps its place in the denominator; the dead
+    // model does not.
+    expect(discovered.answered).toBe(2)
+    expect(discovered.droppedOut).toEqual(["discovery-3"])
+    // The partial model keeps its valid item, and slot 1's findings are untouched
+    // by slot 2's defect or slot 3's death (AD-6b).
+    expect(discovered.findings.map((f) => f.author)).toEqual(["discovery-1", "discovery-2"])
+
+    const codes = discovered.warnings.map((w) => w.code)
+    expect(codes).toContain("partial-envelope")
+    expect(codes).toContain("model-dropped-out")
+    expect(codes).toContain("denominator-reduced")
+    expect(
+      discovered.warnings.find((w) => w.code === "denominator-reduced")!.detail,
+    ).toMatchObject({ answered: 2, requested: 3 })
   })
 })

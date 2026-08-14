@@ -2,9 +2,10 @@
 /**
  * AD-1 — the dependency-direction rule, and it must fail CI.
  *
- * No module under `core/` may import from `adapters/`, from `@opencode-ai/*`,
- * or from any other harness SDK. Adapters implement `core/ports` interfaces and
- * the entrypoint injects them; the arrow never points the other way.
+ * No module under `core/` may import from `adapters/`, from the top-level
+ * `fixtures/` tree, from `@opencode-ai/*`, or from any other harness SDK.
+ * Adapters implement `core/ports` interfaces and the entrypoint injects them;
+ * fixtures drive the core from outside it. The arrow never points the other way.
  *
  * This is the `eslint.config.js (or equivalent)` the story asks for, written as
  * an equivalent so the rule needs no plugin toolchain to run in CI:
@@ -12,7 +13,7 @@
  */
 
 import { Glob } from "bun"
-import { relative, resolve } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 
 const ROOT = resolve(import.meta.dir, "..")
 
@@ -20,6 +21,21 @@ const ROOT = resolve(import.meta.dir, "..")
 const FORBIDDEN_FOR_CORE: { pattern: RegExp; why: string }[] = [
   { pattern: /^\.\.\/(\.\.\/)*adapters\//, why: "core must not import from adapters/" },
   { pattern: /(^|\/)adapters\//, why: "core must not import from adapters/" },
+  // AD-1's direction rule over the top-level `fixtures/` tree. `fixtures/` may
+  // import `core/` — the recall harness drives `review()` — and the arrow never
+  // points back, so seeded-defect data, scripted answers and test-only helpers
+  // cannot end up shipped inside a stage.
+  //
+  // AD-1's direction rule over the top-level `fixtures/` tree, for NON-relative
+  // specifiers only. Every relative form is decided exactly by `escapesTo`
+  // below, which resolves the path instead of guessing at its prefix — an
+  // anchored `^\.\./fixtures/` both missed real escapes
+  // (`"../clustering/../../fixtures/x"`) and flagged legitimate ones
+  // (`"../fixtures/x"` from `core/clustering/` is `core/fixtures/`, inside core).
+  // AD-14 has clustering's own harness shipping WITH the engine, so a fixture
+  // tree inside `core/` is legitimate; what is forbidden is reaching the
+  // top-level one.
+  { pattern: /^fixtures(\/|$)/, why: "core must not import from fixtures/" },
   { pattern: /^@opencode-ai\//, why: "core must not import a harness SDK (@opencode-ai/*)" },
   { pattern: /^opencode(\/|$)/, why: "core must not import a harness SDK" },
   { pattern: /^@anthropic-ai\//, why: "core must not import a harness SDK" },
@@ -46,6 +62,32 @@ export interface Violation {
   why: string
 }
 
+/** Top-level trees a module under `core/` may never reach into. */
+const FORBIDDEN_TREES = [
+  { tree: "fixtures", why: "core must not import from fixtures/" },
+  { tree: "adapters", why: "core must not import from adapters/" },
+] as const
+
+/**
+ * Resolve a RELATIVE specifier against the importing file and report the
+ * top-level tree it actually lands in.
+ *
+ * A prefix pattern can only see the specifier as written, so
+ * `"../clustering/../../fixtures/recall.ts"` reads as `../clustering/…` and
+ * escapes every anchor — while resolving to `fixtures/recall.ts` all the same.
+ * Resolution is exact where a pattern is a guess, and it keeps AD-14's
+ * `core/clustering/fixtures/` legitimate for free: that one resolves to a path
+ * under `core/`, not to the top-level tree.
+ */
+function escapesTo(file: string, specifier: string): { why: string } | undefined {
+  if (!specifier.startsWith(".")) return undefined
+  const resolved = join(dirname(file), specifier).replaceAll("\\", "/")
+  for (const { tree, why } of FORBIDDEN_TREES) {
+    if (resolved === tree || resolved.startsWith(`${tree}/`)) return { why }
+  }
+  return undefined
+}
+
 /** Exported so the rule itself is unit-tested rather than merely trusted. */
 export function scanSource(file: string, source: string): Violation[] {
   const violations: Violation[] = []
@@ -54,6 +96,13 @@ export function scanSource(file: string, source: string): Violation[] {
   while ((match = IMPORT_RE.exec(source)) !== null) {
     const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
     if (!specifier) continue
+
+    const escaped = escapesTo(file, specifier)
+    if (escaped) {
+      violations.push({ file, specifier, why: escaped.why })
+      continue
+    }
+
     for (const rule of FORBIDDEN_FOR_CORE) {
       if (rule.pattern.test(specifier)) {
         violations.push({ file, specifier, why: rule.why })
