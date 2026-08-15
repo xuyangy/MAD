@@ -6,6 +6,11 @@
  * own fields. Story 1 runs `discover` and `output` only, so the fields owned by
  * cluster / route / debate / judge are declared here and left unset — they are
  * declared now so no later story invents a second, conflicting name for them.
+ *
+ * AD-8's ownership list for discovery, in full and in one place: **claim,
+ * reasoning, locus, severity, author, source, lens.** Nothing else. `source` and
+ * `lens` joined it with CAP-11 (story 2A); every other stage reads them and
+ * writes neither.
  */
 
 /** AD-10 — the severity scale is exactly these four values, and nothing else. */
@@ -73,6 +78,17 @@ export interface CoDiscovery {
 /** AD-9 — verdict is its own field; it is never fused with anything else. */
 export type Verdict = "upheld" | "withdrawn-by-author" | "judge-ruled-invalid" | "not-adjudicated"
 
+/**
+ * AD-9 amended / AD-17d — where a finding came from, and the ONLY discriminator
+ * for "no co-discovery prior is claimable".
+ *
+ * `coDiscovery === undefined` already means "clustering has not run" (AD-14,
+ * story 3). Overloading it to also mean "no prior claimable" makes a lens
+ * finding silently rank as though clustering failed. Two absences, two
+ * mechanisms, one field to tell them apart.
+ */
+export type FindingSource = "pool" | "lens"
+
 export interface Finding {
   // ---- discover owns (AD-8) ----
   /** Stable from the moment of discovery; survives clustering. */
@@ -85,6 +101,19 @@ export interface Finding {
   severity: Severity
   /** The roster slot that raised it. */
   author: string
+  /**
+   * AD-9 amended / AD-17d — REQUIRED, and required is the point. Optional would
+   * make "absent" a third meaning alongside "not yet clustered" and "no prior
+   * claimable", and AD-9's discriminator would stop discriminating.
+   */
+  source: FindingSource
+  /**
+   * AD-17 — the lens that produced it, set only when `source === 'lens'`. This
+   * field and `LensSlot.lens` are the only places a lens is readable: it is
+   * never parsed out of a slot id, never carried into a debate instruction
+   * (AD-17a), and stripped by the anonymizer with model identity (AD-17b).
+   */
+  lens?: string
 
   // ---- cluster owns (AD-8) — story 3 ----
   clusterId?: string

@@ -11,7 +11,8 @@
 import type { Roster } from "../domain/roster.ts"
 import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
-import { DISCOVERY_INSTRUCTIONS, type InstructionSet } from "../instructions/discovery.ts"
+import { resolveInstructions } from "../instructions/registry.ts"
+import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
@@ -54,7 +55,10 @@ function buildInput(change: ChangeSet): string {
 
 export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const { roster, backend, clock, change } = deps
-  const instructions = deps.instructions ?? DISCOVERY_INSTRUCTIONS
+  // AD-11 amended — the pool's set comes from the registry, addressed by task
+  // type + role. The lens sets are resolved inside `discover`, per lens slot.
+  const instructions =
+    deps.instructions ?? resolveInstructions({ taskType: "coding", role: "discovery" })
 
   const record: RunRecord = {
     runId: clock.id("run"),
@@ -62,6 +66,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     roster,
     answered: 0,
     findings: [],
+    lensInstructions: [],
     warnings: [...(deps.priorWarnings ?? [])],
     ledger: emptyLedger(),
   }
@@ -78,16 +83,28 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
 
   record.answered = discovered.answered
   record.findings = discovered.findings
+  // AD-11 amended / AD-17e — carried to output so a reader can tell a shipped
+  // lens instruction from one generated at run time.
+  record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
 
   // ---- stages 2–5: cluster, route, debate, judge — stories 3–7 ----
   //
   // AD-8 says clustering owns `coDiscovery`. With no cluster stage yet, every
-  // finding is its own one-member cluster, so the pipeline assembles that
+  // POOL finding is its own one-member cluster, so the pipeline assembles that
   // degenerate case HERE rather than letting `discover` write a field it does
   // not own. Story 3 deletes these lines and `core/stages/cluster.ts` takes
   // over. The denominator is `answered` (AD-6a), never `roster.requested`.
+  //
+  // The guard is AD-17d and it is not cosmetic. Unguarded, a lens finding does
+  // not necessarily render `1/1` — at `answered: 3` it renders `1/3` — it
+  // carries A PRIOR IT WAS NEVER ENTITLED TO, which is AD-9's forbidden
+  // conflation whatever the ratio comes out as. A lens was PROMPTED for its
+  // dimension, so it has no unprompted signal to report and no number can stand
+  // in for one. `source` is the discriminator, never `coDiscovery === undefined`
+  // — that already means "clustering has not run".
   for (const finding of record.findings) {
+    if (finding.source !== "pool") continue
     finding.coDiscovery = { raised: 1, answered: discovered.answered }
   }
 

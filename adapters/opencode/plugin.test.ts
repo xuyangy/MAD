@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
+import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import {
   clampDiscoverySlots,
+  clampLenses,
   DEFAULT_DISCOVERY_SLOTS,
   MAX_DISCOVERY_SLOTS,
+  MAX_LENS_SLOTS,
 } from "./plugin.ts"
 
 describe("discovery slot count (AD-3, CAP-1)", () => {
@@ -59,5 +62,65 @@ describe("discovery slot count (AD-3, CAP-1)", () => {
   test("a value inside the range passes through untouched", () => {
     expect(clampDiscoverySlots(2)).toBe(2)
     expect(clampDiscoverySlots(MAX_DISCOVERY_SLOTS)).toBe(MAX_DISCOVERY_SLOTS)
+  })
+})
+
+describe("discovery lenses (CAP-11, AD-3, AD-15 amended)", () => {
+  test("THE DEFAULT IS NO LENSES — a fresh install's cost is unchanged", () => {
+    // The regression this guards is the expensive one: lens count multiplies the
+    // run's widest fan-out (3 models with 5 lenses is 8 discovery turns, not 3).
+    // A default of anything but none makes this capability's existence cost every
+    // fresh install money it never asked to spend (AD-3, AD-15 amended).
+    expect(clampLenses(undefined)).toEqual([])
+    expect(clampLenses([])).toEqual([])
+  })
+
+  test("lens ids are deduped, order preserved", () => {
+    // Two slots carrying one lens would share a slot id, and paying twice for one
+    // persona is not what the caller meant either.
+    expect(clampLenses(["security", "tests", "security"])).toEqual(["security", "tests"])
+  })
+
+  test("the list is clamped to MAX_LENS_SLOTS", () => {
+    const many = Array.from({ length: 40 }, (_, i) => `lens-${i}`)
+    expect(clampLenses(many)).toHaveLength(MAX_LENS_SLOTS)
+    expect(clampLenses(many)[0]).toBe("lens-0")
+  })
+
+  test("the whole shipped pack fits inside the bound", () => {
+    // Asking for every lens MAD ships is a defensible request and must not be
+    // silently truncated.
+    expect(CODING_LENSES.length).toBeLessThanOrEqual(MAX_LENS_SLOTS)
+    expect(clampLenses(CODING_LENSES.map((l) => l.id))).toHaveLength(CODING_LENSES.length)
+  })
+
+  test("AN UNKNOWN ID IS ACCEPTED, NOT REJECTED", () => {
+    // It reaches the registry's generated fallback (AD-11 amended) and the run
+    // record says the instruction was generated rather than shipped. Rejecting
+    // it here would make the fallback unreachable through the only surface a
+    // user has.
+    expect(clampLenses(["threat-model"])).toEqual(["threat-model"])
+    expect(clampLenses(["security", "not-a-real-lens"])).toEqual(["security", "not-a-real-lens"])
+  })
+
+  test("blank and whitespace-only ids are dropped, and ids are trimmed", () => {
+    // An empty id would build the slot id `discovery-lens-`, which names nothing
+    // and collides with the next empty one.
+    expect(clampLenses(["", "  ", " security "])).toEqual(["security"])
+  })
+
+  test("a non-string arriving from a model call is dropped rather than stringified", () => {
+    // The value comes from a model calling the tool; the schema bounds it and so
+    // does this, on the same reasoning as the slot clamp.
+    expect(clampLenses([null, 7, "security"] as never)).toEqual(["security"])
+  })
+
+  test("A BARE STRING IS NOT ITERATED BY CHARACTER", () => {
+    // Without the `Array.isArray` guard, `"security"` iterates into eight
+    // one-letter lens ids — eight billed discovery turns against the user's own
+    // credentials, for nothing, from a single mistyped tool call.
+    expect(clampLenses("security" as never)).toEqual([])
+    expect(clampLenses(42 as never)).toEqual([])
+    expect(clampLenses({ 0: "security", length: 1 } as never)).toEqual([])
   })
 })

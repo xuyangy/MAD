@@ -16,6 +16,7 @@ import { selectRoster } from "../../core/roster/select.ts"
 import { review } from "../../core/run/review.ts"
 import { candidate, fakeClock, FakeBackend, type SlotScript } from "../../core/test-support/fakes.ts"
 import {
+  lensRecallGain,
   missedDefects,
   pooledRecallBeatsBestMember,
   recall,
@@ -168,19 +169,123 @@ const SCRIPTS: Record<string, SlotScript> = {
   ],
 }
 
+const NOTICE = "src/billing/refund-notice.ts"
+
+/**
+ * CAP-11's arms. Each lens reads the SAME change the pool just read, and the
+ * three lens slots below cover the third file the unlensed scripts are blind to.
+ *
+ * `discovery-lens-security` is the control inside the control: it re-finds the
+ * SQL injection two pool arms already raised, so `lensRecallGain` has an
+ * overlapping lens finding to exclude. A gain number that counted it would be
+ * measuring duplication, not coverage.
+ */
+const LENS_SCRIPTS: Record<string, SlotScript> = {
+  "discovery-lens-performance": [
+    {
+      kind: "ok",
+      value: {
+        findings: [
+          {
+            claim: "`notifyRefunds` issues two queries per row, sequentially, inside the batch loop.",
+            reasoning:
+              "This is an n+1 pattern in both directions: each row costs a charges lookup and a " +
+              "customers lookup, awaited one after the other, so a 500-row batch is 1000 round trip " +
+              "s where two set-based queries would answer the whole batch.",
+            severity: "high",
+            file: NOTICE,
+            startLine: 12,
+            endLine: 14,
+          },
+        ],
+      },
+    },
+  ],
+  "discovery-lens-privacy-a11y": [
+    {
+      kind: "ok",
+      value: {
+        findings: [
+          {
+            claim: "The notice log line writes the customer's email and `card_number` in plain text.",
+            reasoning:
+              "Cardholder data is logged on every row of every batch and then lives wherever the " +
+              "logs live, for the whole retention period, reachable by anyone with log access.",
+            severity: "critical",
+            file: NOTICE,
+            startLine: 15,
+            endLine: 15,
+          },
+          {
+            claim: "The rendered notice is grey-on-grey and its image carries no alt attribute.",
+            reasoning:
+              "#9a9a9a on #a4a4a4 is far under any contrast minimum, so a low-vision customer " +
+              "cannot read the confirmation, and with no alt text a screen reader announces " +
+              "nothing at all where the confirmation image is.",
+            severity: "medium",
+            file: NOTICE,
+            startLine: 26,
+            endLine: 28,
+          },
+        ],
+      },
+    },
+  ],
+  "discovery-lens-tests": [
+    {
+      kind: "ok",
+      value: {
+        findings: [
+          {
+            claim: "`notifyRefunds` sends irreversible customer email and the change ships no test for it.",
+            reasoning:
+              "Nothing here is covered: not the batch, not the empty batch, not a partial send " +
+              "where the third row throws after two customers have already been emailed.",
+            severity: "high",
+            file: NOTICE,
+            startLine: 10,
+            endLine: 11,
+          },
+        ],
+      },
+    },
+  ],
+  "discovery-lens-security": [
+    {
+      kind: "ok",
+      value: {
+        findings: [
+          {
+            claim: "The charges lookup interpolates the order id into the SQL text.",
+            reasoning:
+              "String interpolation into a query lets a crafted order id rewrite the statement. " +
+              "Two pool models raised this as well — it is deliberately NOT new coverage.",
+            severity: "critical",
+            file: REFUND,
+            startLine: 20,
+            endLine: 22,
+          },
+        ],
+      },
+    },
+  ],
+}
+
+const LENSES = ["performance", "privacy-a11y", "tests", "security"] as const
+
 /** Three lineages, three slots — the roster AD-4 ranks toward. */
-function threeSlotRun() {
+function threeSlotRun(lenses: readonly string[] = []) {
   const resolved = selectRoster(
     [
       candidate("anthropic", "claude-sonnet-4-5"),
       candidate("openai", "gpt-5"),
       candidate("google", "gemini-2.5-pro"),
     ],
-    { slots: 3, providerConfigKey: "provider" },
+    { slots: 3, lenses, providerConfigKey: "provider" },
   )
   return review({
     roster: resolved.roster,
-    backend: new FakeBackend(SCRIPTS),
+    backend: new FakeBackend({ ...SCRIPTS, ...LENS_SCRIPTS }),
     clock: fakeClock(),
     change: SEEDED_CHANGE,
     priorWarnings: resolved.warnings,
@@ -319,14 +424,36 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     expect(comparison.members).toHaveLength(record.answered)
   })
 
-  test("nobody finds everything — the unfound defect is still counted against the pool", async () => {
+  test("nobody finds everything — the unfound defects are still counted against the pool", async () => {
     const { record } = await threeSlotRun()
     const pooled = recall(SEEDED_DEFECTS, record.findings)
 
     expect(pooled.found).toBeLessThan(pooled.total)
-    expect(missedDefects(SEEDED_DEFECTS, record.findings).map((d) => d.id)).toEqual([
-      "unchecked-idempotency-key",
-    ])
+
+    const missed = missedDefects(SEEDED_DEFECTS, record.findings).map((d) => d.id)
+    // The deliberately unfindable one, planted so a perfect score is not on
+    // offer and a harness bug crediting everything to everyone shows up as
+    // `found === total`.
+    expect(missed).toContain("unchecked-idempotency-key")
+    // Story 2A: the rest of what this unlensed pool misses is the third file,
+    // which the scripts above are blind to by construction. Derived from the
+    // fixture rather than pinned as a list, because `change.ts` promises the set
+    // extends by adding rows and story 9 reuses it.
+    const notice = SEEDED_DEFECTS.filter((d) => d.locus.file === "src/billing/refund-notice.ts")
+    expect(notice.length).toBeGreaterThan(0)
+    for (const defect of notice) expect(missed).toContain(defect.id)
+    expect(missed).toHaveLength(1 + notice.length)
+  })
+
+  test("the seeded set spans several dimensions — CAP-11 has something to measure over", () => {
+    // CAP-11's criterion is "seeded defects spanning several dimensions". One
+    // dimension would make a lensed pass and an unlensed one measure the same
+    // thing, and the recall gain would be noise.
+    const dimensions = new Set(SEEDED_DEFECTS.map((d) => d.dimension))
+    expect(dimensions.size).toBeGreaterThanOrEqual(6)
+    for (const required of ["performance", "maintainability", "tests", "privacy-a11y"]) {
+      expect([...dimensions]).toContain(required)
+    }
   })
 
   test("per-model recall is derivable from `author` alone", async () => {
@@ -369,6 +496,26 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     )
   })
 
+  test("a lensed run leaves CAP-1's own numbers exactly where they were", async () => {
+    // The two capabilities are measured separately (AD-9's two-numbers rule).
+    // `pooledRecallBeatsBestMember` partitions on `source`, so turning lenses on
+    // must not move CAP-1's comparison by a single count in either direction.
+    const answered = ["discovery-1", "discovery-2", "discovery-3"]
+    const unlensed = await threeSlotRun()
+    const lensed = await threeSlotRun(LENSES)
+
+    const a = pooledRecallBeatsBestMember(SEEDED_DEFECTS, unlensed.record.findings, undefined, answered)
+    const b = pooledRecallBeatsBestMember(SEEDED_DEFECTS, lensed.record.findings, undefined, answered)
+
+    expect(b.pooled).toEqual(a.pooled)
+    expect(b.members).toEqual(a.members)
+    expect(b.beats).toBe(true)
+    // The lens arms are not extra pool arms — the assertion `recall.test.ts`
+    // relies on, and the one an inflated `answered` would break first.
+    expect(b.members).toHaveLength(lensed.record.answered)
+    expect(lensed.record.answered).toBe(3)
+  })
+
   test("the run this is measured over is a clean, undegraded 3-model run", async () => {
     const { record, rendered } = await threeSlotRun()
 
@@ -380,5 +527,95 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     expect(rendered).toContain("co-discovery: 1/3")
     // The pool is a union, and the output says so until clustering lands.
     expect(rendered).toContain("POOL — NOT YET MERGED")
+  })
+})
+
+describe("CAP-11 — a lensed pass over the same change", () => {
+  test("A LENSED PASS SURFACES A DEFECT NO UNLENSED POOL MEMBER RAISED — CAP-11", async () => {
+    // CAP-11's success criterion, asserted rather than described. Everything
+    // below is derived from `SEEDED_DEFECTS` and `Finding.source`; nothing is a
+    // hardcoded count, because `change.ts` promises this set extends by adding
+    // rows and story 9's third arm reuses the same harness.
+    const { record } = await threeSlotRun(LENSES)
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+
+    expect(gain.beats).toBe(true)
+    expect(gain.lensOnlyDefects.length).toBeGreaterThan(0)
+    // Additive: the lens arm adds coverage on top of the pool and takes none
+    // away, so the combined count strictly exceeds the pool's alone.
+    expect(gain.combined.found).toBeGreaterThan(gain.pool.found)
+    expect(gain.combined.found).toBe(gain.pool.found + gain.lensOnlyDefects.length)
+    // Same defect set on every arm, so the four counts compare without division.
+    expect(gain.pool.total).toBe(SEEDED_DEFECTS.length)
+    expect(gain.lens.total).toBe(SEEDED_DEFECTS.length)
+  })
+
+  test("a lens finding the pool already raised is NOT counted as a gain", async () => {
+    // `discovery-lens-security` re-finds the SQL injection two pool arms raised.
+    // A gain number that counted it would be measuring duplication.
+    const { record } = await threeSlotRun(LENSES)
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+
+    const lensFindings = record.findings.filter((f) => f.source === "lens")
+    expect(lensFindings.some((f) => f.claim.includes("interpolates the order id"))).toBe(true)
+    expect(gain.lensOnlyDefects.map((d) => d.id)).not.toContain("sql-injection")
+    // ...and the lens arm's own recall DOES include it, so the exclusion above
+    // is the comparison's doing rather than the matcher failing to see it.
+    expect(gain.lens.found).toBeGreaterThan(gain.lensOnlyDefects.length)
+  })
+
+  test("with no lenses there is no gain, and the fresh-install numbers are untouched", async () => {
+    // AD-3 / AD-15 amended — the default path. Not "a small gain": none, and no
+    // lens finding to compute one from.
+    const { record } = await threeSlotRun()
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+
+    expect(record.findings.every((f) => f.source === "pool")).toBe(true)
+    expect(gain.lens.found).toBe(0)
+    expect(gain.lensOnlyDefects).toEqual([])
+    expect(gain.beats).toBe(false)
+    expect(gain.combined.found).toBe(gain.pool.found)
+  })
+
+  test("the matcher is injected here too (AD-14's shape)", async () => {
+    // The module's own rule: the matcher is supplied, never hard-wired, so a
+    // later story can swap in a model-backed one without reopening the harness.
+    // Untested, `lensRecallGain` could have reached for the lexical default
+    // directly and nothing would have said so.
+    const { record } = await threeSlotRun(LENSES)
+
+    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => false).beats).toBe(false)
+    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => false).lensOnlyDefects).toEqual([])
+    // A matcher that agrees with everything credits the pool first, so nothing
+    // is left for the lens arm to claim uniquely — the greedy assignment is the
+    // matcher's to drive, not the harness's.
+    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => true).pool.found).toBeGreaterThan(0)
+  })
+
+  test("nobody finds everything, lenses included", async () => {
+    // The honesty property survives the extension: at least one planted defect
+    // is findable by no arm at all, lensed or not, so a perfect score is still
+    // not on offer and a matcher that credits everything shows up immediately.
+    const { record } = await threeSlotRun(LENSES)
+    const missed = missedDefects(SEEDED_DEFECTS, record.findings)
+    expect(missed.length).toBeGreaterThan(0)
+    expect(missed.map((d) => d.id)).toContain("unchecked-idempotency-key")
+  })
+
+  test("AD-17d — no lens finding carries a co-discovery prior, end to end", async () => {
+    // Asserted here as well as in `review.test.ts` because this is the run that
+    // most resembles a real one: a full pipeline over the real change, through
+    // the same `review()` seam story 9's arms use.
+    const { record, rendered } = await threeSlotRun(LENSES)
+
+    for (const finding of record.findings) {
+      if (finding.source === "lens") expect(finding.coDiscovery).toBeUndefined()
+      else expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
+    }
+    expect(rendered).toContain("not applicable — lens-sourced")
+    expect(rendered).toContain("co-discovery: 1/3")
+    // AD-17c — four lens slots over three lineages, and the count is the pool's.
+    expect(record.roster.lensSlots).toHaveLength(LENSES.length)
+    expect(record.roster.distinctLineages).toBe(3)
   })
 })

@@ -46,6 +46,8 @@ function finding(partial: Partial<Finding> & { locus?: Locus } = {}): Finding {
     locus: partial.locus ?? { file: FILE, startLine: 20, endLine: 22 },
     severity: partial.severity ?? "high",
     author: partial.author ?? "discovery-1",
+    source: partial.source ?? "pool",
+    lens: partial.lens,
     history: [],
   }
 }

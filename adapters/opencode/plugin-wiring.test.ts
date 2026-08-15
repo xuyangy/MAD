@@ -19,7 +19,12 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { DEFAULT_DISCOVERY_SLOTS, MadPlugin, MAX_DISCOVERY_SLOTS } from "./plugin.ts"
+import {
+  DEFAULT_DISCOVERY_SLOTS,
+  MadPlugin,
+  MAX_DISCOVERY_SLOTS,
+  MAX_LENS_SLOTS,
+} from "./plugin.ts"
 
 function model(id: string) {
   return { id, name: id, capabilities: { toolcall: true }, limit: { context: 200000 }, cost: { input: 3, output: 15 } }
@@ -62,7 +67,12 @@ function fakeShell() {
 interface ToolResult {
   title: string
   output: string
-  metadata?: { requested?: number; answered?: number }
+  metadata?: {
+    requested?: number
+    answered?: number
+    lensSlots?: string[]
+    lensInstructions?: { lens: string; origin: string }[]
+  }
 }
 
 async function executeWith(args: Record<string, unknown>): Promise<ToolResult> {
@@ -110,5 +120,79 @@ describe("mad_review.execute — the default actually reaches the roster (AC1, C
     expect(result.output).toContain("NO MODEL ANSWERED")
     // AD-6a — the denominator never silently becomes what was requested.
     expect(result.title).toContain("0/")
+  })
+})
+
+describe("mad_review.execute — THE BACKEND RECEIVES POOL *AND* LENS SLOTS (CAP-11)", () => {
+  /**
+   * The highest-probability defect in story 2A, and nothing type-checks it.
+   *
+   * `OpencodeModelBackend` builds its per-slot map from the `slots` array it is
+   * constructed with, and `runTurn` THROWS on a slot it does not know.
+   * `runWithOneRetry` converts that throw into a transport-error envelope — so
+   * a plugin that passes only `resolved.roster.slots` produces a run where
+   * every lens slot drops out twice and looks exactly like a flaky provider.
+   * Both the wired and unwired versions render a drop-out warning naming the
+   * lens slot, which is why asserting on the warning alone would not fail.
+   *
+   * The one thing that differs is the MESSAGE: the unwired version carries
+   * `unknown slot \`discovery-lens-security\`` from the backend's own throw.
+   * That string is the assertion.
+   */
+  test("no lens slot is rejected as an unknown slot", async () => {
+    const result = await executeWith({ lenses: ["security", "performance"] })
+
+    // The backend was reached and failed on the network, not on the slot map.
+    expect(result.output).not.toContain("unknown slot")
+    // ...and the lens slots really did run, so the assertion above is over a run
+    // that exercised them rather than one that skipped them.
+    expect(result.output).toContain("discovery-lens-security")
+    expect(result.output).toContain("discovery-lens-performance")
+    expect(result.metadata?.lensSlots).toEqual([
+      "discovery-lens-security",
+      "discovery-lens-performance",
+    ])
+  })
+
+  test("pool slots are still wired, with lenses on", async () => {
+    const result = await executeWith({ lenses: ["security"] })
+    expect(result.output).not.toContain("unknown slot")
+    expect(result.output).toContain("discovery-1")
+  })
+
+  test("the lenses argument reaches the roster, deduped and clamped", async () => {
+    const result = await executeWith({
+      lenses: ["security", "security", ...Array.from({ length: 20 }, (_, i) => `x-${i}`)],
+    })
+    expect(result.metadata?.lensSlots).toHaveLength(MAX_LENS_SLOTS)
+    expect(result.metadata?.lensSlots?.[0]).toBe("discovery-lens-security")
+  })
+
+  test("an unknown lens id reaches the generated fallback rather than failing", async () => {
+    // AD-11 amended, end to end through the only surface a user has.
+    const result = await executeWith({ lenses: ["threat-model"] })
+    expect(result.metadata?.lensInstructions).toEqual([
+      { lens: "threat-model", origin: "generated" },
+    ])
+    expect(result.output).toContain("GENERATED at run time")
+  })
+
+  test("OMITTING `lenses` COSTS NOTHING — no lens slot, no lens turn", async () => {
+    // AD-3 / AD-15 amended, asserted through `execute` rather than against the
+    // clamp: a fresh install's cost is unchanged by this capability's existence.
+    const result = await executeWith({})
+    expect(result.metadata?.lensSlots).toEqual([])
+    expect(result.metadata?.lensInstructions).toEqual([])
+    expect(result.output).not.toContain("discovery-lens-")
+    expect(result.output).not.toContain("lens slots:")
+    expect(result.title).not.toContain("lens")
+  })
+
+  test("the denominator stays the pool's when lenses are on (AD-6a)", async () => {
+    const result = await executeWith({ lenses: ["security", "performance"] })
+    // Three pool slots requested; the lens slots never join that number.
+    expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
+    expect(result.title).toContain(`0/${DEFAULT_DISCOVERY_SLOTS}`)
+    expect(result.title).toContain("+ 2 lens")
   })
 })

@@ -17,10 +17,10 @@ const ENVELOPE = {
   ],
 }
 
-function setup(models: [string, string][], slots = 1) {
+function setup(models: [string, string][], slots = 1, lenses: readonly string[] = []) {
   return selectRoster(
     models.map(([p, m]) => candidate(p, m)),
-    { slots, providerConfigKey: "provider" },
+    { slots, lenses, providerConfigKey: "provider" },
   )
 }
 
@@ -277,5 +277,152 @@ describe("review — the story 9 control arm seam", () => {
     expect(record.findings).toHaveLength(0)
     expect(rendered).toContain("this run is degraded")
     expect(rendered).toContain("FINDINGS (0)")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-11 — the shim guard. `review.ts:90-92` stamps `{raised: 1, answered}` on
+// every finding as the degenerate one-member-cluster case, and story 3 deletes
+// the whole block. Until then, the guard on `source === 'pool'` is the only
+// thing between a lens finding and a co-discovery prior it was never entitled
+// to. This is the assertion most likely to catch a regression during stories
+// 3–6, which is why it lives here rather than only in the fixture suite.
+// ---------------------------------------------------------------------------
+
+const LENSED_SLOTS = ["discovery-1", "discovery-2", "discovery-3"] as const
+
+function lensedBackend(lenses: readonly string[]) {
+  const script = Object.fromEntries([
+    ...LENSED_SLOTS.map((slot) => [
+      slot,
+      [{ kind: "ok" as const, value: { findings: [{ ...ENVELOPE.findings[0]!, claim: `${slot} found it.` }] } }],
+    ]),
+    ...lenses.map((lens) => [
+      `discovery-lens-${lens}`,
+      [
+        {
+          kind: "ok" as const,
+          value: { findings: [{ ...ENVELOPE.findings[0]!, claim: `the ${lens} lens found it.` }] },
+        },
+      ],
+    ]),
+  ])
+  return new FakeBackend(script)
+}
+
+describe("review — no lens finding carries a co-discovery prior (AD-17d)", () => {
+  const THREE = [
+    ["anthropic", "claude-sonnet-4-5"],
+    ["openai", "gpt-5"],
+    ["google", "gemini-2.5-pro"],
+  ] as [string, string][]
+
+  test("NO LENS FINDING CARRIES coDiscovery, AND EVERY POOL FINDING STILL READS 1/answered", async () => {
+    const lenses = ["security", "performance"]
+    const resolved = setup(THREE, 3, lenses)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: lensedBackend(lenses),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    const pool = record.findings.filter((f) => f.source === "pool")
+    const lens = record.findings.filter((f) => f.source === "lens")
+    expect(pool).toHaveLength(3)
+    expect(lens).toHaveLength(2)
+
+    for (const finding of lens) {
+      // Not `1/1`, not `1/3`, not `0` — ABSENT. The unguarded shim would have
+      // stamped `{raised: 1, answered: 3}` here, which renders `1/3` and is a
+      // prior this finding was never entitled to, whatever the ratio reads.
+      expect(finding.coDiscovery).toBeUndefined()
+    }
+    for (const finding of pool) {
+      expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
+    }
+
+    // AD-6a — the denominator is the pool's, so lenses do not shrink a fraction.
+    expect(record.answered).toBe(3)
+    expect(rendered).toContain("co-discovery: 1/3")
+    expect(rendered).not.toContain("co-discovery: 1/5")
+  })
+
+  test("the guard discriminates on `source`, not on how many models answered", async () => {
+    // At `answered: 1` the unguarded shim renders the lens finding as `1/1` —
+    // the case the story brief names. At `answered: 3` it renders `1/3`. Both
+    // are the same defect; only one of them looks obviously wrong.
+    const lenses = ["security"]
+    const resolved = setup([["openai", "gpt-5"]], 1, lenses)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: lensedBackend(lenses),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.answered).toBe(1)
+    const lens = record.findings.find((f) => f.source === "lens")!
+    expect(lens.coDiscovery).toBeUndefined()
+    expect(rendered).toContain("not applicable — lens-sourced")
+    expect(rendered).not.toMatch(/co-discovery: 1\/1\s+verdict.*\n.*lens-sourced/)
+  })
+
+  test("AD-17c — lens slots reach the run record without touching distinctLineages", async () => {
+    const lenses = ["security", "performance", "tests"]
+    const resolved = setup(THREE, 3, lenses)
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: lensedBackend(lenses),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.roster.lensSlots).toHaveLength(3)
+    expect(record.roster.distinctLineages).toBe(3)
+    // AD-11 amended — provenance survives to the record, and so to output.
+    expect(record.lensInstructions).toEqual([
+      { lens: "security", origin: "shipped" },
+      { lens: "performance", origin: "shipped" },
+      { lens: "tests", origin: "shipped" },
+    ])
+  })
+
+  test("an unregistered lens is recorded as generated, and still reviews", async () => {
+    const lenses = ["threat-model"]
+    const resolved = setup(THREE, 3, lenses)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: lensedBackend(lenses),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.lensInstructions).toEqual([{ lens: "threat-model", origin: "generated" }])
+    expect(record.findings.some((f) => f.lens === "threat-model")).toBe(true)
+    expect(rendered).toContain("GENERATED at run time")
+  })
+
+  test("with no lenses the record is exactly what story 2 produced", async () => {
+    // AD-3 / AD-15 amended — the fresh-install path, unchanged.
+    const resolved = setup(THREE, 3)
+    const backend = lensedBackend([])
+    const { record } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.roster.lensSlots).toEqual([])
+    expect(record.lensInstructions).toEqual([])
+    expect(backend.calls).toHaveLength(3) // one billed turn per pool slot, no more
+    expect(record.findings.every((f) => f.source === "pool")).toBe(true)
+    expect(record.findings.every((f) => f.coDiscovery?.answered === 3)).toBe(true)
   })
 })

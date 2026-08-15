@@ -18,8 +18,24 @@
  *   story 3) and its own hand-labelled finding-PAIR fixture set. Nothing here is
  *   a similarity function over findings.
  * - **It does not read `dimension` off a `Finding`.** `dimension` labels a
- *   planted bug, and lives only on `SeededDefect`. No lens code (AD-17 / story
- *   2A) is involved or implied.
+ *   planted bug and lives only on `SeededDefect`. It is NOT a lens: nothing here
+ *   maps a dimension to a lens id, and a lens finding is never credited by
+ *   matching its lens against a defect's dimension — that would score a model on
+ *   what it was asked to look at rather than on what it found.
+ *
+ * ## Story 2A (CAP-11) superseded one note here
+ *
+ * The pre-2A version of this header said "no lens code is involved or implied".
+ * That was true for story 2 and is not true now: `Finding.source` is a real
+ * field, `recallByAuthor` and `pooledRecallBeatsBestMember` partition POOL arms
+ * on it, and `lensRecallGain` answers CAP-11's criterion mechanically. What
+ * remains true is the sentence above it — the harness reads `source`, never
+ * `lens`, and never `dimension` off a finding.
+ *
+ * CAP-1's number and CAP-11's number stay SEPARATE (AD-9's two-numbers rule
+ * applied to measurement): pooled-beats-best-member is a claim about the
+ * unlensed pool, so lens findings are excluded from BOTH sides of it rather than
+ * quietly inflating the pooled side against pool-only arms.
  *
  * The matcher is INJECTED with a shipped lexical default, mirroring AD-14's
  * injected similarity function, so a later story can supply a model-backed
@@ -218,6 +234,20 @@ export function missedDefects(
   return defects.filter((defect) => !found.has(defect.id))
 }
 
+/**
+ * CAP-11 — partition on `Finding.source`, the field discovery writes and the
+ * only honest discriminator for "was this prompted?" (AD-9 amended). Never on
+ * `author`'s spelling, and never on `coDiscovery === undefined`.
+ */
+export function pooledOnly(findings: readonly Finding[]): Finding[] {
+  return findings.filter((finding) => finding.source === "pool")
+}
+
+/** The other half of the same partition. */
+export function lensOnly(findings: readonly Finding[]): Finding[] {
+  return findings.filter((finding) => finding.source === "lens")
+}
+
 export interface AuthorRecall {
   /** The roster slot that raised the findings — discovery's own `author` field. */
   author: string
@@ -246,7 +276,11 @@ export function recallByAuthor(
 ): AuthorRecall[] {
   const byAuthor = new Map<string, Finding[]>()
   for (const author of answered) if (!byAuthor.has(author)) byAuthor.set(author, [])
-  for (const finding of findings) {
+  // POOL ARMS ONLY (CAP-11, AD-6a). `answered` is the pool slots that replied,
+  // and a lens slot never enters it; letting lens findings in would add arms the
+  // denominator does not know about, and compare a prompted persona's recall
+  // against an unprompted model's as though they measured the same thing.
+  for (const finding of pooledOnly(findings)) {
     const group = byAuthor.get(finding.author)
     if (group) group.push(finding)
     else byAuthor.set(finding.author, [finding])
@@ -284,11 +318,71 @@ export function pooledRecallBeatsBestMember(
   matcher: DefectMatcher = lexicalDefectMatcher,
   answered: readonly string[] = [],
 ): RecallComparison {
-  const pooled = recall(defects, findings, matcher)
-  const members = recallByAuthor(defects, findings, matcher, answered)
+  // Both sides are POOL findings (CAP-11). CAP-1's claim is that pooling
+  // heterogeneous UNPROMPTED models beats any one of them; counting lens
+  // findings on the pooled side while every arm is pool-only would let a lens
+  // win CAP-1 on the pool's behalf. CAP-11's gain is `lensRecallGain`'s to
+  // report, as its own number (AD-9's two-numbers rule).
+  const pool = pooledOnly(findings)
+  const pooled = recall(defects, pool, matcher)
+  const members = recallByAuthor(defects, pool, matcher, answered)
   let best: AuthorRecall | undefined
   for (const member of members) {
     if (!best || member.recall.found > best.recall.found) best = member
   }
   return { pooled, members, best, beats: best !== undefined && pooled.found > best.recall.found }
+}
+
+export interface LensGain {
+  /** What the unlensed pool alone found. The CAP-1 arm, unchanged by lenses. */
+  pool: RecallCount
+  /** What the lens findings alone found. Prompted signal, reported separately. */
+  lens: RecallCount
+  /** Both together — the run as it actually happened. */
+  combined: RecallCount
+  /**
+   * CAP-11's criterion, as defects rather than a count: what the lens arm found
+   * that NO unlensed pool member raised. Non-empty is the claim.
+   */
+  lensOnlyDefects: SeededDefect[]
+  /** Whether CAP-11's criterion holds over this run. */
+  beats: boolean
+}
+
+/**
+ * CAP-11's success criterion, mechanically: "over a fixture change with seeded
+ * defects spanning several dimensions, a lensed pass surfaces at least one
+ * defect no unlensed pool member raised."
+ *
+ * Partitioned on `Finding.source` — a real field since story 2A, so this needs
+ * no convention about slot-id spelling and no lens-to-dimension mapping. Counts,
+ * never ratios, exactly like everything else in this module: the four numbers
+ * are over one shared defect set, so nothing needs dividing to compare them.
+ *
+ * The gain is deliberately reported as its own number and never folded into
+ * CAP-1's. Story 9's third arm divides the recall gain from its token cost for
+ * the same reason (AD-9, and the sprint change proposal's success criterion 5).
+ */
+export function lensRecallGain(
+  defects: readonly SeededDefect[],
+  findings: readonly Finding[],
+  matcher: DefectMatcher = lexicalDefectMatcher,
+): LensGain {
+  const pool = pooledOnly(findings)
+  const lens = lensOnly(findings)
+
+  const foundByPool = foundIds(defects, pool, matcher)
+  const foundByLens = foundIds(defects, lens, matcher)
+
+  const lensOnlyDefects = defects.filter(
+    (defect) => foundByLens.has(defect.id) && !foundByPool.has(defect.id),
+  )
+
+  return {
+    pool: { found: foundByPool.size, total: defects.length },
+    lens: { found: foundByLens.size, total: defects.length },
+    combined: recall(defects, findings, matcher),
+    lensOnlyDefects,
+    beats: lensOnlyDefects.length > 0,
+  }
 }

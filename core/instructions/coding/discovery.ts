@@ -1,23 +1,23 @@
 /**
- * AD-11 — instruction-led, not scaffold-led.
+ * The coding pack's GENERALIST discovery instruction — the unlensed pool's set.
  *
- * Role instruction sets are versioned artifacts and live here, never inlined at
- * a call site. MAD's behavioural lever is what it asks each role to do; the
- * schema constrains only the fields MAD mechanically computes on.
+ * MOVED VERBATIM from `core/instructions/discovery.ts` in story 2A. The text is
+ * byte-for-byte what story 2 shipped and `registry.test.ts` pins it against a
+ * literal copy, on purpose: it is story 9's control arm and story 2's recall
+ * baseline, and rewriting it moves both underneath the measurement they exist to
+ * support. Lenses are a SPLIT of this instruction's breadth into depth, not a
+ * replacement for it.
  *
- * Names no model, and says nothing about which model is reading it (AD-3).
+ * Changing this text is an `Ask First` (story 2A, Boundaries).
  */
 
-export interface InstructionSet {
-  /** Role id — matches host-integration.md exactly. */
-  role: string
-  version: string
-  text: string
-}
+import type { InstructionSet } from "../types.ts"
 
-export const DISCOVERY_INSTRUCTIONS: InstructionSet = {
+export const CODING_DISCOVERY_GENERALIST: InstructionSet = {
+  taskType: "coding",
   role: "discovery",
   version: "1",
+  origin: "shipped",
   text: `You are reviewing a code change. Work independently: report what YOU find, not what you think others would find.
 
 Report concrete defects in the change — correctness bugs, security holes, data loss, resource leaks, broken error handling, race conditions, API misuse, and behaviour that contradicts the change's evident intent. Skip style preferences, formatting, and speculative refactors.

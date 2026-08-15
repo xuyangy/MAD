@@ -9,8 +9,16 @@
  * never FUSES them into a stored or displayed number. Co-discovery always
  * renders as a fraction with its denominator.
  *
- * AD-6 — all four degradation reports are carried here and rendered: the
- * denominator, drop-outs, the roster warning, and the unresolved section. The
+ * AD-17 lands here too, in its (e) clause: a lens-sourced finding is DISCLOSED
+ * — its co-discovery renders *not applicable — lens-sourced*, its lens is named
+ * on its row, and the roster block states that lens slots buy coverage and not
+ * lineage. Every one of those discriminates on `source`, never on
+ * `coDiscovery === undefined` (AD-9 amended) — except the COMPARATOR, which asks
+ * a different question and says so at the site.
+ *
+ * AD-6 — all five degradation reports are carried here and rendered: the
+ * denominator, drop-outs, the roster warning, lens homogeneity, and the
+ * unresolved section. The
  * same rule covers what the finding list IS while the pipeline is short of
  * stages: before clustering runs it is a pool, not a merged set, and a
  * multi-model run says so (`pooledNotYetMerged`).
@@ -39,11 +47,32 @@ export function rankFindings(findings: Finding[]): Finding[] {
     const bySeverity = severityRank(b.severity) - severityRank(a.severity)
     if (bySeverity !== 0) return bySeverity
 
-    // 2. co-discovery, compared as a ratio at sort time and never stored.
-    // Raw `raised` counts would rank 2/9 above 1/1, inverting the signal the
-    // moment denominators differ — which they do from story 2 onward.
-    const byCoDiscovery = coDiscoveryRatio(b) - coDiscoveryRatio(a)
-    if (byCoDiscovery !== 0) return byCoDiscovery
+    // 2. AD-9 amended — co-discovery is a criterion only when BOTH findings
+    // carry a prior. Compared as a ratio at sort time and never stored: raw
+    // `raised` counts would rank 2/9 above 1/1, inverting the signal the moment
+    // denominators differ — which they do from story 2 onward.
+    //
+    // A missing prior is NOT coerced to a ratio. `coDiscoveryRatio` returns `0`
+    // for an absent pair, and `0` already means "nobody answered" — a genuinely
+    // different fact. Reusing it here would rank a correct lens finding dead
+    // last as though every model had disagreed with it.
+    //
+    // THE PREDICATE IS `coDiscovery !== undefined`, NOT `source === 'pool'`, and
+    // that is not a contradiction of AD-9's "never discriminate on
+    // `coDiscovery === undefined`". The two ask different questions. RENDERING
+    // asks "is a prior claimable at all?" — permanently a question about
+    // `source`. ORDERING asks "does this finding carry a prior right now?" — and
+    // a POOL finding before clustering runs does not, so `source === 'pool'`
+    // would compare a pool finding's absent prior against a real one and
+    // reintroduce the coercion from the other side. Do not "correct" this.
+    const aPrior = a.coDiscovery !== undefined
+    const bPrior = b.coDiscovery !== undefined
+    if (aPrior && bPrior) {
+      const byCoDiscovery = coDiscoveryRatio(b) - coDiscoveryRatio(a)
+      if (byCoDiscovery !== 0) return byCoDiscovery
+    }
+    // else fall through to the next criterion — today locus; from story 6,
+    // verdict then evidence then locus (story 7 keeps the full treatment).
 
     // 3. stable tiebreak on locus, so two runs of the same input print alike
     const byFile = a.locus.file.localeCompare(b.locus.file)
@@ -67,6 +96,12 @@ function renderLocus(finding: Finding): string {
 
 /** AD-9 — always a fraction with its denominator, never a pre-divided float. */
 function renderCoDiscovery(finding: Finding): string {
+  // AD-9 amended / AD-17d — a lens finding claims no prior, and says so in
+  // words. Never `—` (which means "clustering has not run"), never `0`, never
+  // `1/1`. The discriminator is `source`, permanently: `coDiscovery ===
+  // undefined` is the OTHER absence and conflating them is what this whole
+  // field exists to prevent.
+  if (finding.source === "lens") return "not applicable — lens-sourced"
   if (!finding.coDiscovery) return "—"
   // A zero denominator would print `1/0`, which looks like a number and is not
   // one. AD-6a: the denominator is the honest part of this fraction.
@@ -109,12 +144,19 @@ function renderEvidence(finding: Finding): string {
  * arithmetic error a reader has no way to catch.
  */
 function pooledNotYetMerged(record: RunRecord, resolved: readonly Finding[]): string[] {
+  // AD-17c/e — POOL-SCOPED, every number in it. `answered` already counts pool
+  // models only (AD-6a); the count and the uniformity check below must match
+  // that scope or the sentence describes a set it did not read. A lens finding
+  // is additive coverage sitting in the same list, not a member of the union
+  // this notice is about.
+  const pooled = resolved.filter((finding) => finding.source === "pool")
+
   if (record.answered <= 1) return []
-  if (resolved.length === 0) return []
+  if (pooled.length === 0) return []
   if (record.findings.some((finding) => finding.clusterId !== undefined)) return []
 
   const lines = [
-    `POOL — NOT YET MERGED: these ${resolved.length} finding(s) are the union of what ` +
+    `POOL — NOT YET MERGED: these ${pooled.length} pool finding(s) are the union of what ` +
       `${record.answered} model(s) reported,`,
     `  reviewed independently and in parallel. Equivalent findings have not been clustered yet, so`,
     `  ONE DEFECT MAY APPEAR ONCE PER MODEL.`,
@@ -126,7 +168,11 @@ function pooledNotYetMerged(record: RunRecord, resolved: readonly Finding[]): st
   // row renders `—` and an unconditional "every fraction reads 1/N" would be
   // simply false. AD-6 is an honesty rule; a header that describes rows it never
   // read is the failure it names, not an exception to it.
-  const uniform = resolved.every(
+  //
+  // Over POOL findings only: a lens finding never carries a pair (AD-17d), so
+  // including it here would make `uniform` false whenever a lens ran and
+  // silently suppress a true statement about the pool.
+  const uniform = pooled.every(
     (finding) => finding.coDiscovery?.raised === 1 && finding.coDiscovery.answered === record.answered,
   )
   if (uniform) {
@@ -168,10 +214,29 @@ export function renderRunRecord(record: RunRecord): string {
         : ""
     lines.push(`  ${slot.slot}: ${slot.providerId}/${slot.modelId} — ${lineage}${also}`)
   }
+  // AD-17c/e — lens slots, on their own lines and outside the lineage count.
+  // Printing them inside the pool list above would put the one thing AD-4's
+  // amendment separates back into one block for the reader, which is where the
+  // "three personas over one Sonnet is three lineages" misreading starts.
+  for (const lensSlot of record.roster.lensSlots) {
+    const origin = record.lensInstructions.find((entry) => entry.lens === lensSlot.lens)?.origin
+    const generated = origin === "generated" ? " [instruction GENERATED at run time, not shipped]" : ""
+    lines.push(
+      `  ${lensSlot.slot}: ${lensSlot.providerId}/${lensSlot.modelId} — lens \`${lensSlot.lens}\`, ` +
+        `additive coverage; does NOT count toward distinct lineages${generated}`,
+    )
+  }
   lines.push(
     `  slots requested: ${record.roster.requested} | filled: ${record.roster.slots.length} | ` +
       `answered: ${record.answered} | distinct verified lineages: ${record.roster.distinctLineages}`,
   )
+  if (record.roster.lensSlots.length > 0) {
+    lines.push(
+      `  lens slots: ${record.roster.lensSlots.length} (${record.roster.lensSlots
+        .map((s) => s.lens)
+        .join(", ")}) — coverage, not independence; they add nothing to the lineage count above.`,
+    )
+  }
   lines.push("")
 
   // ---- AD-6: warnings, rendered once, here, by output ----
@@ -223,7 +288,13 @@ export function renderRunRecord(record: RunRecord): string {
         `verdict: ${renderVerdict(finding)}   ` +
         `evidence: ${renderEvidence(finding)}`,
     )
-    lines.push(`      raised by: ${finding.author}`)
+    // AD-17e — the reader always learns a finding was lens-sourced and WHICH
+    // lens found it. Read from `finding.lens`, never parsed back out of the slot
+    // id in `author` (AD-17, design notes).
+    lines.push(
+      `      raised by: ${finding.author}` +
+        (finding.source === "lens" ? `  (lens-sourced: \`${finding.lens ?? "unnamed"}\`)` : ""),
+    )
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {

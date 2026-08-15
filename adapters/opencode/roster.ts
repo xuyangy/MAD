@@ -91,12 +91,18 @@ export async function enumerateCandidates(client: Client): Promise<Candidate[]> 
   return ordered
 }
 
-export async function resolveRoster(client: Client, slots: number): Promise<SelectResult> {
+export async function resolveRoster(
+  client: Client,
+  slots: number,
+  /** CAP-11 — ordered lens ids. Empty by default, so a fresh install runs no lens turn (AD-3). */
+  lenses: readonly string[] = [],
+): Promise<SelectResult> {
   const candidates = await enumerateCandidates(client)
   // Throws NoCandidatesError when the host has nothing configured — unusable
   // host state, surfaced to the user with guidance by the plugin entry.
   return selectRoster(candidates, {
     slots,
+    lenses,
     providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
   })
 }

@@ -38,11 +38,43 @@ export interface RosterSlot {
   alsoAvailableVia: string[]
 }
 
+/**
+ * One filled LENS slot (CAP-11, AD-4 amended, AD-17).
+ *
+ * A lens is a persona narrowing what one discovery slot looks for. It applies at
+ * exactly one moment — that slot's discovery turn — and claims no diversity, so
+ * a lens slot may reuse a model the pool already holds.
+ *
+ * READ THE LENS FROM `lens`, NEVER BY PARSING `slot`. The slot id
+ * (`discovery-lens-security`) is for humans; recovering the lens by
+ * string-splitting an id or an `author` field re-creates the leak AD-17 spends
+ * five clauses closing, somewhere no reviewer looks.
+ */
+export interface LensSlot extends RosterSlot {
+  /** The lens id this slot carries, e.g. `security`. */
+  lens: string
+}
+
 export interface Roster {
+  /** The unlensed pool. The ONLY slots lineage accounting ever sees (AD-4). */
   slots: RosterSlot[]
+  /**
+   * AD-4 amended (CAP-11) — lens slots live HERE and never in `slots`, so they
+   * are excluded from lineage accounting by construction rather than by a filter
+   * someone can forget. Required and `[]` when no lens was asked for: an
+   * optional field would re-admit the absent-vs-empty ambiguity at every read.
+   */
+  lensSlots: LensSlot[]
   /** How many slots were requested — never the denominator (AD-6a). */
   requested: number
-  /** Distinct VERIFIED lineages actually filled. Unverified never counts (AD-5). */
+  /**
+   * Distinct VERIFIED lineages actually filled. Unverified never counts (AD-5).
+   *
+   * POOL SLOTS ONLY, BY CONSTRUCTION (AD-4 amended, AD-17c). This is computed
+   * from `slots` alone; `lensSlots` is a separate collection and cannot reach
+   * this number. Several personas over one model are one model's blind spots
+   * wearing hats — coverage, never independence (`host-integration.md`).
+   */
   distinctLineages: number
   /** Every provider the run will send code to, for disclosure (AD-3). */
   providers: string[]

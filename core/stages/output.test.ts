@@ -14,6 +14,8 @@ function finding(partial: Partial<Finding> & { severity: Severity; file: string 
     locus: partial.locus ?? { file: partial.file, startLine: 1, endLine: 1 },
     severity: partial.severity,
     author: partial.author ?? "discovery-1",
+    source: partial.source ?? "pool",
+    lens: partial.lens,
     clusterId: partial.clusterId,
     coDiscovery: partial.coDiscovery,
     unresolved: partial.unresolved,
@@ -21,9 +23,21 @@ function finding(partial: Partial<Finding> & { severity: Severity; file: string 
   }
 }
 
-function record(findings: Finding[], answered = 1): RunRecord {
+/** A lens-sourced finding — `source` and `lens` together, never one alone. */
+function lensFinding(
+  partial: Partial<Finding> & { severity: Severity; file: string; lens: string },
+): Finding {
+  return finding({
+    ...partial,
+    author: partial.author ?? `discovery-lens-${partial.lens}`,
+    source: "lens",
+  })
+}
+
+function record(findings: Finding[], answered = 1, lenses: readonly string[] = []): RunRecord {
   const { roster, warnings } = selectRoster([candidate("openai", "gpt-5")], {
     slots: 1,
+    lenses,
     providerConfigKey: "provider",
   })
   return {
@@ -32,6 +46,7 @@ function record(findings: Finding[], answered = 1): RunRecord {
     roster,
     answered,
     findings,
+    lensInstructions: roster.lensSlots.map((slot) => ({ lens: slot.lens, origin: "shipped" as const })),
     warnings,
     ledger: emptyLedger(),
   }
@@ -273,5 +288,191 @@ describe("rendering (AD-6, AD-9)", () => {
     const rendered = output(record([]))
     expect(rendered).toContain("DISCLOSURE:")
     expect(rendered).toContain("WARNINGS: none")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-11 — AD-17(e) disclosure and the AD-9 comparator. The rendering half is
+// straightforward; the ORDERING half is where the conflation actually bites,
+// because a missing prior coerced to a ratio ranks a correct lens finding dead
+// last as though every model had disagreed with it.
+// ---------------------------------------------------------------------------
+
+describe("lens-sourced findings render as lens-sourced (AD-17e, AD-9 amended)", () => {
+  test("matrix: co-discovery renders `not applicable — lens-sourced`, never 0, 1/1 or a bare —", () => {
+    const rendered = output(record([lensFinding({ severity: "high", file: "a.ts", lens: "security" })]))
+
+    expect(rendered).toContain("co-discovery: not applicable — lens-sourced")
+    expect(rendered).not.toContain("co-discovery: —")
+    expect(rendered).not.toContain("co-discovery: 0")
+    expect(rendered).not.toContain("co-discovery: 1/1")
+  })
+
+  test("it discriminates on `source`, not on `coDiscovery === undefined`", () => {
+    // The two absences that must never be conflated. A POOL finding with no
+    // pair means "clustering has not run" and renders `—`; a LENS finding means
+    // "no prior is claimable" and says so in words. Same undefined field.
+    const rendered = output(
+      record([
+        finding({ severity: "high", file: "pool.ts" }),
+        lensFinding({ severity: "high", file: "lens.ts", lens: "security" }),
+      ], 3),
+    )
+    expect(rendered).toContain("co-discovery: —")
+    expect(rendered).toContain("not applicable — lens-sourced")
+  })
+
+  test("a lens finding stamped with a prior anyway STILL renders as lens-sourced", () => {
+    // Belt and braces on AD-17d: if some future stage wrongly stamps a pair on a
+    // lens finding, the renderer does not launder it into a fraction. `source`
+    // is the discriminator, permanently.
+    const rogue = lensFinding({ severity: "high", file: "a.ts", lens: "security" })
+    rogue.coDiscovery = { raised: 1, answered: 3 }
+    expect(output(record([rogue]))).toContain("not applicable — lens-sourced")
+  })
+
+  test("the row names WHICH lens found it (AD-17e)", () => {
+    const rendered = output(
+      record([lensFinding({ severity: "high", file: "a.ts", lens: "privacy-a11y" })]),
+    )
+    expect(rendered).toContain("raised by: discovery-lens-privacy-a11y")
+    expect(rendered).toContain("lens-sourced: `privacy-a11y`")
+  })
+
+  test("a pool row is unchanged — no lens note, no extra column", () => {
+    const rendered = output(
+      record([finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 1 } })]),
+    )
+    expect(rendered).toContain("raised by: discovery-1")
+    expect(rendered).not.toContain("lens-sourced")
+  })
+
+  test("the roster block lists lens slots outside the lineage count (AD-17c)", () => {
+    const rendered = output(record([], 1, ["security", "tests"]))
+
+    expect(rendered).toContain("discovery-lens-security")
+    expect(rendered).toContain("does NOT count toward distinct lineages")
+    expect(rendered).toContain("distinct verified lineages: 1")
+    expect(rendered).toContain("lens slots: 2 (security, tests)")
+  })
+
+  test("a generated lens instruction is distinguishable from a shipped one (AD-11 amended)", () => {
+    const rec = record([], 1, ["threat-model"])
+    rec.lensInstructions = [{ lens: "threat-model", origin: "generated" }]
+    expect(output(rec)).toContain("GENERATED at run time")
+
+    const shipped = record([], 1, ["security"])
+    expect(output(shipped)).not.toContain("GENERATED at run time")
+  })
+
+  test("no lens slots, no lens lines at all", () => {
+    const rendered = output(record([finding({ severity: "high", file: "a.ts" })]))
+    expect(rendered).not.toContain("lens slots:")
+    expect(rendered).not.toContain("lens-sourced")
+  })
+})
+
+describe("the comparator does not coerce a missing prior (AD-9 amended)", () => {
+  test("A NO-PRIOR FINDING IS NOT SORTED AS THOUGH ITS RATIO WERE 0", () => {
+    // The inversion this pulls forward from story 7. `coDiscoveryRatio` returns
+    // 0 for an absent pair, and 0 already means "nobody answered" — a genuinely
+    // different fact. Coerced, the lens finding below is forced last as though
+    // three models had looked at it and disagreed.
+    const ranked = rankFindings([
+      finding({ severity: "high", file: "b-pool.ts", coDiscovery: { raised: 1, answered: 9 } }),
+      lensFinding({ severity: "high", file: "a-lens.ts", lens: "security" }),
+    ])
+    // Same severity, one has a very low ratio, the other has no prior at all:
+    // co-discovery is skipped and ordering falls through to locus.
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a-lens.ts", "b-pool.ts"])
+  })
+
+  test("the fall-through is to the NEXT criterion, not to an invented one", () => {
+    // Locus today; verdict then evidence then locus from story 6 (story 7 keeps
+    // the full treatment). Severity still leads, and a lens finding does not
+    // jump a more severe pool finding.
+    const ranked = rankFindings([
+      lensFinding({ severity: "low", file: "a-lens.ts", lens: "security" }),
+      finding({ severity: "critical", file: "z-pool.ts", coDiscovery: { raised: 1, answered: 9 } }),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["z-pool.ts", "a-lens.ts"])
+  })
+
+  test("when BOTH carry a prior, co-discovery is still the criterion it always was", () => {
+    const ranked = rankFindings([
+      finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 3 } }),
+      finding({ severity: "high", file: "b.ts", coDiscovery: { raised: 3, answered: 3 } }),
+    ])
+    expect(ranked[0]!.locus.file).toBe("b.ts")
+  })
+
+  test("the predicate is `coDiscovery !== undefined`, NOT `source === 'pool'`", () => {
+    // Two POOL findings before clustering runs: neither carries a prior, so the
+    // criterion is skipped for both. A `source === 'pool'` predicate would
+    // compare their absent priors as ratios and reintroduce the coercion from
+    // the other side — which is why the comparator asks a different question
+    // from the renderer, and why this test exists to stop a "correction".
+    const ranked = rankFindings([
+      finding({ severity: "high", file: "b.ts" }),
+      finding({ severity: "high", file: "a.ts" }),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts"])
+  })
+
+  test("a real zero ratio is still ranked as a real zero", () => {
+    // `1/0` means "nobody answered" — present, and worse than a real fraction.
+    // Skipping the criterion for it would be the mirror-image mistake.
+    const ranked = rankFindings([
+      finding({ severity: "high", file: "a-nobody.ts", coDiscovery: { raised: 1, answered: 0 } }),
+      finding({ severity: "high", file: "z-someone.ts", coDiscovery: { raised: 1, answered: 3 } }),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["z-someone.ts", "a-nobody.ts"])
+  })
+})
+
+describe("the pool notice stays pool-scoped with a lens finding present (AD-17)", () => {
+  test("its count is the POOL's, not the whole finding list", () => {
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 3 } }),
+          finding({ severity: "high", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } }),
+          lensFinding({ severity: "high", file: "c.ts", lens: "security" }),
+        ],
+        3,
+        ["security"],
+      ),
+    )
+    expect(rendered).toContain("these 2 pool finding(s) are the union of what 3 model(s) reported")
+    // The section header still counts everything printed below it.
+    expect(rendered).toContain("FINDINGS (3)")
+  })
+
+  test("one lens finding does not suppress a true statement about the pool", () => {
+    // `uniform` is computed over pool findings only. Over the whole list a lens
+    // finding — which never carries a pair — would make it false and silently
+    // withhold a sentence that IS true of every fraction rendered.
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", coDiscovery: { raised: 1, answered: 3 } }),
+          finding({ severity: "high", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } }),
+          lensFinding({ severity: "high", file: "c.ts", lens: "security" }),
+        ],
+        3,
+        ["security"],
+      ),
+    )
+    expect(rendered).toContain("Every co-discovery fraction below reads 1/3")
+  })
+
+  test("a run whose only findings are lens-sourced announces no pool", () => {
+    // There is no union of pool findings to describe, so the notice says
+    // nothing rather than describing an empty one.
+    const rendered = output(
+      record([lensFinding({ severity: "high", file: "c.ts", lens: "security" })], 3, ["security"]),
+    )
+    expect(rendered).not.toContain("NOT YET MERGED")
+    expect(rendered).toContain("FINDINGS (1)")
   })
 })

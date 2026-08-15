@@ -3,16 +3,16 @@ import { describe, expect, test } from "bun:test"
 import type { ZodType } from "zod"
 
 import { emptyLedger } from "../domain/run-record.ts"
-import { DISCOVERY_INSTRUCTIONS } from "../instructions/discovery.ts"
+import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../instructions/coding/discovery.ts"
 import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate, fakeClock, FakeBackend, type SlotScript } from "../test-support/fakes.ts"
 import { discover } from "./discover.ts"
 
-function rosterOf(slots: number, models: [string, string][]) {
+function rosterOf(slots: number, models: [string, string][], lenses: readonly string[] = []) {
   return selectRoster(
     models.map(([provider, model]) => candidate(provider, model)),
-    { slots, providerConfigKey: "provider" },
+    { slots, lenses, providerConfigKey: "provider" },
   ).roster
 }
 
@@ -72,6 +72,10 @@ describe("discover — happy path", () => {
     expect(finding.severity).toBe("high")
     expect(finding.locus).toEqual({ file: "src/pay.ts", startLine: 12, endLine: 14 })
     expect(finding.author).toBe("discovery-1")
+    // AD-8 / AD-9 amended — `source` is discovery's, required, and `lens` is
+    // absent on a pool finding rather than empty-stringed.
+    expect(finding.source).toBe("pool")
+    expect(finding.lens).toBeUndefined()
     // fields owned by later stages stay unset
     expect(finding.coDiscovery).toBeUndefined()
     expect(finding.clusterId).toBeUndefined()
@@ -615,5 +619,289 @@ describe("discover — the pooling contract at N>1 (CAP-1)", () => {
     expect(
       discovered.warnings.find((w) => w.code === "denominator-reduced")!.detail,
     ).toMatchObject({ answered: 2, requested: 3 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-11 — the additive lens segment. Everything here is about ONE rule: a lens
+// buys coverage and claims nothing else (AD-17). The denominator assertions are
+// the ones that catch the expensive mistake, because an inflated `answered`
+// shrinks every co-discovery fraction in the run and nothing else fails.
+// ---------------------------------------------------------------------------
+
+const LENS_INSTRUCTIONS: Record<string, string> = {
+  security: "LENS security — look hardest at injection and authz.",
+  performance: "LENS performance — look hardest at N+1s and hot paths.",
+  tests: "LENS tests — look hardest at what is untested.",
+}
+
+/** Injected so the stage's wiring is tested without pinning the shipped prose. */
+const fakeResolveLens = (lens: string) => ({
+  taskType: "coding" as const,
+  role: "discovery",
+  lens,
+  version: "1",
+  origin: (LENS_INSTRUCTIONS[lens] ? "shipped" : "generated") as "shipped" | "generated",
+  text: LENS_INSTRUCTIONS[lens] ?? `LENS ${lens} — generated at run time.`,
+})
+
+function discoverLensed(
+  roster: ReturnType<typeof rosterOf>,
+  script: Record<string, SlotScript>,
+  backend: ModelBackend = new FakeBackend(script),
+) {
+  return discover({
+    roster,
+    backend,
+    instructions: DISCOVERY_INSTRUCTIONS,
+    resolveLens: fakeResolveLens,
+    input: THE_INPUT,
+    clock: fakeClock(),
+    ledger: emptyLedger(),
+  })
+}
+
+/** 3 pool slots + 2 lens slots, everyone answering with one finding. */
+function lensedScript(): Record<string, SlotScript> {
+  return {
+    ...threeSlotScript(),
+    "discovery-lens-security": [
+      { kind: "ok", value: { findings: [findingFor("lens-security", "src/auth.ts")] } },
+    ],
+    "discovery-lens-performance": [
+      { kind: "ok", value: { findings: [findingFor("lens-performance", "src/hot.ts")] } },
+    ],
+  }
+}
+
+describe("discover — the lens segment (CAP-11, AD-17)", () => {
+  test("`answered` EXCLUDES LENS SLOTS: 3 pool + 2 lens answering is answered: 3", async () => {
+    // AD-6a / AD-17d, and the single most consequential assertion in this file.
+    // A lens slot in the denominator makes every pool fraction read x/5 over a
+    // 3-model pool — quietly wrong on the number the whole pipeline divides by.
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const discovered = await discoverLensed(roster, lensedScript())
+
+    expect(roster.lensSlots).toHaveLength(2)
+    expect(discovered.answered).toBe(3)
+    expect(discovered.findings).toHaveLength(5)
+    expect(discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(false)
+  })
+
+  test("pool findings precede lens findings, whatever the completion order", async () => {
+    // Pooling contracts 3 and 5: two ordered segments over positional outcomes.
+    // Completion order is forced to the exact inverse.
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const backend = new SequencedBackend(new FakeBackend(lensedScript()), [
+      "discovery-lens-performance",
+      "discovery-lens-security",
+      "discovery-3",
+      "discovery-2",
+      "discovery-1",
+    ])
+
+    const discovered = await discoverLensed(roster, lensedScript(), backend)
+
+    expect(backend.completed[0]).toBe("discovery-lens-performance")
+    expect(discovered.findings.map((f) => f.author)).toEqual([
+      "discovery-1",
+      "discovery-2",
+      "discovery-3",
+      "discovery-lens-security",
+      "discovery-lens-performance",
+    ])
+    expect(discovered.findings.map((f) => f.source)).toEqual([
+      "pool",
+      "pool",
+      "pool",
+      "lens",
+      "lens",
+    ])
+  })
+
+  test("pool findings keep exactly the ids they get with no lenses configured", async () => {
+    // Ids are allocated in the sequential pass, and the lens segment runs
+    // strictly after the pool's — so turning lenses on moves nothing a
+    // transcript might already reference (spine, Ids).
+    const bare = await discoverLensed(rosterOf(3, THREE_LINEAGES), threeSlotScript())
+    const lensed = await discoverLensed(
+      rosterOf(3, THREE_LINEAGES, ["security", "performance"]),
+      lensedScript(),
+    )
+
+    const poolIds = (r: { findings: { id: string; source: string }[] }) =>
+      r.findings.filter((f) => f.source === "pool").map((f) => f.id)
+    expect(poolIds(lensed)).toEqual(poolIds(bare))
+    // ...and every id in the run is still unique.
+    expect(new Set(lensed.findings.map((f) => f.id)).size).toBe(lensed.findings.length)
+  })
+
+  test("lens findings carry `source: 'lens'` and their lens id; pool findings carry neither", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const discovered = await discoverLensed(roster, lensedScript())
+
+    const pool = discovered.findings.filter((f) => f.source === "pool")
+    const lens = discovered.findings.filter((f) => f.source === "lens")
+
+    expect(pool).toHaveLength(3)
+    expect(pool.every((f) => f.lens === undefined)).toBe(true)
+    expect(lens.map((f) => f.lens)).toEqual(["security", "performance"])
+    // AD-17d — discovery writes no prior for anyone; clustering owns that field.
+    expect(discovered.findings.every((f) => f.coDiscovery === undefined)).toBe(true)
+  })
+
+  test("matrix: lenses on, diverse host — 3 pool + 3 lens is SIX discovery turns", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance", "tests"])
+    const backend = new FakeBackend({
+      ...threeSlotScript(),
+      "discovery-lens-security": [{ kind: "ok", value: { findings: [findingFor("l1", "src/a.ts")] } }],
+      "discovery-lens-performance": [{ kind: "ok", value: { findings: [findingFor("l2", "src/b.ts")] } }],
+      "discovery-lens-tests": [{ kind: "ok", value: { findings: [findingFor("l3", "src/c.ts")] } }],
+    })
+    const discovered = await discoverLensed(roster, {}, backend)
+
+    // Six billed turns, no retries — the cost the lens count actually buys.
+    expect(backend.calls).toHaveLength(6)
+    expect(discovered.findings).toHaveLength(6)
+    // ...and the diversity claim is untouched by three of them (AD-17c).
+    expect(roster.distinctLineages).toBe(3)
+    expect(discovered.answered).toBe(3)
+  })
+
+  test("matrix: lens drop-out — warns, and costs the pool nothing", async () => {
+    // AD-6b still applies to a lens slot — it is a real billed turn that really
+    // failed — but AD-6a's denominator never knew about it.
+    const roster = rosterOf(3, THREE_LINEAGES, ["security"])
+    const discovered = await discoverLensed(roster, {
+      ...threeSlotScript(),
+      "discovery-lens-security": [{ kind: "fail", failure: "model-error", message: "overloaded" }],
+    })
+
+    expect(discovered.answered).toBe(3)
+    expect(discovered.droppedOut).toEqual(["discovery-lens-security"])
+    const dropped = discovered.warnings.find((w) => w.code === "model-dropped-out")
+    expect(dropped!.message).toContain("discovery-lens-security")
+    expect(dropped!.message).toContain("overloaded")
+    // The comparison is against the POOL, so a dead lens cannot make it fire.
+    expect(discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(false)
+    // Every pool finding survives untouched — one slot's failure never costs
+    // another slot's findings, and that holds across the segment boundary too.
+    expect(discovered.findings.map((f) => f.author)).toEqual([
+      "discovery-1",
+      "discovery-2",
+      "discovery-3",
+    ])
+    expect(discovered.findings.every((f) => f.source === "pool")).toBe(true)
+  })
+
+  test("a pool drop-out still reduces the denominator with lenses on", async () => {
+    // The other direction: a filled lens roster must not paper over a pool model
+    // that died, which is what comparing against pool + lens would do.
+    const roster = rosterOf(3, THREE_LINEAGES, ["security"])
+    const discovered = await discoverLensed(roster, {
+      ...lensedScript(),
+      "discovery-3": [{ kind: "fail", failure: "model-error", message: "gone" }],
+    })
+
+    expect(discovered.answered).toBe(2)
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")
+    expect(reduced!.detail).toMatchObject({ answered: 2, filled: 3, requested: 3 })
+  })
+
+  test("every slot gets the identical input; only the INSTRUCTIONS differ by lens", async () => {
+    // Pooling contract 2, extended: the lens instruction is the one difference
+    // the whole capability consists of. Every pool slot still gets the exact
+    // generalist text, so the pool's independence is untouched.
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const backend = new RecordingBackend(new FakeBackend(lensedScript()))
+
+    await discoverLensed(roster, lensedScript(), backend)
+
+    expect(backend.seen).toHaveLength(5)
+    for (const turn of backend.seen) expect(turn.input).toBe(THE_INPUT)
+    expect(new Set(backend.seen.map((s) => s.input)).size).toBe(1)
+
+    const byslot = new Map(backend.seen.map((s) => [s.slot, s.instructions]))
+    for (const slot of ["discovery-1", "discovery-2", "discovery-3"]) {
+      expect(byslot.get(slot)).toBe(DISCOVERY_INSTRUCTIONS.text)
+    }
+    expect(byslot.get("discovery-lens-security")).toBe(LENS_INSTRUCTIONS.security)
+    expect(byslot.get("discovery-lens-performance")).toBe(LENS_INSTRUCTIONS.performance)
+  })
+
+  test("peak concurrency is pool + lens: the lens pass costs no extra round", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const backend = new ConcurrencyProbe(new FakeBackend(lensedScript()))
+    await discoverLensed(roster, lensedScript(), backend)
+    expect(backend.peak).toBe(5)
+  })
+
+  test("AD-11 amended — shipped and generated origins are recorded per lens slot", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "threat-model"])
+    const discovered = await discoverLensed(roster, {
+      ...threeSlotScript(),
+      "discovery-lens-security": [
+        { kind: "ok", value: { findings: [findingFor("lens-security", "src/auth.ts")] } },
+      ],
+      "discovery-lens-threat-model": [
+        { kind: "ok", value: { findings: [findingFor("lens-threat", "src/auth.ts")] } },
+      ],
+    })
+
+    expect(discovered.lensInstructions).toEqual([
+      { lens: "security", origin: "shipped" },
+      { lens: "threat-model", origin: "generated" },
+    ])
+  })
+
+  test("origin is recorded even for a lens slot that dropped out", async () => {
+    // It is a fact about the instruction, resolved before the turn. A reader who
+    // sees a lens slot named in a drop-out warning can still tell which kind of
+    // instruction it was handed.
+    const roster = rosterOf(3, THREE_LINEAGES, ["threat-model"])
+    const discovered = await discoverLensed(roster, {
+      ...threeSlotScript(),
+      "discovery-lens-threat-model": [{ kind: "fail", failure: "model-error" }],
+    })
+    expect(discovered.lensInstructions).toEqual([{ lens: "threat-model", origin: "generated" }])
+  })
+
+  test("with no lenses the stage is byte-for-byte what it was (AD-3, AD-15 amended)", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const backend = new FakeBackend(threeSlotScript())
+    const discovered = await discoverLensed(roster, threeSlotScript(), backend)
+
+    expect(roster.lensSlots).toEqual([])
+    expect(discovered.lensInstructions).toEqual([])
+    // The cost regression check, mechanically: one backend call per pool slot
+    // and not one more.
+    expect(backend.calls).toHaveLength(3)
+    expect(discovered.findings.every((f) => f.source === "pool")).toBe(true)
+  })
+
+  test("the shipped registry is the default when no resolver is injected", async () => {
+    // The stage falls back to `core/instructions/registry.ts` rather than
+    // requiring every caller to wire one up.
+    const roster = rosterOf(1, [["openai", "gpt-5"]], ["security"])
+    const backend = new RecordingBackend(
+      new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: ONE_FINDING }],
+        "discovery-lens-security": [{ kind: "ok", value: ONE_FINDING }],
+      }),
+    )
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: THE_INPUT,
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+    })
+
+    expect(discovered.lensInstructions).toEqual([{ lens: "security", origin: "shipped" }])
+    const lensTurn = backend.seen.find((s) => s.slot === "discovery-lens-security")!
+    expect(lensTurn.instructions).toContain("The Security Sentinel")
+    // The lens instruction still carries the generalist's contract verbatim.
+    expect(lensTurn.instructions).toContain(DISCOVERY_INSTRUCTIONS.text)
   })
 })

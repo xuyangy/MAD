@@ -10,11 +10,11 @@
  * (AD-6b, AD-12), and it is excluded from the denominator.
  *
  * Writes only the fields discovery owns (AD-8): claim, reasoning, locus,
- * severity, author.
+ * severity, author, source, lens.
  *
  * ## The pooling contract (what N>1 means here)
  *
- * These four properties are the whole point of fanning out, and each of them is
+ * These five properties are the whole point of fanning out, and each of them is
  * load-bearing for a downstream stage:
  *
  * 1. **The pool is a UNION, not a merge.** Nothing here clusters, deduplicates
@@ -43,6 +43,20 @@
  *    make id order a function of network timing — and ids survive clustering, so
  *    anything a transcript references later would move between runs.
  *
+ * 5. **The lens segment is ADDITIVE COVERAGE, and the denominator is
+ *    pool-only.** `roster.lensSlots` (CAP-11) is an optional second pass over
+ *    the same change, each slot carrying a persona that narrows what it looks
+ *    for. Its turns start in the SAME fan-out as the pool's, but it is a
+ *    separate segment of the sequential post-pass and it buys different things:
+ *    a lens finding claims **no co-discovery prior** (AD-17d — it was prompted
+ *    for its dimension, so it has no unprompted signal to report) and **no
+ *    lineage** (AD-17c). `answered` counts POOL slots only (AD-6a,
+ *    `pipeline-stages.md` §1): a lens slot that answers never moves the
+ *    denominator, and a lens slot that drops out warns (AD-6b) without shrinking
+ *    it. Every finding carries `source` so the two are never confused
+ *    downstream; with no lenses requested, this segment is empty and the stage
+ *    behaves byte-for-byte as it did before it existed (AD-3, AD-15 amended).
+ *
  * One slot's failure never costs another slot's findings (AD-6b): each turn is
  * isolated, and a backend that throws is converted into a failure envelope for
  * its own slot only.
@@ -50,13 +64,20 @@
 
 import { z } from "zod"
 
-import { appendEntry, SEVERITIES, type Finding, type Locus } from "../domain/finding.ts"
-import type { Roster } from "../domain/roster.ts"
-import { recordTurn, type TokenLedger } from "../domain/run-record.ts"
+import {
+  appendEntry,
+  SEVERITIES,
+  type Finding,
+  type FindingSource,
+  type Locus,
+} from "../domain/finding.ts"
+import type { RosterSlot, Roster } from "../domain/roster.ts"
+import { recordTurn, type LensInstructionRecord, type TokenLedger } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
+import { resolveInstructions } from "../instructions/registry.ts"
+import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { Envelope, ModelBackend } from "../ports/model-backend.ts"
-import type { InstructionSet } from "../instructions/discovery.ts"
 
 /**
  * AD-11 / AD-12 — the schema constrains ONLY the fields MAD computes on:
@@ -114,7 +135,17 @@ export function salvageFindings(raw: unknown): Salvage | undefined {
 export interface DiscoverInput {
   roster: Roster
   backend: ModelBackend
+  /** AD-11 — the POOL's instruction set. Every pool slot gets exactly this. */
   instructions: InstructionSet
+  /**
+   * AD-11 amended — resolves one lens's instruction set. Injected so a test can
+   * script it; defaults to the shipped registry.
+   *
+   * The task type is `coding` here and the reason is a non-goal rather than an
+   * omission (`core/instructions/types.ts`): v1 populates one task type, and the
+   * registry's shape is what keeps a second from reopening this layer.
+   */
+  resolveLens?: (lens: string) => InstructionSet
   /** The material under review — the diff, plus whatever framing the caller adds. */
   input: string
   clock: Clock
@@ -128,10 +159,21 @@ export interface DiscoverResult {
    * it until clustering runs (AD-14, story 3).
    */
   findings: Finding[]
-  /** AD-6a — the denominator: how many models actually answered. */
+  /**
+   * AD-6a — the denominator: how many POOL models actually answered. A lens slot
+   * answering never moves it (`pipeline-stages.md` §1: "it counts pool models
+   * only"), because a lens finding claims no co-discovery prior to divide.
+   */
   answered: number
-  /** Slots that dropped out after their one retry. */
+  /** Slots that dropped out after their one retry — pool and lens alike. */
   droppedOut: string[]
+  /**
+   * AD-11 amended / AD-17e — one entry per lens slot, in `lensSlots` order,
+   * saying whether its instruction was SHIPPED or GENERATED at run time. It
+   * survives to output because a generated lens a reader cannot distinguish from
+   * a shipped one is the amendment unimplemented.
+   */
+  lensInstructions: LensInstructionRecord[]
   warnings: Warning[]
 }
 
@@ -150,17 +192,13 @@ function toLocus(raw: { file: string; startLine?: number; endLine?: number }): L
 async function runWithOneRetry(
   input: DiscoverInput,
   slot: string,
+  instructions: string,
 ): Promise<{ envelope: Envelope<DiscoveryEnvelope>; attempts: number }> {
   let last: Envelope<DiscoveryEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     let envelope: Envelope<DiscoveryEnvelope>
     try {
-      envelope = await input.backend.runTurn(
-        slot,
-        input.instructions.text,
-        input.input,
-        discoveryEnvelopeSchema,
-      )
+      envelope = await input.backend.runTurn(slot, instructions, input.input, discoveryEnvelopeSchema)
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). If one throws anyway, that is still this slot's problem and
@@ -183,6 +221,16 @@ async function runWithOneRetry(
 
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const { roster, clock } = input
+  const resolveLens =
+    input.resolveLens ?? ((lens: string) => resolveInstructions({ taskType: "coding", role: "discovery", lens }))
+
+  // AD-11 amended — resolved BEFORE the fan-out, so a generated lens is recorded
+  // whether or not its turn survives. One entry per lens slot, in slot order.
+  const lensSets = roster.lensSlots.map((lensSlot) => resolveLens(lensSlot.lens))
+  const lensInstructions: LensInstructionRecord[] = roster.lensSlots.map((lensSlot, index) => ({
+    lens: lensSlot.lens,
+    origin: lensSets[index]!.origin,
+  }))
 
   // Spine, Concurrency: discovery fans out in parallel across the roster — every
   // turn is started before any is awaited, so peak concurrency equals the slot
@@ -191,29 +239,55 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // bad backend cannot abort the whole fan-out and cost the run every other
   // model's findings (AD-6b).
   //
-  // Pooling contract 2 (independence): each slot is handed the SAME
-  // `input.input` and `input.instructions` and nothing else. There is no channel
-  // by which one slot's findings could reach another.
+  // Pooling contract 5: pool turns and lens turns start in ONE fan-out, so peak
+  // concurrency is pool + lens slots and the lens pass costs no extra wall-clock
+  // round. They are separated again in the sequential post-pass below, which is
+  // where the two segments' different meanings live.
+  //
+  // Pooling contract 2 (independence): each POOL slot is handed the SAME
+  // `input.input` and `input.instructions` and nothing else. A lens slot gets
+  // that same input and its own lens instruction — the one difference the whole
+  // capability consists of. There is no channel by which one slot's findings
+  // could reach another, lensed or not.
   //
   // Pooling contract 3: `Promise.all` resolves POSITIONALLY, so `outcomes` is in
-  // roster order however the turns actually completed.
-  const outcomes = await Promise.all(
-    roster.slots.map(async (rosterSlot) => ({
-      rosterSlot,
-      ...(await runWithOneRetry(input, rosterSlot.slot)),
-    })),
-  )
+  // roster order however the turns actually completed — and the pool's entries
+  // precede the lens slots' by construction of the array.
+  const [poolOutcomes, lensOutcomes] = await Promise.all([
+    Promise.all(
+      roster.slots.map(async (rosterSlot) => ({
+        rosterSlot,
+        ...(await runWithOneRetry(input, rosterSlot.slot, input.instructions.text)),
+      })),
+    ),
+    Promise.all(
+      roster.lensSlots.map(async (lensSlot, index) => ({
+        rosterSlot: lensSlot as RosterSlot,
+        lens: lensSlot.lens,
+        ...(await runWithOneRetry(input, lensSlot.slot, lensSets[index]!.text)),
+      })),
+    ),
+  ])
 
   const findings: Finding[] = []
   const warnings: Warning[] = []
   const droppedOut: string[] = []
   let answered = 0
 
-  // Pooling contracts 1, 3 and 4: one SEQUENTIAL pass over the positional
-  // outcomes. It is what makes the pooled order roster order, the ids unique and
-  // stable, and the result a plain union — no member of `findings` is ever
-  // compared against, folded into, or deduplicated against another here.
-  for (const outcome of outcomes) {
+  /**
+   * One outcome, turned into findings and warnings.
+   *
+   * Returns whether the slot ANSWERED. Only the pool segment adds that to the
+   * denominator (AD-6a) — the caller decides, so the rule lives in one visible
+   * place rather than inside a branch on `source`.
+   */
+  const collect = (
+    outcome: {
+      rosterSlot: RosterSlot
+      envelope: Envelope<DiscoveryEnvelope>
+    },
+    origin: { source: FindingSource; lens?: string },
+  ): boolean => {
     const { rosterSlot, envelope } = outcome
     const modelName = `${rosterSlot.providerId}/${rosterSlot.modelId}`
 
@@ -247,7 +321,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
           error: envelope.ok ? "" : envelope.message,
         },
       })
-      continue
+      return false
     }
 
     if (salvaged) {
@@ -271,7 +345,6 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       })
     }
 
-    answered += 1
     const at = clock.now()
     for (const raw of raised) {
       const finding: Finding = {
@@ -281,6 +354,11 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         locus: toLocus(raw),
         severity: raw.severity,
         author: rosterSlot.slot,
+        // AD-8 / AD-9 amended — discovery owns these two, and `source` is what
+        // every downstream stage reads to know whether a prior is claimable at
+        // all. `lens` is set on a lens finding and left absent on a pool one.
+        source: origin.source,
+        ...(origin.lens === undefined ? {} : { lens: origin.lens }),
         history: [],
       }
       // AD-7 — history is append-only; discovery appends the first entry.
@@ -293,10 +371,31 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       })
       findings.push(finding)
     }
+    return true
+  }
+
+  // Pooling contracts 1, 3, 4 and 5: one SEQUENTIAL pass over the positional
+  // outcomes, in TWO ORDERED SEGMENTS — every pool slot in roster order, then
+  // every lens slot in `lensSlots` order. It is what makes the pooled order
+  // roster order, the ids unique and stable, and the result a plain union — no
+  // member of `findings` is ever compared against, folded into, or deduplicated
+  // against another here. Pool findings get exactly the ids they get with no
+  // lenses configured, because the lens segment runs strictly after them.
+  for (const outcome of poolOutcomes) {
+    // AD-6a — the denominator, and the ONLY place it moves.
+    if (collect(outcome, { source: "pool" })) answered += 1
+  }
+  for (const outcome of lensOutcomes) {
+    // AD-6a / AD-17d — a lens slot answering does NOT move `answered`. Its
+    // findings claim no prior, so there is nothing for the denominator to
+    // divide, and inflating it would shrink every pool fraction on the page.
+    collect(outcome, { source: "lens", lens: outcome.lens })
   }
 
   // AD-6a — make the shrunken denominator itself visible, not just implied by
-  // the fraction.
+  // the fraction. Compared against the POOL only: `roster.slots.length` never
+  // includes a lens slot, so a dropped-out lens can never make this fire and a
+  // filled lens roster can never make it stop firing.
   if (answered < roster.slots.length) {
     warnings.push({
       code: "denominator-reduced",
@@ -308,5 +407,5 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     })
   }
 
-  return { findings, answered, droppedOut, warnings }
+  return { findings, answered, droppedOut, lensInstructions, warnings }
 }

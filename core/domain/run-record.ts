@@ -8,9 +8,23 @@
  * that may be added behind a flag without touching a stage.
  */
 
+import type { InstructionOrigin } from "../instructions/types.ts"
 import type { Finding } from "./finding.ts"
 import type { Roster } from "./roster.ts"
 import type { Warning } from "./warning.ts"
+
+/**
+ * AD-11 amended / AD-17e — one lens slot's instruction provenance.
+ *
+ * `InstructionOrigin` is imported as a TYPE ONLY: this records what the run got,
+ * it does not reach into the instruction layer to get it. The alternative was a
+ * second declaration of the same two-member union, which is one rename away from
+ * a record that disagrees with the registry it describes.
+ */
+export interface LensInstructionRecord {
+  lens: string
+  origin: InstructionOrigin
+}
 
 /**
  * AD-15 — MAD budgets in tokens, never currency. These are the integers the
@@ -68,6 +82,13 @@ export interface RunRecord {
    */
   answered: number
   findings: Finding[]
+  /**
+   * AD-11 amended / AD-17e — the lens slots this run used and whether each one's
+   * instruction was shipped or generated at run time. Required and `[]` when no
+   * lens ran, for the same reason `Roster.lensSlots` is: absent and empty must
+   * not be two ways of saying the same thing.
+   */
+  lensInstructions: LensInstructionRecord[]
   warnings: Warning[]
   ledger: TokenLedger
 }
