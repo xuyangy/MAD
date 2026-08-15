@@ -144,6 +144,32 @@ describe("an unregistered lens is GENERATED, never rejected and never silently d
     expect(set.text).toContain("---")
   })
 
+  test("A BLANK LENS ID IS NO LENS, NOT A LENS NAMED `\"\"`", () => {
+    // The `---` case above is only half of it (code review 2026-08-15). The
+    // other half is an id that is ALREADY empty, which `humanize` never sees:
+    // the raw-id fallback then hands back `""` too, and the persona reads
+    // `through the "" lens` on a billed turn. Only `clampLenses` in the
+    // opencode adapter was filtering blanks, so a core caller — story 9's
+    // ablation arms build rosters directly — reintroduced it.
+    for (const blank of ["", " ", "\t\n"]) {
+      const set = resolveInstructions({ ...CODING_DISCOVERY, lens: blank })
+
+      expect(set.origin).toBe("shipped")
+      expect(set.lens).toBeUndefined()
+      expect(set.text).toBe(DISCOVERY_TEXT_AS_SHIPPED)
+      expect(set.text).not.toContain('the "" lens')
+      expect(isShippedLens(blank)).toBe(false)
+    }
+  })
+
+  test("a lens id is trimmed, so a disclosure cannot disagree with what resolved", () => {
+    const set = resolveInstructions({ ...CODING_DISCOVERY, lens: "  security  " })
+
+    expect(set.origin).toBe("shipped")
+    expect(set.lens).toBe("security")
+    expect(isShippedLens("  security  ")).toBe(true)
+  })
+
   test("it does not throw, and does not quietly return the generalist", () => {
     // A silent generalist fallback is the worst of the three outcomes: the run
     // would cost a lens turn, claim a lens in output, and have asked for nothing.

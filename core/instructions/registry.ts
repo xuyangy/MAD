@@ -93,7 +93,7 @@ function humanize(lens: string): string {
  *
  * - registered (taskType, role, lens) -> the shipped set, `origin: 'shipped'`
  * - unregistered lens                 -> generated from the id, `origin: 'generated'`
- * - no lens                           -> the role's generalist, `origin: 'shipped'`
+ * - no lens, or a blank/whitespace id -> the role's generalist, `origin: 'shipped'`
  */
 export function resolveInstructions(key: InstructionKey): InstructionSet {
   const generalist = GENERALISTS.get(keyOf(key.taskType, key.role))
@@ -105,12 +105,21 @@ export function resolveInstructions(key: InstructionKey): InstructionSet {
     )
   }
 
-  if (key.lens === undefined) return generalist
+  // A BLANK lens id is no lens, not a lens named "" (code review 2026-08-15).
+  // The only thing enforcing a non-empty id was `clampLenses` in the opencode
+  // adapter, so a core-level caller — story 9's ablation arms build rosters
+  // without going through the tool — could reach the generated fallback with
+  // `""` and bill a turn on `a reviewer reading this change through the "" lens`.
+  // `fillLensSlots` does not filter blanks either. Normalized here, where the
+  // decision belongs, so every entry point reads the same answer. Trimmed for
+  // the same reason `clampLenses` trims: `" "` is the same non-request as `""`.
+  const lens = key.lens?.trim()
+  if (lens === undefined || lens.length === 0) return generalist
 
   // Task type + role + lens. A lens set written for `discovery` is not reachable
   // from any other role (AD-17a) — an unregistered (role, lens) pair falls
   // through to the generated set below rather than borrowing another role's.
-  const shipped = LENS_SETS.get(keyOf(key.taskType, key.role, key.lens))
+  const shipped = LENS_SETS.get(keyOf(key.taskType, key.role, lens))
   if (shipped) return shipped
 
   // AD-11 amended — the on-the-fly fallback. Same contract, weaker persona, and
@@ -118,13 +127,14 @@ export function resolveInstructions(key: InstructionKey): InstructionSet {
   //
   // `humanize` can empty a degenerate id (`"---"` -> `""`), which produced
   // `through the "" lens` on a billed turn (code review 2026-08-15). The raw id
-  // is always non-empty by the time it reaches here, so it is the honest
-  // fallback: a reader sees exactly what was asked for.
-  const readable = humanize(key.lens) || key.lens
+  // is non-empty here — the blank guard above is what makes that true, rather
+  // than an assumption about callers — so it is the honest fallback: a reader
+  // sees exactly what was asked for.
+  const readable = humanize(lens) || lens
   return {
     taskType: key.taskType,
     role: key.role,
-    lens: key.lens,
+    lens,
     version: "generated-1",
     origin: "generated",
     text: lensInstructionText(
@@ -138,7 +148,12 @@ export function resolveInstructions(key: InstructionKey): InstructionSet {
  * Whether a lens id has a shipped set for a (task type, role). Exported so
  * callers can disclose it. Defaults to the one pair v1 populates, so existing
  * callers read the same answer they always did.
+ *
+ * Trims for the same reason `resolveInstructions` does: a disclosure that
+ * disagrees with the set actually resolved is worse than no disclosure. A blank
+ * id is `false` here and the GENERALIST there — both honest, because a blank
+ * asks for no lens and there is no shipped LENS set for one.
  */
 export function isShippedLens(lens: string, taskType: TaskType = "coding", role = "discovery"): boolean {
-  return LENS_SETS.has(keyOf(taskType, role, lens))
+  return LENS_SETS.has(keyOf(taskType, role, lens.trim()))
 }
