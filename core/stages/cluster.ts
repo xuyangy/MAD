@@ -42,6 +42,16 @@ export interface ClusterInput {
    * AD-14 — the similarity function is INJECTED, defaulted to the shipped
    * deterministic one. The model-backed matcher `stories.yaml` anticipates
    * arrives here, and nothing in `core/clustering/` reopens.
+   *
+   * The BLOCK KEY is not injected, and that is a real limit on this seam (code
+   * review 2026-08-15). `findingBlockKey` blocks on the file basename, which is
+   * provably no stricter than `lexicalSimilarity` but says nothing about a
+   * replacement: a semantic matcher that would merge `src/pay.ts:12` with
+   * `src/billing/charge.ts:44` never gets asked, and the veto is invisible
+   * because a blocked pair raises no `comparisons` or `failures`.
+   * `core/clustering/fixtures/rates.ts` already takes `blockKey` as a
+   * parameter; `ClusterInput` should too, whenever a matcher that needs it
+   * lands. Recorded in `deferred-work.md`.
    */
   similar?: Similar<Finding>
   /**

@@ -73,8 +73,11 @@ export function clampDiscoverySlots(slots: number | undefined): number {
  * CAP-11 — an upper bound on the LENS fan-out, for the same reason
  * `MAX_DISCOVERY_SLOTS` exists: each lens is another billed session against the
  * user's own credentials at the widest point of the run (AD-15 amended — three
- * models with five lenses is eighteen discovery turns, not three), and the
- * argument arrives from a model calling the tool.
+ * models with five lenses is eight discovery turns rather than three, the
+ * fan-out being `slots + lenses`; see `DEFAULT_DISCOVERY_SLOTS` above, which
+ * carries the same correction and the reason the amendment's original
+ * multiplicative eighteen matches no code path), and the argument arrives from
+ * a model calling the tool.
  *
  * Eight, because that is the shipped coding pack: asking for every lens MAD
  * ships is a defensible request, and asking for more than that is a request for
@@ -231,8 +234,16 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // 3-requested/1-filled host into a clean-looking "1/1"; and present a
           // pre-clustering union as a plain finding count, which is the exact
           // misreading the body's POOL — NOT YET MERGED notice exists to stop.
+          // The empty list is the third thing it must not do (code review
+          // 2026-08-15): `[].every(...)` is `true`, so a 2-model run that
+          // raised nothing used to title itself "0 pooled finding(s), not yet
+          // merged" — a claim about merging that no longer holds now that
+          // clustering always runs, and one the BODY never made
+          // (`pooledNotYetMerged` bails on an empty pool). Match its predicate.
           const pooled =
-            record.answered > 1 && record.findings.every((f) => f.clusterId === undefined)
+            record.answered > 1 &&
+            record.findings.length > 0 &&
+            record.findings.every((f) => f.clusterId === undefined)
           const findingLabel = pooled ? "pooled finding(s), not yet merged" : "finding(s)"
           // AD-17e reaches the headline too. The denominator stays the pool's:
           // `answered` counts pool models only, and naming the lens count beside

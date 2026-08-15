@@ -588,6 +588,41 @@ describe("a merged canonical discloses what it absorbed (AD-17e)", () => {
     expect(canonical.severity).toBe("low") // the field itself is untouched
   })
 
+  test("A CLUSTER'S EFFECTIVE SEVERITY ORDERS IT TOO, NOT ONLY PRINTS IT (AD-10)", () => {
+    // The regression this pins (code review 2026-08-15): the comparator read the
+    // raw `severity` while the cell rendered `effectiveSeverity`, so this run
+    // printed `#1 [medium]` above `#2 [critical]` — output contradicting AD-10
+    // from the other side. Asserting `[critical]` appears is not enough; the
+    // ORDER is the claim.
+    const canonical = finding({
+      id: "f1",
+      severity: "low",
+      file: "a.ts",
+      clusterId: "cluster-1",
+      coDiscovery: { raised: 1, answered: 3 },
+    })
+    canonical.clusterSeverity = "critical"
+    canonical.mergedIds = ["f2"]
+    const absorbed = lensFinding({ id: "f2", severity: "critical", file: "a.ts", lens: "security" })
+    const other = finding({
+      id: "f3",
+      severity: "medium",
+      file: "b.ts",
+      coDiscovery: { raised: 1, answered: 3 },
+    })
+
+    const rec = record([canonical, other], 3, ["security"])
+    rec.pool = [canonical, absorbed, other]
+    const ranked = rankFindings(rec.findings)
+
+    expect(ranked.map((f) => f.id)).toEqual(["f1", "f3"])
+    expect(canonical.rank).toBe(1)
+    expect(canonical.severity).toBe("low") // still never rewritten (AD-8)
+
+    const rendered = output(rec)
+    expect(rendered.indexOf("[critical]")).toBeLessThan(rendered.indexOf("[medium]"))
+  })
+
   test("a finding with no clusterSeverity renders its own severity, as it always did", () => {
     const rendered = output(record([finding({ severity: "medium", file: "a.ts" })]))
     expect(rendered).toContain("[medium]")

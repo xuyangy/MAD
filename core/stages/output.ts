@@ -21,8 +21,10 @@
  * it, and — for a lens member — which lens (`renderMerged`). AD-10 arrives with
  * it: the severity cell reads `effectiveSeverity`, because a cluster that took a
  * member's `critical` must print `critical` while `severity` itself stays
- * unwritten (AD-8). ORDERING still reads `severity` directly; story 7 owns the
- * ranked-output treatment and the gap is recorded in `deferred-work.md`.
+ * unwritten (AD-8). ORDERING reads the same accessor (code review 2026-08-15):
+ * sorting on the raw field while rendering the effective one printed a
+ * `critical` below a `high`. Story 7 still owns the full ranked-output
+ * treatment; this is only the tie between the two severity reads.
  *
  * AD-6 — all five degradation reports are carried here and rendered: the
  * denominator, drop-outs, the roster warning, lens homogeneity, and the
@@ -51,8 +53,13 @@ function coDiscoveryRatio(finding: Finding): number {
  */
 export function rankFindings(findings: Finding[]): Finding[] {
   const ordered = [...findings].sort((a, b) => {
-    // 1. severity, carried unchanged from discovery (AD-10)
-    const bySeverity = severityRank(b.severity) - severityRank(a.severity)
+    // 1. severity — read through `effectiveSeverity`, the SAME accessor the
+    // severity cell renders. Sorting on the raw `severity` field instead let a
+    // cluster that absorbed a member's `critical` print `critical` and rank
+    // below a `high`, because `clusterSeverity` is written exactly when the
+    // highest member severity is not the canonical's own (AD-10, AD-8: the raw
+    // field stays unwritten). Ordering and rendering must read one accessor.
+    const bySeverity = severityRank(effectiveSeverity(b)) - severityRank(effectiveSeverity(a))
     if (bySeverity !== 0) return bySeverity
 
     // 2. AD-9 amended — co-discovery is a criterion only when BOTH findings

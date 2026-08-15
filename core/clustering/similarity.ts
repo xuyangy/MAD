@@ -108,10 +108,21 @@ export function overlapCoefficient(a: Set<string>, b: Set<string>): number {
  * The blocking key: the file's BASENAME.
  *
  * It must be no stricter than `sameFile`, or the block would silently veto pairs
- * the matcher would have merged — a full path key would split `src/pay.ts` from
- * `billing/pay.ts`, which `sameFile` deliberately accepts. A basename is stable
- * across path spellings and still keeps a matcher from being billed for two
+ * the matcher would have merged. A basename satisfies that for the reason the
+ * comment here used to state backwards (code review 2026-08-15): `sameFile` is
+ * true only on an exact match or a `/`-suffix match, and BOTH imply equal
+ * basenames — so no `sameFile` pair can ever land in two blocks. (It is not
+ * that `sameFile` accepts `src/pay.ts` against `billing/pay.ts`; it rejects
+ * that pair, neither path being a suffix of the other.) A full PATH key would
+ * be the stricter one, splitting `src/pay.ts` from the `pay.ts` a second model
+ * cited unqualified — the pair `sameFile` does accept. The basename is stable
+ * across those spellings and still keeps a matcher from being billed for two
  * findings that cannot be the same site.
+ *
+ * Note the direction of that guarantee: it holds for THIS matcher, not for any
+ * matcher. A semantic replacement that would merge two different files is
+ * blocked before `similar` is ever asked — see the `blockKey` seam noted on
+ * `ClusterInput` in `core/stages/cluster.ts`.
  */
 export const findingBlockKey: BlockKey<Finding> = (finding) => {
   const path = normalizePath(finding.locus.file)
