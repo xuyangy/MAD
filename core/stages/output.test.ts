@@ -46,6 +46,9 @@ function record(findings: Finding[], answered = 1, lenses: readonly string[] = [
     roster,
     answered,
     findings,
+    // These records are built by hand and never clustered, so the pool IS the
+    // finding set — which is exactly the pre-cluster state this block asserts on.
+    pool: findings,
     lensInstructions: roster.lensSlots.map((slot) => ({ lens: slot.lens, origin: "shipped" as const })),
     warnings,
     ledger: emptyLedger(),
@@ -177,6 +180,50 @@ describe("rendering (AD-6, AD-9)", () => {
     expect(rendered).toContain("budget exhausted")
     // and it is not double-counted among the resolved findings
     expect(rendered).toContain("FINDINGS (0)")
+  })
+
+  test("AD-17e reaches the UNRESOLVED section too — a lens finding is disclosed there", () => {
+    // The section is output, and clause (e) has no exception for a finding the
+    // budget ran out on. A reader deciding an undecided finding by hand needs to
+    // know it carries no prior BECAUSE it was prompted, not because judging
+    // never reached it (code review 2026-08-15; latent until story 8).
+    const rec = record(
+      [
+        lensFinding({
+          severity: "high",
+          file: "a.ts",
+          lens: "security",
+          unresolved: { diedAtStage: "judge", reason: "budget exhausted" },
+        }),
+      ],
+      1,
+      ["security"],
+    )
+    const rendered = output(rec)
+    const section = rendered.slice(rendered.indexOf("UNRESOLVED — YOU DECIDE"))
+
+    expect(section).toContain("raised by: discovery-lens-security")
+    expect(section).toContain("lens-sourced: `security`")
+    // ...and it never shows a prior it was not entitled to (AD-17d, AD-9).
+    expect(section).toContain("not applicable — lens-sourced")
+    expect(section).not.toContain("1/1")
+  })
+
+  test("a POOL finding in the UNRESOLVED section is disclosed without a lens label", () => {
+    const rec = record([
+      finding({
+        severity: "high",
+        file: "a.ts",
+        coDiscovery: { raised: 1, answered: 1 },
+        unresolved: { diedAtStage: "debate", reason: "budget exhausted" },
+      }),
+    ])
+    const section = output(rec).slice(0)
+    const unresolvedBlock = section.slice(section.indexOf("UNRESOLVED — YOU DECIDE"))
+
+    expect(unresolvedBlock).toContain("raised by: discovery-1")
+    expect(unresolvedBlock).not.toContain("lens-sourced")
+    expect(unresolvedBlock).toContain("co-discovery: 1/1")
   })
 
   test("AD-6: zero findings because nobody answered never reads as a clean review", () => {
@@ -427,6 +474,145 @@ describe("the comparator does not coerce a missing prior (AD-9 amended)", () => 
       finding({ severity: "high", file: "z-someone.ts", coDiscovery: { raised: 1, answered: 3 } }),
     ])
     expect(ranked.map((f) => f.locus.file)).toEqual(["z-someone.ts", "a-nobody.ts"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 3 — what a merged canonical must disclose (AD-17e), and the severity it
+// must print (AD-10). The pre-cluster blocks above are unchanged on purpose:
+// `output()` stays callable on a record clustering never touched.
+// ---------------------------------------------------------------------------
+
+describe("a merged canonical discloses what it absorbed (AD-17e)", () => {
+  test("THE NOTICE IS ABSENT ONCE clusterId IS SET, INCLUDING WHEN NOTHING MERGED", () => {
+    // The case AD-14 amended 2 exists for: a fully-clustered run in which no two
+    // findings were equivalent must never re-announce itself as an unmerged pool.
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", clusterId: "cluster-1", coDiscovery: { raised: 1, answered: 3 } }),
+          finding({ severity: "high", file: "b.ts", clusterId: "cluster-2", coDiscovery: { raised: 1, answered: 3 } }),
+        ],
+        3,
+      ),
+    )
+    expect(rendered).not.toContain("NOT YET MERGED")
+    expect(rendered).toContain("co-discovery: 1/3")
+    // Nothing merged, so nothing is disclosed as merged either.
+    expect(rendered).not.toContain("merged:")
+  })
+
+  test("the row names how many findings were absorbed and who raised them", () => {
+    const canonical = finding({
+      id: "f1",
+      severity: "high",
+      file: "a.ts",
+      author: "discovery-1",
+      clusterId: "cluster-1",
+      coDiscovery: { raised: 2, answered: 3 },
+    })
+    canonical.mergedIds = ["f2"]
+    const absorbed = finding({ id: "f2", severity: "high", file: "a.ts", author: "discovery-2" })
+    absorbed.clusterId = "cluster-1"
+
+    const rec = record([canonical], 3)
+    rec.pool = [canonical, absorbed]
+    const rendered = output(rec)
+
+    expect(rendered).toContain("merged: 1 other finding(s) — discovery-2")
+    expect(rendered).toContain("co-discovery: 2/3")
+  })
+
+  test("AN ABSORBED LENS MEMBER IS STILL DISCLOSED WITH ITS LENS", () => {
+    // Without this the finding disappears from the list entirely, and AD-17e's
+    // "the reader always learns a finding was lens-sourced and which lens found
+    // it" has no exception for a member that merged.
+    const canonical = finding({
+      id: "f1",
+      severity: "high",
+      file: "a.ts",
+      author: "discovery-1",
+      clusterId: "cluster-1",
+      coDiscovery: { raised: 1, answered: 3 },
+    })
+    canonical.mergedIds = ["f2"]
+    const absorbed = lensFinding({ id: "f2", severity: "high", file: "a.ts", lens: "security" })
+    absorbed.clusterId = "cluster-1"
+
+    const rec = record([canonical], 3, ["security"])
+    rec.pool = [canonical, absorbed]
+    const rendered = output(rec)
+
+    expect(rendered).toContain("merged: 1 other finding(s)")
+    expect(rendered).toContain("discovery-lens-security")
+    expect(rendered).toContain("lens-sourced: `security`")
+    // ...and the canonical still renders its own, pool-scoped prior.
+    expect(rendered).toContain("co-discovery: 1/3")
+  })
+
+  test("an id the pool cannot resolve says so rather than printing a shorter list", () => {
+    const canonical = finding({
+      id: "f1",
+      severity: "high",
+      file: "a.ts",
+      clusterId: "cluster-1",
+      coDiscovery: { raised: 1, answered: 3 },
+    })
+    canonical.mergedIds = ["ghost"]
+    const rec = record([canonical], 3)
+    rec.pool = [canonical]
+
+    expect(output(rec)).toContain("ghost (unresolved — not on the run record)")
+  })
+
+  test("A CLUSTER THAT TOOK A MEMBER'S `critical` RENDERS `critical` (AD-10)", () => {
+    // `severity` is never rewritten (AD-8), so the cell reads through
+    // `effectiveSeverity` — otherwise output contradicts the AD it implements.
+    const canonical = finding({
+      id: "f1",
+      severity: "low",
+      file: "a.ts",
+      clusterId: "cluster-1",
+      coDiscovery: { raised: 1, answered: 3 },
+    })
+    canonical.clusterSeverity = "critical"
+    canonical.mergedIds = ["f2"]
+    const absorbed = lensFinding({ id: "f2", severity: "critical", file: "a.ts", lens: "security" })
+
+    const rec = record([canonical], 3, ["security"])
+    rec.pool = [canonical, absorbed]
+    const rendered = output(rec)
+
+    expect(rendered).toContain("[critical]")
+    expect(rendered).not.toContain("[low]")
+    expect(canonical.severity).toBe("low") // the field itself is untouched
+  })
+
+  test("a finding with no clusterSeverity renders its own severity, as it always did", () => {
+    const rendered = output(record([finding({ severity: "medium", file: "a.ts" })]))
+    expect(rendered).toContain("[medium]")
+  })
+
+  test("AD-17e reaches the UNRESOLVED section too — a merged canonical discloses there", () => {
+    // Same clause, same reasoning as the lens label already in that section: a
+    // reader deciding an undecided finding by hand needs to know a lens member
+    // is folded into it. Latent until story 8 writes `unresolved`.
+    const canonical = finding({
+      id: "f1",
+      severity: "high",
+      file: "a.ts",
+      clusterId: "cluster-1",
+      unresolved: { diedAtStage: "judge", reason: "budget exhausted" },
+    })
+    canonical.mergedIds = ["f2"]
+    const absorbed = lensFinding({ id: "f2", severity: "high", file: "a.ts", lens: "security" })
+
+    const rec = record([canonical], 3, ["security"])
+    rec.pool = [canonical, absorbed]
+    const section = output(rec).slice(output(rec).indexOf("UNRESOLVED — YOU DECIDE"))
+
+    expect(section).toContain("merged: 1 other finding(s)")
+    expect(section).toContain("lens-sourced: `security`")
   })
 })
 

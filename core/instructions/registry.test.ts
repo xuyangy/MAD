@@ -134,6 +134,16 @@ describe("an unregistered lens is GENERATED, never rejected and never silently d
     expect(isShippedLens("threat-model")).toBe(false)
   })
 
+  test("a degenerate id falls back to the raw id, never an empty persona", () => {
+    // `humanize("---")` is `""`, which shipped `through the "" lens` on a real
+    // billed turn (code review 2026-08-15).
+    const set = resolveInstructions({ ...CODING_DISCOVERY, lens: "---" })
+
+    expect(set.origin).toBe("generated")
+    expect(set.text).not.toContain('the "" lens')
+    expect(set.text).toContain("---")
+  })
+
   test("it does not throw, and does not quietly return the generalist", () => {
     // A silent generalist fallback is the worst of the three outcomes: the run
     // would cost a lens turn, claim a lens in output, and have asked for nothing.
@@ -187,5 +197,30 @@ describe("addressing", () => {
     // unreachable rather than handled — the shape is not permission
     // (`SPEC.md` non-goals). This asserts the reachable half.
     expect(resolveInstructions(CODING_DISCOVERY).taskType).toBe("coding")
+  })
+
+  test("A LENS SET IS REACHABLE ONLY FROM THE ROLE IT WAS WRITTEN FOR (AD-17a)", () => {
+    // Keyed by lens id alone, `{role: 'debate', lens: 'security'}` returned the
+    // DISCOVERY lens instruction — a set whose own `role` says `discovery` —
+    // the moment any second role registered a generalist. That is AD-17(a)
+    // ("it is NOT included in the debate instruction") arriving through the
+    // registry in story 5, silently (code review 2026-08-15).
+    //
+    // Today `debate` throws before reaching the lens lookup, so this asserts the
+    // property at the only layer that will still hold once it does not: a
+    // shipped set is stored under its own role and nothing else can address it.
+    const shipped = resolveInstructions({ ...CODING_DISCOVERY, lens: "security" })
+    expect(shipped.origin).toBe("shipped")
+    expect(shipped.role).toBe("discovery")
+
+    // The guard story 5 will meet first.
+    expect(() => resolveInstructions({ taskType: "coding", role: "debate", lens: "security" })).toThrow(
+      "no instruction set",
+    )
+
+    // And `isShippedLens` answers per (task type, role), not globally — so a
+    // caller asking about `debate` is told the truth rather than `discovery`'s.
+    expect(isShippedLens("security")).toBe(true)
+    expect(isShippedLens("security", "coding", "debate")).toBe(false)
   })
 })

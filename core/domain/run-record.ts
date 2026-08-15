@@ -81,7 +81,24 @@ export interface RunRecord {
    * fraction downstream divides by this, never by `roster.requested`.
    */
   answered: number
+  /** After clustering, the CANONICAL findings. Before it, the whole pool. */
   findings: Finding[]
+  /**
+   * The pre-cluster union — every finding discovery raised, in roster order.
+   * Required and never optional, for the same reason `lensSlots` and
+   * `lensInstructions` are: absent and empty must not be two ways of saying the
+   * same thing.
+   *
+   * THIS IS NOT BOOKKEEPING. Findings are mutated in place (AD-7), so `pool` and
+   * `findings` share objects and cannot drift; `findings` is the canonical
+   * subset. CAP-1's criterion is a claim about the DISCOVERY POOL, and
+   * `fixtures/recall.ts` derives every single-model arm from `finding.author` —
+   * measured over a merged set instead, an arm silently loses credit for a
+   * finding it really did raise and CAP-1's number degrades with no test failing.
+   *
+   * AD-16 is unchanged: still in memory, still nothing written to the repo.
+   */
+  pool: Finding[]
   /**
    * AD-11 amended / AD-17e — the lens slots this run used and whether each one's
    * instruction was shipped or generated at run time. Required and `[]` when no

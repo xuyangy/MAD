@@ -392,7 +392,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // participating arm — passed explicitly so an arm that raised nothing would
     // still appear rather than vanishing from the comparison.
     const answered = record.roster.slots.map((slot) => slot.slot)
-    const comparison = pooledRecallBeatsBestMember(SEEDED_DEFECTS, record.findings, undefined, answered)
+    const comparison = pooledRecallBeatsBestMember(SEEDED_DEFECTS, record.pool, undefined, answered)
 
     expect(comparison.beats).toBe(true)
     expect(comparison.members).toHaveLength(3)
@@ -410,7 +410,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // at any size.
     expect(comparison.pooled.total).toBe(SEEDED_DEFECTS.length)
     expect(comparison.pooled.found).toBe(
-      SEEDED_DEFECTS.length - missedDefects(SEEDED_DEFECTS, record.findings).length,
+      SEEDED_DEFECTS.length - missedDefects(SEEDED_DEFECTS, record.pool).length,
     )
     // No arm is silent, and no arm alone reaches the pool — which is the shape
     // that makes the strict inequality above mean "heterogeneity paid", rather
@@ -426,11 +426,11 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
 
   test("nobody finds everything — the unfound defects are still counted against the pool", async () => {
     const { record } = await threeSlotRun()
-    const pooled = recall(SEEDED_DEFECTS, record.findings)
+    const pooled = recall(SEEDED_DEFECTS, record.pool)
 
     expect(pooled.found).toBeLessThan(pooled.total)
 
-    const missed = missedDefects(SEEDED_DEFECTS, record.findings).map((d) => d.id)
+    const missed = missedDefects(SEEDED_DEFECTS, record.pool).map((d) => d.id)
     // The deliberately unfindable one, planted so a perfect score is not on
     // offer and a harness bug crediting everything to everyone shows up as
     // `found === total`.
@@ -443,6 +443,34 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     expect(notice.length).toBeGreaterThan(0)
     for (const defect of notice) expect(missed).toContain(defect.id)
     expect(missed).toHaveLength(1 + notice.length)
+  })
+
+  test("CLUSTERING DID NOT MOVE CAP-1's NUMBER — the pool is discovery's set, untouched", async () => {
+    // AD-8 in one assertion. This harness reads `claim`, `reasoning`, `locus`,
+    // `author`, `source` and `severity`; clustering writes `clusterId`,
+    // `coDiscovery`, `mergedIds` and `clusterSeverity` and nothing else. So
+    // measuring `record.pool` AFTER clustering measures exactly the set story 2
+    // measured, and the numbers below cannot have moved. Assert it rather than
+    // reason it: a stage that started rewriting a claim would degrade CAP-1
+    // silently, which is the one failure mode this measurement cannot survive.
+    const { record } = await threeSlotRun(LENSES)
+
+    expect(record.pool.length).toBeGreaterThan(0)
+    for (const finding of record.pool) {
+      expect(typeof finding.claim).toBe("string")
+      expect(finding.severity).toBeDefined()
+      // A merge entry is APPENDED (AD-7); discovery's own entry is still first.
+      expect(finding.history[0]!.stage).toBe("discover")
+    }
+
+    // And the pool is strictly larger than the canonical set here, so the choice
+    // of set is load-bearing rather than an academic distinction.
+    expect(record.pool.length).toBeGreaterThan(record.findings.length)
+
+    // Every arm is still derivable from `author` over the pool, which is what
+    // would break first if a merged member had been dropped.
+    const authors = new Set(record.pool.filter((f) => f.source === "pool").map((f) => f.author))
+    expect([...authors].sort()).toEqual(["discovery-1", "discovery-2", "discovery-3"])
   })
 
   test("the seeded set spans several dimensions — CAP-11 has something to measure over", () => {
@@ -461,7 +489,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
 
     // Partition on nothing but `author` — the field discovery writes (AD-8) —
     // and the arms fall out of one pooled run rather than needing N runs.
-    const authors = [...new Set(record.findings.map((f) => f.author))]
+    const authors = [...new Set(record.pool.map((f) => f.author))]
     expect(authors).toEqual(["discovery-1", "discovery-2", "discovery-3"])
 
     const byHand = authors
@@ -469,17 +497,17 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
         author,
         recall: recall(
           SEEDED_DEFECTS,
-          record.findings.filter((finding) => finding.author === author),
+          record.pool.filter((finding) => finding.author === author),
         ),
       }))
       .sort((a, b) => a.author.localeCompare(b.author))
 
-    expect(recallByAuthor(SEEDED_DEFECTS, record.findings)).toEqual(byHand)
+    expect(recallByAuthor(SEEDED_DEFECTS, record.pool)).toEqual(byHand)
   })
 
   test("a false positive is not recall", async () => {
     const { record } = await threeSlotRun()
-    const shapeFinding = record.findings.find((f) => f.claim.includes("RefundResult.refundId"))
+    const shapeFinding = record.pool.find((f) => f.claim.includes("RefundResult.refundId"))
     expect(shapeFinding).toBeDefined()
     expect(recall(SEEDED_DEFECTS, [shapeFinding!])).toEqual({
       found: 0,
@@ -490,8 +518,8 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   test("an injected matcher replaces the lexical default (AD-14's shape)", async () => {
     const { record } = await threeSlotRun()
     // A matcher that agrees with nothing proves the default is not hard-wired.
-    expect(recall(SEEDED_DEFECTS, record.findings, () => false).found).toBe(0)
-    expect(pooledRecallBeatsBestMember(SEEDED_DEFECTS, record.findings, () => false).beats).toBe(
+    expect(recall(SEEDED_DEFECTS, record.pool, () => false).found).toBe(0)
+    expect(pooledRecallBeatsBestMember(SEEDED_DEFECTS, record.pool, () => false).beats).toBe(
       false,
     )
   })
@@ -504,8 +532,8 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     const unlensed = await threeSlotRun()
     const lensed = await threeSlotRun(LENSES)
 
-    const a = pooledRecallBeatsBestMember(SEEDED_DEFECTS, unlensed.record.findings, undefined, answered)
-    const b = pooledRecallBeatsBestMember(SEEDED_DEFECTS, lensed.record.findings, undefined, answered)
+    const a = pooledRecallBeatsBestMember(SEEDED_DEFECTS, unlensed.record.pool, undefined, answered)
+    const b = pooledRecallBeatsBestMember(SEEDED_DEFECTS, lensed.record.pool, undefined, answered)
 
     expect(b.pooled).toEqual(a.pooled)
     expect(b.members).toEqual(a.members)
@@ -522,11 +550,21 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // No drop-out, no reduced denominator, no single-lineage warning: the recall
     // number is not standing on a degraded run (AD-6).
     expect(record.warnings.map((w) => w.code)).toEqual(["provider-fan-out"])
-    // AD-6a — one denominator, and it is who answered.
+    // AD-6a — one denominator, and it is who answered. Every CANONICAL pool
+    // finding carries the pair...
     expect(record.findings.every((f) => f.coDiscovery?.answered === 3)).toBe(true)
+    // ...and across the whole pool no OTHER denominator appears anywhere. An
+    // absorbed member carries no pair of its own — clustering writes it on the
+    // canonical (AD-8) — so absence here is correct and a second denominator
+    // would not be.
+    expect(
+      record.pool.every((f) => f.coDiscovery === undefined || f.coDiscovery.answered === 3),
+    ).toBe(true)
     expect(rendered).toContain("co-discovery: 1/3")
-    // The pool is a union, and the output says so until clustering lands.
-    expect(rendered).toContain("POOL — NOT YET MERGED")
+    // Clustering has run, so the union notice is gone and every finding —
+    // canonical and absorbed alike — carries a clusterId (AD-14 amended 2).
+    expect(rendered).not.toContain("POOL — NOT YET MERGED")
+    expect(record.pool.every((f) => f.clusterId !== undefined)).toBe(true)
   })
 })
 
@@ -537,7 +575,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // hardcoded count, because `change.ts` promises this set extends by adding
     // rows and story 9's third arm reuses the same harness.
     const { record } = await threeSlotRun(LENSES)
-    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
     expect(gain.beats).toBe(true)
     expect(gain.lensOnlyDefects.length).toBeGreaterThan(0)
@@ -554,9 +592,9 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // `discovery-lens-security` re-finds the SQL injection two pool arms raised.
     // A gain number that counted it would be measuring duplication.
     const { record } = await threeSlotRun(LENSES)
-    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
-    const lensFindings = record.findings.filter((f) => f.source === "lens")
+    const lensFindings = record.pool.filter((f) => f.source === "lens")
     expect(lensFindings.some((f) => f.claim.includes("interpolates the order id"))).toBe(true)
     expect(gain.lensOnlyDefects.map((d) => d.id)).not.toContain("sql-injection")
     // ...and the lens arm's own recall DOES include it, so the exclusion above
@@ -568,9 +606,9 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // AD-3 / AD-15 amended — the default path. Not "a small gain": none, and no
     // lens finding to compute one from.
     const { record } = await threeSlotRun()
-    const gain = lensRecallGain(SEEDED_DEFECTS, record.findings)
+    const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
-    expect(record.findings.every((f) => f.source === "pool")).toBe(true)
+    expect(record.pool.every((f) => f.source === "pool")).toBe(true)
     expect(gain.lens.found).toBe(0)
     expect(gain.lensOnlyDefects).toEqual([])
     expect(gain.beats).toBe(false)
@@ -584,12 +622,12 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // directly and nothing would have said so.
     const { record } = await threeSlotRun(LENSES)
 
-    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => false).beats).toBe(false)
-    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => false).lensOnlyDefects).toEqual([])
+    expect(lensRecallGain(SEEDED_DEFECTS, record.pool, () => false).beats).toBe(false)
+    expect(lensRecallGain(SEEDED_DEFECTS, record.pool, () => false).lensOnlyDefects).toEqual([])
     // A matcher that agrees with everything credits the pool first, so nothing
     // is left for the lens arm to claim uniquely — the greedy assignment is the
     // matcher's to drive, not the harness's.
-    expect(lensRecallGain(SEEDED_DEFECTS, record.findings, () => true).pool.found).toBeGreaterThan(0)
+    expect(lensRecallGain(SEEDED_DEFECTS, record.pool, () => true).pool.found).toBeGreaterThan(0)
   })
 
   test("nobody finds everything, lenses included", async () => {
@@ -597,7 +635,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // is findable by no arm at all, lensed or not, so a perfect score is still
     // not on offer and a matcher that credits everything shows up immediately.
     const { record } = await threeSlotRun(LENSES)
-    const missed = missedDefects(SEEDED_DEFECTS, record.findings)
+    const missed = missedDefects(SEEDED_DEFECTS, record.pool)
     expect(missed.length).toBeGreaterThan(0)
     expect(missed.map((d) => d.id)).toContain("unchecked-idempotency-key")
   })
@@ -608,9 +646,19 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // the same `review()` seam story 9's arms use.
     const { record, rendered } = await threeSlotRun(LENSES)
 
+    // Over the WHOLE POOL, absorbed members included: a lens finding carries no
+    // prior wherever it ends up, and no pool finding carries a denominator that
+    // is not `answered`. `raised` is no longer always 1 — that is clustering
+    // doing its job — so the invariant is asserted on the two things that must
+    // never move.
+    for (const finding of record.pool) {
+      if (finding.source === "lens") expect(finding.coDiscovery).toBeUndefined()
+      else if (finding.coDiscovery) expect(finding.coDiscovery.answered).toBe(3)
+    }
+    // And on the canonical set, every pool finding carries its pair.
     for (const finding of record.findings) {
       if (finding.source === "lens") expect(finding.coDiscovery).toBeUndefined()
-      else expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
+      else expect(finding.coDiscovery?.answered).toBe(3)
     }
     expect(rendered).toContain("not applicable — lens-sourced")
     expect(rendered).toContain("co-discovery: 1/3")

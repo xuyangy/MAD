@@ -16,6 +16,14 @@
  * `coDiscovery === undefined` (AD-9 amended) — except the COMPARATOR, which asks
  * a different question and says so at the site.
  *
+ * Story 3 extends the same clause to a MERGED finding: an absorbed member leaves
+ * the finding list entirely, so a canonical names what it absorbed, who raised
+ * it, and — for a lens member — which lens (`renderMerged`). AD-10 arrives with
+ * it: the severity cell reads `effectiveSeverity`, because a cluster that took a
+ * member's `critical` must print `critical` while `severity` itself stays
+ * unwritten (AD-8). ORDERING still reads `severity` directly; story 7 owns the
+ * ranked-output treatment and the gap is recorded in `deferred-work.md`.
+ *
  * AD-6 — all five degradation reports are carried here and rendered: the
  * denominator, drop-outs, the roster warning, lens homogeneity, and the
  * unresolved section. The
@@ -24,7 +32,7 @@
  * multi-model run says so (`pooledNotYetMerged`).
  */
 
-import { severityRank, type Finding } from "../domain/finding.ts"
+import { effectiveSeverity, severityRank, type Finding } from "../domain/finding.ts"
 import type { RunRecord } from "../domain/run-record.ts"
 
 /**
@@ -107,6 +115,32 @@ function renderCoDiscovery(finding: Finding): string {
   // one. AD-6a: the denominator is the honest part of this fraction.
   if (finding.coDiscovery.answered <= 0) return "— (no model answered)"
   return `${finding.coDiscovery.raised}/${finding.coDiscovery.answered}`
+}
+
+/**
+ * AD-17e — what a merged canonical absorbed, and this is disclosure, not
+ * decoration.
+ *
+ * A lens finding that merges into a pool cluster disappears from the finding
+ * list entirely, and "the reader always learns a finding was lens-sourced and
+ * which lens found it" has no exception for a member that merged. Members are
+ * resolved against `record.pool` — the pre-cluster union — because that is the
+ * only place an absorbed member still appears (AD-14, `RunRecord.pool`).
+ */
+function renderMerged(finding: Finding, pool: readonly Finding[]): string | undefined {
+  const ids = finding.mergedIds
+  if (!ids || ids.length === 0) return undefined
+
+  const members = ids.map((id) => {
+    const member = pool.find((candidate) => candidate.id === id)
+    // An id the pool cannot resolve is a broken record, and saying so is more
+    // honest than printing a shorter list that looks complete.
+    if (!member) return `${id} (unresolved — not on the run record)`
+    if (member.source !== "lens") return member.author
+    return `${member.author} (lens-sourced: \`${member.lens ?? "unnamed"}\`)`
+  })
+
+  return `      merged: ${ids.length} other finding(s) — ${members.join(", ")}`
 }
 
 function renderVerdict(finding: Finding): string {
@@ -281,7 +315,11 @@ export function renderRunRecord(record: RunRecord): string {
   }
   for (const finding of resolved) {
     lines.push("")
-    lines.push(`  #${finding.rank ?? "?"}  [${finding.severity}]  ${renderLocus(finding)}`)
+    // AD-10 — the CLUSTER's severity when it has one, so a cluster that took a
+    // member's `critical` does not print the canonical's own `high` over it.
+    // `severity` itself is never rewritten (AD-8), which is why this reads
+    // through `effectiveSeverity` rather than off the field.
+    lines.push(`  #${finding.rank ?? "?"}  [${effectiveSeverity(finding)}]  ${renderLocus(finding)}`)
     // AD-9 — three separate columns; nothing is fused.
     lines.push(
       `      co-discovery: ${renderCoDiscovery(finding)}   ` +
@@ -295,6 +333,8 @@ export function renderRunRecord(record: RunRecord): string {
       `      raised by: ${finding.author}` +
         (finding.source === "lens" ? `  (lens-sourced: \`${finding.lens ?? "unnamed"}\`)` : ""),
     )
+    const merged = renderMerged(finding, record.pool)
+    if (merged) lines.push(merged)
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {
@@ -311,10 +351,26 @@ export function renderRunRecord(record: RunRecord): string {
   }
   for (const finding of unresolved) {
     lines.push(
-      `  [${finding.severity}] ${renderLocus(finding)} — died at stage ` +
+      `  [${effectiveSeverity(finding)}] ${renderLocus(finding)} — died at stage ` +
         `${finding.unresolved?.diedAtStage} (${finding.unresolved?.reason})`,
     )
     lines.push(`      evidence so far: ${renderEvidence(finding)}`)
+    // AD-17e applies to THIS section too. It is output, and "the reader always
+    // learns a finding was lens-sourced and which lens found it" has no
+    // exception for a finding the budget ran out on — a reader deciding an
+    // undecided finding by hand needs to know it carries no prior BECAUSE it was
+    // prompted, not because judging never reached it. Latent until story 8
+    // writes `unresolved`; found before it could ship (code review 2026-08-15).
+    lines.push(
+      `      raised by: ${finding.author}` +
+        (finding.source === "lens" ? `  (lens-sourced: \`${finding.lens ?? "unnamed"}\`)` : "") +
+        `   co-discovery: ${renderCoDiscovery(finding)}`,
+    )
+    // AD-17e has no exception for this section either, and a merged canonical
+    // that dies at a later stage carries the same absorbed lens member a
+    // resolved one does. Same reasoning as the lens label on the line above.
+    const merged = renderMerged(finding, record.pool)
+    if (merged) lines.push(merged)
     lines.push(indent(finding.claim, "      "))
   }
   lines.push("")

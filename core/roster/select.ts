@@ -159,12 +159,19 @@ export function countVerifiedLineages(slots: readonly RosterSlot[]): number {
  * CAP-11 / AD-4 amended — fill the lens slots, AFTER the pool, from the same
  * deduped candidate list.
  *
- * Lens *i* takes `deduped[i % deduped.length]`: round-robin over the FULL
- * deduped list, so lenses spread across models where the host has them and reuse
- * a pool model where it does not. Reuse is permitted and costs nothing dedupe
- * was protecting — a lens slot claims no diversity (AD-17c) — but spreading
- * first gets the better roster for free and makes `roster-lens-homogeneous` mean
- * "your host is narrow" rather than "MAD chose badly".
+ * Lens *i* takes the *i*th entry of the FULL deduped list ordered BY LINEAGE
+ * SPREAD, wrapping. Reuse is permitted and costs nothing dedupe was protecting —
+ * a lens slot claims no diversity (AD-17c) — but spreading first gets the better
+ * roster for free and makes `roster-lens-homogeneous` mean "your host is narrow"
+ * rather than "MAD chose badly".
+ *
+ * The ordering is `rankByDiversity` over the whole list, NOT the raw deduped
+ * order (code review, 2026-08-15). Indexing the raw order makes the spread a
+ * function of how the host happens to list its providers: a host offering
+ * `sonnet, haiku, opus, gpt-5` put three lenses on three Claude models and left
+ * `gpt-5` unused, which is precisely the "MAD chose badly" case the paragraph
+ * above claims cannot happen. Ranking first costs one call and makes the claim
+ * true. Reuse still happens — it just happens after every lineage has one.
  *
  * Duplicate lens ids collapse to one slot. Two slots sharing an id would share a
  * slot id, which a backend's per-slot map cannot represent and a finding's
@@ -179,12 +186,17 @@ export function fillLensSlots(
 ): LensSlot[] {
   if (deduped.length === 0) return []
 
+  // AD-4 step 2, reused: one model per lineage before any lineage gets a second.
+  // The pool is filled from this same ordering; taking the raw `deduped` order
+  // here instead is what let lenses pile into one lineage (code review 2026-08-15).
+  const spread = rankByDiversity(deduped, deduped.length)
+
   const seen = new Set<string>()
   const slots: LensSlot[] = []
   for (const lens of lenses) {
     if (seen.has(lens)) continue
     seen.add(lens)
-    const entry = deduped[slots.length % deduped.length]!
+    const entry = spread[slots.length % spread.length]!
     slots.push({
       // The id is for HUMANS. `LensSlot.lens` is the data — nothing downstream
       // recovers the lens by string-splitting this (AD-17, design notes).
@@ -331,20 +343,41 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
   // three lineages can still resolve four lenses onto one model if that is all
   // the deduped list had left to round-robin over.
   //
-  // It fires on MORE THAN ONE lens slot resolving to one identity. A single lens
-  // slot is one persona over one model, which is what was asked for; and reuse
-  // of a pool model is explicitly permitted (AD-4 amended) and never warned
-  // about on its own, because a lens claims no diversity to lose.
+  // It fires on MORE THAN ONE lens slot sharing a blind spot. A single lens slot
+  // is one persona over one model, which is what was asked for; and reuse of a
+  // pool model is explicitly permitted (AD-4 amended) and never warned about on
+  // its own, because a lens claims no diversity to lose.
+  //
+  // TWO triggers, because AD-6e's rationale is a shared-blind-spots argument and
+  // AD-5 locates blind spots at the LINEAGE, not the model ("correlated blind
+  // spots come from shared training data"). Keying on identity alone let three
+  // personas over sonnet + haiku + opus pass silently — three distinct models,
+  // one lineage, exactly the configuration AD-6c warns about for the pool (code
+  // review 2026-08-15; AD-6e amended to match its own reasoning).
+  //
+  // Unverified lineages do NOT collapse together: N unrecognized models are N
+  // unknowns, not one shared lineage, and AD-5 forbids reading anything into an
+  // unverified claim in either direction.
   const lensIdentities = new Set(lensSlots.map((s) => s.identity))
-  if (lensSlots.length > 1 && lensIdentities.size === 1) {
+  const lensLineages = new Set(lensSlots.map((s) => s.lineage.lineage))
+  const allVerified = lensSlots.every((s) => s.lineage.verified)
+  const oneModel = lensIdentities.size === 1
+  const oneLineage = allVerified && lensLineages.size === 1
+
+  if (lensSlots.length > 1 && (oneModel || oneLineage)) {
     const only = lensSlots[0]!
+    const shared = oneModel
+      ? `the same model, \`${only.providerId}/${only.modelId}\``
+      : `${lensIdentities.size} models of ONE lineage (${only.lineage.label}): ` +
+        `${[...new Set(lensSlots.map((s) => `${s.providerId}/${s.modelId}`))].join(", ")}`
     warnings.push({
       code: "roster-lens-homogeneous",
       stage: "roster",
       message:
-        `LENS ROSTER HOMOGENEOUS: all ${lensSlots.length} lens slot(s) resolved to the same model, ` +
-        `\`${only.providerId}/${only.modelId}\` (${lensSlots.map((s) => s.lens).join(", ")}). ` +
-        `Several personas over one model share that model's blind spots, so these lenses buy ` +
+        `LENS ROSTER HOMOGENEOUS: all ${lensSlots.length} lens slot(s) resolved to ${shared} ` +
+        `(${lensSlots.map((s) => s.lens).join(", ")}). ` +
+        `Several personas over one ${oneModel ? "model" : "lineage"} share ` +
+        `${oneModel ? "that model's" : "that lineage's"} blind spots, so these lenses buy ` +
         `COVERAGE and not independence. Lens variation is not an accepted substitute for a diverse ` +
         `roster, on the same grounds as temperature variation. Add a provider from another lineage ` +
         `under the \`${providerConfigKey}\` key in your opencode config to spread them. Lens slots ` +
@@ -352,6 +385,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       detail: {
         model: `${only.providerId}/${only.modelId}`,
         identity: only.identity,
+        scope: oneModel ? "one-model" : "one-lineage",
+        lineage: only.lineage.lineage,
         lenses: lensSlots.map((s) => s.lens),
         providerConfigKey,
       },

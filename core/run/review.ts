@@ -2,8 +2,8 @@
  * Pipeline assembly — the one seam a caller drives (AD-1: the entrypoint
  * injects the adapters' port implementations; the core knows no harness).
  *
- * Story 1 runs two of the six filters: discover -> output. Stories 2–7 insert
- * cluster, route, debate and judge between them WITHOUT changing this
+ * Story 3 runs three of the six filters: discover -> cluster -> output. Stories
+ * 4–7 insert route, debate and judge between them WITHOUT changing this
  * signature, and story 9's ablation calls this function directly as the
  * single-model control arm — no second code path.
  */
@@ -16,6 +16,7 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
+import { cluster } from "../stages/cluster.ts"
 import { discover } from "../stages/discover.ts"
 import { output } from "../stages/output.ts"
 
@@ -66,6 +67,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     roster,
     answered: 0,
     findings: [],
+    pool: [],
     lensInstructions: [],
     warnings: [...(deps.priorWarnings ?? [])],
     ledger: emptyLedger(),
@@ -82,31 +84,30 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   })
 
   record.answered = discovered.answered
-  record.findings = discovered.findings
+  // The pre-cluster union is RETAINED, not reconstructed. CAP-1's recall harness
+  // measures the discovery pool, and a merged set is a different set.
+  record.pool = discovered.findings
   // AD-11 amended / AD-17e — carried to output so a reader can tell a shipped
   // lens instruction from one generated at run time.
   record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
 
-  // ---- stages 2–5: cluster, route, debate, judge — stories 3–7 ----
+  // ---- stage 2: cluster ----
   //
-  // AD-8 says clustering owns `coDiscovery`. With no cluster stage yet, every
-  // POOL finding is its own one-member cluster, so the pipeline assembles that
-  // degenerate case HERE rather than letting `discover` write a field it does
-  // not own. Story 3 deletes these lines and `core/stages/cluster.ts` takes
-  // over. The denominator is `answered` (AD-6a), never `roster.requested`.
+  // The `{raised: 1, answered}` shim that stood here until story 3 IS GONE.
+  // Clustering owns `coDiscovery` (AD-8) and now writes it — including the rule
+  // the shim's guard used to carry, that a lens finding never receives a prior
+  // (AD-17d, CAP-11). Do not reintroduce a default here; a stage writing a field
+  // it does not own is exactly what AD-8 exists to stop.
   //
-  // The guard is AD-17d and it is not cosmetic. Unguarded, a lens finding does
-  // not necessarily render `1/1` — at `answered: 3` it renders `1/3` — it
-  // carries A PRIOR IT WAS NEVER ENTITLED TO, which is AD-9's forbidden
-  // conflation whatever the ratio comes out as. A lens was PROMPTED for its
-  // dimension, so it has no unprompted signal to report and no number can stand
-  // in for one. `source` is the discriminator, never `coDiscovery === undefined`
-  // — that already means "clustering has not run".
-  for (const finding of record.findings) {
-    if (finding.source !== "pool") continue
-    finding.coDiscovery = { raised: 1, answered: discovered.answered }
-  }
+  // For a run whose findings are all distinct this is byte-for-byte what the
+  // shim produced: every finding is a singleton reading `{raised: 1, answered}`.
+  // The only rendering that changes is the one that should — findings that are
+  // actually equivalent.
+  const clustered = await cluster({ findings: record.pool, answered: discovered.answered, clock })
+  record.findings = clustered.findings
+
+  // ---- stages 3–5: route, debate, judge — stories 4–7 ----
 
   // ---- stage 6: output ----
   record.finishedAt = clock.now()

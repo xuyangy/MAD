@@ -14,9 +14,22 @@
  *   the pre-divided-number habit AD-9 and the number convention both push
  *   against, bought for nothing.
  * - **It does not cluster.** Matching a finding to a *planted defect* is not
- *   matching a finding to another *finding*; the latter is clustering (AD-14,
- *   story 3) and its own hand-labelled finding-PAIR fixture set. Nothing here is
- *   a similarity function over findings.
+ *   matching a finding to another *finding*; the latter is clustering (AD-14)
+ *   and has its own engine and its own hand-labelled finding-PAIR fixture set at
+ *   `core/clustering/`. Nothing here is a similarity function over findings.
+ *
+ * ## Story 3 (AD-14) — this harness measures `RunRecord.pool`, not `findings`
+ *
+ * Clustering has now run, so `record.findings` is the CANONICAL set and
+ * `record.pool` is the pre-cluster union. Every caller here passes the POOL, and
+ * that is a decision rather than an oversight: CAP-1's criterion and CAP-11's
+ * are both claims about **discovery** — what the models raised — not about what
+ * survived merging. Measured over the canonical set instead, a model whose
+ * finding was absorbed into another's cluster silently loses credit for a defect
+ * it really did locate, every single-model arm shrinks, and CAP-1's number
+ * degrades with nothing failing to say so.
+ *
+ * Nothing in this module reads `clusterId`, `mergedIds` or `coDiscovery`.
  * - **It does not read `dimension` off a `Finding`.** `dimension` labels a
  *   planted bug and lives only on `SeededDefect`. It is NOT a lens: nothing here
  *   maps a dimension to a lens id, and a lens finding is never credited by
@@ -291,7 +304,10 @@ export function recallByAuthor(
 }
 
 export interface RecallComparison {
-  /** The union across every model that answered — the pool (AD-14 has not run). */
+  /**
+   * The union across every model that answered — `RunRecord.pool`, which is the
+   * pre-cluster set and stays the pre-cluster set now that AD-14 has run.
+   */
   pooled: RecallCount
   /**
    * Every single-model arm, derived from `author` — and, when `answered` is

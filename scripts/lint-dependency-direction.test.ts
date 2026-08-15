@@ -115,6 +115,33 @@ describe("AD-1 dependency-direction rule", () => {
     ).toHaveLength(0)
   })
 
+  test("STORY 3'S REAL SPECIFIERS: the shipped harness passes, a reach out does not", () => {
+    // The cases above are hypothetical; these are the specifiers actually in the
+    // tree now that `core/clustering/fixtures/` exists. Story 3 is the first to
+    // RELY on the resolver behaving this way, so it is pinned against the real
+    // files rather than against an example of them.
+    expect(
+      scanSource(
+        "core/clustering/fixtures/rates.ts",
+        `import type { Finding } from "../../domain/finding.ts"\n` +
+          `import { clusterItems } from "../engine.ts"\n` +
+          `import { PAIRS } from "./pairs.ts"\n`,
+      ),
+    ).toHaveLength(0)
+    expect(
+      scanSource("scripts/clustering-rates.ts", `import { PAIRS } from "../core/clustering/fixtures/pairs.ts"\n`),
+    ).toHaveLength(0)
+
+    // ...and the thing that must still fail: clustering's own fixture tree
+    // reaching CAP-1's seeded-defect tree, which is three directories up.
+    expect(
+      scanSource(
+        "core/clustering/fixtures/rates.ts",
+        `import { SEEDED_DEFECTS } from "../../../fixtures/seeded-defects/change.ts"\n`,
+      ),
+    ).toHaveLength(1)
+  })
+
   test("allows the imports the core is supposed to make", () => {
     expect(
       scanSource(

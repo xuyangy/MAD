@@ -419,9 +419,7 @@ describe("lens homogeneity (AD-6e)", () => {
     expect(warnings.some((w) => w.code === "roster-lens-homogeneous")).toBe(false)
   })
 
-  test("it fires independently of the lineage report", () => {
-    // A three-lineage host can still land every lens on one model if that is all
-    // the round-robin had left — so the two facts are reported separately.
+  test("a clean roster and clean lenses raise neither report", () => {
     const { warnings } = selectRoster(THREE_LINEAGES, {
       ...OPTS,
       lenses: ["security", "performance"],
@@ -429,6 +427,102 @@ describe("lens homogeneity (AD-6e)", () => {
     const codes = warnings.map((w) => w.code)
     expect(codes).not.toContain("roster-single-lineage") // roster is fine...
     expect(codes).not.toContain("roster-lens-homogeneous") // ...and so are the lenses
+  })
+
+  test("IT FIRES INDEPENDENTLY OF THE LINEAGE REPORT — a fine pool, homogeneous lenses", () => {
+    // The case the old version of this test DESCRIBED in a comment and never
+    // exercised: it asserted both warnings absent over a plainly diverse roster,
+    // so "fires independently" was never observed firing (code review 2026-08-15).
+    //
+    // Two lineages reach the host but only one of them has depth, and the pool
+    // takes the top 1 by diversity rank. Three lens slots then wrap within the
+    // deep lineage.
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("anthropic", "claude-haiku-4-5"),
+        candidate("anthropic", "claude-opus-4-1"),
+      ],
+      { ...OPTS, slots: 1, lenses: ["security", "performance", "tests"] },
+    )
+
+    const codes = warnings.map((w) => w.code)
+    // The POOL is exactly what was asked for: one slot, one verified lineage.
+    expect(roster.slots).toHaveLength(1)
+    expect(roster.distinctLineages).toBe(1)
+    expect(codes).not.toContain("roster-single-lineage")
+    expect(codes).not.toContain("roster-underfilled")
+    // ...and the LENS roster is degraded anyway. That is the independence.
+    expect(codes).toContain("roster-lens-homogeneous")
+  })
+
+  test("AD-6e amended — three DISTINCT models of one lineage still share its blind spots", () => {
+    // Keying the warning on model identity alone let this pass silently: three
+    // different models, one lineage, no report (code review 2026-08-15). AD-5
+    // locates blind spots at the lineage, and AD-6c already warns the pool on
+    // exactly these grounds.
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("anthropic", "claude-haiku-4-5"),
+        candidate("anthropic", "claude-opus-4-1"),
+      ],
+      { ...OPTS, slots: 1, lenses: ["security", "performance", "tests"] },
+    )
+
+    // Three distinct models — the identity-only trigger would not fire here.
+    expect(new Set(roster.lensSlots.map((s) => s.identity)).size).toBe(3)
+
+    const homogeneous = warnings.find((w) => w.code === "roster-lens-homogeneous")
+    expect(homogeneous).toBeDefined()
+    expect(homogeneous!.message).toContain("ONE lineage")
+    expect(homogeneous!.message.toLowerCase()).toContain("blind spots")
+    expect(homogeneous!.detail).toMatchObject({ scope: "one-lineage", lineage: "claude" })
+  })
+
+  test("N UNVERIFIED models are N unknowns, not one shared lineage", () => {
+    // AD-5 forbids reading anything into an unverified claim in either
+    // direction: unrecognized models are never counted as diverse, and must not
+    // be counted as correlated either.
+    const { roster, warnings } = selectRoster(
+      [candidate("local", "some-new-model-v1"), candidate("local", "another-unknown-v2")],
+      { ...OPTS, slots: 1, lenses: ["security", "performance"] },
+    )
+
+    expect(roster.lensSlots.every((s) => !s.lineage.verified)).toBe(true)
+    expect(new Set(roster.lensSlots.map((s) => s.identity)).size).toBe(2)
+    expect(warnings.some((w) => w.code === "roster-lens-homogeneous")).toBe(false)
+  })
+})
+
+describe("lens spread follows lineage rank, not host listing order (code review 2026-08-15)", () => {
+  test("lenses do not pile into one lineage because the host listed it first", () => {
+    // The defect: `fillLensSlots` indexed the RAW deduped order while the pool
+    // indexed the diversity-ranked one, so the lens spread was a function of how
+    // the host happened to list its providers. Here `gpt-5` is listed last and
+    // was left unused while three lenses stacked onto three Claude models.
+    const { roster } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("anthropic", "claude-haiku-4-5"),
+        candidate("anthropic", "claude-opus-4-1"),
+        candidate("openai", "gpt-5"),
+      ],
+      { ...OPTS, slots: 2, lenses: ["security", "performance", "maintainability"] },
+    )
+
+    // One model per lineage before any lineage gets a second — the same rule the
+    // pool fills by (AD-4 step 2).
+    expect(roster.lensSlots.map((s) => s.modelId)).toEqual([
+      "claude-sonnet-4-5",
+      "gpt-5",
+      "claude-haiku-4-5",
+    ])
+    expect(new Set(roster.lensSlots.map((s) => s.lineage.lineage))).toEqual(
+      new Set(["claude", "gpt"]),
+    )
+    // The pool is untouched by any of this (AD-17c).
+    expect(roster.distinctLineages).toBe(2)
   })
 })
 

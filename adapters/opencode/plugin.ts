@@ -25,8 +25,10 @@ import { resolveRoster } from "./roster.ts"
  * heterogeneous discovery that never fans out is a claim, not a capability.
  *
  * Three, specifically, because the contract reasons in threes wherever it counts
- * model turns. AD-15's amendment is the one that counts DISCOVERY turns —
- * "three models with five lenses is eighteen discovery turns rather than three".
+ * model turns. AD-15's amendment is the one that counts DISCOVERY turns — three
+ * models with five lenses is eight discovery turns rather than three, the
+ * fan-out being `slots + lenses` (AD-15 corrected 2026-08-15; the amendment
+ * originally stated a multiplicative eighteen, which no code path produces).
  * (`cost-model.md` lever 1's "3 calls per round instead of 27" is the same three
  * models, but it is counting debate calls per round, not discovery.) It is also
  * the smallest N at which

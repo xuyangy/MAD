@@ -11,6 +11,11 @@
  * reasoning, locus, severity, author, source, lens.** Nothing else. `source` and
  * `lens` joined it with CAP-11 (story 2A); every other stage reads them and
  * writes neither.
+ *
+ * AD-8's ownership list for CLUSTERING, likewise in one place: **clusterId,
+ * coDiscovery, mergedIds, clusterSeverity.** Nothing else, and `severity` in
+ * particular is NOT on it — see `effectiveSeverity` below for why the cluster's
+ * severity had to become a fourth field rather than a rewrite of the first.
  */
 
 /** AD-10 — the severity scale is exactly these four values, and nothing else. */
@@ -116,10 +121,22 @@ export interface Finding {
   lens?: string
 
   // ---- cluster owns (AD-8) — story 3 ----
+  /**
+   * Set on EVERY finding clustering processes, singletons included (AD-14
+   * amended 2). It is what `core/stages/output.ts` reads as "clustering has
+   * run"; written only on merges, a run in which nothing merged would be
+   * indistinguishable from a run that never clustered.
+   */
   clusterId?: string
   coDiscovery?: CoDiscovery
   /** Ids merged into this canonical finding, so transcript references resolve. */
   mergedIds?: string[]
+  /**
+   * AD-10 — the highest severity among the cluster's members, set on the
+   * canonical only when it differs from the canonical's own. Read through
+   * `effectiveSeverity`, never directly.
+   */
+  clusterSeverity?: Severity
 
   // ---- route owns (AD-8) — story 4 ----
   route?: "debate" | "judge"
@@ -143,6 +160,24 @@ export interface Finding {
 
   /** AD-7 — append-only. */
   history: Entry[]
+}
+
+/**
+ * AD-10 — the ONE read path for "how severe is this finding now".
+ *
+ * AD-10 says two things that cannot both hold if a merged cluster's severity is
+ * written onto the canonical's own `severity`: the cluster takes the HIGHEST
+ * severity among its members, and NO stage after discovery writes `severity`.
+ * Picking the most severe member as canonical does not resolve it either — a
+ * `critical` LENS member may not be canonical (AD-9's rendering rule), so its
+ * severity would simply be lost.
+ *
+ * So clustering writes `clusterSeverity`, a field it owns (AD-8), and every
+ * reader asks here instead of choosing between two fields at each call site.
+ * Story 4's routing reads this same helper.
+ */
+export function effectiveSeverity(finding: Finding): Severity {
+  return finding.clusterSeverity ?? finding.severity
 }
 
 /**

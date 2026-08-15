@@ -48,9 +48,12 @@ describe("review — the story 9 control arm seam", () => {
     expect(rendered).toContain("src/pay.ts:12-14")
   })
 
-  test("three slots pool in roster order, each reading 1/3 over answered: 3", async () => {
-    // The default fan-out of a fresh install (story 2). Every model answers, so
-    // the denominator is 3 and nothing here is degraded.
+  test("THREE MODELS DESCRIBING ONE DEFECT BECOME ONE FINDING READING 3/3", async () => {
+    // The default fan-out of a fresh install, and the case CAP-2 exists for. All
+    // three scripted findings share the locus `src/pay.ts:12-14`, so they are
+    // three models describing ONE defect. Before story 3 this test asserted the
+    // inverse — three findings at 1/3 and no clusterId — and that inversion is
+    // the point rather than a regression: it is what clustering was built to do.
     const resolved = setup(
       [
         ["anthropic", "claude-sonnet-4-5"],
@@ -59,7 +62,7 @@ describe("review — the story 9 control arm seam", () => {
       ],
       3,
     )
-    const claimOf = (slot: string) => `${slot} found the fee bug.`
+    const claimOf = (slot: string) => `${slot} found the fee bug before the rate was validated.`
     const { record, rendered } = await review({
       roster: resolved.roster,
       backend: new FakeBackend(
@@ -83,29 +86,101 @@ describe("review — the story 9 control arm seam", () => {
     })
 
     expect(record.answered).toBe(3)
-    expect(record.findings).toHaveLength(3)
-    // Pooled in roster order, not completion order, and not merged (AD-14 is
-    // story 3's): three models describing one defect are three findings here.
-    expect(record.findings.map((f) => f.author)).toEqual([
+    // The pool is retained in roster order, not completion order — CAP-1's
+    // recall arms are derived from it and every finding stays a live object.
+    expect(record.pool).toHaveLength(3)
+    expect(record.pool.map((f) => f.author)).toEqual([
       "discovery-1",
       "discovery-2",
       "discovery-3",
     ])
-    expect(record.findings.map((f) => f.claim)).toEqual([
+    expect(record.pool.map((f) => f.claim)).toEqual([
       claimOf("discovery-1"),
       claimOf("discovery-2"),
       claimOf("discovery-3"),
     ])
-    // AD-6a — one denominator, and it is who answered.
-    for (const finding of record.findings) {
-      expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
-      expect(finding.clusterId).toBeUndefined()
-    }
-    expect(rendered).toContain("co-discovery: 1/3")
+
+    // ONE canonical finding reaches output, credited to three distinct models.
+    expect(record.findings).toHaveLength(1)
+    const canonical = record.findings[0]!
+    expect(canonical.author).toBe("discovery-1")
+    expect(canonical.coDiscovery).toEqual({ raised: 3, answered: 3 })
+    expect(canonical.mergedIds).toHaveLength(2)
+
+    // AD-14 amended 2 — every finding carries an id, absorbed members included.
+    for (const finding of record.pool) expect(finding.clusterId).toBe(canonical.clusterId!)
+
+    expect(rendered).toContain("co-discovery: 3/3")
     expect(rendered).toContain("answered: 3")
     expect(rendered).toContain("WARNINGS: none")
-    // The pool is honest about not being merged yet (AD-6).
-    expect(rendered).toContain("POOL — NOT YET MERGED")
+    // Clustering has run, so the union notice is gone (AD-6, AD-14 amended 2).
+    expect(rendered).not.toContain("POOL — NOT YET MERGED")
+    // AD-17e — the reader learns which models were absorbed into it.
+    expect(rendered).toContain("merged: 2 other finding(s)")
+    expect(rendered).toContain("discovery-2")
+    expect(rendered).toContain("discovery-3")
+  })
+
+  test("THREE DISTINCT LOCI STAY THREE SINGLETONS, EACH READING 1/3", async () => {
+    // The other direction, and the one the deleted shim used to produce for
+    // every run: nothing is equivalent, so nothing merges and every fraction
+    // reads 1/3 — byte-for-byte what story 2 rendered, minus the union notice.
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const script = [
+      { slot: "discovery-1", file: "src/pay.ts", line: 12, claim: "The rate is never validated." },
+      { slot: "discovery-2", file: "src/refund.ts", line: 40, claim: "Money is stored as a float." },
+      { slot: "discovery-3", file: "src/ledger.ts", line: 90, claim: "The ledger write is not awaited." },
+    ]
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(
+        Object.fromEntries(
+          script.map((entry) => [
+            entry.slot,
+            [
+              {
+                kind: "ok" as const,
+                value: {
+                  findings: [
+                    {
+                      ...ENVELOPE.findings[0]!,
+                      claim: entry.claim,
+                      file: entry.file,
+                      startLine: entry.line,
+                      endLine: entry.line,
+                    },
+                  ],
+                },
+              },
+            ],
+          ]),
+        ),
+      ),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.answered).toBe(3)
+    expect(record.pool).toHaveLength(3)
+    expect(record.findings).toHaveLength(3)
+    for (const finding of record.findings) {
+      expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
+      // AD-14 amended 2 — a run in which nothing merged is still a clustered run.
+      expect(finding.clusterId).toBeDefined()
+      expect(finding.mergedIds).toBeUndefined()
+    }
+    expect(new Set(record.findings.map((f) => f.clusterId)).size).toBe(3)
+    expect(rendered).toContain("co-discovery: 1/3")
+    expect(rendered).not.toContain("POOL — NOT YET MERGED")
+    expect(rendered).not.toContain("merged:")
   })
 
   test("two lineages at three slots — the common host, warned honestly and still reviewed", async () => {
@@ -142,20 +217,20 @@ describe("review — the story 9 control arm seam", () => {
     expect(codes).not.toContain("model-dropped-out")
     expect(codes).not.toContain("denominator-reduced")
 
-    // AD-6a — the denominator is who answered, so the fraction reads 1/2 and
-    // never 1/3 against a slot no model ever filled.
+    // AD-6a — the denominator is who answered, so the fraction reads 2/2 and
+    // never 2/3 against a slot no model ever filled. Both models raised the same
+    // ENVELOPE finding at one locus, so clustering merges them.
     expect(record.answered).toBe(2)
-    expect(record.findings).toHaveLength(2)
-    for (const finding of record.findings) {
-      expect(finding.coDiscovery).toEqual({ raised: 1, answered: 2 })
-    }
-    expect(rendered).toContain("co-discovery: 1/2")
+    expect(record.pool).toHaveLength(2)
+    expect(record.findings).toHaveLength(1)
+    expect(record.findings[0]!.coDiscovery).toEqual({ raised: 2, answered: 2 })
+    expect(rendered).toContain("co-discovery: 2/2")
     expect(rendered).toContain("slots requested: 3 | filled: 2")
     // The warning names the real lineage count, whatever its code is called.
     const lineageWarning = record.warnings.find((w) => w.code === "roster-single-lineage")!
     expect(lineageWarning.message).toContain("2")
-    // Still a pool at N=2, and still said so.
-    expect(rendered).toContain("POOL — NOT YET MERGED")
+    // Clustering has run, so the union notice is gone even on a degraded roster.
+    expect(rendered).not.toContain("POOL — NOT YET MERGED")
   })
 
   test("matrix: host smaller than N — runs on what there is, and says what is missing", async () => {
@@ -281,12 +356,14 @@ describe("review — the story 9 control arm seam", () => {
 })
 
 // ---------------------------------------------------------------------------
-// CAP-11 — the shim guard. `review.ts:90-92` stamps `{raised: 1, answered}` on
-// every finding as the degenerate one-member-cluster case, and story 3 deletes
-// the whole block. Until then, the guard on `source === 'pool'` is the only
-// thing between a lens finding and a co-discovery prior it was never entitled
-// to. This is the assertion most likely to catch a regression during stories
-// 3–6, which is why it lives here rather than only in the fixture suite.
+// CAP-11 — the invariant that survived the shim. Until story 3 the guard on
+// `source === 'pool'` in `review.ts` was the only thing between a lens finding
+// and a co-discovery prior it was never entitled to. The shim is gone and
+// clustering owns `coDiscovery` now (AD-8), so the invariant holds for a
+// STRONGER reason: `raised` counts distinct POOL authors, so a lens member of a
+// pool cluster is recorded and disclosed without ever being counted, and a
+// cluster with no pool member at all gets no pair. This is still the assertion
+// most likely to catch a regression during stories 4–6.
 // ---------------------------------------------------------------------------
 
 const LENSED_SLOTS = ["discovery-1", "discovery-2", "discovery-3"] as const
@@ -317,7 +394,7 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
     ["google", "gemini-2.5-pro"],
   ] as [string, string][]
 
-  test("NO LENS FINDING CARRIES coDiscovery, AND EVERY POOL FINDING STILL READS 1/answered", async () => {
+  test("NO LENS FINDING CARRIES coDiscovery, WHEREVER CLUSTERING PUTS IT", async () => {
     const lenses = ["security", "performance"]
     const resolved = setup(THREE, 3, lenses)
     const { record, rendered } = await review({
@@ -328,36 +405,67 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
       priorWarnings: resolved.warnings,
     })
 
-    const pool = record.findings.filter((f) => f.source === "pool")
-    const lens = record.findings.filter((f) => f.source === "lens")
+    // The pool is retained, so the invariant is checked over EVERY finding the
+    // run raised, absorbed members included — which is where a lens finding now
+    // ends up when it describes a defect the pool also found.
+    const pool = record.pool.filter((f) => f.source === "pool")
+    const lens = record.pool.filter((f) => f.source === "lens")
     expect(pool).toHaveLength(3)
     expect(lens).toHaveLength(2)
 
     for (const finding of lens) {
-      // Not `1/1`, not `1/3`, not `0` — ABSENT. The unguarded shim would have
-      // stamped `{raised: 1, answered: 3}` here, which renders `1/3` and is a
-      // prior this finding was never entitled to, whatever the ratio reads.
+      // Not `1/1`, not `1/3`, not `0` — ABSENT. A lens was PROMPTED for its
+      // dimension, so it has no unprompted signal and no number can stand in for
+      // one, whatever the ratio would have read.
       expect(finding.coDiscovery).toBeUndefined()
     }
-    for (const finding of pool) {
-      expect(finding.coDiscovery).toEqual({ raised: 1, answered: 3 })
-    }
 
-    // AD-6a — the denominator is the pool's, so lenses do not shrink a fraction.
+    // All five describe one defect at one locus, so they form one cluster. Its
+    // canonical is a POOL finding credited to the three distinct pool authors —
+    // the two lens members raise it not at all (CAP-11).
+    expect(record.findings).toHaveLength(1)
+    const canonical = record.findings[0]!
+    expect(canonical.source).toBe("pool")
+    expect(canonical.coDiscovery).toEqual({ raised: 3, answered: 3 })
+
+    // AD-6a — the denominator is the pool's, so lenses neither shrink a fraction
+    // nor inflate one.
     expect(record.answered).toBe(3)
-    expect(rendered).toContain("co-discovery: 1/3")
-    expect(rendered).not.toContain("co-discovery: 1/5")
+    expect(rendered).toContain("co-discovery: 3/3")
+    expect(rendered).not.toContain("/5")
+    // AD-17e — an absorbed lens member does not vanish; it is named with its lens.
+    expect(rendered).toContain("lens-sourced: `security`")
+    expect(rendered).toContain("lens-sourced: `performance`")
   })
 
-  test("the guard discriminates on `source`, not on how many models answered", async () => {
-    // At `answered: 1` the unguarded shim renders the lens finding as `1/1` —
-    // the case the story brief names. At `answered: 3` it renders `1/3`. Both
-    // are the same defect; only one of them looks obviously wrong.
-    const lenses = ["security"]
-    const resolved = setup([["openai", "gpt-5"]], 1, lenses)
+  test("A CLUSTER OF LENS FINDINGS ALONE RENDERS `not applicable`, AT ANY DENOMINATOR", async () => {
+    // The other half of the invariant. A lens finding describing a defect no
+    // pool model raised forms its own cluster, and that cluster gets no pair at
+    // all — not `1/1` at `answered: 1`, not `1/3` at `answered: 3`. Both are the
+    // same defect; only one of them ever looked obviously wrong.
+    const resolved = setup([["openai", "gpt-5"]], 1, ["security"])
     const { record, rendered } = await review({
       roster: resolved.roster,
-      backend: lensedBackend(lenses),
+      backend: new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: ENVELOPE }],
+        "discovery-lens-security": [
+          {
+            kind: "ok",
+            value: {
+              findings: [
+                {
+                  claim: "The order id is interpolated into the SQL string.",
+                  reasoning: "",
+                  severity: "critical",
+                  file: "src/query.ts",
+                  startLine: 80,
+                  endLine: 80,
+                },
+              ],
+            },
+          },
+        ],
+      }),
       clock: fakeClock(),
       change: fakeChange(),
       priorWarnings: resolved.warnings,
@@ -366,8 +474,13 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
     expect(record.answered).toBe(1)
     const lens = record.findings.find((f) => f.source === "lens")!
     expect(lens.coDiscovery).toBeUndefined()
+    expect(lens.clusterId).toBeDefined() // clustering ran; it simply claims nothing
     expect(rendered).toContain("not applicable — lens-sourced")
-    expect(rendered).not.toMatch(/co-discovery: 1\/1\s+verdict.*\n.*lens-sourced/)
+    // ...while the pool finding beside it does carry its prior.
+    expect(record.findings.find((f) => f.source === "pool")!.coDiscovery).toEqual({
+      raised: 1,
+      answered: 1,
+    })
   })
 
   test("AD-17c — lens slots reach the run record without touching distinctLineages", async () => {
@@ -403,7 +516,10 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
     })
 
     expect(record.lensInstructions).toEqual([{ lens: "threat-model", origin: "generated" }])
-    expect(record.findings.some((f) => f.lens === "threat-model")).toBe(true)
+    // Read from the POOL: the lens finding describes the same defect the pool
+    // raised, so clustering absorbs it — and an absorbed member is still a live
+    // object on the record (AD-7, `RunRecord.pool`).
+    expect(record.pool.some((f) => f.lens === "threat-model")).toBe(true)
     expect(rendered).toContain("GENERATED at run time")
   })
 
