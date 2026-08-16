@@ -26,6 +26,19 @@
  * `critical` below a `high`. Story 7 still owns the full ranked-output
  * treatment; this is only the tie between the two severity reads.
  *
+ * Story 4 adds two READS and no writes: a `route:` line per finding — in the
+ * resolved list AND in the unresolved section — and a `ROUTING` summary naming
+ * the threshold and the partition. CAP-3's criterion is that changing the
+ * threshold alone changes which findings enter debate, and an unrendered route
+ * would leave that measurable only from the record. The per-finding line is
+ * silent when `route` is unset and the summary is silent when
+ * `record.routeCounts` is absent, so `output()` stays callable mid-pipeline.
+ *
+ * The summary reports `RunRecord.routeCounts` — the ROUTE STAGE's own counts —
+ * and never recounts the list it is rendering. Two counts of one partition can
+ * disagree, and this one would: the renderer only ever sees the resolved
+ * findings, so it would shed any routed finding that later died.
+ *
  * AD-6 — all five degradation reports are carried here and rendered: the
  * denominator, drop-outs, the roster warning, lens homogeneity, and the
  * unresolved section. The
@@ -35,7 +48,7 @@
  */
 
 import { effectiveSeverity, severityRank, type Finding } from "../domain/finding.ts"
-import type { RunRecord } from "../domain/run-record.ts"
+import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
 
 /**
  * The co-discovery ratio, computed at sort time and never stored (AD-9). A
@@ -148,6 +161,72 @@ function renderMerged(finding: Finding, pool: readonly Finding[]): string | unde
   })
 
   return `      merged: ${ids.length} other finding(s) — ${members.join(", ")}`
+}
+
+/**
+ * CAP-3 — the route and the sentence that explains it.
+ *
+ * `route: 'judge'` MEANS verify-independently mode (`pipeline-stages.md` §5), and
+ * the label says so, because "judge" alone reads like the finding was decided
+ * rather than routed. Absent when `route` is unset, so `output()` stays callable
+ * on a pre-route record — the same property `pooledNotYetMerged` relies on.
+ */
+function renderRoute(finding: Finding): string | undefined {
+  if (!finding.route) return undefined
+  const label = finding.route === "debate" ? "debate" : "judge (verify-independently)"
+  return `      route: ${label} — ${finding.routeReason ?? "no reason recorded"}`
+}
+
+/**
+ * CAP-3's criterion is that CHANGING THE THRESHOLD ALONE demonstrably changes
+ * which findings enter debate, and this line is where a human sees it: two runs
+ * at different thresholds differ here before they differ anywhere else. The dial
+ * is printed with the counts because a partition without its threshold is a
+ * number nobody can interpret.
+ *
+ * Silent on a pre-route record, for the same reason `renderRoute` is.
+ */
+function routingSummary(record: RunRecord): string[] {
+  // The STAGE's counts, never a recount over the list being rendered. Absence is
+  // "routing has not run" (`RunRecord.routeCounts`), which is why this reads the
+  // field rather than filtering `resolved`: a recount here would cover only the
+  // resolved findings and would quietly shed any routed finding that later died,
+  // reporting a partition narrower than the one that was decided.
+  const counts = record.routeCounts
+  if (!counts) return []
+
+  const lines = [
+    `ROUTING (co-discovery threshold ${formatThreshold(record.threshold)}): ` +
+      `${counts.toDebate} to debate, ${counts.toJudge} straight to the judge.`,
+  ]
+
+  // THE TWO JUDGE BUCKETS ARE NOT ONE CLAIM. A lens finding reached the judge
+  // because it never had a fraction to place against the dial (AD-17d) — saying
+  // "at or above the threshold" over a total that includes it would announce an
+  // absent prior as a cleared one, which is the conflation AD-9's amendment
+  // forbids and the whole reason this stage discriminates on `source`.
+  if (counts.toJudgeAtThreshold > 0) {
+    lines.push(
+      `  ${counts.toJudgeAtThreshold} of those met or beat the threshold; skipping debate is not`,
+      `  skipping scrutiny — they are judged verify-independently instead.`,
+    )
+  }
+  if (counts.toJudgeNoPrior > 0) {
+    lines.push(
+      `  ${counts.toJudgeNoPrior} of those is lens-sourced and was never compared against the`,
+      `  threshold at all — a lens claims no co-discovery prior (AD-17d), so it goes to`,
+      `  verify-independently judging on that ground, not on a fraction.`,
+    )
+  }
+  lines.push(`  Critical severity is debated at any threshold.`)
+  // AD-6 — a partial run must not read like a finished one. Routing is a decision
+  // recorded now; the stages it names are stories 5–6 and do not run in this slice.
+  lines.push(
+    `  NOTE: debate and judging are not implemented yet (stories 5–6). These are recorded`,
+    `  routing decisions, not work already done — nothing below has been debated or judged.`,
+  )
+  lines.push("")
+  return lines
 }
 
 function renderVerdict(finding: Finding): string {
@@ -307,6 +386,9 @@ export function renderRunRecord(record: RunRecord): string {
   // ---- AD-6 — what the finding list below actually is, before clustering ----
   lines.push(...pooledNotYetMerged(record, resolved))
 
+  // ---- CAP-3 — the dial and the partition it produced ----
+  lines.push(...routingSummary(record))
+
   lines.push(`FINDINGS (${resolved.length})`)
   if (resolved.length === 0) {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
@@ -342,6 +424,10 @@ export function renderRunRecord(record: RunRecord): string {
     )
     const merged = renderMerged(finding, record.pool)
     if (merged) lines.push(merged)
+    // CAP-3 — why this finding took the path it did, per finding. The summary
+    // line above says how many went each way; this says why THIS one did.
+    const routed = renderRoute(finding)
+    if (routed) lines.push(routed)
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {
@@ -378,6 +464,15 @@ export function renderRunRecord(record: RunRecord): string {
     // resolved one does. Same reasoning as the lens label on the line above.
     const merged = renderMerged(finding, record.pool)
     if (merged) lines.push(merged)
+    // CAP-3 in this section too, on the same grounds as the lens label above. A
+    // reader deciding an undecided finding by hand needs to know whether the
+    // pipeline had judged it contested or had sent it straight to the judge —
+    // that is the difference between "nobody has argued this yet" and "this was
+    // settled enough to skip argument", and the died-at-stage line does not say
+    // it. Latent until story 8 writes `unresolved`; added before it could ship
+    // (code review 2026-08-16).
+    const unresolvedRoute = renderRoute(finding)
+    if (unresolvedRoute) lines.push(unresolvedRoute)
     lines.push(indent(finding.claim, "      "))
   }
   lines.push("")

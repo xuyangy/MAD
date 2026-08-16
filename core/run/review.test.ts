@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { selectRoster } from "../roster/select.ts"
+import { DEFAULT_CO_DISCOVERY_THRESHOLD } from "../stages/route.ts"
 import { candidate, fakeChange, fakeClock, FakeBackend } from "../test-support/fakes.ts"
 import { review } from "./review.ts"
 
@@ -540,5 +541,243 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
     expect(backend.calls).toHaveLength(3) // one billed turn per pool slot, no more
     expect(record.findings.every((f) => f.source === "pool")).toBe(true)
     expect(record.findings.every((f) => f.coDiscovery?.answered === 3)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-3 — SEVERITY-AWARE THRESHOLD ROUTING, END TO END (story 4)
+//
+// CAP-3's success criterion is a claim about a DIFFERENCE between two runs:
+// "changing the threshold alone demonstrably changes which findings enter
+// debate". A unit test over `route()` cannot make that claim, because the
+// interesting input — a real co-discovery pair produced by real clustering over
+// real discovery — is exactly what the pipeline assembles. These run it.
+// ---------------------------------------------------------------------------
+
+const CAP3_MODELS = [
+  ["anthropic", "claude-sonnet-4-5"],
+  ["openai", "gpt-5"],
+  ["google", "gemini-2.5-pro"],
+] as [string, string][]
+
+/**
+ * Two models describe ONE defect in `src/pay.ts` and the third describes a
+ * different one in `src/ledger.ts`. After clustering that is a 2/3 finding and a
+ * 1/3 finding — the two sides of any threshold between them.
+ */
+function cap3Backend(severity: "high" | "critical" = "high") {
+  const shared = { ...ENVELOPE.findings[0]!, severity, file: "src/pay.ts", startLine: 12, endLine: 14 }
+  return new FakeBackend({
+    "discovery-1": [{ kind: "ok" as const, value: { findings: [{ ...shared, claim: "The rate is never validated." }] } }],
+    "discovery-2": [{ kind: "ok" as const, value: { findings: [{ ...shared, claim: "The rate is not validated before use." }] } }],
+    "discovery-3": [
+      {
+        kind: "ok" as const,
+        value: {
+          findings: [
+            { ...ENVELOPE.findings[0]!, severity, claim: "The ledger write is not awaited.", file: "src/ledger.ts", startLine: 90, endLine: 90 },
+          ],
+        },
+      },
+    ],
+  })
+}
+
+async function cap3Run(threshold: number, severity: "high" | "critical" = "high") {
+  const resolved = setup(CAP3_MODELS, 3)
+  return review({
+    roster: resolved.roster,
+    backend: cap3Backend(severity),
+    clock: fakeClock(),
+    change: fakeChange(),
+    priorWarnings: resolved.warnings,
+    threshold,
+  })
+}
+
+const debated = (record: { findings: { id: string; route?: string }[] }) =>
+  record.findings.filter((f) => f.route === "debate").map((f) => f.id).sort()
+
+describe("review — CAP-3 threshold routing, through the whole pipeline", () => {
+  test("CHANGING THE THRESHOLD ALONE CHANGES WHICH FINDINGS ENTER DEBATE", async () => {
+    const paranoid = await cap3Run(1)
+    const quick = await cap3Run(0.5)
+
+    // At 1.0 nothing short of unanimity is settled, so both findings are argued.
+    expect(debated(paranoid.record)).toHaveLength(2)
+    // At 0.5 the 2/3 finding clears the bar and only the 1/3 one is argued.
+    expect(debated(quick.record)).toHaveLength(1)
+
+    // The IDS, not only the counts. "Two became one" is satisfied by any finding
+    // dropping out; CAP-3's claim is that the debate set SHRANK BY THE FINDING
+    // THAT CLEARED THE DIAL and kept the one that did not.
+    const cleared = paranoid.record.findings.find((f) => f.coDiscovery?.raised === 2)!
+    const stillContested = paranoid.record.findings.find((f) => f.coDiscovery?.raised === 1)!
+    expect(debated(paranoid.record)).toEqual([cleared.id, stillContested.id].sort())
+    expect(debated(quick.record)).toEqual([stillContested.id])
+
+    // The thing that differed is the DIAL, and nothing else about the findings.
+    const fractions = (r: typeof paranoid.record) =>
+      r.findings.map((f) => `${f.coDiscovery?.raised}/${f.coDiscovery?.answered}`).sort()
+    expect(fractions(paranoid.record)).toEqual(fractions(quick.record))
+    expect(paranoid.record.findings.map((f) => f.severity)).toEqual(
+      quick.record.findings.map((f) => f.severity),
+    )
+    expect(paranoid.record.threshold).toBe(1)
+    expect(quick.record.threshold).toBe(0.5)
+  })
+
+  test("a CRITICAL finding at full co-discovery is still debated (CAP-3)", async () => {
+    // The assertion that carries this test is about the 2/3 finding SPECIFICALLY.
+    // It clears a 0.5 threshold comfortably, so it is the one the override
+    // actually rescues from the judge path; the 1/3 finding would be debated
+    // anyway and proves nothing. Asserting `every(...)` alone would pass even if
+    // the override did nothing.
+    const { record, rendered } = await cap3Run(0.5, "critical")
+
+    const cleared = record.findings.find((f) => f.coDiscovery?.raised === 2)!
+    expect(cleared).toBeDefined()
+    expect(cleared.coDiscovery).toEqual({ raised: 2, answered: 3 })
+    expect(cleared.route).toBe("debate")
+    expect(cleared.routeReason).toContain("critical severity overrides the threshold")
+    // ...and its reason names the override rather than the fraction it beat.
+    expect(cleared.routeReason).not.toContain("2/3")
+
+    expect(record.findings.every((f) => f.route === "debate")).toBe(true)
+    expect(record.routeCounts).toEqual({
+      toDebate: 2,
+      toJudge: 0,
+      toJudgeAtThreshold: 0,
+      toJudgeNoPrior: 0,
+    })
+    expect(rendered).toContain("critical severity overrides the threshold")
+  })
+
+  test("AN OUT-OF-RANGE THRESHOLD IS CLAMPED AT THE SEAM, and the record reports what ran", async () => {
+    // `RunRecord.threshold` says it is "the threshold this run actually routed
+    // against, already clamped". Nothing used to hold `review()` to that: every
+    // value any test passed was a fixpoint of `clampThreshold`, so replacing the
+    // stamp with `deps.threshold ?? DEFAULT` kept the whole suite green while the
+    // record announced `900%` for a run that routed at `100%`.
+    const { record, rendered } = await cap3Run(9)
+
+    expect(record.threshold).toBe(1)
+    expect(rendered).toContain("ROUTING (co-discovery threshold 100%)")
+    // At 1.0 nothing short of unanimity settles, and neither finding is unanimous.
+    expect(debated(record)).toHaveLength(2)
+  })
+
+  test("a NaN threshold falls back to the default rather than poisoning the render", async () => {
+    const { record, rendered } = await cap3Run(Number.NaN)
+
+    expect(record.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
+    expect(rendered).toContain("ROUTING (co-discovery threshold 80%)")
+    // Scoped to the lines routing wrote — the seeded change's own prose talks
+    // about a NaN total, so a whole-render check would pass for the wrong reason.
+    for (const finding of record.findings) {
+      expect(finding.routeReason).not.toContain("NaN")
+    }
+    expect(rendered.split("\n").find((l) => l.startsWith("ROUTING"))).not.toContain("NaN")
+  })
+
+  test("a LENS finding is judged verify-independently, and still carries no prior", async () => {
+    // ALL THREE POOL SLOTS ARE SCRIPTED. An unscripted slot returns
+    // `empty-response` from `FakeBackend` and drops out, which would leave
+    // `answered === 1`, put every pool finding at `1/1`, and make the
+    // `threshold: 0.8` below play no part in the run — a degraded roster reading
+    // as a clean three-model-plus-lens one. The two shared claims give the pool a
+    // real 2/3 that the dial actually bites on.
+    const resolved = setup(CAP3_MODELS, 3, ["security"])
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          {
+            kind: "ok" as const,
+            value: {
+              findings: [
+                { ...ENVELOPE.findings[0]!, claim: "The rate is never validated.", file: "src/pay.ts", startLine: 12, endLine: 14 },
+              ],
+            },
+          },
+        ],
+        "discovery-2": [
+          {
+            kind: "ok" as const,
+            value: {
+              findings: [
+                { ...ENVELOPE.findings[0]!, claim: "The rate is not validated before use.", file: "src/pay.ts", startLine: 12, endLine: 14 },
+              ],
+            },
+          },
+        ],
+        "discovery-3": [
+          {
+            kind: "ok" as const,
+            value: {
+              findings: [
+                { ...ENVELOPE.findings[0]!, claim: "The ledger write is not awaited.", file: "src/ledger.ts", startLine: 90, endLine: 90 },
+              ],
+            },
+          },
+        ],
+        "discovery-lens-security": [
+          {
+            kind: "ok" as const,
+            value: {
+              findings: [
+                { ...ENVELOPE.findings[0]!, claim: "Tokens are logged in cleartext.", file: "src/auth.ts", startLine: 8, endLine: 8 },
+              ],
+            },
+          },
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      threshold: 0.8,
+    })
+
+    // The roster is NOT degraded — pin it, because a silent drop-out would make
+    // every assertion below hold for the wrong reason.
+    expect(record.answered).toBe(3)
+    expect(record.warnings.some((w) => w.code === "model-dropped-out")).toBe(false)
+
+    const lensFinding = record.findings.find((f) => f.source === "lens")!
+    expect(lensFinding.route).toBe("judge")
+    expect(lensFinding.coDiscovery).toBeUndefined()
+    // AD-17d — the reason names the absence, never the threshold it was not
+    // compared against. 2A's invariant, now surviving a third stage.
+    expect(lensFinding.routeReason).toContain("no co-discovery prior")
+    expect(lensFinding.routeReason).not.toContain("threshold")
+    expect(rendered).toContain("route: judge (verify-independently)")
+
+    // The dial really did bite: the 2/3 pool finding is below 0.8 and debated,
+    // which is what makes the lens finding's judge route a DIFFERENT fact rather
+    // than the same one arrived at by accident.
+    const merged = record.findings.find((f) => f.coDiscovery?.raised === 2)!
+    expect(merged.coDiscovery).toEqual({ raised: 2, answered: 3 })
+    expect(merged.route).toBe("debate")
+
+    // And the summary keeps the two judge reasons apart (AD-17d).
+    expect(record.routeCounts?.toJudgeNoPrior).toBe(1)
+    expect(record.routeCounts?.toJudgeAtThreshold).toBe(0)
+    expect(rendered).toContain("1 of those is lens-sourced and was never compared against the")
+  })
+
+  test("with no threshold given the run uses the shipped default and says so", async () => {
+    const resolved = setup(CAP3_MODELS, 3)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: cap3Backend(),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
+    expect(rendered).toContain("ROUTING (co-discovery threshold 80%)")
+    // Every finding leaves routed — routing partitions, it never filters.
+    expect(record.findings.every((f) => f.route !== undefined)).toBe(true)
   })
 })

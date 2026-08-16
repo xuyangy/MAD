@@ -3,9 +3,11 @@
  *
  * Field ownership is disjoint per stage (AD-8). Each field below is annotated
  * with the stage that OWNS it. A stage may read anything; it writes only its
- * own fields. Story 1 runs `discover` and `output` only, so the fields owned by
- * cluster / route / debate / judge are declared here and left unset — they are
- * declared now so no later story invents a second, conflicting name for them.
+ * own fields. Every field was declared here from story 1 onward, before its
+ * stage existed, so no later story could invent a second conflicting name for
+ * one. As of story 4 the stages that WRITE are `discover`, `cluster`, `route`
+ * and `output`; the fields owned by `debate` and `judge` are still declared and
+ * left unset, and will be written by stories 5–6.
  *
  * AD-8's ownership list for discovery, in full and in one place: **claim,
  * reasoning, locus, severity, author, source, lens.** Nothing else. `source` and
@@ -16,6 +18,12 @@
  * coDiscovery, mergedIds, clusterSeverity.** Nothing else, and `severity` in
  * particular is NOT on it — see `effectiveSeverity` below for why the cluster's
  * severity had to become a fourth field rather than a rewrite of the first.
+ *
+ * AD-8's ownership list for ROUTING (story 4): **route, routeReason.** Two
+ * fields, and two is the whole list — the judge's MODE is derived from `route`
+ * rather than stored beside it (`core/stages/route.ts`). Routing READS severity
+ * and coDiscovery and writes neither: AD-10 exists because routing depends on
+ * severity, so a stage that rewrote it would change what already happened.
  */
 
 /** AD-10 — the severity scale is exactly these four values, and nothing else. */
@@ -50,7 +58,7 @@ export type Stage = "discover" | "cluster" | "route" | "debate" | "judge" | "out
 
 /**
  * AD-7 — `history` is append-only. Every entry carries at minimum
- * `{ stage, actor, at, kind, body }`. Debate-round entries (story 4) add the
+ * `{ stage, actor, at, kind, body }`. Debate-round entries (story 5) add the
  * round fields; they are optional here so the shape does not change later.
  */
 export interface Entry {
@@ -139,7 +147,17 @@ export interface Finding {
   clusterSeverity?: Severity
 
   // ---- route owns (AD-8) — story 4 ----
+  /**
+   * CAP-3. `'judge'` MEANS the judge's verify-independently mode
+   * (`pipeline-stages.md` §5) — threshold-skipped, no transcript, Fact-Checker
+   * only. `'debate'` reaches the same judge afterwards in adjudicate mode. The
+   * mode is derived from this field, never stored beside it.
+   */
   route?: "debate" | "judge"
+  /**
+   * Why it took that route, in words. A lens finding's reason never mentions the
+   * threshold, because no fraction was placed against it (AD-17d, AD-9 amended).
+   */
   routeReason?: string
 
   // ---- debate owns (AD-8) — story 5; rounds are appended to `history` ----

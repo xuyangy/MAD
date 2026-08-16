@@ -106,8 +106,79 @@ export interface RunRecord {
    * not be two ways of saying the same thing.
    */
   lensInstructions: LensInstructionRecord[]
+  /**
+   * CAP-3 — the co-discovery threshold this run actually routed against, already
+   * clamped. Required and never optional, for the same reason `pool` and
+   * `lensInstructions` are: absent and defaulted must not be two ways of saying
+   * the same thing.
+   *
+   * It is on the record because a routing summary without its dial is a count
+   * nobody can interpret — CAP-3's success criterion is that *changing the
+   * threshold alone* changes which findings enter debate, and a reader comparing
+   * two runs needs to see the number that differed. Story 8's presets record what
+   * they resolved to here.
+   */
+  threshold: number
+  /**
+   * CAP-3 — the partition routing produced, as the ROUTE STAGE counted it.
+   *
+   * Optional, and its ABSENCE is the signal that routing has not run — the same
+   * shape `clusterId` uses for clustering (AD-14 amended), and the property that
+   * keeps `output()` callable mid-pipeline. It is NOT "absent means zero": a run
+   * that routed nothing carries all-zero counts, which is a different fact from a
+   * run that never routed.
+   *
+   * Written here rather than recomputed by the renderer because a partition
+   * counted twice is a partition that can disagree with itself. The renderer's
+   * copy would necessarily count only the RESOLVED findings it is iterating, so
+   * once story 8 writes `unresolved`, a finding that was routed and then died at
+   * a later stage would silently drop out of the totals. The stage's own counts
+   * cover every finding it decided about, which is what the summary claims to be.
+   */
+  routeCounts?: RouteCounts
   warnings: Warning[]
   ledger: TokenLedger
+}
+
+/**
+ * CAP-3 — the routed partition, counted once by the stage that decided it.
+ *
+ * The judge bucket is split by WHY, and that split is load-bearing rather than
+ * decorative: a finding reaches the judge either because its fraction cleared the
+ * dial or because it never had a fraction at all (AD-17d). Reporting one total
+ * and captioning it "at or above the threshold" would state the second case as
+ * the first — the exact conflation AD-9's amendment forbids, said in the summary
+ * line instead of in the comparator.
+ *
+ * `toJudge === toJudgeAtThreshold + toJudgeNoPrior`, always.
+ */
+export interface RouteCounts {
+  toDebate: number
+  toJudge: number
+  /** Judged because `raised / answered >= threshold`. A claim about a comparison. */
+  toJudgeAtThreshold: number
+  /** Judged because there was no prior to compare — lens-sourced (AD-17d). */
+  toJudgeNoPrior: number
+}
+
+/**
+ * CAP-3 — the ONE way the threshold is written for a human, so the routing stage
+ * and the renderer cannot disagree about what dial a run used.
+ *
+ * A percentage, because that is the vocabulary `cost-model.md` states the dial in
+ * ("100% debates everything, 50% debates almost nothing"). Rounded to TWO DECIMAL
+ * PLACES of a percent with trailing zeros trimmed, so `0.8` reads `80%` and an
+ * awkward `0.667` reads `66.7%`.
+ *
+ * Rounding at that place is a real, if small, loss: `1/3` renders `33.33%` while
+ * `meetsThreshold` compares against `0.3333…`. The precision is chosen to keep the
+ * printed dial from landing on a NEIGHBOURING round number a reader would take for
+ * the setting — `0.667` must not read `67%`, which routes `2/3` the other way —
+ * not to reproduce the double. A caller that needs the exact value reads
+ * `RunRecord.threshold`.
+ */
+export function formatThreshold(threshold: number): string {
+  return `${Number.parseFloat((threshold * 100).toFixed(2))}%`
 }
 
 export function emptyLedger(): TokenLedger {

@@ -2,8 +2,8 @@
  * Pipeline assembly — the one seam a caller drives (AD-1: the entrypoint
  * injects the adapters' port implementations; the core knows no harness).
  *
- * Story 3 runs three of the six filters: discover -> cluster -> output. Stories
- * 4–7 insert route, debate and judge between them WITHOUT changing this
+ * Story 4 runs four of the six filters: discover -> cluster -> route -> output.
+ * Stories 5–6 insert debate and judge between them WITHOUT changing this
  * signature, and story 9's ablation calls this function directly as the
  * single-model control arm — no second code path.
  */
@@ -19,6 +19,7 @@ import type { ChangeSet } from "../ports/repo.ts"
 import { cluster } from "../stages/cluster.ts"
 import { discover } from "../stages/discover.ts"
 import { output } from "../stages/output.ts"
+import { clampThreshold, route } from "../stages/route.ts"
 
 export interface ReviewDeps {
   roster: Roster
@@ -30,6 +31,15 @@ export interface ReviewDeps {
   priorWarnings?: Warning[]
   /** AD-11 — versioned instruction set; defaulted, never inlined at a call site. */
   instructions?: InstructionSet
+  /**
+   * CAP-3 — the co-discovery threshold, the paranoia dial (`cost-model.md`).
+   * Defaulted and clamped by the route stage. This seam is deliberately the only
+   * way to move it in story 4: `cost-model.md` puts ONE budget number and a
+   * `quick | normal | paranoid` preset in front of the user, and story 8 owns
+   * that surface. Story 9's ablation drives `review()` directly, so nothing that
+   * needs the dial today is missing it.
+   */
+  threshold?: number
 }
 
 export interface ReviewResult {
@@ -69,6 +79,9 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     findings: [],
     pool: [],
     lensInstructions: [],
+    // CAP-3 — clamped once, here, so the record carries the value routing
+    // actually used rather than the one the caller asked for.
+    threshold: clampThreshold(deps.threshold),
     warnings: [...(deps.priorWarnings ?? [])],
     ledger: emptyLedger(),
   }
@@ -107,7 +120,26 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const clustered = await cluster({ findings: record.pool, answered: discovered.answered, clock })
   record.findings = clustered.findings
 
-  // ---- stages 3–5: route, debate, judge — stories 4–7 ----
+  // ---- stage 3: route ----
+  //
+  // The CANONICAL set, never `record.pool`: an absorbed member is not a finding
+  // the pipeline decides about, and routing one would produce a decision nothing
+  // downstream ever reads.
+  const routed = route({ findings: record.findings, threshold: record.threshold, clock })
+  // The record reports what the STAGE did, not what the caller asked for and not
+  // what the renderer can reconstruct. Re-stamping `threshold` from the return
+  // value costs nothing (both sides call `clampThreshold`, so it is already a
+  // fixpoint) and removes the class of bug where the two derivations drift; the
+  // counts come across for the reason `RunRecord.routeCounts` documents.
+  record.threshold = routed.threshold
+  record.routeCounts = {
+    toDebate: routed.toDebate,
+    toJudge: routed.toJudge,
+    toJudgeAtThreshold: routed.toJudgeAtThreshold,
+    toJudgeNoPrior: routed.toJudgeNoPrior,
+  }
+
+  // ---- stages 4–5: debate, judge — stories 5–6 ----
 
   // ---- stage 6: output ----
   record.finishedAt = clock.now()

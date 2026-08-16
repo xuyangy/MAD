@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
 import type { Finding, Severity } from "../domain/finding.ts"
-import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
+import { emptyLedger, type RouteCounts, type RunRecord } from "../domain/run-record.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate } from "../test-support/fakes.ts"
 import { output, rankFindings } from "./output.ts"
+import { DEFAULT_CO_DISCOVERY_THRESHOLD } from "./route.ts"
 
 function finding(partial: Partial<Finding> & { severity: Severity; file: string }): Finding {
   return {
@@ -18,6 +19,8 @@ function finding(partial: Partial<Finding> & { severity: Severity; file: string 
     lens: partial.lens,
     clusterId: partial.clusterId,
     coDiscovery: partial.coDiscovery,
+    route: partial.route,
+    routeReason: partial.routeReason,
     unresolved: partial.unresolved,
     history: [],
   }
@@ -34,7 +37,16 @@ function lensFinding(
   })
 }
 
-function record(findings: Finding[], answered = 1, lenses: readonly string[] = []): RunRecord {
+function record(
+  findings: Finding[],
+  answered = 1,
+  lenses: readonly string[] = [],
+  threshold = DEFAULT_CO_DISCOVERY_THRESHOLD,
+  // Absent by default, because absent MEANS "routing has not run" — the property
+  // that keeps `output()` callable mid-pipeline. A test that wants the summary
+  // supplies the stage's counts, exactly as `review()` does.
+  routeCounts?: RouteCounts,
+): RunRecord {
   const { roster, warnings } = selectRoster([candidate("openai", "gpt-5")], {
     slots: 1,
     lenses,
@@ -50,6 +62,8 @@ function record(findings: Finding[], answered = 1, lenses: readonly string[] = [
     // finding set — which is exactly the pre-cluster state this block asserts on.
     pool: findings,
     lensInstructions: roster.lensSlots.map((slot) => ({ lens: slot.lens, origin: "shipped" as const })),
+    threshold,
+    routeCounts,
     warnings,
     ledger: emptyLedger(),
   }
@@ -695,5 +709,188 @@ describe("the pool notice stays pool-scoped with a lens finding present (AD-17)"
     )
     expect(rendered).not.toContain("NOT YET MERGED")
     expect(rendered).toContain("FINDINGS (1)")
+  })
+})
+
+describe("the route and the dial that produced it are rendered (CAP-3)", () => {
+  test("each finding names its route and its reason", () => {
+    const rendered = output(
+      record([
+        finding({
+          severity: "high",
+          file: "src/pay.ts",
+          clusterId: "cluster-1",
+          coDiscovery: { raised: 3, answered: 3 },
+          route: "judge",
+          routeReason: "co-discovery 3/3 at or above threshold 80% — debate skipped, judged verify-independently",
+        }),
+        finding({
+          severity: "medium",
+          file: "src/ledger.ts",
+          clusterId: "cluster-2",
+          coDiscovery: { raised: 1, answered: 3 },
+          route: "debate",
+          routeReason: "co-discovery 1/3 below threshold 80% — contested",
+        }),
+      ], 3),
+    )
+
+    // `judge` alone would read as though the finding had been DECIDED. The label
+    // names the mode, because that is what the route actually means.
+    expect(rendered).toContain("route: judge (verify-independently) — co-discovery 3/3 at or above")
+    expect(rendered).toContain("route: debate — co-discovery 1/3 below threshold 80%")
+  })
+
+  test("THE SUMMARY NAMES THE DIAL AND BOTH COUNTS — this is where CAP-3 is legible", () => {
+    const rendered = output(
+      record(
+        [
+          finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" }),
+          finding({ severity: "high", file: "b.ts", route: "debate", routeReason: "contested" }),
+          finding({ severity: "low", file: "c.ts", route: "judge", routeReason: "settled" }),
+        ],
+        3,
+        [],
+        0.5,
+        { toDebate: 2, toJudge: 1, toJudgeAtThreshold: 1, toJudgeNoPrior: 0 },
+      ),
+    )
+
+    expect(rendered).toContain("ROUTING (co-discovery threshold 50%): 2 to debate, 1 straight to the judge.")
+    // Skipping debate is not skipping scrutiny, and the reader is told so once.
+    expect(rendered).toContain("judged verify-independently instead")
+    expect(rendered).toContain("1 of those met or beat the threshold")
+    // Nothing was lens-sourced, so that half of the split stays silent rather
+    // than printing a zero the reader has to interpret.
+    expect(rendered).not.toContain("lens-sourced and was never compared")
+  })
+
+  test("THE JUDGE BUCKET IS SPLIT BY WHY — a lens finding is never reported as having cleared the dial", () => {
+    // The whole story turns on "an absent prior is not a below-threshold one".
+    // A summary that totalled both judge reasons and captioned them "at or above
+    // the threshold" would state that conflation in the one line a reader is most
+    // likely to read — pointing the other way, but the same false claim.
+    const rendered = output(
+      record(
+        [
+          finding({
+            severity: "high",
+            file: "a.ts",
+            route: "judge",
+            routeReason: "co-discovery 3/3 at or above threshold 80% — debate skipped",
+          }),
+          lensFinding({
+            lens: "security",
+            severity: "high",
+            file: "b.ts",
+            route: "judge",
+            routeReason: "no co-discovery prior — lens-sourced (`security`); judged verify-independently",
+          }),
+        ],
+        3,
+        ["security"],
+        0.8,
+        { toDebate: 0, toJudge: 2, toJudgeAtThreshold: 1, toJudgeNoPrior: 1 },
+      ),
+    )
+
+    expect(rendered).toContain("0 to debate, 2 straight to the judge.")
+    expect(rendered).toContain("1 of those met or beat the threshold")
+    expect(rendered).toContain("1 of those is lens-sourced and was never compared against the")
+    expect(rendered).toContain("a lens claims no co-discovery prior (AD-17d)")
+  })
+
+  test("AD-6 — the summary says debate and judging have not run, so a partial run cannot read as a finished one", () => {
+    const rendered = output(
+      record(
+        [finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })],
+        1,
+        [],
+        0.8,
+        { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 },
+      ),
+    )
+
+    expect(rendered).toContain("debate and judging are not implemented yet (stories 5–6)")
+    expect(rendered).toContain("nothing below has been debated or judged")
+  })
+
+  test("BOTH ARE SILENT ON A PRE-ROUTE RECORD, so output stays callable mid-pipeline", () => {
+    // The same property `pooledNotYetMerged` relies on: `output()` is exported
+    // and callable on a record the pipeline has not finished with. The SUMMARY's
+    // signal is `routeCounts`, absent here; the per-finding line's is `route`.
+    const rendered = output(record([finding({ severity: "high", file: "a.ts" })], 1))
+
+    expect(rendered).not.toContain("ROUTING")
+    expect(rendered).not.toContain("route:")
+  })
+
+  test("THE SUMMARY REPORTS THE STAGE'S COUNTS, NOT A RECOUNT OF THE RENDERED LIST", () => {
+    // This is the drift the record field exists to prevent. Two findings were
+    // routed; one of them then died and is rendered in the UNRESOLVED section, so
+    // a renderer counting the resolved list would report `1 to debate, 0` and
+    // silently shed the other. The stage counted both, and both are reported.
+    const died = finding({
+      severity: "high",
+      file: "b.ts",
+      route: "judge",
+      routeReason: "co-discovery 3/3 at or above threshold 80% — debate skipped",
+    })
+    died.unresolved = { diedAtStage: "judge", reason: "budget exhausted" }
+
+    const rendered = output(
+      record(
+        [finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" }), died],
+        3,
+        [],
+        0.8,
+        { toDebate: 1, toJudge: 1, toJudgeAtThreshold: 1, toJudgeNoPrior: 0 },
+      ),
+    )
+
+    expect(rendered).toContain("1 to debate, 1 straight to the judge.")
+    expect(rendered).toContain("FINDINGS (1)")
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (1)")
+  })
+
+  test("THE UNRESOLVED SECTION CARRIES THE ROUTE TOO — the reader deciding by hand needs it", () => {
+    // AD-17e's precedent: a reader hand-deciding an undecided finding must not
+    // lose the context the resolved list would have given them. "Was this
+    // contested, or was it settled enough to skip argument?" is exactly that.
+    const died = finding({
+      severity: "high",
+      file: "a.ts",
+      route: "debate",
+      routeReason: "co-discovery 1/3 below threshold 80% — contested",
+    })
+    died.unresolved = { diedAtStage: "debate", reason: "budget exhausted" }
+
+    const rendered = output(
+      record([died], 3, [], 0.8, {
+        toDebate: 1,
+        toJudge: 0,
+        toJudgeAtThreshold: 0,
+        toJudgeNoPrior: 0,
+      }),
+    )
+
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (1)")
+    expect(rendered).toContain("route: debate — co-discovery 1/3 below threshold 80% — contested")
+  })
+
+  test("a route with no reason recorded says so rather than rendering a bare dash", () => {
+    // `route` and `routeReason` are two independent optionals, so this branch is
+    // reachable by type even though `route()` always writes both. Pinned rather
+    // than left as a silently dead fallback.
+    const rendered = output(
+      record([finding({ severity: "high", file: "a.ts", route: "judge" })], 1, [], 0.8, {
+        toDebate: 0,
+        toJudge: 1,
+        toJudgeAtThreshold: 1,
+        toJudgeNoPrior: 0,
+      }),
+    )
+
+    expect(rendered).toContain("route: judge (verify-independently) — no reason recorded")
   })
 })

@@ -667,3 +667,42 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     expect(record.roster.distinctLineages).toBe(3)
   })
 })
+
+describe("story 4 — routing did not move a discovery number", () => {
+  test("CAP-1 AND CAP-11 ARE MEASURED OVER THE POOL, WHICH ROUTING NEVER TOUCHES", async () => {
+    // Routing writes `route` and `routeReason` (AD-8) and reads everything else.
+    // The harness derives every arm from `finding.author` over `record.pool`, and
+    // routing runs over the CANONICAL set — so an inserted stage must be invisible
+    // here. Asserted structurally, because the numbers above passing unchanged is
+    // evidence and this is the reason.
+    const { record } = await threeSlotRun(LENSES)
+
+    // Only canonicals were routed; the pool still holds absorbed members that
+    // nothing decided about. `pool.length >= findings.length` is true by
+    // construction and asserts nothing — the claim worth pinning is that the
+    // ABSORBED members carry no route, because routing an absorbed member would
+    // produce a decision nothing downstream ever reads.
+    const canonicalIds = new Set(record.findings.map((f) => f.id))
+    const absorbed = record.pool.filter((f) => !canonicalIds.has(f.id))
+    expect(absorbed.length).toBeGreaterThan(0)
+    for (const member of absorbed) {
+      expect(member.route).toBeUndefined()
+      expect(member.routeReason).toBeUndefined()
+      expect(member.history.some((e) => e.stage === "route")).toBe(false)
+    }
+    expect(record.pool.filter((f) => f.route !== undefined).length).toBe(record.findings.length)
+
+    // Every field the recall harness reads is untouched by routing.
+    for (const finding of record.pool) {
+      expect(finding.author.length).toBeGreaterThan(0)
+      expect(["pool", "lens"]).toContain(finding.source)
+      expect(finding.history[0]!.stage).toBe("discover")
+    }
+
+    // AD-8 — routing wrote nothing clustering owns.
+    for (const finding of record.findings) {
+      if (finding.source === "lens") expect(finding.coDiscovery).toBeUndefined()
+      else expect(finding.coDiscovery?.answered).toBe(record.answered)
+    }
+  })
+})
