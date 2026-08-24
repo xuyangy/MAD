@@ -1,7 +1,7 @@
 {
   "name": "mad",
   "version": "0.1.0",
-  "description": "MAD — multi-agent debate orchestrator for code review. Current slice: opencode adapter, roster resolution, parallel heterogeneous discovery over N models, finding clustering with co-discovery counted over distinct pool authors, and severity-aware threshold routing that marks contested findings for debate while critical severity is marked at any threshold (the debate and judge stages themselves are not in this slice). Ships the CAP-1 recall harness over a seeded-defect change and the CAP-2 over-merge/under-merge harness over a hand-labelled pair set.",
+  "description": "MAD — multi-agent debate orchestrator for code review. Current slice: opencode adapter, roster resolution, parallel heterogeneous discovery over N models, finding clustering with co-discovery counted over distinct pool authors, severity-aware threshold routing that marks contested findings for debate, and per-finding debate in sparse rooms with turns batched one per model per round, ending in exactly one recorded exit — converged, stalled, or round cap — under a token ledger that answers \"may I spend?\" and surfaces rather than drops what the budget stranded (the judge stage is not in this slice). Ships the CAP-1 recall harness over a seeded-defect change and the CAP-2 over-merge/under-merge harness over a hand-labelled pair set.",
   "type": "module",
   "private": true,
   "license": "Apache-2.0",

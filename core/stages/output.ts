@@ -39,6 +39,14 @@
  * disagree, and this one would: the renderer only ever sees the resolved
  * findings, so it would shed any routed finding that later died.
  *
+ * Story 5 adds two more READS and, again, no writes: a `debate:` line per
+ * finding — in the resolved list AND in the unresolved section, on story 4's
+ * precedent — and a `DEBATE` summary after the routing one. `rankFindings` is
+ * UNTOUCHED: `exit` is not a ranking criterion, verdict ordering is story 6's,
+ * and an exit sorted on would put "we argued about this" above "this is bad".
+ * Both are silent when the stage did not run, so `output()` stays callable
+ * mid-pipeline.
+ *
  * AD-6 — all five degradation reports are carried here and rendered: the
  * denominator, drop-outs, the roster warning, lens homogeneity, and the
  * unresolved section. The
@@ -48,6 +56,7 @@
  */
 
 import { effectiveSeverity, severityRank, type Finding } from "../domain/finding.ts"
+
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
 
 /**
@@ -178,6 +187,43 @@ function renderRoute(finding: Finding): string | undefined {
 }
 
 /**
+ * CAP-4 — how this finding's debate ended, and what that exit MEANS.
+ *
+ * The three exits are not interchangeable and a bare word would let a reader
+ * treat them as one: `converged` says the room settled, `stalled` says nobody
+ * moved and the remaining rounds were deliberately not spent, `cap` says the
+ * argument was still live when the rounds ran out. All three reach the judge;
+ * only one of them is agreement.
+ *
+ * The round count is read from `history` — the append-only record (AD-7) — and
+ * never from a stored counter, because a second copy of "how many rounds" is a
+ * second thing that can disagree with the transcript printed beside it.
+ *
+ * Absent when `exit` is unset, which covers both a `route: "judge"` finding (it
+ * was never argued) and a pre-debate record. Those two absences are told apart
+ * by the `route:` line above, not by this one.
+ */
+function renderDebate(finding: Finding): string | undefined {
+  if (!finding.exit) return undefined
+  const rounds = finding.history.reduce(
+    (highest, entry) => (entry.stage === "debate" && entry.round ? Math.max(highest, entry.round) : highest),
+    0,
+  )
+  // The exit entry's own words, which carry the REASON the three-value `exit`
+  // field cannot (`debate.ts`'s `ExitReason`) — so "the room agreed" and "only
+  // the author ever spoke" do not render as the same sentence (AD-6).
+  const explanation = finding.history.findLast?.((entry) => entry.kind.startsWith("debate-exit-"))?.body
+
+  // ZERO ROUNDS IS NOT "after 0 round(s)" (code review 2026-08-24). A debate
+  // that recorded no position spent no round anybody can read, and printing a
+  // round count of zero implies rounds that ran and produced nothing — a
+  // different and more flattering claim than the truth, which is that nothing
+  // was ever argued.
+  const when = rounds === 0 ? `with no round on the record` : `after ${rounds} round(s)`
+  return `      debate: ${finding.exit} ${when} — ${explanation ?? "no reason recorded"}`
+}
+
+/**
  * CAP-3's criterion is that CHANGING THE THRESHOLD ALONE demonstrably changes
  * which findings enter debate, and this line is where a human sees it: two runs
  * at different thresholds differ here before they differ anywhere else. The dial
@@ -219,12 +265,103 @@ function routingSummary(record: RunRecord): string[] {
     )
   }
   lines.push(`  Critical severity is debated at any threshold.`)
-  // AD-6 — a partial run must not read like a finished one. Routing is a decision
-  // recorded now; the stages it names are stories 5–6 and do not run in this slice.
+  // AD-6 — a partial run must not read like a finished one. Debate runs from
+  // story 5; JUDGING still does not, and the note shrank to say exactly that
+  // rather than staying stale in the flattering direction.
   lines.push(
-    `  NOTE: debate and judging are not implemented yet (stories 5–6). These are recorded`,
-    `  routing decisions, not work already done — nothing below has been debated or judged.`,
+    `  NOTE: judging is not implemented yet (story 6). Nothing below has been judged, and every`,
+    `  verdict reads "not adjudicated" for that reason rather than as a ruling.`,
   )
+  lines.push("")
+  return lines
+}
+
+/**
+ * CAP-4 — the round cap and the exits it produced.
+ *
+ * Reports `RunRecord.debateCounts` — the DEBATE STAGE's own counts — and never a
+ * recount of the list being rendered, for `routingSummary`'s reason exactly: the
+ * renderer only ever sees the resolved findings, so a recount would shed every
+ * finding the budget stranded, which is the one bucket a reader most needs to
+ * see. Silent when the field is absent, which MEANS debate did not run.
+ *
+ * The four buckets are printed separately and never summed into a "debates
+ * finished" figure. `stalled` is a saving, `cap` is a spend, and `unresolved` is
+ * not an exit at all — it is AD-6d, and it is the only one that needs the reader
+ * to do something.
+ */
+function debateSummary(record: RunRecord): string[] {
+  const counts = record.debateCounts
+  if (!counts) return []
+
+  // AD-15 — the BUDGET is named beside the round cap, on the same CAP-3
+  // precedent `maxRounds` follows: a partition without its dial is a count
+  // nobody can interpret, and a ceiling that only appears once it has been hit
+  // is a ceiling the reader cannot check the run against (code review
+  // 2026-08-24). `null` is rendered as words, never as a blank or a `0`.
+  const budget = record.ledger.cap === null ? "no token cap" : `token cap ${record.ledger.cap}`
+
+  const lines = [
+    `DEBATE (round cap ${record.maxRounds}, ${budget}): ${counts.debated} contested finding(s), ` +
+      `${counts.rounds} batched round(s), ${counts.turns} turn(s) spent.`,
+  ]
+
+  if (counts.debated === 0) {
+    // Not the same fact as "debate did not run", and the absent-vs-zero
+    // distinction `debateCounts` exists for is worth one sentence here.
+    lines.push(`  Nothing was contested, so no debate turn was spent.`)
+    lines.push("")
+    return lines
+  }
+
+  lines.push(
+    `  exits: ${counts.converged} converged, ${counts.stalled} stalled, ${counts.cap} hit the round cap.`,
+  )
+
+  // THE TWO CONVERGED SUBSETS ARE SEPARATE CLAIMS, and both are cases where the
+  // headline word overstates what happened (AD-6). They are printed as subsets
+  // of `converged`, never added to the totals above.
+  if (counts.convergedUncontested > 0) {
+    lines.push(
+      `  ${counts.convergedUncontested} of those converged UNCONTESTED — only one participant ever`,
+      `  stated a position, so nobody disagreed because nobody else answered. That is not agreement.`,
+    )
+  }
+  if (counts.convergedUnsure > 0) {
+    lines.push(
+      `  ${counts.convergedUnsure} of those converged on UNSURE — every participant said the evidence`,
+      `  did not settle it. Unresolved by evidence, not upheld.`,
+    )
+  }
+  if (counts.stalled > 0) {
+    lines.push(
+      `  A stalled debate is one where nobody moved. It short-circuits to the judge rather than`,
+      `  burning the remaining rounds — restating is not progress.`,
+    )
+  }
+  if (counts.unresolved > 0) {
+    lines.push(
+      `  ${counts.unresolved} finding(s) never reached an exit: the token budget ran out. They are`,
+      `  in the UNRESOLVED section below, not dropped.`,
+    )
+  }
+  // AD-15 / `cost-model.md` lever 1 — say what the batching bought, because a
+  // turn count smaller than the finding count looks like an omission otherwise.
+  lines.push(
+    `  Turns are batched one per model per round over all of that model's open findings, so one`,
+    `  turn can cover several debates (AD-15: that is one allocation, not several).`,
+  )
+  // The two numbers the TOKENS line can be reconciled against. Printed only when
+  // they differ, because "4 turns, 4 attempts" is noise; when they do differ, a
+  // reader counting ledger rows against turns needs to know why (code review
+  // 2026-08-24).
+  if (counts.attempts > counts.turns) {
+    lines.push(
+      `  ${counts.attempts} turn(s) were BILLED against those ${counts.turns} allocation(s): ` +
+        `${counts.attempts - counts.turns} needed`,
+      `  their one retry (AD-6b). The TOKENS line below counts billed attempts, not allocations.`,
+    )
+  }
   lines.push("")
   return lines
 }
@@ -389,6 +526,9 @@ export function renderRunRecord(record: RunRecord): string {
   // ---- CAP-3 — the dial and the partition it produced ----
   lines.push(...routingSummary(record))
 
+  // ---- CAP-4 — the round cap and the exits it produced ----
+  lines.push(...debateSummary(record))
+
   lines.push(`FINDINGS (${resolved.length})`)
   if (resolved.length === 0) {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
@@ -428,6 +568,11 @@ export function renderRunRecord(record: RunRecord): string {
     // line above says how many went each way; this says why THIS one did.
     const routed = renderRoute(finding)
     if (routed) lines.push(routed)
+    // CAP-4 — and BELOW the route line on purpose: the route says the finding
+    // was contested, the exit says how the argument ended. Read the other way
+    // round the exit has nothing to be an exit from.
+    const debated = renderDebate(finding)
+    if (debated) lines.push(debated)
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {
@@ -473,6 +618,13 @@ export function renderRunRecord(record: RunRecord): string {
     // (code review 2026-08-16).
     const unresolvedRoute = renderRoute(finding)
     if (unresolvedRoute) lines.push(unresolvedRoute)
+    // NO `debate:` LINE HERE, and that is an invariant rather than an omission
+    // (code review 2026-08-24). `unresolved` is written ONLY for a room whose
+    // `exit` is still undefined (`debate.ts`, AD-6d), and no code path writes an
+    // exit afterwards — so `unresolved` and `exit` cannot co-occur, and a
+    // `renderDebate` call here was dead code sitting under a comment claiming
+    // otherwise. What a reader needs in this section is the died-at-stage line
+    // above, which already says the debate never reached an exit.
     lines.push(indent(finding.claim, "      "))
   }
   lines.push("")

@@ -2,13 +2,14 @@
  * Pipeline assembly — the one seam a caller drives (AD-1: the entrypoint
  * injects the adapters' port implementations; the core knows no harness).
  *
- * Story 4 runs four of the six filters: discover -> cluster -> route -> output.
- * Stories 5–6 insert debate and judge between them WITHOUT changing this
+ * Story 5 runs five of the six filters: discover -> cluster -> route -> debate ->
+ * output. Story 6 inserts the judge between the last two WITHOUT changing this
  * signature, and story 9's ablation calls this function directly as the
  * single-model control arm — no second code path.
  */
 
 import type { Roster } from "../domain/roster.ts"
+import { clampTokenCap } from "../budget/ledger.ts"
 import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -17,6 +18,7 @@ import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
 import { cluster } from "../stages/cluster.ts"
+import { clampMaxRounds, debate } from "../stages/debate.ts"
 import { discover } from "../stages/discover.ts"
 import { output } from "../stages/output.ts"
 import { clampThreshold, route } from "../stages/route.ts"
@@ -40,6 +42,38 @@ export interface ReviewDeps {
    * needs the dial today is missing it.
    */
   threshold?: number
+  /**
+   * CAP-4 — the debate round cap. Defaulted and clamped by the debate stage.
+   *
+   * This seam is deliberately the only way to move it, for the reason story 4
+   * recorded for `threshold`: `cost-model.md` puts ONE budget number and a
+   * `quick | normal | paranoid` preset in front of the user, and story 8 owns
+   * that surface. Exposing a raw round dial on `mad_review` now would ship the
+   * eleventh dial the preset exists to hide and then need deprecating.
+   */
+  maxRounds?: number
+  /**
+   * AD-15 — a token ceiling in tokens, defaulted and clamped by
+   * `clampTokenCap`. Absent means NO ceiling, which is what every caller before
+   * story 5 got.
+   *
+   * **IT IS MEASURED OVER THE WHOLE RUN BUT ONLY GATES DEBATE.** The ledger
+   * records every stage's turns, so `spent` includes discovery — but debate is
+   * the only stage that asks `mayISpend` before spending, because it is the only
+   * stage story 5 gave a gate. The consequence is worth stating rather than
+   * discovering: a cap smaller than discovery's own spend leaves nothing for
+   * debate, so the first gate check refuses and EVERY contested finding is
+   * marked `unresolved { diedAtStage: "debate" }` without a single debate turn
+   * having run. That is honest — the run says exactly where it stopped (AD-6d) —
+   * but it is not "the budget was too small for the debate", it is "the budget
+   * was already gone". Story 8 owns the user-facing budget number and is where
+   * metering the earlier stages belongs.
+   *
+   * It lives on the LEDGER rather than beside it, so "may I spend?" is
+   * answerable from one object (`core/budget/ledger.ts`). Same `Ask First` as
+   * `maxRounds`: this seam, never the `mad_review` tool surface.
+   */
+  tokenCap?: number
 }
 
 export interface ReviewResult {
@@ -82,8 +116,16 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     // CAP-3 — clamped once, here, so the record carries the value routing
     // actually used rather than the one the caller asked for.
     threshold: clampThreshold(deps.threshold),
+    // CAP-4 — clamped once, here, for exactly `threshold`'s reason: the record
+    // carries the value debate actually used, not the one the caller asked for.
+    maxRounds: clampMaxRounds(deps.maxRounds),
     warnings: [...(deps.priorWarnings ?? [])],
-    ledger: emptyLedger(),
+    // AD-15 — the ceiling rides on the ledger, beside the spend it bounds, and
+    // is CLAMPED once here for exactly `threshold`'s and `maxRounds`' reason. An
+    // unclamped `NaN` is the one that bites: `spent < NaN` is false for every
+    // spend, so it refuses the first turn and the run then blames a budget
+    // nobody set (code review 2026-08-24).
+    ledger: emptyLedger(clampTokenCap(deps.tokenCap)),
   }
 
   // ---- stage 1: discover ----
@@ -139,7 +181,55 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     toJudgeNoPrior: routed.toJudgeNoPrior,
   }
 
-  // ---- stages 4–5: debate, judge — stories 5–6 ----
+  // ---- stage 4: debate ----
+  //
+  // The CANONICAL set again, and the whole of it: `debate()` picks out its own
+  // `route: "debate"` partition rather than being handed a filtered array, so
+  // the one place that decides what is contested stays `route`, and the stage
+  // returns the same array it was given (it never filters).
+  //
+  // `answeredSlots` is derived HERE from discovery's own drop-out list, because
+  // discovery is the only stage that knows who answered. The non-author seat in
+  // a debate room exists to produce a contest; offering it to a model that
+  // already failed twice would buy a warning instead of an argument.
+  const answeredSlots = roster.slots
+    .map((slot) => slot.slot)
+    .concat(roster.lensSlots.map((slot) => slot.slot))
+    .filter((slot) => !discovered.droppedOut.includes(slot))
+
+  const debated = await debate({
+    findings: record.findings,
+    // The pre-cluster union, so a cluster's CO-FINDERS are resolvable from
+    // `mergedIds` — the only place an absorbed member's author survives.
+    pool: record.pool,
+    roster,
+    answeredSlots,
+    backend,
+    input: buildInput(change),
+    clock,
+    ledger: record.ledger,
+    maxRounds: record.maxRounds,
+  })
+  // Re-stamped from the stage's return for routing's reason exactly: the record
+  // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is
+  // already a fixpoint, and the counts come across because a partition counted
+  // twice is a partition that can disagree with itself.
+  record.maxRounds = debated.maxRounds
+  record.debateCounts = {
+    debated: debated.debated,
+    converged: debated.converged,
+    convergedUncontested: debated.convergedUncontested,
+    convergedUnsure: debated.convergedUnsure,
+    stalled: debated.stalled,
+    cap: debated.cap,
+    unresolved: debated.unresolved,
+    rounds: debated.rounds,
+    turns: debated.turns,
+    attempts: debated.attempts,
+  }
+  record.warnings.push(...debated.warnings)
+
+  // ---- stage 5: judge — story 6 ----
 
   // ---- stage 6: output ----
   record.finishedAt = clock.now()

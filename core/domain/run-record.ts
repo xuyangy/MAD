@@ -68,6 +68,20 @@ export interface LedgerEntry {
 export interface TokenLedger {
   entries: LedgerEntry[]
   total: TokenUsage
+  /**
+   * AD-15 — the ceiling, in tokens, and `null` MEANS "no ceiling". Required and
+   * never optional, for the same reason `RunRecord.threshold` is: absent and
+   * unlimited must not be two ways of saying the same thing, and story 8's
+   * presets resolve to exactly this field.
+   *
+   * It lives HERE, beside the spend, rather than as a second dial on
+   * `RunRecord`, so "may I spend?" is answerable from ONE object. Two fields
+   * that can disagree is the failure AD-15's single accountant exists to
+   * prevent. The gate that reads it is `core/budget/ledger.ts`; nothing in this
+   * module enforces it, because recording and permitting are different jobs and
+   * story 1 only ever did the first.
+   */
+  cap: number | null
 }
 
 export interface RunRecord {
@@ -136,6 +150,24 @@ export interface RunRecord {
    * cover every finding it decided about, which is what the summary claims to be.
    */
   routeCounts?: RouteCounts
+  /**
+   * CAP-4 — the round cap this run actually debated under, already clamped.
+   * Required and never optional, for exactly the reason `threshold` is: a debate
+   * summary without its cap is a count nobody can interpret, and CAP-4's `cap`
+   * exit is only readable against the number it hit. Story 8's presets record
+   * what they resolved to here.
+   */
+  maxRounds: number
+  /**
+   * CAP-4 — the exits debate produced, as the DEBATE STAGE counted them.
+   *
+   * Optional, and its ABSENCE is the signal that debate has not run — the same
+   * shape `routeCounts` uses, and for the same reason: a run that debated
+   * nothing carries all-zero counts, which is a different fact from a run that
+   * never debated. Counted by the stage that decided them so a renderer cannot
+   * produce a second, narrower partition of the same set.
+   */
+  debateCounts?: DebateCounts
   warnings: Warning[]
   ledger: TokenLedger
 }
@@ -162,6 +194,67 @@ export interface RouteCounts {
 }
 
 /**
+ * CAP-4 — the debated partition, counted once by the stage that decided it.
+ *
+ * `debated === converged + stalled + cap + unresolved`, always. The four buckets
+ * are separate claims and are never summed into one "debate finished" number:
+ * `stalled` is the exit that SAVED tokens (`cost-model.md` lever 3), `cap` is
+ * the one that spent them all, and `unresolved` is not an exit at all — it is
+ * AD-6d's budget exhaustion, which leaves a finding with no `exit` on purpose.
+ *
+ * `rounds` and `turns` are the cost, in the two units that matter: `rounds` is
+ * how many batched rounds ran, `turns` is how many ALLOCATIONS were requested
+ * (AD-15: one batched turn covering nine findings is one allocation, not nine).
+ */
+export interface DebateCounts {
+  /** Findings that entered debate — the `route: "debate"` partition. */
+  debated: number
+  converged: number
+  /**
+   * A SUBSET of `converged` — never added to it. Only ONE participant ever
+   * stated a position, so nothing was contested and nothing was agreed.
+   *
+   * It is counted because AD-6 forbids a degraded review from reading like a
+   * good one, and `converged` alone cannot tell them apart: a room where two
+   * models examined the claim and settled, and a room where everyone but the
+   * author dropped out, land on the same word. `Finding.exit` is three values
+   * and this story may not widen it, so the distinction lives here and in the
+   * exit entry's `kind` (`debate-exit-converged-uncontested`), which is where
+   * story 6's judge reads it.
+   */
+  convergedUncontested: number
+  /**
+   * A SUBSET of `converged` — never added to it. Every standing position was
+   * `unsure`: the participants agree only that the evidence did not settle it.
+   *
+   * Counted separately for the same reason as the field above, and it is the one
+   * the judge most needs: unanimous uncertainty is precisely the case that must
+   * not reach a reader as a settled debate.
+   */
+  convergedUnsure: number
+  stalled: number
+  cap: number
+  /** AD-6d — undecided when the budget ran out. Not an exit; no `exit` is set. */
+  unresolved: number
+  /** Batched rounds actually run across the whole stage. */
+  rounds: number
+  /**
+   * Turns REQUESTED — the AD-15 unit of allocation. One batched turn covering
+   * nine findings is one allocation, and a turn that needed its one retry is
+   * still one allocation.
+   */
+  turns: number
+  /**
+   * Turns BILLED — every attempt that reported tokens, which is what reaches the
+   * ledger. `attempts >= turns` always, and they differ exactly when a turn was
+   * retried. Carried beside `turns` rather than collapsed into it because the
+   * rendered run prints the ledger's totals on the same page, and one number
+   * captioned as the other is arithmetic a reader has no way to check.
+   */
+  attempts: number
+}
+
+/**
  * CAP-3 — the ONE way the threshold is written for a human, so the routing stage
  * and the renderer cannot disagree about what dial a run used.
  *
@@ -181,8 +274,8 @@ export function formatThreshold(threshold: number): string {
   return `${Number.parseFloat((threshold * 100).toFixed(2))}%`
 }
 
-export function emptyLedger(): TokenLedger {
-  return { entries: [], total: emptyTokenUsage() }
+export function emptyLedger(cap: number | null = null): TokenLedger {
+  return { entries: [], total: emptyTokenUsage(), cap }
 }
 
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {

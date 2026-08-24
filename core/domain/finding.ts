@@ -5,9 +5,9 @@
  * with the stage that OWNS it. A stage may read anything; it writes only its
  * own fields. Every field was declared here from story 1 onward, before its
  * stage existed, so no later story could invent a second conflicting name for
- * one. As of story 4 the stages that WRITE are `discover`, `cluster`, `route`
- * and `output`; the fields owned by `debate` and `judge` are still declared and
- * left unset, and will be written by stories 5–6.
+ * one. As of story 5 the stages that WRITE are `discover`, `cluster`, `route`,
+ * `debate` and `output`; the fields owned by `judge` are still declared and left
+ * unset, and will be written by story 6.
  *
  * AD-8's ownership list for discovery, in full and in one place: **claim,
  * reasoning, locus, severity, author, source, lens.** Nothing else. `source` and
@@ -24,6 +24,29 @@
  * rather than stored beside it (`core/stages/route.ts`). Routing READS severity
  * and coDiscovery and writes neither: AD-10 exists because routing depends on
  * severity, so a stage that rewrote it would change what already happened.
+ *
+ * AD-8's ownership list for DEBATE (story 5): **exit**, the debate entries it
+ * appends to `history`, and — only on budget exhaustion — `unresolved`. That is
+ * the whole list, and three things are pointedly NOT on it:
+ *
+ * - `verdict` is the JUDGE's (story 6), including `withdrawn-by-author`. When an
+ *   author withdraws, debate records the withdrawal as that author's POSITION in
+ *   `history` and exits `converged`; the judge reads the entry and writes the
+ *   verdict. Writing it here would make debate a second writer of a field it
+ *   does not own, and `withdrawn-by-author` is already a `Verdict` value below.
+ * - `severity`, `coDiscovery` and `clusterSeverity` are read and never written
+ *   (AD-10), for routing's reason exactly: debate DEPENDS on the contest those
+ *   fields produced, so a stage that rewrote them would change what already
+ *   happened.
+ * - the finding itself is never removed. Deniers cannot delete a finding, an
+ *   author's withdrawal does not delete it either, and no code path in the stage
+ *   filters the set. A withdrawn finding leaves debate present, exited, and with
+ *   its `verdict` unset.
+ *
+ * `exit` is written EXACTLY ONCE per debated finding, and a `route: "judge"`
+ * finding never receives one — that absence is what tells a reader the finding
+ * was never argued, which is a different fact from having been argued to no
+ * conclusion.
  */
 
 /** AD-10 — the severity scale is exactly these four values, and nothing else. */

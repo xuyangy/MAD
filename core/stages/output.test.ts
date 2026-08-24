@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test"
 
 import type { Finding, Severity } from "../domain/finding.ts"
-import { emptyLedger, type RouteCounts, type RunRecord } from "../domain/run-record.ts"
+import {
+  emptyLedger,
+  type DebateCounts,
+  type RouteCounts,
+  type RunRecord,
+} from "../domain/run-record.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate } from "../test-support/fakes.ts"
 import { output, rankFindings } from "./output.ts"
+import { DEFAULT_MAX_ROUNDS } from "./debate.ts"
 import { DEFAULT_CO_DISCOVERY_THRESHOLD } from "./route.ts"
 
 function finding(partial: Partial<Finding> & { severity: Severity; file: string }): Finding {
@@ -46,6 +52,11 @@ function record(
   // that keeps `output()` callable mid-pipeline. A test that wants the summary
   // supplies the stage's counts, exactly as `review()` does.
   routeCounts?: RouteCounts,
+  // Absent by default for exactly `routeCounts`' reason: absent MEANS "debate has
+  // not run", which is the property that keeps `output()` callable mid-pipeline
+  // and is a different fact from "debate ran and contested nothing".
+  debateCounts?: DebateCounts,
+  maxRounds = DEFAULT_MAX_ROUNDS,
 ): RunRecord {
   const { roster, warnings } = selectRoster([candidate("openai", "gpt-5")], {
     slots: 1,
@@ -64,6 +75,8 @@ function record(
     lensInstructions: roster.lensSlots.map((slot) => ({ lens: slot.lens, origin: "shipped" as const })),
     threshold,
     routeCounts,
+    maxRounds,
+    debateCounts,
     warnings,
     ledger: emptyLedger(),
   }
@@ -811,8 +824,8 @@ describe("the route and the dial that produced it are rendered (CAP-3)", () => {
       ),
     )
 
-    expect(rendered).toContain("debate and judging are not implemented yet (stories 5–6)")
-    expect(rendered).toContain("nothing below has been debated or judged")
+    expect(rendered).toContain("judging is not implemented yet (story 6)")
+    expect(rendered).toContain("Nothing below has been judged")
   })
 
   test("BOTH ARE SILENT ON A PRE-ROUTE RECORD, so output stays callable mid-pipeline", () => {
@@ -892,5 +905,243 @@ describe("the route and the dial that produced it are rendered (CAP-3)", () => {
     )
 
     expect(rendered).toContain("route: judge (verify-independently) — no reason recorded")
+  })
+})
+
+describe("the exit and the cap that produced it are rendered (CAP-4)", () => {
+  const debateCounts = (partial: Partial<DebateCounts> = {}): DebateCounts => ({
+    debated: 1,
+    converged: 1,
+    convergedUncontested: 0,
+    convergedUnsure: 0,
+    stalled: 0,
+    cap: 0,
+    unresolved: 0,
+    rounds: 2,
+    turns: 4,
+    attempts: 4,
+    ...partial,
+  })
+
+  /** A finding that carries a real round transcript, so the round count is read. */
+  function debated(
+    exit: "converged" | "stalled" | "cap",
+    rounds: number,
+    reason = exit === "converged" ? "agreed" : exit === "stalled" ? "restated" : "restated",
+    body = "the exit sentence the stage recorded",
+  ): Finding {
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.exit = exit
+    for (let round = 1; round <= rounds; round += 1) {
+      f.history.push({
+        stage: "debate",
+        actor: "discovery-1",
+        at: "t1",
+        kind: "debate-round",
+        body: "argument",
+        round,
+        position: "upholds",
+        positionChanged: false,
+        citations: [],
+      })
+    }
+    // The renderer reads the exit ENTRY's body, so the fixture must carry one —
+    // that is what lets "the room agreed" and "nobody else answered" render
+    // differently from one three-value `exit` field.
+    f.history.push({
+      stage: "debate",
+      actor: "mad",
+      at: "t2",
+      kind: `debate-exit-${exit}-${reason}`,
+      body,
+    })
+    return f
+  }
+
+  test("each exit renders WITH ITS MEANING — three words a reader could otherwise conflate", () => {
+    const rendered = output(
+      record(
+        [debated("stalled", 2, "restated", "Stalled in round 2: nobody moved.")],
+        1,
+        [],
+        0.8,
+        undefined,
+        debateCounts({ converged: 0, stalled: 1 }),
+      ),
+    )
+    expect(rendered).toContain("debate: stalled after 2 round(s)")
+    expect(rendered).toContain("nobody moved")
+  })
+
+  test("the round count is read from `history`, not from a stored counter", () => {
+    const rendered = output(
+      record([debated("cap", 3, "restated", "Round cap reached at 3: positions still differ.")], 1, [], 0.8, undefined, debateCounts({ converged: 0, cap: 1, rounds: 3 })),
+    )
+    expect(rendered).toContain("debate: cap after 3 round(s)")
+    expect(rendered).toContain("positions still differ")
+  })
+
+  test("ZERO ROUNDS DOES NOT RENDER AS `after 0 round(s)` — no round is not an empty round", () => {
+    // A debate that recorded no position spent no round anybody can read.
+    // Printing `0` implies rounds that ran and produced nothing, which is a
+    // different and more flattering claim than "nothing was ever argued".
+    const silent = debated("stalled", 0, "silent", "Stalled in round 0: NO PARTICIPANT STATED A POSITION.")
+    const rendered = output(record([silent], 1, [], 0.8, undefined, debateCounts({ converged: 0, stalled: 1, rounds: 1 })))
+    expect(rendered).not.toContain("0 round(s)")
+    expect(rendered).toContain("debate: stalled with no round on the record")
+    expect(rendered).toContain("NO PARTICIPANT STATED A POSITION")
+  })
+
+  test("AD-6 — `uncontested` and `unsure` do not render as agreement", () => {
+    // The whole reason the reason rides in the exit entry: `Finding.exit` is
+    // three values, and "the room agreed" and "nobody else answered" are not one
+    // of them.
+    const uncontested = debated(
+      "converged",
+      1,
+      "uncontested",
+      "Converged in round 1: UNCONTESTED — only one participant ever stated a position, so nothing here is agreement.",
+    )
+    const rendered = output(record([uncontested], 1, [], 0.8, undefined, debateCounts({ convergedUncontested: 1 })))
+    expect(rendered).toContain("debate: converged after 1 round(s)")
+    expect(rendered).toContain("UNCONTESTED")
+    expect(rendered).toContain("nothing here is agreement")
+    expect(rendered).toContain("converged UNCONTESTED — only one participant ever")
+
+    const unsure = debated(
+      "converged",
+      2,
+      "unsure",
+      "Converged in round 2: every participant answered UNSURE.",
+    )
+    const rendered2 = output(record([unsure], 1, [], 0.8, undefined, debateCounts({ convergedUnsure: 1 })))
+    expect(rendered2).toContain("UNSURE")
+    expect(rendered2).toContain("converged on UNSURE")
+    expect(rendered2).toContain("Unresolved by evidence, not upheld.")
+  })
+
+  test("THE SUMMARY NAMES THE CAP AND THE EXITS, and reports the STAGE's counts", () => {
+    const rendered = output(
+      record(
+        [debated("converged", 2)],
+        3,
+        [],
+        0.8,
+        { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 },
+        debateCounts({ rounds: 2, turns: 4 }),
+        3,
+      ),
+    )
+    expect(rendered).toContain(
+      "DEBATE (round cap 3, no token cap): 1 contested finding(s), 2 batched round(s), 4 turn(s) spent.",
+    )
+    expect(rendered).toContain("exits: 1 converged, 0 stalled, 0 hit the round cap.")
+    // AD-15 / lever 1 — a turn count under the finding count is batching, not an
+    // omission, and the summary says which.
+    expect(rendered).toContain("batched one per model per round")
+  })
+
+  test("`debated: 0` IS NOT THE SAME FACT AS `debateCounts` being absent", () => {
+    // The absent-vs-zero distinction the field exists for, said out loud.
+    const ran = output(record([finding({ severity: "high", file: "a.ts", route: "judge" })], 1, [], 0.8, undefined, debateCounts({ debated: 0, converged: 0, rounds: 0, turns: 0, attempts: 0 })))
+    expect(ran).toContain("DEBATE (round cap")
+    expect(ran).toContain("Nothing was contested, so no debate turn was spent.")
+
+    const didNotRun = output(record([finding({ severity: "high", file: "a.ts", route: "judge" })], 1, [], 0.8))
+    expect(didNotRun).not.toContain("DEBATE (round cap")
+  })
+
+  test("BOTH ARE SILENT ON A PRE-DEBATE RECORD, so output stays callable mid-pipeline", () => {
+    const rendered = output(record([finding({ severity: "high", file: "a.ts", route: "debate" })], 1, [], 0.8))
+    expect(rendered).not.toContain("DEBATE (round cap")
+    expect(rendered).not.toContain("debate: ")
+  })
+
+  test("a `route: 'judge'` finding renders NO debate line — it was never argued", () => {
+    const judged = finding({ severity: "high", file: "b.ts", route: "judge", routeReason: "3/3 cleared the dial" })
+    const rendered = output(record([judged], 3, [], 0.8, undefined, debateCounts({ debated: 0, converged: 0, rounds: 0, turns: 0, attempts: 0 })))
+    expect(rendered).toContain("route: judge (verify-independently)")
+    expect(rendered).not.toContain("debate: ")
+  })
+
+  test("AD-6d — the unresolved section reports the budget, and the summary counts it", () => {
+    const died = finding({ severity: "high", file: "b.ts", route: "debate", routeReason: "contested" })
+    died.unresolved = { diedAtStage: "debate", reason: "the token budget (40) ran out after round 1 of 3" }
+    const rendered = output(
+      record(
+        [died],
+        3,
+        [],
+        0.8,
+        { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 },
+        debateCounts({ converged: 0, unresolved: 1, rounds: 1, turns: 2 }),
+      ),
+    )
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (1)")
+    expect(rendered).toContain("died at stage debate")
+    expect(rendered).toContain("token budget")
+    expect(rendered).toContain("1 finding(s) never reached an exit: the token budget ran out.")
+    // Counted by the stage, so a finding that died still appears in the totals.
+    expect(rendered).toContain("1 contested finding(s)")
+  })
+
+  test("THE STALL SENTENCE IS THE SUMMARY'S, not the per-finding line's", () => {
+    // Deleting the summary's `stalled > 0` branch left the suite green, because
+    // every stall assertion matched `renderDebate`'s string instead (mutation
+    // check, code review 2026-08-24). This one reads the summary.
+    const rendered = output(
+      record(
+        [debated("stalled", 2, "restated", "Stalled in round 2: nobody moved.")],
+        3,
+        [],
+        0.8,
+        { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 },
+        debateCounts({ converged: 0, stalled: 1 }),
+      ),
+    )
+    expect(rendered).toContain("A stalled debate is one where nobody moved. It short-circuits to the judge rather than")
+    expect(rendered).toContain("burning the remaining rounds — restating is not progress.")
+  })
+
+  test("AD-15 — the TOKEN CAP is named beside the round cap, whether or not it was hit", () => {
+    // A ceiling that only appears once it has been exceeded is a ceiling the
+    // reader cannot check the run against.
+    const capped = record([debated("converged", 1)], 1, [], 0.8, undefined, debateCounts())
+    capped.ledger.cap = 5000
+    expect(output(capped)).toContain("DEBATE (round cap 3, token cap 5000)")
+  })
+
+  test("BILLED ATTEMPTS ARE RECONCILED AGAINST ALLOCATIONS when they differ", () => {
+    const retried = output(record([debated("converged", 1)], 1, [], 0.8, undefined, debateCounts({ turns: 4, attempts: 5 })))
+    expect(retried).toContain("5 turn(s) were BILLED against those 4 allocation(s): 1 needed")
+    expect(retried).toContain("The TOKENS line below counts billed attempts, not allocations.")
+
+    // Silent when they agree — "4 turns, 4 attempts" is noise.
+    const clean = output(record([debated("converged", 1)], 1, [], 0.8, undefined, debateCounts()))
+    expect(clean).not.toContain("were BILLED against")
+  })
+
+  test("THE UNRESOLVED SECTION CARRIES NO DEBATE LINE — the two fields cannot co-occur", () => {
+    // `unresolved` is written only for a room whose `exit` is undefined (AD-6d),
+    // and nothing writes an exit afterwards. The line that used to be emitted
+    // here was dead code under a comment claiming otherwise.
+    const died = finding({ severity: "high", file: "b.ts", route: "debate", routeReason: "contested" })
+    died.unresolved = { diedAtStage: "debate", reason: "the token budget (40) ran out after round 1 of 3" }
+    const rendered = output(record([died], 3, [], 0.8, undefined, debateCounts({ converged: 0, unresolved: 1 })))
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (1)")
+    expect(rendered).not.toContain("debate: ")
+  })
+
+  test("RANKING IS UNTOUCHED BY THE EXIT — verdict ordering is story 6's", () => {
+    // An exit sorted on would put "we argued about this" above "this is bad".
+    const stalledCritical = debated("stalled", 2)
+    stalledCritical.severity = "critical"
+    stalledCritical.locus = { file: "z.ts", startLine: 1, endLine: 1 }
+    const convergedLow = debated("converged", 1)
+    convergedLow.severity = "low"
+    convergedLow.locus = { file: "a.ts", startLine: 1, endLine: 1 }
+
+    const ranked = rankFindings([convergedLow, stalledCritical])
+    expect(ranked.map((f) => f.severity)).toEqual(["critical", "low"])
   })
 })

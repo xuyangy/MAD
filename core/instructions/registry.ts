@@ -21,6 +21,7 @@
  * permission (`SPEC.md` non-goals).
  */
 
+import { CODING_DEBATE_GENERALIST } from "./coding/debate.ts"
 import { CODING_DISCOVERY_GENERALIST } from "./coding/discovery.ts"
 import { CODING_LENS_INSTRUCTIONS, lensInstructionText } from "./coding/lenses.ts"
 import type { InstructionSet, TaskType } from "./types.ts"
@@ -52,12 +53,23 @@ function keyOf(taskType: TaskType, role: string, lens?: string): string {
   return lens === undefined ? `${taskType}\0${role}` : `${taskType}\0${role}\0${lens}`
 }
 
-/** Every (task type, role) the shipped packs have an unlensed set for. */
+/**
+ * Every (task type, role) the shipped packs have an unlensed set for.
+ *
+ * `debate` joined it in story 5 and joined it here ONLY — there is deliberately
+ * no `(coding, debate)` entry in `LENS_SETS` below, and AD-17a is the reason: a
+ * lens author debates as an author, on evidence, so every debate participant
+ * gets this one generalist. `resolveInstructions({role: "debate", lens: "x"})`
+ * therefore falls through to the GENERATED fallback rather than borrowing
+ * discovery's lens set — which is exactly the leak the role-in-the-key change of
+ * 2026-08-15 was made to close, now that a second role actually exists.
+ */
 const GENERALISTS: ReadonlyMap<string, InstructionSet> = new Map([
   [
     keyOf(CODING_DISCOVERY_GENERALIST.taskType, CODING_DISCOVERY_GENERALIST.role),
     CODING_DISCOVERY_GENERALIST,
   ],
+  [keyOf(CODING_DEBATE_GENERALIST.taskType, CODING_DEBATE_GENERALIST.role), CODING_DEBATE_GENERALIST],
 ])
 
 /**

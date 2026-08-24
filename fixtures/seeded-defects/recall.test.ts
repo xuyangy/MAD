@@ -14,7 +14,13 @@ import { describe, expect, test } from "bun:test"
 
 import { selectRoster } from "../../core/roster/select.ts"
 import { review } from "../../core/run/review.ts"
-import { candidate, fakeClock, FakeBackend, type SlotScript } from "../../core/test-support/fakes.ts"
+import {
+  candidate,
+  fakeClock,
+  FakeBackend,
+  type SlotScript,
+  type SlotStep,
+} from "../../core/test-support/fakes.ts"
 import {
   lensRecallGain,
   missedDefects,
@@ -273,6 +279,31 @@ const LENS_SCRIPTS: Record<string, SlotScript> = {
 
 const LENSES = ["performance", "privacy-a11y", "tests", "security"] as const
 
+/**
+ * CAP-1 measures DISCOVERY recall, and story 5 put a debate stage inside
+ * `review()` between discovery and output. Every scripted slot is therefore
+ * asked a SECOND time, for a debate turn this fixture has no opinion about —
+ * and `FakeBackend` repeats a script's last step, so without this the debate
+ * turn would be handed the discovery envelope, fail validation twice, and
+ * decorate a harness that asserts "clean, undegraded 3-model run" with three
+ * drop-out warnings.
+ *
+ * `{turns: []}` is a VALID debate envelope meaning "I stated no position this
+ * round". The stage treats it as abstention, which is exactly what this fixture
+ * means: it neither denies nor concedes anything, raises no warning, moves no
+ * position, and leaves the contested findings to exit at the round cap. The
+ * recall numbers below are untouched by it — debate adds and removes no
+ * findings — which is the property that keeps CAP-1's measurement the same
+ * measurement it was before this stage existed.
+ */
+const DEBATE_ABSTENTION: SlotStep = { kind: "ok", value: { turns: [] } }
+
+function abstainingInDebate(scripts: Record<string, SlotScript>): Record<string, SlotScript> {
+  return Object.fromEntries(
+    Object.entries(scripts).map(([slot, script]) => [slot, [...script, DEBATE_ABSTENTION]]),
+  )
+}
+
 /** Three lineages, three slots — the roster AD-4 ranks toward. */
 function threeSlotRun(lenses: readonly string[] = []) {
   const resolved = selectRoster(
@@ -285,7 +316,7 @@ function threeSlotRun(lenses: readonly string[] = []) {
   )
   return review({
     roster: resolved.roster,
-    backend: new FakeBackend({ ...SCRIPTS, ...LENS_SCRIPTS }),
+    backend: new FakeBackend(abstainingInDebate({ ...SCRIPTS, ...LENS_SCRIPTS })),
     clock: fakeClock(),
     change: SEEDED_CHANGE,
     priorWarnings: resolved.warnings,

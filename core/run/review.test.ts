@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test"
 
 import { selectRoster } from "../roster/select.ts"
+import { DEFAULT_MAX_ROUNDS } from "../stages/debate.ts"
 import { DEFAULT_CO_DISCOVERY_THRESHOLD } from "../stages/route.ts"
-import { candidate, fakeChange, fakeClock, FakeBackend } from "../test-support/fakes.ts"
+import type { ModelBackend } from "../ports/model-backend.ts"
+import {
+  candidate,
+  fakeChange,
+  fakeClock,
+  FakeBackend,
+  tokens,
+  type SlotScript,
+  type SlotStep,
+} from "../test-support/fakes.ts"
 import { review } from "./review.ts"
 
 const ENVELOPE = {
@@ -16,6 +26,24 @@ const ENVELOPE = {
       endLine: 14,
     },
   ],
+}
+
+/**
+ * A VALID debate envelope stating no position — "I said nothing this round".
+ *
+ * `FakeBackend` repeats a script's last step, so a slot scripted only for
+ * discovery is handed its discovery envelope on its debate turn, fails
+ * validation twice, and drops out (AD-12). That is correct behaviour and exactly
+ * the wrong thing to have happen inside a test about some other stage. Silence
+ * is abstention: appending this step lets a debate happen and end without
+ * anybody in it having claimed anything.
+ */
+const DEBATE_ABSTENTION: SlotStep = { kind: "ok", value: { turns: [] } }
+
+function abstainingInDebate(scripts: Record<string, SlotScript>): Record<string, SlotScript> {
+  return Object.fromEntries(
+    Object.entries(scripts).map(([slot, script]) => [slot, [...script, DEBATE_ABSTENTION]]),
+  )
 }
 
 function setup(models: [string, string][], slots = 1, lenses: readonly string[] = []) {
@@ -690,7 +718,13 @@ describe("review — CAP-3 threshold routing, through the whole pipeline", () =>
     const resolved = setup(CAP3_MODELS, 3, ["security"])
     const { record, rendered } = await review({
       roster: resolved.roster,
-      backend: new FakeBackend({
+      // Story 5 put a debate stage between routing and output, so every slot in
+      // a contested finding's room is asked a SECOND time. This test is about
+      // ROUTING, so its slots ABSTAIN in debate rather than being scripted for
+      // an argument nobody here asserts on — otherwise the debate turn would be
+      // handed the discovery envelope, fail validation twice, and decorate a
+      // routing assertion with drop-out warnings.
+      backend: new FakeBackend(abstainingInDebate({
         "discovery-1": [
           {
             kind: "ok" as const,
@@ -731,7 +765,7 @@ describe("review — CAP-3 threshold routing, through the whole pipeline", () =>
             },
           },
         ],
-      }),
+      })),
       clock: fakeClock(),
       change: fakeChange(),
       priorWarnings: resolved.warnings,
@@ -779,5 +813,427 @@ describe("review — CAP-3 threshold routing, through the whole pipeline", () =>
     expect(rendered).toContain("ROUTING (co-discovery threshold 80%)")
     // Every finding leaves routed — routing partitions, it never filters.
     expect(record.findings.every((f) => f.route !== undefined)).toBe(true)
+  })
+})
+
+describe("review — CAP-4 per-finding debate, through the whole pipeline", () => {
+  /**
+   * Two models, two DISTINCT findings, so each reads 1/2 and lands below the
+   * default 0.8 threshold — both contested, and neither is contested by accident.
+   *
+   * Ids are `fakeClock`'s: `run-1`, then one `finding-N` per raised finding in
+   * roster order. `finding-2` is discovery-1's, `finding-3` is discovery-2's.
+   */
+  const DEBATE_MODELS: [string, string][] = [
+    ["anthropic", "claude-sonnet-4-5"],
+    ["openai", "gpt-5"],
+  ]
+
+  const raised = (claim: string, file: string) => ({
+    kind: "ok" as const,
+    value: { findings: [{ ...ENVELOPE.findings[0]!, claim, file, startLine: 1, endLine: 1 }] },
+  })
+
+  const position = (
+    ...turns: { findingId: string; position: string; concession?: string }[]
+  ) => ({
+    kind: "ok" as const,
+    value: {
+      turns: turns.map((turn) => ({
+        findingId: turn.findingId,
+        position: turn.position,
+        argument: `${turn.position} on ${turn.findingId}`,
+        ...(turn.concession === undefined ? {} : { concession: turn.concession }),
+        citations: ["src/pay.ts:12"],
+      })),
+    },
+  })
+
+  test("AC: A CONTESTED FINDING DEBATES THROUGH THE REAL PIPELINE; A JUDGE-ROUTED ONE DOES NOT", async () => {
+    // discovery-1 and discovery-2 raise the SAME defect at the same locus, so it
+    // clusters to 2/2 and clears the dial — judge, never debated. discovery-2
+    // also raises a lone one at 1/2, which is contested.
+    const shared = { ...ENVELOPE.findings[0]!, claim: "The rate is never validated.", file: "src/pay.ts", startLine: 12, endLine: 14 }
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          { kind: "ok", value: { findings: [shared] } },
+          position({ findingId: "finding-4", position: "denies" }),
+        ],
+        "discovery-2": [
+          {
+            kind: "ok",
+            value: {
+              findings: [
+                shared,
+                { ...ENVELOPE.findings[0]!, claim: "The ledger write is not awaited.", file: "src/ledger.ts", startLine: 90, endLine: 90 },
+              ],
+            },
+          },
+          position({ findingId: "finding-4", position: "upholds" }),
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    const cleared = record.findings.find((f) => f.coDiscovery?.raised === 2)!
+    const contested = record.findings.find((f) => f.locus.file === "src/ledger.ts")!
+
+    // The contested one carries EXACTLY ONE exit and at least one debate entry.
+    expect(contested.route).toBe("debate")
+    expect(contested.exit).toBeDefined()
+    expect(contested.history.filter((e) => e.kind.startsWith("debate-exit-"))).toHaveLength(1)
+    expect(contested.history.some((e) => e.stage === "debate" && e.round === 1)).toBe(true)
+
+    // The threshold-skipped one carries NEITHER. Its absence of an exit is the
+    // fact "this was never argued", not "this was argued to no conclusion".
+    expect(cleared.route).toBe("judge")
+    expect(cleared.exit).toBeUndefined()
+    expect(cleared.history.some((e) => e.stage === "debate")).toBe(false)
+
+    // The record and the render agree about the partition.
+    expect(record.debateCounts?.debated).toBe(1)
+    expect(record.maxRounds).toBe(DEFAULT_MAX_ROUNDS)
+    expect(rendered).toContain("DEBATE (round cap 3, no token cap)")
+    expect(rendered).toContain("debate: ")
+  })
+
+  test("a debate that CONVERGES on a concession is on the record end to end", async () => {
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          raised("The rate is never validated.", "src/pay.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "denies" }),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds", concession: "I had the guard on the wrong line." }),
+        ],
+        "discovery-2": [
+          raised("The ledger write is not awaited.", "src/ledger.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+    })
+
+    const ledgerFinding = record.findings.find((f) => f.locus.file === "src/ledger.ts")!
+    expect(ledgerFinding.exit).toBe("converged")
+    const flip = ledgerFinding.history.find((e) => e.round === 2 && e.actor === "discovery-1")!
+    expect(flip.positionChanged).toBe(true)
+    expect(flip.concession).toContain("guard")
+    // AD-8 — the withdrawal/verdict boundary holds through the real pipeline.
+    expect(ledgerFinding.verdict).toBeUndefined()
+    expect(rendered).toContain("debate: converged")
+    expect(record.debateCounts?.converged).toBe(2)
+  })
+
+  test("AC: A TOKEN CAP THE SECOND ROUND WOULD EXCEED LEAVES FINDINGS UNRESOLVED, NOT DROPPED", async () => {
+    // `tokens()` bills 30 per turn: discovery spends 60, so a cap of 100 permits
+    // round 1 (60 < 100) and refuses round 2 (120 >= 100).
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          raised("The rate is never validated.", "src/pay.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "denies" }),
+        ],
+        "discovery-2": [
+          raised("The ledger write is not awaited.", "src/ledger.ts"),
+          position({ findingId: "finding-2", position: "denies" }, { findingId: "finding-3", position: "upholds" }),
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 100,
+    })
+
+    expect(record.findings).toHaveLength(2)
+    for (const finding of record.findings) {
+      expect(finding.unresolved).toEqual({
+        diedAtStage: "debate",
+        reason: expect.stringContaining("token budget"),
+      })
+      expect(finding.exit).toBeUndefined()
+    }
+    // The run REPORTS where it stopped, and nothing was silently shed.
+    expect(record.warnings.some((w) => w.code === "unresolved-findings")).toBe(true)
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (2)")
+    expect(rendered).toContain("FINDINGS (0)")
+    expect(record.debateCounts?.unresolved).toBe(2)
+  })
+
+  test("AC: A PARTICIPANT THAT FAILS EVERY ATTEMPT DOES NOT STALL THE RUN", async () => {
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          raised("The rate is never validated.", "src/pay.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+        ],
+        "discovery-2": [
+          raised("The ledger write is not awaited.", "src/ledger.ts"),
+          { kind: "fail", failure: "model-error", message: "overloaded" },
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+    })
+
+    // Both models ANSWERED discovery, so the denominator is intact...
+    expect(record.answered).toBe(2)
+    // ...and the drop-out is debate's, named, and does not stop the run.
+    const dropped = record.warnings.filter((w) => w.code === "model-dropped-out" && w.stage === "debate")
+    expect(dropped).toHaveLength(1)
+    expect(dropped[0]!.message).toContain("discovery-2")
+    for (const finding of record.findings) expect(finding.exit).toBeDefined()
+    expect(rendered).toContain("MODEL DROPPED OUT OF DEBATE")
+  })
+
+  test("the same run at a LOWER round cap changes the exit and nothing else", async () => {
+    const scripts = () => ({
+      "discovery-1": [
+        raised("The rate is never validated.", "src/pay.ts"),
+        position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "denies" }),
+        position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "unsure" }),
+        position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+      ],
+      "discovery-2": [
+        raised("The ledger write is not awaited.", "src/ledger.ts"),
+        position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+      ],
+    })
+    const at = async (maxRounds: number) => {
+      const resolved = setup(DEBATE_MODELS, 2)
+      return review({
+        roster: resolved.roster,
+        backend: new FakeBackend(scripts()),
+        clock: fakeClock(),
+        change: fakeChange(),
+        maxRounds,
+      })
+    }
+
+    const long = await at(3)
+    const short = await at(2)
+    const ledgerOf = (r: Awaited<ReturnType<typeof at>>) =>
+      r.record.findings.find((f) => f.locus.file === "src/ledger.ts")!
+
+    expect(ledgerOf(long).exit).toBe("converged")
+    expect(ledgerOf(short).exit).toBe("cap")
+    expect(long.record.maxRounds).toBe(3)
+    expect(short.record.maxRounds).toBe(2)
+    // Everything the exit is not.
+    const shape = (f: (typeof long)["record"]["findings"][number]) => ({
+      claim: f.claim,
+      severity: f.severity,
+      coDiscovery: f.coDiscovery,
+      route: f.route,
+      routeReason: f.routeReason,
+      verdict: f.verdict,
+      unresolved: f.unresolved,
+    })
+    expect(shape(ledgerOf(short))).toEqual(shape(ledgerOf(long)))
+  })
+
+  test("SEAM: A SLOT THAT DROPPED OUT OF DISCOVERY IS NEVER GIVEN A DEBATE TURN", async () => {
+    // Deleting `review()`'s `.filter(slot => !discovered.droppedOut.includes(slot))`
+    // left the whole suite green (mutation check, code review 2026-08-24). That
+    // argument decides WHO argues, and `adapters/opencode/plugin.ts` is the
+    // caller that would ship it.
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const backend = new FakeBackend({
+      "discovery-1": [
+        raised("The rate is never validated.", "src/pay.ts"),
+        position({ findingId: "finding-2", position: "upholds" }),
+      ],
+      // Fails BOTH discovery attempts: it never answers, so it is not a seat.
+      "discovery-2": [{ kind: "fail", failure: "model-error", message: "gone" }],
+      "discovery-3": [
+        raised("The ledger write is not awaited.", "src/ledger.ts"),
+        position({ findingId: "finding-2", position: "denies" }),
+      ],
+    })
+    const { record } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    // The run is degraded and says so, and a contested finding still exists.
+    expect(record.answered).toBe(2)
+    expect(record.findings.some((f) => f.route === "debate")).toBe(true)
+    expect(record.debateCounts!.debated).toBeGreaterThan(0)
+
+    // The dead slot was asked exactly twice — its discovery turn and its one
+    // retry — and never once for debate.
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
+    // ...while the live slots were asked more than their discovery turn.
+    expect(backend.calls.filter((call) => call.slot === "discovery-1").length).toBeGreaterThan(1)
+  })
+
+  test("SEAM: AN ABSORBED MEMBER'S AUTHOR IS SEATED IN THE CANONICAL'S ROOM", async () => {
+    // Deleting `pool: record.pool` left the suite green (mutation check, code
+    // review 2026-08-24). That argument decides WITH WHOM a finding is argued:
+    // without the pre-cluster union there is nowhere to resolve `mergedIds` back
+    // to a second author, and every merged cluster silently loses its
+    // co-finder's seat.
+    //
+    // FOUR slots, deliberately. The cluster is raised by discovery-2 and
+    // discovery-3, and the ONE extra seat goes to discovery-1 (first in roster
+    // order). So without the pool the room would be {discovery-2, discovery-1} —
+    // and discovery-3's absence is the whole assertion. At two or three slots
+    // the co-finder happens to coincide with the extra seat and the test would
+    // pass either way.
+    const sharedLocus = { file: "src/pay.ts", startLine: 12, endLine: 14 }
+    const raisedAt = (claim: string, locus: { file: string; startLine: number; endLine: number }) => ({
+      kind: "ok" as const,
+      value: { findings: [{ ...ENVELOPE.findings[0]!, claim, ...locus }] },
+    })
+    // One debate step answering every id in the run; the stage discards answers
+    // about findings a slot was not seated for (asserted in `debate.test.ts`).
+    const answersAll = position(
+      ...["finding-2", "finding-3", "finding-4", "finding-5"].map((findingId) => ({
+        findingId,
+        position: "upholds",
+      })),
+    )
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+        ["meta", "llama-4-scout"],
+      ],
+      4,
+    )
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [raisedAt("Retries are unbounded.", { file: "src/retry.ts", startLine: 4, endLine: 4 }), answersAll],
+        "discovery-2": [raisedAt("The rate is never validated.", sharedLocus), answersAll],
+        "discovery-3": [raisedAt("The rate is not validated before use.", sharedLocus), answersAll],
+        "discovery-4": [raisedAt("The ledger write is not awaited.", { file: "src/ledger.ts", startLine: 90, endLine: 90 }), answersAll],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      // 2/4 clears neither 0.8 nor 1, so the merged cluster stays contested.
+      maxRounds: 1,
+    })
+
+    const canonical = record.findings.find((f) => (f.mergedIds?.length ?? 0) > 0)!
+    expect(canonical.mergedIds).toHaveLength(1)
+    expect(canonical.author).toBe("discovery-2")
+    expect(canonical.route).toBe("debate")
+
+    // The co-finder argued, and it is seated ONLY because the pool was passed.
+    const spoke = new Set(
+      canonical.history.filter((e) => e.kind === "debate-round").map((e) => e.actor),
+    )
+    expect(spoke.has("discovery-3")).toBe(true)
+    // Sparse room: the author, the co-finder, and exactly one extra seat.
+    expect([...spoke].sort()).toEqual(["discovery-1", "discovery-2", "discovery-3"])
+    expect(spoke.has("discovery-4")).toBe(false)
+  })
+
+  test("SEAM: THE DEBATE PROMPT CARRIES THE CHANGE UNDER REVIEW", async () => {
+    // Replacing `input: buildInput(change)` with `""` left the suite green. That
+    // argument decides what EVIDENCE the debate is about — a debate over a diff
+    // nobody was shown is rhetoric, which is the thing this design exists to
+    // replace.
+    const prompts: string[] = []
+    const resolved = setup(DEBATE_MODELS, 2)
+    const recording: ModelBackend = {
+      capabilities: () => ({ tools: false }),
+      async runTurn(slot, _instructions, input, schema) {
+        prompts.push(input)
+        const payload = input.includes("Debate round")
+          ? { turns: [{ findingId: "finding-2", position: "upholds", argument: "a", citations: [] }] }
+          : { findings: [{ ...ENVELOPE.findings[0]!, claim: `${slot} found it`, file: `src/${slot}.ts`, startLine: 1, endLine: 1 }] }
+        const parsed = schema.safeParse(payload)
+        return parsed.success
+          ? { ok: true, slot, value: parsed.data, tokens: tokens() }
+          : { ok: false, slot, failure: "schema-invalid", message: "n/a", tokens: tokens() }
+      },
+    }
+    await review({
+      roster: resolved.roster,
+      backend: recording,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxRounds: 1,
+    })
+
+    const debatePrompts = prompts.filter((prompt) => prompt.includes("Debate round"))
+    expect(debatePrompts.length).toBeGreaterThan(0)
+    for (const prompt of debatePrompts) {
+      // `fakeChange()`'s actual diff text, not merely a heading.
+      expect(prompt).toContain("const fee = total * rate")
+      expect(prompt).toContain("src/pay.ts")
+    }
+  })
+
+  test("SEAM: a NaN token cap is clamped rather than refusing every turn", async () => {
+    // Unclamped, `spent < NaN` is false for every spend: the run would debate
+    // nothing, mark every contested finding unresolved, and report "the token
+    // budget (NaN) ran out".
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [
+          raised("The rate is never validated.", "src/pay.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+        ],
+        "discovery-2": [
+          raised("The ledger write is not awaited.", "src/ledger.ts"),
+          position({ findingId: "finding-2", position: "upholds" }, { findingId: "finding-3", position: "upholds" }),
+        ],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: Number.NaN,
+    })
+
+    expect(record.ledger.cap).toBeNull()
+    expect(record.debateCounts!.unresolved).toBe(0)
+    expect(record.findings.every((f) => f.unresolved === undefined)).toBe(true)
+    expect(rendered).toContain("no token cap")
+    // The fixture's own reasoning prose mentions NaN; what must not appear is a
+    // BUDGET reported as NaN.
+    expect(rendered).not.toContain("token budget (NaN)")
+    expect(rendered).not.toContain("token cap NaN")
+  })
+
+  test("an out-of-range round cap is clamped at the seam and the record reports what ran", async () => {
+    const resolved = setup(DEBATE_MODELS, 2)
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(abstainingInDebate({
+        "discovery-1": [raised("The rate is never validated.", "src/pay.ts")],
+        "discovery-2": [raised("The ledger write is not awaited.", "src/ledger.ts")],
+      })),
+      clock: fakeClock(),
+      change: fakeChange(),
+      maxRounds: 99,
+    })
+    expect(record.maxRounds).toBe(6)
   })
 })

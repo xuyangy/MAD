@@ -211,11 +211,31 @@ describe("an unregistered lens is GENERATED, never rejected and never silently d
 
 describe("addressing", () => {
   test("a role with no shipped set is programmer error, not a domain outcome", () => {
-    // Every role MAD asks for is one MAD defined (spine, Errors). Stories 5 and
-    // 6 add `debate`, `fact-check`, `logic-eval` and `aggregate` here.
-    expect(() => resolveInstructions({ taskType: "coding", role: "debate" })).toThrow(
+    // Every role MAD asks for is one MAD defined (spine, Errors). Story 5 added
+    // `debate`; story 6 adds `fact-check`, `logic-eval` and `aggregate` here.
+    expect(() => resolveInstructions({ taskType: "coding", role: "judge" })).toThrow(
       "no instruction set",
     )
+  })
+
+  test("story 5 registered the debate generalist, and it is the ONLY debate set", () => {
+    const set = resolveInstructions({ taskType: "coding", role: "debate" })
+    expect(set.origin).toBe("shipped")
+    expect(set.role).toBe("debate")
+    expect(set.lens).toBeUndefined()
+    // AD-17a — the debate instruction is not discovery's, and cannot become it.
+    expect(set.text).not.toBe(DISCOVERY_TEXT_AS_SHIPPED)
+    // It names no model and says nothing about who is reading it (AD-3).
+    const text = set.text.toLowerCase()
+    for (const name of ["claude", "gpt", "gemini", "anthropic", "openai", "sonnet"]) {
+      expect(text).not.toContain(name)
+    }
+    // SPEC.md forbids ASSIGNING a position. The vocabulary is offered; no role is.
+    for (const assigned of ["devil's advocate", "skeptic", "you must disagree", "argue against"]) {
+      expect(text).not.toContain(assigned)
+    }
+    // AD-9 — no tally over positions, ever.
+    expect(text).toContain("do not vote")
   })
 
   test("the registry has ONE populated task type, and the type says so", () => {
@@ -232,17 +252,22 @@ describe("addressing", () => {
     // ("it is NOT included in the debate instruction") arriving through the
     // registry in story 5, silently (code review 2026-08-15).
     //
-    // Today `debate` throws before reaching the lens lookup, so this asserts the
-    // property at the only layer that will still hold once it does not: a
-    // shipped set is stored under its own role and nothing else can address it.
+    // Story 5 registered `debate`, so the lens lookup IS now reached from that
+    // role — which is exactly the moment this property had to hold. A shipped
+    // set is stored under its own role and nothing else can address it.
     const shipped = resolveInstructions({ ...CODING_DISCOVERY, lens: "security" })
     expect(shipped.origin).toBe("shipped")
     expect(shipped.role).toBe("discovery")
 
-    // The guard story 5 will meet first.
-    expect(() => resolveInstructions({ taskType: "coding", role: "debate", lens: "security" })).toThrow(
-      "no instruction set",
-    )
+    // The same key under `debate` does NOT reach discovery's set. It falls
+    // through to the generated fallback, labelled as such — and, crucially, the
+    // debate STAGE never asks for it: `debate()` resolves the unlensed
+    // generalist for every participant (AD-17a). This asserts the registry
+    // cannot serve the leak even if some future caller asked for it.
+    const notDiscoverys = resolveInstructions({ taskType: "coding", role: "debate", lens: "security" })
+    expect(notDiscoverys.origin).toBe("generated")
+    expect(notDiscoverys.role).toBe("debate")
+    expect(notDiscoverys.text).not.toBe(shipped.text)
 
     // And `isShippedLens` answers per (task type, role), not globally — so a
     // caller asking about `debate` is told the truth rather than `discovery`'s.
