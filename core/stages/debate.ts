@@ -116,6 +116,20 @@ export const MAX_DEBATE_ROUNDS = 6
  *
  * Fractional values are floored, not rounded: 2.9 rounds is 2 rounds you can
  * afford, and rounding up spends a round the caller did not ask for.
+ *
+ * **`0` AND NEGATIVES CLAMP UP TO ONE ROUND, and that is the deliberate mirror
+ * image of what `clampTokenCap` does with an explicit `0`** — which it treats as
+ * a real ceiling precisely because turning a caller's "none" into "unlimited"
+ * would be dishonest. The asymmetry is stated here rather than left for a reader
+ * to trip over (code review 2026-08-26). The two are different because the
+ * floors mean different things: a zero-token budget is a spend the run can
+ * honestly decline, but a zero-ROUND debate would mint the budget-exhaustion
+ * shape — `unresolved`, no `exit` — out of a config value, and CAP-4's whole
+ * contract is that a contested finding gets argued rather than merely counted.
+ * A preset that genuinely means "skip debate, route everything to the judge" is
+ * a story 8 decision and needs its own specified path, not this silent
+ * reinterpretation. Pinned by `debate.test.ts`'s "out of range is CLAMPED, not
+ * defaulted".
  */
 export function clampMaxRounds(maxRounds: number | undefined): number {
   if (typeof maxRounds !== "number" || Number.isNaN(maxRounds)) return DEFAULT_MAX_ROUNDS
@@ -459,6 +473,24 @@ type ExitReason =
   | "restated"
   /** Nobody stated a position at all. More rounds cannot help. */
   | "silent"
+  /**
+   * The round budget ran out with the room still open — the ONLY reason the
+   * end-of-stage sweep may write, and never a reason `exitFor` returns.
+   *
+   * It exists because the sweep used to reuse `restated`, whose sentence
+   * ("nobody moved… the remaining rounds were not spent") is false of every
+   * finding that actually reaches the sweep: a room that had stopped moving
+   * exits `stalled` from `exitFor` first, so anything surviving to the cap was
+   * still moving, and every round WAS spent (code review 2026-08-26).
+   *
+   * ONE WORD, DELIBERATELY. `exitReasonOf` recovers the reason with
+   * `kind.split("-").at(-1)`, so a hyphenated reason (`round-limit`) decodes to
+   * `"limit"` silently — no type error, and it would fail quietly because the
+   * counts branch only on `uncontested`/`unsure` today. Any future reason added
+   * here is subject to the same constraint until that string protocol becomes a
+   * typed field.
+   */
+  | "capped"
 
 interface Decision {
   exit: "converged" | "stalled" | "cap"
@@ -820,7 +852,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     const at = clock.now()
     for (const room of rooms) {
       if (room.finding.exit === undefined && !room.finding.unresolved) {
-        recordExit(room.finding, { exit: "cap", reason: "restated" }, maxRounds, at)
+        recordExit(room.finding, { exit: "cap", reason: "capped" }, maxRounds, at)
       }
     }
   }
@@ -992,6 +1024,19 @@ function exitBody(decision: Decision, round: number): string {
       return (
         `Stalled in round ${round}: NO PARTICIPANT STATED A POSITION. There is no transcript to ` +
         `read; more rounds could not have produced one, so they were not spent.`
+      )
+    case "capped":
+      // Deliberately ONE neutral sentence for both rooms that reach the sweep:
+      // a live disagreement that never settled, and a lone voice whose silent
+      // seat never got the second round `exitFor` promised it. "Did not reach a
+      // conclusion" is literally true of both — `exitFor` returning `undefined`
+      // IS the stage declining to conclude — where "positions remained
+      // unsettled" would be false of the second. Distinguishing the two would
+      // need a specified reason and its own tests, not a state inspection
+      // reconstructed here (code review 2026-08-26).
+      return (
+        `Round cap reached after round ${round}: the room did not reach a conclusion before the ` +
+        `configured limit.`
       )
   }
 }

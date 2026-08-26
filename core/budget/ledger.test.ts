@@ -109,6 +109,16 @@ describe("clampTokenCap — the ceiling is bounded too", () => {
     expect(clampTokenCap("500" as unknown as number)).toBeNull()
   })
 
+  test("INFINITY IS NO CEILING, and `null` is the only way to spell that", () => {
+    // Behaviourally `spent < Infinity` already matches the uncapped state, so
+    // this is about canonical representation (code review 2026-08-26): a second
+    // spelling of "no ceiling" produces a `cap` that contradicts its own field
+    // comment and diagnostics that read "the token budget (Infinity) ran out".
+    expect(clampTokenCap(Number.POSITIVE_INFINITY)).toBeNull()
+    expect(clampTokenCap(Number.NEGATIVE_INFINITY)).toBeNull()
+    expect(mayISpend(ledgerAt(9_999_999, clampTokenCap(Number.POSITIVE_INFINITY)))).toBe(true)
+  })
+
   test("negative is ZERO, never unlimited", () => {
     // The caller who most clearly asked to spend nothing must not be handed an
     // unlimited budget.

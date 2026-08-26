@@ -234,6 +234,70 @@ describe("debate — the three exits (CAP-4)", () => {
     expect(finding.exit).toBe("cap")
     expect(result.cap).toBe(1)
     expect(result.rounds).toBe(3)
+
+    // The EXPLANATION, not just the exit value (code review 2026-08-26). This
+    // test scripts a debate in which somebody moves every round — see the setup
+    // comment above — and the sweep used to label it `restated`, whose sentence
+    // claims nobody moved and that the remaining rounds went unspent. Both are
+    // false here, and asserting only `exit === "cap"` is exactly why four review
+    // layers missed it. `output.ts` prints this body verbatim.
+    const exitEntry = finding.history.findLast((entry) => entry.kind.startsWith("debate-exit-"))
+    expect(exitEntry?.kind).toBe("debate-exit-cap-capped")
+    expect(exitEntry?.body).toContain("Round cap reached")
+    expect(exitEntry?.body).not.toContain("Stalled")
+    expect(exitEntry?.body).not.toContain("remaining rounds were not spent")
+  })
+
+  test("the `capped` reason survives `exitReasonOf`'s `split(\"-\")` protocol", async () => {
+    // A hyphenated reason (`round-limit`) would decode to `"limit"` here with no
+    // type error and no failing assertion anywhere else, because the counts only
+    // branch on `uncontested`/`unsure`. This test is the guard on that: it pins
+    // the single-word constraint the `ExitReason` comment states, so a future
+    // multi-word reason fails loudly rather than silently.
+    const finding = contested()
+    await run(
+      [finding],
+      {
+        "discovery-1": [
+          says({ findingId: "f-1", position: "upholds" }),
+          says({ findingId: "f-1", position: "unsure" }),
+        ],
+        "discovery-2": [says({ findingId: "f-1", position: "denies" })],
+      },
+      { maxRounds: 2 },
+    )
+
+    const kind = finding.history.findLast((entry) => entry.kind.startsWith("debate-exit-"))!.kind
+    expect(kind).toBe("debate-exit-cap-capped")
+    expect(kind.split("-").at(-1)).toBe("capped")
+  })
+
+  test("a lone voice held open by a live silent seat caps with the SAME neutral explanation", async () => {
+    // The rejected-P3 case, pinned (code review 2026-08-26). At `maxRounds: 1` a
+    // live silent seat has not had the second round `exitFor` promises it, so
+    // the stage declines to call the lone answer `uncontested` and the round
+    // budget ends first. `cap` is the honest exit — and its sentence must be
+    // true of THIS room too, which is why the reason is one neutral "did not
+    // reach a conclusion" rather than a claim about unsettled positions.
+    // `discovery-2` must answer with a VALID BUT EMPTY envelope, not be absent:
+    // an absent slot fails and drops out, which removes it from `liveSeats` and
+    // correctly lets the lone survivor converge `uncontested` in round 1. The
+    // case being pinned here is the other one — a seat that is alive, silent,
+    // and therefore still owed its second round.
+    const finding = contested({ author: "discovery-1" })
+    await run(
+      [finding],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [{ kind: "ok", value: { turns: [] } }],
+      },
+      { maxRounds: 1 },
+    )
+
+    expect(finding.exit).toBe("cap")
+    const body = finding.history.findLast((entry) => entry.kind.startsWith("debate-exit-"))?.body
+    expect(body).toContain("did not reach a conclusion")
+    expect(body).not.toContain("Stalled")
   })
 
   test("AC: THE SAME DEBATE AT A LOWER CAP EXITS `cap` INSTEAD OF `converged`, AND NOTHING ELSE CHANGES", async () => {

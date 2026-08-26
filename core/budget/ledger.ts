@@ -76,11 +76,18 @@ export function spent(ledger: TokenLedger): number {
  * - **Negative is ZERO, not no-ceiling.** `-5` is a caller asking to spend
  *   nothing; turning it into `null` would grant an unlimited budget to the one
  *   caller who most clearly asked for none.
+ * - **Infinity is NO CEILING, spelled the one way this module spells it.**
+ *   `spent < Infinity` already behaves exactly like the uncapped state, so this
+ *   is a canonical-representation rule rather than a behaviour fix: `null` is
+ *   how absence is written here, and letting a second spelling through means
+ *   diagnostics that read "the token budget (Infinity) ran out" and a ledger
+ *   whose `cap` contradicts its own field comment. `Number.isFinite` covers it
+ *   and NaN in one check (code review 2026-08-26).
  * - **Fractional floors.** Tokens are integers, and 10.9 tokens is 10 you can
  *   afford. Rounding up hands out a token nobody granted.
  */
 export function clampTokenCap(cap: number | undefined | null): number | null {
-  if (typeof cap !== "number" || Number.isNaN(cap)) return null
+  if (typeof cap !== "number" || !Number.isFinite(cap)) return null
   return Math.max(Math.floor(cap), 0)
 }
 
