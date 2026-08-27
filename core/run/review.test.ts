@@ -1321,6 +1321,35 @@ describe("review — AD-18: the change under review is data, never instruction",
     )
   })
 
+  test("ORDINARY INPUT IS NOT MANGLED, AND THE FILES ROW IS QUOTED", async () => {
+    // The NEGATIVE CONTROL for the cell escaping added 2026-08-27 (second pass).
+    // `fixtures/prompt-injection/` proves the hostile case; it has no benign case
+    // in it, so nothing there would catch an encoding that quietly rewrote
+    // ordinary input — which would be a filter wearing an encoding's name, and
+    // AD-18's Never clause forbids exactly that.
+    //
+    // The quotes on the files row are UNCONDITIONAL, and that is a deliberate
+    // prompt-shape change pinned here so it reads as a decision rather than as a
+    // surprise. A repo path may contain the row's own `", "` separator, and one
+    // encoding applied to every cell beats one applied to the cells that look
+    // dangerous.
+    const resolved = setup([["openai", "gpt-5"]])
+    const { backend, turns } = recorder(answer)
+    await review({ roster: resolved.roster, backend, clock: fakeClock(), change: fakeChange() })
+
+    const discovery = turns.find((turn) => !turn.input.includes("Debate round"))!
+    const lines = discovery.input.split("\n")
+
+    // `fakeChange()` carries no break, no backslash and no comma anywhere, so the
+    // description must survive character for character.
+    expect(lines.filter((line) => line === "Selection: working tree (git diff HEAD)")).toHaveLength(1)
+    expect(lines.filter((line) => line === `Files touched (1): "src/pay.ts"`)).toHaveLength(1)
+    expect(lines.filter((line) => line === "## Diff")).toHaveLength(1)
+    // And no escape was invented where there was nothing to escape.
+    expect(discovery.input).not.toContain("\\n")
+    expect(discovery.input).not.toContain("\\\\")
+  })
+
   test("THE FRAMING IS IN THE INPUT, NEVER IN THE INSTRUCTIONS", async () => {
     // AD-18's placement rule. Instruction text is pinned byte-for-byte, is
     // story 2's recall baseline and is story 9's control arm; framing it there

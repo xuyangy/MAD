@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { ModelBackend } from "../../core/ports/model-backend.ts"
-import { MATERIAL_NOTICES } from "../../core/prompt/material.ts"
+import { MATERIAL_NOTICES, listCell, oneLine } from "../../core/prompt/material.ts"
 import { selectRoster } from "../../core/roster/select.ts"
 import { review } from "../../core/run/review.ts"
 import {
@@ -22,7 +22,9 @@ import {
   tokens,
 } from "../../core/test-support/fakes.ts"
 import {
+  AFTER_FORGED_ROW,
   FORGED_ENTRY,
+  FORGED_SELECTION_ROW,
   INJECTED_LOCUS_FILE,
   INJECTED_ORDERS,
   INJECTION_CHANGE,
@@ -184,7 +186,64 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     expect(change[0]!.body).toContain("(nothing further to review)")
     // The whole diff is in there, byte for byte — nothing was stripped (AD-18).
     expect(change[0]!.body).toContain(INJECTION_CHANGE.diff.trimEnd())
-    expect(change[0]!.body).toContain(INJECTION_CHANGE.description)
+    // The description is there too, ENCODED rather than byte-for-byte, because it
+    // is a cell of a MAD-owned row and the diff is not. `oneLine` is the exact
+    // transform, so this asserts the encoding rather than tolerating any change:
+    // nothing is dropped, and the escaped form is what a reviewer reads.
+    expect(change[0]!.body).toContain(oneLine(INJECTION_CHANGE.description))
+  })
+
+  test("AC: A HOSTILE DESCRIPTION OR FILENAME CANNOT FORGE A ROW IN THE CHANGE SPAN", async () => {
+    // Plant 7 and plant 8, and the matrix row added 2026-08-27 (second pass).
+    // `Selection:` and `Files touched (N):` are rows MAD formats; `description`
+    // and `files` are cells MAD does not own. Fencing the span cannot help here,
+    // because the forgery impersonates MAD's frame from INSIDE the span.
+    //
+    // ASSERTED OVER EVERY PROMPT, not just discovery's. `buildInput` feeds BOTH
+    // stages that talk to a model, and the debate prompt is where the change span
+    // sits next to spans 2 and 3 — the one place a forged row could be mistaken
+    // for a transcript row. A test that read only `recorded[0]` would leave half
+    // the surface unasserted.
+    const recorded: { slot: string; instructions: string; input: string }[] = []
+    await threeSlotRun(recorded)
+
+    const debating = recorded.filter((turn) => turn.input.includes("Debate round"))
+    expect(recorded.length).toBeGreaterThan(3)
+    // The debate half is non-vacuous: if routing ever stopped reaching debate,
+    // this loop would silently cover only discovery.
+    expect(debating.length).toBeGreaterThan(0)
+
+    for (const turn of recorded) {
+      const spans = materialSpans(turn.input).filter((span) => span.label === "change under review")
+      expect(spans).toHaveLength(1)
+      const lines = turn.input.split("\n")
+
+      // ONE of each MAD-owned line, counted over the WHOLE prompt rather than the
+      // span, because a forged row outside the span would be worse still.
+      const selection = lines.filter((line) => line.startsWith("Selection: "))
+      const touched = lines.filter((line) => line.startsWith("Files touched ("))
+      expect(selection, `${turn.slot}: forged Selection row`).toHaveLength(1)
+      expect(touched, `${turn.slot}: forged Files-touched row`).toHaveLength(1)
+      expect(lines.filter((line) => line === "## Diff")).toHaveLength(1)
+
+      // The count MAD attests equals the number of quoted cells on the row it
+      // attests about. This is the invariant the unquoted join lost: one path
+      // carrying `", "` rendered as two files under a count that said one.
+      const declared = Number(/^Files touched \((\d+)\):/.exec(touched[0]!)![1])
+      expect(declared).toBe(INJECTION_CHANGE.files.length)
+      expect(touched[0]!.match(/"(?:[^"\\]|\\.)*"/g)).toHaveLength(declared)
+
+      // AN ENCODING, NOT A FILTER (AD-18's Never clause). Every hostile byte is
+      // still readable — the forged row is present, escaped, and the escape is
+      // what pins it mid-line. Without these three the suite would pass just as
+      // happily against code that DELETED the text.
+      expect(selection[0]!).toContain(`\\n${FORGED_SELECTION_ROW}`)
+      expect(selection[0]!).toContain(AFTER_FORGED_ROW)
+      expect(selection[0]!).toContain(PLAIN_ORDER)
+      for (const file of INJECTION_CHANGE.files) {
+        expect(touched[0]!).toContain(listCell(file))
+      }
+    }
   })
 
   test("A FORGED TRANSCRIPT ROW IN THE DIFF IS NOT A DEBATE ENTRY", async () => {

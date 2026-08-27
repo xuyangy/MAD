@@ -17,7 +17,7 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
-import { fenceFor, material } from "../prompt/material.ts"
+import { fenceFor, listCell, material, oneLine } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
 import { clampMaxRounds, debate } from "../stages/debate.ts"
 import { discover } from "../stages/discover.ts"
@@ -117,8 +117,28 @@ function buildInput(change: ChangeSet): string {
     material(
       "change under review",
       [
-        `Selection: ${change.description}`,
-        `Files touched (${change.files.length}): ${change.files.join(", ")}`,
+        // ESCAPED, not merely fenced (code review 2026-08-27, second pass).
+        // `Selection:` and `Files touched (N):` are rows MAD formats, and
+        // `description` and `files` are cells MAD does not own — the same shape
+        // as the debate exchange's entry rows, and the same forgery. A break in
+        // `description` printed a SECOND `Files touched (1): …` row and a second
+        // `## Diff` heading inside the span, in MAD's own voice; the count is
+        // MAD's attestation and content made it false. It also let the
+        // description open its own fence, so the real diff rendered inside the
+        // attacker's block. The fence cannot stop either, because the forgery
+        // impersonates MAD's frame from INSIDE the span rather than escaping it.
+        //
+        // The files row is QUOTED as well as escaped, for the citation list's
+        // reason (`core/stages/debate.ts`): the join is `", "` and a path may
+        // contain it, which rendered one path as two files and left the count
+        // disagreeing with the visible list. One cell per quoted string, so the
+        // two can no longer diverge.
+        //
+        // `change.diff` is deliberately NOT escaped: it has no MAD-owned line
+        // structure to forge and collapsing its lines would make it unreadable
+        // (`core/prompt/material.ts`).
+        `Selection: ${oneLine(change.description)}`,
+        `Files touched (${change.files.length}): ${change.files.map(listCell).join(", ")}`,
         ``,
         `## Diff`,
         ``,

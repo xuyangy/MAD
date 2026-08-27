@@ -183,16 +183,33 @@ const LINE_BREAK_RE = /\r\n|[\n\r\u0085\u000b\u000c\u2028\u2029]/g
  * per entry (AD-18 as amended names the exchange as one span, and per-entry spans
  * would multiply the notice by the transcript length). Nothing is removed and
  * nothing is judged: a backslash and the characters in `LINE_BREAKS` are the only
- * sequences touched, the escape is reversible, and it is applied to the whole cell
- * rather than to anything that "looks like" an attack. A model reads `a\nb` and
- * still has every byte the model that wrote it produced.
+ * sequences touched, and the escape is applied to the whole cell rather than to
+ * anything that "looks like" an attack.
+ *
+ * ## Exactly what the escape does, and the one thing it discards
+ *
+ * Corrected 2026-08-27 (second code-review pass), which found the wording here
+ * overclaiming. `\` becomes `\\`, and EVERY form in `LINE_BREAKS` becomes the two
+ * characters `\` and `n`. So no line break of any kind survives in the cell —
+ * that, not preservation, is what stops a row being forged, because a cell
+ * holding an LF forges a row just as well as one holding a CR.
+ *
+ * The escape is UNAMBIGUOUS: because the backslash is doubled first, an escaped
+ * break (`\n`) can always be told apart from author-written text that merely
+ * reads like one (`\\n`). Decoding therefore recovers the text with every
+ * boundary as LF. What it does NOT recover is WHICH break form the author used —
+ * CRLF, CR, VT, FF, NEL, U+2028 and U+2029 all arrive as the same escape. That
+ * is the one thing this encoding discards, it is discarded deliberately, and
+ * nothing in AD-18 depends on it. Earlier wording here called the escape
+ * "reversible" and claimed a model "still has every byte the model that wrote it
+ * produced"; both were false and are gone.
  *
  * The SAME reasoning covers every cell of a MAD-owned row, which is why the
- * finding's `Claim:` / `Reasoning:` lines and the `## finding` header's locus go
- * through here too, not only the exchange rows (code review 2026-08-27). Bodies
- * with no MAD-owned line structure — the diff — are NOT passed through here.
- * There is no row for content to forge there, and a diff whose lines were
- * collapsed would be unreadable.
+ * finding's `Claim:` / `Reasoning:` lines, the debate exchange's entry rows, and
+ * the change section's `Selection:` and `Files touched:` cells all go through here
+ * (code review 2026-08-27, both passes). Bodies with no MAD-owned line structure
+ * — the diff — are NOT passed through here. There is no row for content to forge
+ * there, and a diff whose lines were collapsed would be unreadable.
  */
 export function oneLine(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(LINE_BREAK_RE, "\\n")
