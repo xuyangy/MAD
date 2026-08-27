@@ -31,6 +31,20 @@ export type WarningCode =
   | "provider-fan-out"
   /** AD-6d — findings undecided when the budget ran out. */
   | "unresolved-findings"
+  /**
+   * AD-13 / AD-6 — a fact-check ran without tools, so nothing it says is
+   * verified. Either no answering slot reported tool capability, or the checker
+   * reported opening nothing. Raised by the judge, never by the adapter: tool
+   * capability is READ per slot and the routing decision is the core's.
+   */
+  | "fact-check-untooled"
+  /**
+   * AD-6 — the judge stage could not run at all, because no POOL slot answered
+   * discovery. Every finding therefore reaches output unadjudicated, and without
+   * this a reader would see "not adjudicated" everywhere with no cause given —
+   * a degraded review indistinguishable from an undecided one.
+   */
+  | "judge-unavailable"
 
 export interface Warning {
   code: WarningCode

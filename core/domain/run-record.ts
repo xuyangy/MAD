@@ -168,6 +168,16 @@ export interface RunRecord {
    * produce a second, narrower partition of the same set.
    */
   debateCounts?: DebateCounts
+  /**
+   * CAP-5 — the verdicts the judge produced, as the JUDGE STAGE counted them.
+   *
+   * Optional, and its ABSENCE is the signal that judging has not run — the same
+   * shape `routeCounts` and `debateCounts` use, and for the same reason: a run
+   * that judged nothing carries all-zero counts, which is a different fact from a
+   * run that never judged. Counted by the stage that decided them so a renderer
+   * cannot produce a second, narrower partition of the same set.
+   */
+  judgeCounts?: JudgeCounts
   warnings: Warning[]
   ledger: TokenLedger
 }
@@ -281,4 +291,74 @@ export function emptyLedger(cap: number | null = null): TokenLedger {
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
   ledger.entries.push(entry)
   ledger.total = addTokens(ledger.total, entry.tokens)
+}
+
+/**
+ * CAP-5 — the judged partition, counted once by the stage that decided it.
+ *
+ * TWO partitions of one set, and they are deliberately separate rather than one
+ * table with more columns:
+ *
+ *   `judged === adjudicated + verifiedIndependently + withdrawnByAuthor + unresolved`
+ *
+ * is a claim about HOW each finding was handled, and
+ *
+ *   `judged === upheld + ruledInvalid + notAdjudicated + withdrawnByAuthor + unresolved`
+ *
+ * is a claim about WHAT was decided. Both always hold. Fusing them would force a
+ * cell like "upheld in verify-independently mode", which is a cross-tab nobody
+ * asked for and which grows multiplicatively the moment a mode or a verdict is
+ * added.
+ *
+ * `withdrawnByAuthor` appears in both because it is both: a way of being handled
+ * (no model turn was spent) and a verdict. `unresolved` appears in both and is
+ * NEITHER a mode nor a verdict — it is AD-6d's budget exhaustion, and a finding
+ * carrying it has no verdict at all, on purpose.
+ */
+export interface JudgeCounts {
+  /** Findings the stage decided about — everything that arrived routed and undead. */
+  judged: number
+  /** Full pipeline: extract, then fact-check and logic-eval, then aggregate. */
+  adjudicated: number
+  /**
+   * Fact-Checker only, no Logic Evaluator, ONE billed turn
+   * (`pipeline-stages.md` §5).
+   *
+   * The condition is NO TRANSCRIPT, not `route: "judge"` — the two are usually
+   * the same and are not always (code review 2026-08-27). A finding routed to
+   * debate whose room never produced a position arrives here too: there is no
+   * argument to extract and none to evaluate, so it gets the same one-turn path
+   * and the Fact-Checker is again its first and only skeptic. Counting it as
+   * `adjudicated` would claim an argument was weighed that never existed.
+   */
+  verifiedIndependently: number
+  /** Short-circuited: the author withdrew in debate, so no model turn was spent. */
+  withdrawnByAuthor: number
+  upheld: number
+  ruledInvalid: number
+  /**
+   * The judge ran and did NOT settle it — an honest undecided, not a failure and
+   * not a bucket for anything else. Also where a finding lands when its
+   * aggregator turn dropped out, because a missing ruling is not a ruling.
+   */
+  notAdjudicated: number
+  /** AD-6d — the budget ran out mid-judge. No exit, no verdict, nothing dropped. */
+  unresolved: number
+  /**
+   * AD-13 — fact-checks that ran on a slot with no tools, or whose checker
+   * reported using none. A reasoning-only check is not a fact-check, and a run
+   * where every one of them was unverified must not read like a run where the
+   * files were actually opened.
+   */
+  factChecksUnverified: number
+  /**
+   * Turns REQUESTED — the AD-15 unit of allocation. The judge does NOT batch
+   * across findings, so this is a per-finding count, unlike debate's.
+   */
+  turns: number
+  /**
+   * Turns BILLED — every attempt that reported tokens. `attempts >= turns`
+   * always, and they differ exactly when a turn needed its one retry.
+   */
+  attempts: number
 }

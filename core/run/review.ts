@@ -2,10 +2,11 @@
  * Pipeline assembly — the one seam a caller drives (AD-1: the entrypoint
  * injects the adapters' port implementations; the core knows no harness).
  *
- * Story 5 runs five of the six filters: discover -> cluster -> route -> debate ->
- * output. Story 6 inserts the judge between the last two WITHOUT changing this
- * signature, and story 9's ablation calls this function directly as the
- * single-model control arm — no second code path.
+ * Story 6 runs all six filters: discover -> cluster -> route -> debate -> judge ->
+ * output. The judge was inserted between the last two WITHOUT changing this
+ * signature, exactly as story 5 predicted it would be, and story 9's ablation
+ * calls this function directly as the single-model control arm — no second code
+ * path.
  */
 
 import type { Roster } from "../domain/roster.ts"
@@ -21,6 +22,7 @@ import { fenceFor, listCell, material, oneLine } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
 import { clampMaxRounds, debate } from "../stages/debate.ts"
 import { discover } from "../stages/discover.ts"
+import { judge } from "../stages/judge.ts"
 import { output } from "../stages/output.ts"
 import { clampThreshold, route } from "../stages/route.ts"
 
@@ -281,7 +283,46 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   }
   record.warnings.push(...debated.warnings)
 
-  // ---- stage 5: judge — story 6 ----
+  // ---- stage 5: judge ----
+  //
+  // The CANONICAL set again, and the whole of it, for debate's reason exactly:
+  // the stage picks its own partition off `route` rather than being handed a
+  // filtered array, so the one place that decides a finding's MODE stays `route`.
+  //
+  // `answeredSlots` is REUSED, not recomputed. The judge's non-author preference
+  // and debate's non-author seat are answering the same question — who is still
+  // alive to be asked — and two derivations of that could disagree.
+  //
+  // `runId` seeds the anonymizer's permutation together with each finding's id,
+  // so two runs over one input produce one record (AD-17b, and the spine's
+  // ordering convention).
+  const judged = await judge({
+    findings: record.findings,
+    roster,
+    answeredSlots,
+    backend,
+    input: buildInput(change),
+    clock,
+    ledger: record.ledger,
+    runId: record.runId,
+  })
+  // Re-stamped from the stage's return for routing's and debate's reason: the
+  // record reports what the STAGE did, never a renderer's recount over the
+  // narrower set it happens to be iterating.
+  record.judgeCounts = {
+    judged: judged.judged,
+    adjudicated: judged.adjudicated,
+    verifiedIndependently: judged.verifiedIndependently,
+    withdrawnByAuthor: judged.withdrawnByAuthor,
+    upheld: judged.upheld,
+    ruledInvalid: judged.ruledInvalid,
+    notAdjudicated: judged.notAdjudicated,
+    unresolved: judged.unresolved,
+    factChecksUnverified: judged.factChecksUnverified,
+    turns: judged.turns,
+    attempts: judged.attempts,
+  }
+  record.warnings.push(...judged.warnings)
 
   // ---- stage 6: output ----
   record.finishedAt = clock.now()

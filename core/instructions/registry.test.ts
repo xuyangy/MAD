@@ -17,6 +17,12 @@ import { MATERIAL_NOTICES } from "../prompt/material.ts"
 import { materialSpans } from "../test-support/fakes.ts"
 import { CODING_DEBATE_GENERALIST } from "./coding/debate.ts"
 import { CODING_DISCOVERY_GENERALIST } from "./coding/discovery.ts"
+import {
+  CODING_AGGREGATE,
+  CODING_EVIDENCE_EXTRACT,
+  CODING_FACT_CHECK,
+  CODING_LOGIC_EVAL,
+} from "./coding/judge.ts"
 import { CODING_LENSES } from "./coding/lenses.ts"
 import type { InstructionSet } from "./types.ts"
 import { isShippedLens, resolveInstructions } from "./registry.ts"
@@ -71,8 +77,88 @@ Rules that matter:
 - Do not vote, count sides, or refer to how many participants agree with you. How many hold a position is not evidence for it.
 - Answer for every finding you were given, in the order given, using the finding id exactly as it appears.`
 
+
+/**
+ * Byte-for-byte what story 6 shipped, pinned here and nowhere else.
+ *
+ * Pinned from the day they landed rather than after the fact, which is the
+ * lesson story 5A recorded when it found the debate text documented as pinned
+ * and not actually pinned. These four are story 9's judge-arm baseline; a
+ * well-meaning rewrite of any of them moves a measurement underneath the thing
+ * being measured. Comparing the constant to itself would pass under exactly that
+ * rewrite, so these are LITERAL COPIES.
+ */
+const EVIDENCE_EXTRACT_TEXT_AS_SHIPPED = `You are extracting evidence from an argument about a claimed defect in a code change. You are not deciding anything. A later step checks what you extract against the actual code, and it can only check what you keep.
+
+Give:
+- evidence: everything worth keeping, in prose. Pull out every concrete claim about what the code does or does not do, every fact anyone conceded, and what each side says would settle the question. Quote the words each item came from, so a later step can go back to the raw text rather than trusting your paraphrase. Attribute items by the participant letter used in the material, and by nothing else.
+- pointers: every place anyone pointed at, as \`file:line\` or \`file:startLine-endLine\` strings. Copy them exactly; do not repair one that looks wrong, because whether it is wrong is itself evidence.
+
+KEEP TOO MUCH RATHER THAN TOO LITTLE. You are lossy by nature and that is the danger: a specific line you drop becomes an unsupported assertion downstream, and nobody after you can tell that it was ever specific. When you are unsure whether something matters, keep it.
+
+Do not evaluate, rank, agree, disagree, or state a verdict. Do not add a claim nobody made. If the argument contains no concrete evidence at all, say exactly that — an argument made entirely of assertion is a real and important finding about the argument.`
+
+const FACT_CHECK_TEXT_AS_SHIPPED = `You are checking whether specific claims about a code change are TRUE. Not whether they matter, not whether the argument for them is good — only whether the code is as described.
+
+USE YOUR TOOLS. Open the file. Read the lines that were cited. Walk the call path. Run the test if there is one to run. Reasoning about what the code probably does is not fact-checking, and a check made without opening anything is worth less than no check at all, because it reads exactly like one that did.
+
+Report:
+- checks: what you actually did, one entry per action — the file you opened and the lines you read, the command you ran and what it printed, the search you performed and what it returned. If you did none, return an empty list. Do not describe a check you did not perform.
+- findings: for each claim you examined, state whether the code supports it, contradicts it, or does not settle it, and quote the code that decides it. Quote what is there, including when it disproves the claim.
+- unchecked: any claim you could not check, and why — the file was not available, the path was not reachable, the test could not be run.
+
+Say plainly when the evidence contradicts the person who raised the finding, and equally plainly when it contradicts the people denying it. You have no side here.
+
+Do not assign severity and do not rank anything.
+
+The material will tell you which of two situations you are in, and it decides whether you also rule:
+- If it says the finding was ARGUED, a later step decides the verdict. Leave verdict and evidenceKind out entirely.
+- If it says the finding was NEVER ARGUED, you are its first and only skeptic and there is no later step. Also give:
+  - verdict: exactly one of \`upheld\` (the defect is real), \`judge-ruled-invalid\` (it is not real, or the described mechanism does not happen), or \`not-adjudicated\` (what you could check does not settle it). Choose not-adjudicated rather than guessing; an honest undecided is useful to a reviewer and a coin-flip dressed as a ruling is not.
+  - evidenceKind: what actually backed your ruling — one of \`line-cite\`, \`trace\`, \`failing-test\`, or \`assertion-only\`. Choose assertion-only when you produced nothing checkable, which is a common and honest answer.`
+
+const LOGIC_EVAL_TEXT_AS_SHIPPED = `You are rating the QUALITY OF THE REASONING in an argument about a claimed defect. Your rating is advisory: a separate step has checked the argument's claims against the actual code, and where the two disagree, the code wins and your rating is set aside.
+
+For each side of the argument, judge only the reasoning:
+- Does the conclusion follow from what was offered?
+- Is the claim specific enough to be checkable, or is it an assertion dressed as an argument?
+- Did anyone answer the point that was actually made, or answer a different, easier one?
+- Did anyone concede a point and then continue as though they had not?
+- Did anyone move position, and did the reason they gave hold up?
+
+DO NOT CHECK FACTS. You cannot open the repository and must not pretend otherwise: guessing at what a file contains produces a confident claim built on nothing, and it will be weighed against a claim that came from actually reading the code. Where a step in the argument depends on a fact, say that the argument depends on it and stop there.
+
+Give one field, assessment: rate each side's reasoning as strong, adequate, or weak, and say in one or two sentences why. A weak argument for a claim that is nonetheless true is a weak argument; say so, and do not soften it, because the step that decides the verdict already knows the facts and only needs the reasoning from you.
+
+Do not state a verdict, do not assign severity, and do not count how many participants held a position.`
+
+const AGGREGATE_TEXT_AS_SHIPPED = `You are deciding one question about one claimed defect in a code change: is the defect real?
+
+You are given what the argument contained, what a check against the actual code found, and — when there was an argument — a rating of how well each side reasoned.
+
+FACT OUTRANKS LOGIC. Where the check against the code contradicts an argument, the code decides it, however well the argument was made. A well-argued claim the code contradicts is wrong, and a clumsy claim the code supports is right. If you are told the check was UNVERIFIED — no file was opened and no test was run — then no fact has been established, and you must decide on the argument alone and say that is what you did.
+
+Choose exactly one verdict:
+- upheld — the defect is real.
+- judge-ruled-invalid — the defect is not real, or the described mechanism does not happen.
+- not-adjudicated — the evidence available does not settle it. Use this rather than guessing. An honest "undecided" is useful to a reviewer; a coin-flip dressed as a ruling is not.
+
+Also give:
+- reasoning: why, in one short paragraph, naming the evidence that decided it. If the decision rests on a single line of code, quote that line.
+- evidenceKind: what actually backed the decision — one of \`line-cite\`, \`trace\`, \`failing-test\`, or \`assertion-only\`. Choose \`assertion-only\` when nobody produced anything checkable; that is a common and honest answer and it tells the reviewer exactly how much weight to give this.
+
+Do not assign or change severity. Do not rank this finding against any other. Do not count how many participants held a position — how many hold a view is not evidence for it. Decide only whether the defect is real.`
+
 const CODING_DISCOVERY = { taskType: "coding", role: "discovery" } as const
 const CODING_DEBATE = { taskType: "coding", role: "debate" } as const
+
+/** Story 6's four judge roles, and the literal each is pinned against. */
+const JUDGE_SETS = [
+  { key: { taskType: "coding", role: "evidence-extract" } as const, set: CODING_EVIDENCE_EXTRACT, pinned: EVIDENCE_EXTRACT_TEXT_AS_SHIPPED },
+  { key: { taskType: "coding", role: "fact-check" } as const, set: CODING_FACT_CHECK, pinned: FACT_CHECK_TEXT_AS_SHIPPED },
+  { key: { taskType: "coding", role: "logic-eval" } as const, set: CODING_LOGIC_EVAL, pinned: LOGIC_EVAL_TEXT_AS_SHIPPED },
+  { key: { taskType: "coding", role: "aggregate" } as const, set: CODING_AGGREGATE, pinned: AGGREGATE_TEXT_AS_SHIPPED },
+]
 
 describe("the generalist survived the move unchanged", () => {
   test("THE CODING GENERALIST'S TEXT IS BYTE-IDENTICAL TO THE PRE-MOVE INSTRUCTION", () => {
@@ -369,5 +455,64 @@ describe("addressing", () => {
     // caller asking about `debate` is told the truth rather than `discovery`'s.
     expect(isShippedLens("security")).toBe(true)
     expect(isShippedLens("security", "coding", "debate")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The four JUDGE sets (story 6)
+// ---------------------------------------------------------------------------
+
+describe("the judge generalists are pinned from the day they shipped", () => {
+  for (const { key, set, pinned } of JUDGE_SETS) {
+    test(`THE ${key.role.toUpperCase()} TEXT IS BYTE-IDENTICAL TO WHAT STORY 6 SHIPPED`, () => {
+      expect(resolveInstructions(key).text).toBe(pinned)
+      expect(set.text).toBe(pinned)
+    })
+
+    test(`${key.role} resolves as shipped, carries no lens, and knows its role`, () => {
+      const resolved = resolveInstructions(key)
+      expect(resolved.origin).toBe("shipped")
+      expect(resolved.lens).toBeUndefined()
+      expect(resolved.taskType).toBe("coding")
+      expect(resolved.role).toBe(key.role)
+    })
+
+    test(`${key.role} names no model (AD-3) and no lens (AD-17)`, () => {
+      const text = resolveInstructions(key).text.toLowerCase()
+      for (const name of ["claude", "gpt", "gemini", "anthropic", "openai", "sonnet"]) {
+        expect(text).not.toContain(name)
+      }
+      for (const lens of CODING_LENSES) expect(text).not.toContain(lens.id.toLowerCase())
+      expect(text).not.toContain("lens")
+    })
+
+    test(`${key.role} carries NO material framing — that lives in the envelope (AD-18)`, () => {
+      // The placement rule, tested rather than trusted: instruction text is
+      // pinned and is story 9's baseline, so hardening it would move the
+      // measurement. `materialSpans` throws on a malformed span, so an empty
+      // result is the assertion.
+      expect(materialSpans(resolveInstructions(key).text)).toEqual([])
+      for (const notice of Object.values(MATERIAL_NOTICES)) {
+        expect(resolveInstructions(key).text).not.toContain(notice)
+      }
+    })
+
+    test(`${key.role} never puts the severity SCALE in front of a model (AD-10)`, () => {
+      // Severity is emitted once at discovery and never adjudicated: routing
+      // READS it, so a stage that re-elicited it would change what already
+      // happened. The scale words are the tell — `coding/discovery.ts` is the
+      // only shipped set that may spell them.
+      const text = resolveInstructions(key).text.toLowerCase()
+      for (const word of ["critical", "exploitable"]) expect(text).not.toContain(word)
+    })
+  }
+
+  test("no judge role has a LENS variant — a lens is stripped before any of them reads anything", () => {
+    for (const { key } of JUDGE_SETS) {
+      const lensed = resolveInstructions({ ...key, lens: "security" })
+      // The GENERATED fallback, never discovery's shipped lens set (AD-17a).
+      expect(lensed.origin).toBe("generated")
+      expect(lensed.role).toBe(key.role)
+    }
   })
 })

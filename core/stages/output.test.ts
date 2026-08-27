@@ -4,6 +4,7 @@ import type { Finding, Severity } from "../domain/finding.ts"
 import {
   emptyLedger,
   type DebateCounts,
+  type JudgeCounts,
   type RouteCounts,
   type RunRecord,
 } from "../domain/run-record.ts"
@@ -57,6 +58,10 @@ function record(
   // and is a different fact from "debate ran and contested nothing".
   debateCounts?: DebateCounts,
   maxRounds = DEFAULT_MAX_ROUNDS,
+  // Absent by default for exactly `routeCounts`' and `debateCounts`' reason:
+  // absent MEANS "judging has not run", which keeps `output()` callable
+  // mid-pipeline and is a different fact from "judged and settled nothing".
+  judgeCounts?: JudgeCounts,
 ): RunRecord {
   const { roster, warnings } = selectRoster([candidate("openai", "gpt-5")], {
     slots: 1,
@@ -77,6 +82,7 @@ function record(
     routeCounts,
     maxRounds,
     debateCounts,
+    judgeCounts,
     warnings,
     ledger: emptyLedger(),
   }
@@ -813,7 +819,13 @@ describe("the route and the dial that produced it are rendered (CAP-3)", () => {
     expect(rendered).toContain("a lens claims no co-discovery prior (AD-17d)")
   })
 
-  test("AD-6 — the summary says debate and judging have not run, so a partial run cannot read as a finished one", () => {
+  test("AD-6 — a record that has not been judged says NOTHING about judging, rather than claiming it", () => {
+    // The "judging is not implemented yet" note that stood here until story 6 is
+    // GONE, and its absence is the assertion. AD-6's honesty rule cuts both ways:
+    // a run that now judges must not keep telling a reader it did not, and a
+    // record that has NOT been judged must not carry a JUDGE summary either. The
+    // signal is `judgeCounts`, absent here — the same shape `routeCounts` and
+    // `debateCounts` use, so `output()` stays callable mid-pipeline.
     const rendered = output(
       record(
         [finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })],
@@ -824,8 +836,13 @@ describe("the route and the dial that produced it are rendered (CAP-3)", () => {
       ),
     )
 
-    expect(rendered).toContain("judging is not implemented yet (story 6)")
-    expect(rendered).toContain("Nothing below has been judged")
+    expect(rendered).not.toContain("judging is not implemented yet")
+    expect(rendered).not.toContain("JUDGE:")
+    // The per-finding line is silent too, for the same reason: no judge entry
+    // exists, so nothing is claimed about one.
+    expect(rendered).not.toContain("judge:")
+    // And the verdict column still reads honestly rather than as a ruling.
+    expect(rendered).toContain("verdict: not adjudicated")
   })
 
   test("BOTH ARE SILENT ON A PRE-ROUTE RECORD, so output stays callable mid-pipeline", () => {
@@ -1143,5 +1160,214 @@ describe("the exit and the cap that produced it are rendered (CAP-4)", () => {
 
     const ranked = rankFindings([convergedLow, stalledCritical])
     expect(ranked.map((f) => f.severity)).toEqual(["critical", "low"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-5 — the judge (story 6)
+// ---------------------------------------------------------------------------
+
+/** A judge history the renderer reads, without running the stage. */
+function judged(
+  over: {
+    verdict?: Finding["verdict"]
+    verified?: boolean
+    logic?: boolean
+    reason?: string
+  } = {},
+): Finding["history"] {
+  const at = "2026-08-13T00:00:00.000Z"
+  const entries: Finding["history"] = [
+    { stage: "judge", actor: "discovery-2", at, kind: "judge-evidence", body: "A cited src/pay.ts:12." },
+    {
+      stage: "judge",
+      actor: "discovery-3",
+      at,
+      kind: over.verified === false ? "judge-fact-check-unverified" : "judge-fact-check-verified",
+      body: `${over.verified === false ? "UNVERIFIED (no file was opened and no command was run) — " : "VERIFIED — "}the line reads as claimed.`,
+    },
+  ]
+  if (over.logic !== false) {
+    entries.push({ stage: "judge", actor: "discovery-2", at, kind: "judge-logic-eval", body: "A adequate, B weak." })
+  }
+  const verdict = over.verdict ?? "upheld"
+  entries.push({
+    stage: "judge",
+    actor: "discovery-1",
+    at,
+    kind: `judge-verdict-${verdict}`,
+    body: over.reason ?? "The cited line says what the finding claims.",
+  })
+  return entries
+}
+
+const JUDGE_COUNTS: JudgeCounts = {
+  judged: 3,
+  adjudicated: 1,
+  verifiedIndependently: 1,
+  withdrawnByAuthor: 1,
+  upheld: 1,
+  ruledInvalid: 0,
+  notAdjudicated: 1,
+  unresolved: 0,
+  factChecksUnverified: 0,
+  turns: 5,
+  attempts: 5,
+}
+
+describe("the judge's verdict is rendered (CAP-5)", () => {
+  test("the three outputs print under the finding, each under its own heading", () => {
+    // BOTH the field and the history, exactly as the stage writes them: the
+    // verdict COLUMN reads the field and the `judge:` line reads the history, and
+    // a fixture that set only one would pass a renderer that read only the other.
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.history = judged()
+    f.verdict = "upheld"
+    f.evidence = "A cited src/pay.ts:12."
+    f.factCheck = "VERIFIED — the line reads as claimed."
+    f.logicEval = "A adequate, B weak."
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("verdict: upheld")
+    expect(rendered).toContain("EVIDENCE EXTRACTED FROM THE ARGUMENT")
+    expect(rendered).toContain("CHECKED AGAINST THE CODE")
+    expect(rendered).toContain("HOW WELL EACH SIDE ARGUED (advisory — the code outranks it)")
+    // AD-9 — three separate things, never merged into one paragraph.
+    expect(rendered.indexOf("EVIDENCE EXTRACTED")).toBeLessThan(rendered.indexOf("CHECKED AGAINST"))
+  })
+
+  test("AD-13 — an UNVERIFIED check says so on the finding's own line", () => {
+    // The warning also says it, and that is not enough: a reader scanning one
+    // finding must see that its check opened nothing without going back up.
+    const f = finding({ severity: "high", file: "a.ts", route: "judge", routeReason: "3/3" })
+    f.history = judged({ verified: false, logic: false })
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("CHECK NOT VERIFIED — nothing was opened or run")
+  })
+
+  test("a verified check reads as checked, and the logic step is named when it ran", () => {
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.history = judged()
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("judge: checked against the code, argument quality weighed")
+  })
+
+  test("the SUMMARY reports the stage's counts, and prints the two partitions apart", () => {
+    const rendered = output(record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("JUDGE: 3 finding(s) decided")
+    expect(rendered).toContain("1 after a debate, 1 checked independently, 1 withdrawn")
+    expect(rendered).toContain("Verdicts: 1 upheld, 0 ruled invalid, 1 not settled, 1 withdrawn.")
+    expect(rendered).toContain("5 allocation(s) spent judging.")
+  })
+
+  test("AD-6 — unverified checks are called out in the summary, loudly", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        factChecksUnverified: 2,
+      }),
+    )
+
+    expect(rendered).toContain("2 of the checks against the code OPENED NOTHING AND RAN")
+    expect(rendered).toContain("Treat those verdicts as opinion.")
+  })
+
+  test("retries are reported beside allocations, never folded into them", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        turns: 5,
+        attempts: 7,
+      }),
+    )
+
+    expect(rendered).toContain("7 were BILLED: 2 needed their one retry.")
+  })
+
+  test("the UNRESOLVED section carries the judge line too", () => {
+    // A finding stranded MID-judge already has a check behind it, and "we looked
+    // and ran out before ruling" is a different thing to hand a reader than "we
+    // ran out before looking".
+    const f = finding({
+      severity: "high",
+      file: "a.ts",
+      route: "debate",
+      routeReason: "contested",
+      unresolved: { diedAtStage: "judge", reason: "the token budget (100) ran out while it was being judged" },
+    })
+    f.history = judged({ verdict: undefined }).slice(0, 2)
+    f.factCheck = "VERIFIED — the line reads as claimed."
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("died at stage judge")
+    expect(rendered).toContain("judge: checked against the code")
+  })
+})
+
+describe("ranking falls through to verdict then evidence (AD-9 amended)", () => {
+  const withVerdict = (file: string, verdict: Finding["verdict"]): Finding => {
+    const f = finding({ severity: "high", file, coDiscovery: { raised: 1, answered: 3 } })
+    f.verdict = verdict
+    return f
+  }
+
+  test("upheld first, withdrawn last — the order is 'still worth your attention'", () => {
+    const ranked = rankFindings([
+      withVerdict("d.ts", "withdrawn-by-author"),
+      withVerdict("c.ts", "judge-ruled-invalid"),
+      withVerdict("b.ts", "not-adjudicated"),
+      withVerdict("a.ts", "upheld"),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts"])
+  })
+
+  test("an UNSET verdict sorts with 'not adjudicated', because that is what it means", () => {
+    const unset = finding({ severity: "high", file: "b.ts", coDiscovery: { raised: 1, answered: 3 } })
+    const ranked = rankFindings([withVerdict("c.ts", "judge-ruled-invalid"), unset, withVerdict("a.ts", "upheld")])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts", "c.ts"])
+  })
+
+  test("severity still leads — a verdict never outranks how bad the defect is", () => {
+    const low = withVerdict("a.ts", "upheld")
+    low.severity = "low"
+    const critical = withVerdict("b.ts", "withdrawn-by-author")
+    critical.severity = "critical"
+    expect(rankFindings([low, critical]).map((f) => f.locus.file)).toEqual(["b.ts", "a.ts"])
+  })
+
+  test("co-discovery still outranks the verdict", () => {
+    const strong = withVerdict("a.ts", "judge-ruled-invalid")
+    strong.coDiscovery = { raised: 3, answered: 3 }
+    const weak = withVerdict("b.ts", "upheld")
+    weak.coDiscovery = { raised: 1, answered: 3 }
+    expect(rankFindings([weak, strong]).map((f) => f.locus.file)).toEqual(["a.ts", "b.ts"])
+  })
+
+  test("EVIDENCE breaks a verdict tie — a checked verdict outranks an unchecked one", () => {
+    const checked = withVerdict("b.ts", "upheld")
+    checked.history = judged()
+    const unchecked = withVerdict("a.ts", "upheld")
+    expect(rankFindings([unchecked, checked]).map((f) => f.locus.file)).toEqual(["b.ts", "a.ts"])
+  })
+
+  test("a VERIFIED check outranks an unverified one", () => {
+    const verified = withVerdict("b.ts", "upheld")
+    verified.history = judged()
+    const unverified = withVerdict("a.ts", "upheld")
+    unverified.history = judged({ verified: false })
+    expect(rankFindings([unverified, verified]).map((f) => f.locus.file)).toEqual(["b.ts", "a.ts"])
+  })
+
+  test("locus is still the last tiebreak, so two runs print alike", () => {
+    const a = withVerdict("a.ts", "upheld")
+    const b = withVerdict("b.ts", "upheld")
+    expect(rankFindings([b, a]).map((f) => f.locus.file)).toEqual(["a.ts", "b.ts"])
   })
 })

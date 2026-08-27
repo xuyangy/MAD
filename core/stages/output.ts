@@ -47,12 +47,21 @@
  * Both are silent when the stage did not run, so `output()` stays callable
  * mid-pipeline.
  *
- * AD-6 — all five degradation reports are carried here and rendered: the
- * denominator, drop-outs, the roster warning, lens homogeneity, and the
- * unresolved section. The
- * same rule covers what the finding list IS while the pipeline is short of
- * stages: before clustering runs it is a pool, not a merged set, and a
- * multi-model run says so (`pooledNotYetMerged`).
+ * Story 6 adds READS again, and no writes: the `judge:` line per finding in both
+ * sections, the three judge outputs printed under the finding, a `JUDGE` summary
+ * after the debate one, and — the one behavioural change — the stale
+ * "judging is not implemented yet" note is GONE. `rankFindings` DOES change, and
+ * only because AD-9's amendment assigned the change to this story: when
+ * co-discovery is skipped or ties, ordering now falls through to verdict, then
+ * evidence, then locus. Nothing is fused; each criterion still reads one thing.
+ *
+ * AD-6 — all six degradation reports are carried here and rendered: the
+ * denominator, drop-outs, the roster warning, lens homogeneity, the unresolved
+ * section, and (story 6) an unverified fact-check, which is the one most likely
+ * to pass for a healthy run — a verdict reasoned from nothing looks exactly like
+ * a verdict read out of the repo. The same rule covers what the finding list IS
+ * while the pipeline is short of stages: before clustering runs it is a pool, not
+ * a merged set, and a multi-model run says so (`pooledNotYetMerged`).
  */
 
 import { effectiveSeverity, severityRank, type Finding } from "../domain/finding.ts"
@@ -67,6 +76,58 @@ function coDiscoveryRatio(finding: Finding): number {
   const co = finding.coDiscovery
   if (!co || co.answered <= 0) return 0
   return co.raised / co.answered
+}
+
+/**
+ * AD-9 — the verdict, as an ORDER and never as a score. Higher sorts first.
+ *
+ * A reviewer reads top-down and stops when the list stops being worth reading, so
+ * the order is "how much does this still deserve your attention":
+ *
+ * - `upheld` — real, as far as anything could tell. Read it.
+ * - not adjudicated (and UNSET, which is the same to a reader) — nobody settled
+ *   it, so it is still yours to decide. Above the two that were settled against.
+ * - `judge-ruled-invalid` — examined and rejected. Kept visible (nothing is ever
+ *   removed) and it does not belong near the top.
+ * - `withdrawn-by-author` — LAST, and below judge-ruled-invalid deliberately: the
+ *   person who found it no longer claims it, which is the most complete
+ *   retraction available. A judge disagreeing with a reviewer is weaker evidence
+ *   against a finding than the reviewer disagreeing with themselves.
+ */
+function verdictRank(finding: Finding): number {
+  switch (finding.verdict) {
+    case "upheld":
+      return 3
+    case "judge-ruled-invalid":
+      return 1
+    case "withdrawn-by-author":
+      return 0
+    default:
+      return 2
+  }
+}
+
+/**
+ * CAP-6 — what was ACTUALLY produced, as an order.
+ *
+ * Read off the append-only history rather than off `finding.evidence`, and the
+ * difference matters: a verify-independently finding never has an extraction (it
+ * had no transcript to extract from) but may very well have had its file opened,
+ * and ordering on `evidence` alone would sink every unargued finding below every
+ * argued one regardless of what was checked.
+ *
+ * The entry KINDS are the judge's (`core/stages/judge.ts`), which is a coupling
+ * between two stages — accepted because the alternative is parsing MAD's own
+ * `VERIFIED`/`UNVERIFIED` prefix back out of prose, which is worse.
+ */
+function evidenceRank(finding: Finding): number {
+  let seen = 0
+  for (const entry of finding.history) {
+    if (entry.stage !== "judge") continue
+    if (entry.kind === "judge-fact-check-verified") return 2
+    if (entry.kind === "judge-fact-check-unverified" || entry.kind === "judge-evidence") seen = 1
+  }
+  return seen
 }
 
 /**
@@ -108,10 +169,20 @@ export function rankFindings(findings: Finding[]): Finding[] {
       const byCoDiscovery = coDiscoveryRatio(b) - coDiscoveryRatio(a)
       if (byCoDiscovery !== 0) return byCoDiscovery
     }
-    // else fall through to the next criterion — today locus; from story 6,
-    // verdict then evidence then locus (story 7 keeps the full treatment).
+    // 3. AD-9 amended, and this is the criterion story 6 was told to add: when
+    // co-discovery is skipped or ties, ordering falls through to VERDICT, then
+    // EVIDENCE, then locus. Each is read on its own — nothing is combined into a
+    // score, and nothing is stored.
+    const byVerdict = verdictRank(b) - verdictRank(a)
+    if (byVerdict !== 0) return byVerdict
 
-    // 3. stable tiebreak on locus, so two runs of the same input print alike
+    // 4. what was actually produced. A verdict backed by a file somebody opened
+    // sorts above one backed by a model's confidence, which is CAP-6's whole
+    // claim about the evidence column applied to the order the columns appear in.
+    const byEvidence = evidenceRank(b) - evidenceRank(a)
+    if (byEvidence !== 0) return byEvidence
+
+    // 5. stable tiebreak on locus, so two runs of the same input print alike
     const byFile = a.locus.file.localeCompare(b.locus.file)
     if (byFile !== 0) return byFile
     return (a.locus.startLine ?? 0) - (b.locus.startLine ?? 0)
@@ -265,13 +336,11 @@ function routingSummary(record: RunRecord): string[] {
     )
   }
   lines.push(`  Critical severity is debated at any threshold.`)
-  // AD-6 — a partial run must not read like a finished one. Debate runs from
-  // story 5; JUDGING still does not, and the note shrank to say exactly that
-  // rather than staying stale in the flattering direction.
-  lines.push(
-    `  NOTE: judging is not implemented yet (story 6). Nothing below has been judged, and every`,
-    `  verdict reads "not adjudicated" for that reason rather than as a ruling.`,
-  )
+  // The "judging is not implemented yet" note that stood here until story 6 IS
+  // GONE, and its removal is the point rather than a tidy-up: AD-6's honesty rule
+  // cuts both ways, and a run that now judges must not keep telling a reader it
+  // did not. What replaces it is `judgeSummary` below, which reports what
+  // actually happened instead of what has not been built.
   lines.push("")
   return lines
 }
@@ -366,15 +435,135 @@ function debateSummary(record: RunRecord): string[] {
   return lines
 }
 
+/**
+ * CAP-5 — the verdicts the judge produced, and how much they are worth.
+ *
+ * Reports `RunRecord.judgeCounts` — the JUDGE STAGE's own counts — and never a
+ * recount of the list being rendered, for `routingSummary`'s and
+ * `debateSummary`'s reason exactly: the renderer only ever sees the resolved
+ * findings, so a recount would shed the ones the budget stranded, which is the
+ * one bucket a reader most needs. Silent when the field is absent, which MEANS
+ * judging did not run.
+ *
+ * TWO PARTITIONS ARE PRINTED SEPARATELY — how each finding was handled, and what
+ * was decided — and neither is summed into the other. Fusing them would need a
+ * cross-tab ("upheld in verify-independently mode") nobody asked for.
+ *
+ * The unverified-fact-check line is the one AD-6 most requires: a run whose
+ * checks all reasoned rather than read produced verdicts that LOOK exactly like
+ * verdicts backed by the repo, and a reader with no line here has no way to tell.
+ */
+function judgeSummary(record: RunRecord): string[] {
+  const counts = record.judgeCounts
+  if (!counts) return []
+
+  const lines: string[] = [
+    `JUDGE: ${counts.judged} finding(s) decided — ${counts.adjudicated} after a debate, ` +
+      `${counts.verifiedIndependently} checked independently, ` +
+      `${counts.withdrawnByAuthor} withdrawn by whoever raised it.`,
+    `  Verdicts: ${counts.upheld} upheld, ${counts.ruledInvalid} ruled invalid, ` +
+      `${counts.notAdjudicated} not settled, ${counts.withdrawnByAuthor} withdrawn.`,
+  ]
+
+  if (counts.withdrawnByAuthor > 0) {
+    // The one verdict no model produced, and no token was spent on it. Said
+    // plainly because a reader counting turns against verdicts would otherwise
+    // find them short.
+    lines.push(
+      `  A withdrawn finding cost no judging at all: the reviewer who raised it took it back`,
+      `  during the argument, and nobody else can withdraw a finding for them.`,
+    )
+  }
+
+  if (counts.notAdjudicated > 0) {
+    lines.push(
+      `  "Not settled" is a real answer, not a failure: the evidence available did not decide it.`,
+    )
+  }
+
+  if (counts.factChecksUnverified > 0) {
+    lines.push(
+      `  ! ${counts.factChecksUnverified} of the checks against the code OPENED NOTHING AND RAN`,
+      `  NOTHING, so nothing they concluded is confirmed. A check made by reasoning alone reads`,
+      `  exactly like one that read the file. Treat those verdicts as opinion.`,
+    )
+  }
+
+  if (counts.unresolved > 0) {
+    lines.push(
+      `  ${counts.unresolved} finding(s) ran out of budget before a verdict and are in the`,
+      `  UNRESOLVED section below with whatever the earlier steps had produced.`,
+    )
+  }
+
+  lines.push(
+    `  ${counts.turns} allocation(s) spent judging.` +
+      (counts.attempts > counts.turns
+        ? ` ${counts.attempts} were BILLED: ${counts.attempts - counts.turns} needed their one retry.`
+        : ""),
+  )
+  lines.push("")
+  return lines
+}
+
+/**
+ * AD-9 — the verdict column, and it is never fused with the other two.
+ *
+ * `not adjudicated` covers two DIFFERENT states and deliberately reads the same
+ * for both, because the difference is not the reader's to act on: the judge ran
+ * and did not settle it, or the judge never reached it. Which one it was is on
+ * the `judge:` line below and in the JUDGE summary, where a reader who cares can
+ * find it — putting it in a three-word column would make the column a sentence.
+ */
 function renderVerdict(finding: Finding): string {
-  // Story 1 runs no judge, so this is honestly empty rather than defaulted to
-  // something that reads like an adjudication.
   if (!finding.verdict || finding.verdict === "not-adjudicated") return "not adjudicated"
   return finding.verdict
 }
 
+/**
+ * CAP-6 — WHAT WAS ACTUALLY PRODUCED, and `assertion only` is the honest reading
+ * of an absent extraction rather than a placeholder.
+ *
+ * The extractor's prose can run to paragraphs, so the column carries its first
+ * line and the full text goes under the finding. A column that wrapped would
+ * make the three separate numbers unreadable as three columns, which is the one
+ * thing AD-9 asks this row to be.
+ */
 function renderEvidence(finding: Finding): string {
-  return finding.evidence ?? "assertion only"
+  if (finding.evidence === undefined) return "assertion only"
+  const first = finding.evidence.split("\n")[0]!.trim()
+  if (first.length === 0) return "assertion only"
+  return first.length > 72 ? `${first.slice(0, 71)}…` : first
+}
+
+/**
+ * CAP-5 — what the judge did to THIS finding, beside the summary that says what
+ * it did to all of them.
+ *
+ * Absent when no judge entry exists, which means the stage never reached this
+ * finding — a pre-judge record, a finding debate stranded, or a run where no
+ * model could judge. That absence is told apart from "judged and undecided" by
+ * this line being missing rather than by the verdict column, which reads the same
+ * for both (see `renderVerdict`).
+ */
+function renderJudge(finding: Finding): string | undefined {
+  const entries = finding.history.filter((entry) => entry.stage === "judge")
+  if (entries.length === 0) return undefined
+  const verdictEntry = entries.findLast?.((entry) => entry.kind.startsWith("judge-verdict-"))
+  const checked = entries.some((entry) => entry.kind === "judge-fact-check-verified")
+  const unverified = entries.some((entry) => entry.kind === "judge-fact-check-unverified")
+  const weighed = entries.some((entry) => entry.kind === "judge-logic-eval")
+
+  const steps: string[] = []
+  // AD-13 stated in the render, not only in the warning: a reader scanning one
+  // finding must be able to see that its check opened nothing.
+  if (checked) steps.push("checked against the code")
+  else if (unverified) steps.push("CHECK NOT VERIFIED — nothing was opened or run")
+  if (weighed) steps.push("argument quality weighed")
+  if (steps.length === 0) steps.push("no step completed")
+
+  const why = verdictEntry?.body.split("\n")[0]
+  return `      judge: ${steps.join(", ")}${why ? ` — ${why}` : ""}`
 }
 
 /**
@@ -529,6 +718,9 @@ export function renderRunRecord(record: RunRecord): string {
   // ---- CAP-4 — the round cap and the exits it produced ----
   lines.push(...debateSummary(record))
 
+  // ---- CAP-5 — the verdicts the judge produced ----
+  lines.push(...judgeSummary(record))
+
   lines.push(`FINDINGS (${resolved.length})`)
   if (resolved.length === 0) {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
@@ -573,11 +765,35 @@ export function renderRunRecord(record: RunRecord): string {
     // round the exit has nothing to be an exit from.
     const debated = renderDebate(finding)
     if (debated) lines.push(debated)
+    // CAP-5 — and BELOW the debate line for the reason the debate line sits below
+    // the route line: the judge reads the argument, so the argument has to have
+    // been described before the ruling on it means anything.
+    const judged = renderJudge(finding)
+    if (judged) lines.push(judged)
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {
       lines.push("")
       lines.push(indent(finding.reasoning, "      "))
+    }
+    // AD-9 — the judge's three outputs, each under its own heading and never
+    // merged into one paragraph. `factCheck` carries MAD's VERIFIED/UNVERIFIED
+    // prefix from the stage, so a reader sees the attestation beside the claim it
+    // qualifies rather than having to find the warning that also says it.
+    if (finding.evidence !== undefined) {
+      lines.push("")
+      lines.push("      EVIDENCE EXTRACTED FROM THE ARGUMENT")
+      lines.push(indent(finding.evidence, "      "))
+    }
+    if (finding.factCheck !== undefined) {
+      lines.push("")
+      lines.push("      CHECKED AGAINST THE CODE")
+      lines.push(indent(finding.factCheck, "      "))
+    }
+    if (finding.logicEval !== undefined) {
+      lines.push("")
+      lines.push("      HOW WELL EACH SIDE ARGUED (advisory — the code outranks it)")
+      lines.push(indent(finding.logicEval, "      "))
     }
   }
   lines.push("")
@@ -618,6 +834,16 @@ export function renderRunRecord(record: RunRecord): string {
     // (code review 2026-08-16).
     const unresolvedRoute = renderRoute(finding)
     if (unresolvedRoute) lines.push(unresolvedRoute)
+    // CAP-5 in this section too, on the same grounds as the lens label and the
+    // route line above. A finding the budget stranded MID-JUDGE may already carry
+    // a fact-check, and "we looked and ran out before ruling" is a materially
+    // different thing to hand a reader than "we ran out before looking" — the
+    // died-at-stage line names the stage and does not say how far into it the run
+    // got. Unlike `renderDebate`, this one is NOT dead code here: `unresolved` and
+    // a completed judge STEP legitimately co-occur, because the stage strands a
+    // finding between its turns rather than before all of them.
+    const unresolvedJudge = renderJudge(finding)
+    if (unresolvedJudge) lines.push(unresolvedJudge)
     // NO `debate:` LINE HERE, and that is an invariant rather than an omission
     // (code review 2026-08-24). `unresolved` is written ONLY for a room whose
     // `exit` is still undefined (`debate.ts`, AD-6d), and no code path writes an

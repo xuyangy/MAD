@@ -23,6 +23,12 @@
 
 import { CODING_DEBATE_GENERALIST } from "./coding/debate.ts"
 import { CODING_DISCOVERY_GENERALIST } from "./coding/discovery.ts"
+import {
+  CODING_AGGREGATE,
+  CODING_EVIDENCE_EXTRACT,
+  CODING_FACT_CHECK,
+  CODING_LOGIC_EVAL,
+} from "./coding/judge.ts"
 import { CODING_LENS_INSTRUCTIONS, lensInstructionText } from "./coding/lenses.ts"
 import type { InstructionSet, TaskType } from "./types.ts"
 
@@ -63,14 +69,22 @@ function keyOf(taskType: TaskType, role: string, lens?: string): string {
  * therefore falls through to the GENERATED fallback rather than borrowing
  * discovery's lens set — which is exactly the leak the role-in-the-key change of
  * 2026-08-15 was made to close, now that a second role actually exists.
+ *
+ * Story 6's four JUDGE roles join on exactly the same terms, and for a stronger
+ * version of the same reason: a lens is stripped by the anonymizer before any of
+ * them reads anything (AD-17b), so a lens variant of a judge set would be a set
+ * addressed by something no judge turn can see.
  */
-const GENERALISTS: ReadonlyMap<string, InstructionSet> = new Map([
+const GENERALISTS: ReadonlyMap<string, InstructionSet> = new Map(
   [
-    keyOf(CODING_DISCOVERY_GENERALIST.taskType, CODING_DISCOVERY_GENERALIST.role),
     CODING_DISCOVERY_GENERALIST,
-  ],
-  [keyOf(CODING_DEBATE_GENERALIST.taskType, CODING_DEBATE_GENERALIST.role), CODING_DEBATE_GENERALIST],
-])
+    CODING_DEBATE_GENERALIST,
+    CODING_EVIDENCE_EXTRACT,
+    CODING_FACT_CHECK,
+    CODING_LOGIC_EVAL,
+    CODING_AGGREGATE,
+  ].map((set) => [keyOf(set.taskType, set.role), set]),
+)
 
 /**
  * Every shipped lens set, keyed by task type + role + LENS.

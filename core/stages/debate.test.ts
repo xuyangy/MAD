@@ -22,6 +22,7 @@ import {
   clampMaxRounds,
   debate,
   debateEnvelopeSchema,
+  exitReasonOf,
   DEFAULT_MAX_ROUNDS,
   MAX_DEBATE_ROUNDS,
   type DebateInput,
@@ -1668,5 +1669,61 @@ describe("debate — AD-18: what the framing must NOT touch", () => {
     expect(finding.unresolved).toBeUndefined()
     // Model prose is stored unescaped; `oneLine` is a prompt-rendering concern.
     expect(roundEntries(finding).every((entry) => entry.body === "I upholds.")).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The exit reason is a TYPED FIELD, not a substring of `kind` (story 6)
+// ---------------------------------------------------------------------------
+
+describe("exit reason", () => {
+  test("every exit entry carries a typed `exitReason` matching its `kind`", async () => {
+    // Both, deliberately: the `kind` is what a human reads in a dumped record,
+    // the field is what the judge branches on. A record where they disagreed
+    // would be worse than either alone.
+    const finding = contested()
+    await run([finding], {
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-3": [says({ findingId: "f-1", position: "upholds" })],
+    })
+
+    const exits = finding.history.filter((entry) => entry.kind.startsWith("debate-exit-"))
+    expect(exits).toHaveLength(1)
+    expect(exits[0]!.exitReason).toBe("agreed")
+    expect(exits[0]!.kind).toBe("debate-exit-converged-agreed")
+    expect(exitReasonOf(finding)).toBe("agreed")
+  })
+
+  test("a room nobody sat in exits stalled/silent, and the field says so", async () => {
+    const finding = contested({ author: "discovery-9" })
+    await run([finding], {}, { answeredSlots: [] })
+
+    expect(finding.exit).toBe("stalled")
+    expect(exitReasonOf(finding)).toBe("silent")
+  })
+
+  test("`exitReasonOf` is undefined when no exit was recorded", () => {
+    // A `route: "judge"` finding never enters a room, so it never exits — the
+    // absence is the fact, and the judge reads it as "never argued".
+    const finding = contested()
+    expect(exitReasonOf(finding)).toBeUndefined()
+  })
+
+  test("a HYPHENATED reason would now survive — the string protocol is gone", async () => {
+    // Story 5 required every reason to be one word, because the reader was
+    // `kind.split("-").at(-1)`. Nothing in this test needs a hyphenated reason to
+    // exist; it pins that the reader no longer parses the `kind` at all, by
+    // reading a record whose `kind` and field deliberately disagree.
+    const finding = contested()
+    finding.history.push({
+      stage: "debate",
+      actor: "mad",
+      at: "2026-08-27T00:00:00.000Z",
+      kind: "debate-exit-stalled-round-limit",
+      exitReason: "capped",
+      body: "hand-built record",
+    })
+    expect(exitReasonOf(finding)).toBe("capped")
   })
 })

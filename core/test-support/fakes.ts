@@ -6,6 +6,7 @@
 import type { ZodType } from "zod"
 
 import type { Candidate } from "../domain/roster.ts"
+import { CODING_AGGREGATE, CODING_EVIDENCE_EXTRACT, CODING_FACT_CHECK, CODING_LOGIC_EVAL } from "../instructions/coding/judge.ts"
 import { emptyTokenUsage, type TokenUsage } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 import type {
@@ -38,35 +39,109 @@ export type SlotStep =
 export type SlotScript = SlotStep[]
 
 /**
+ * The judge roles a scripted backend can recognise, and the role vocabulary is
+ * recovered FROM THE INSTRUCTION TEXT the stage handed it.
+ *
+ * `ModelBackend.runTurn` takes no role parameter — deliberately, since a backend
+ * runs a turn and knows nothing about the pipeline — but a fake has to answer
+ * four different schemas for one slot. The instruction text is the one thing the
+ * stage passes that identifies which question is being asked, so the fake reads
+ * it. Nothing in production does this; it is a test double recovering a fact the
+ * port has no reason to carry.
+ */
+const JUDGE_TEXTS: readonly (readonly [JudgeRoleTag, string])[] = [
+  ["evidence-extract", CODING_EVIDENCE_EXTRACT.text],
+  ["fact-check", CODING_FACT_CHECK.text],
+  ["logic-eval", CODING_LOGIC_EVAL.text],
+  ["aggregate", CODING_AGGREGATE.text],
+]
+
+export type JudgeRoleTag = "evidence-extract" | "fact-check" | "logic-eval" | "aggregate"
+
+export function judgeRoleOf(instructions: string): JudgeRoleTag | undefined {
+  return JUDGE_TEXTS.find(([, text]) => text === instructions)?.[0]
+}
+
+/**
+ * A plausible, schema-valid answer per judge role.
+ *
+ * They exist so a test about DISCOVERY or DEBATE does not have to script four
+ * more turns per finding to stay green — and, more importantly, so it does not
+ * silently acquire a `model-dropped-out` warning it was never about. A test that
+ * IS about judging overrides them.
+ *
+ * The fact-check answer reports a check it "ran", because the default should be
+ * the healthy path; the untooled path is a degradation and every test that wants
+ * it asks for it explicitly.
+ */
+export const DEFAULT_JUDGE_ANSWERS: Record<JudgeRoleTag, unknown> = {
+  "evidence-extract": {
+    evidence: "Participant A says the constant is never read; B says it is read on the error path.",
+    pointers: ["src/pay.ts:12"],
+  },
+  "fact-check": {
+    checks: ["opened src/pay.ts and read lines 1-40"],
+    findings: "The cited line reads `const fee = total * rate`, which supports the claim.",
+    verdict: "upheld",
+    evidenceKind: "line-cite",
+  },
+  "logic-eval": { assessment: "A argued from the code and is adequate; B asserted and is weak." },
+  aggregate: {
+    verdict: "upheld",
+    reasoning: "The cited line says what the finding claims it says.",
+    evidenceKind: "line-cite",
+  },
+}
+
+/**
  * A scripted backend. Each slot gets a list of per-attempt outcomes; attempt i
  * uses entry i, and the last entry repeats. `raw` returns a value that is run
  * through the real schema, so schema-invalid responses can be exercised end to
  * end (AD-12).
+ *
+ * JUDGE TURNS ARE SCRIPTED SEPARATELY, by role rather than by slot, because one
+ * slot answers up to four different schemas in one run and a single per-slot
+ * sequence cannot express that. Attempts are counted per (slot, role), so the
+ * one-retry contract is exercised per role too.
  */
 export class FakeBackend implements ModelBackend {
-  readonly calls: { slot: string; attempt: number }[] = []
+  readonly calls: { slot: string; attempt: number; role?: JudgeRoleTag }[] = []
   private readonly attempts = new Map<string, number>()
 
   constructor(
     private readonly script: Record<string, SlotScript>,
+    /**
+     * Tool capability per slot. UNLISTED SLOTS ARE TOOL-CAPABLE — the opposite of
+     * this fake's original default, and deliberate: `capabilities()` has exactly
+     * one caller in the core, the judge's AD-13 routing, so a fake that defaulted
+     * to "no tools" would make every pipeline test report an untooled fact-check
+     * it was never about. A test that wants the degradation says `false`.
+     */
     private readonly toolcall: Record<string, boolean> = {},
+    /** Per-judge-role overrides. Absent roles use `DEFAULT_JUDGE_ANSWERS`. */
+    private readonly judgeScript: Partial<Record<JudgeRoleTag, SlotScript>> = {},
   ) {}
 
   capabilities(slot: string): BackendCapabilities {
-    return { tools: this.toolcall[slot] === true }
+    return { tools: this.toolcall[slot] !== false }
   }
 
   async runTurn<T>(
     slot: string,
-    _instructions: string,
+    instructions: string,
     _input: string,
     schema: ZodType<T>,
   ): Promise<Envelope<T>> {
-    const attempt = (this.attempts.get(slot) ?? 0) + 1
-    this.attempts.set(slot, attempt)
-    this.calls.push({ slot, attempt })
+    const role = judgeRoleOf(instructions)
+    const key = role === undefined ? slot : `${slot}\0${role}`
+    const attempt = (this.attempts.get(key) ?? 0) + 1
+    this.attempts.set(key, attempt)
+    this.calls.push(role === undefined ? { slot, attempt } : { slot, attempt, role })
 
-    const steps = this.script[slot] ?? []
+    const steps =
+      role === undefined
+        ? (this.script[slot] ?? [])
+        : (this.judgeScript[role] ?? [{ kind: "ok", value: DEFAULT_JUDGE_ANSWERS[role] }])
     const step = steps[Math.min(attempt - 1, steps.length - 1)]
     if (!step) {
       return { ok: false, slot, failure: "empty-response", message: "no script", tokens: tokens() }

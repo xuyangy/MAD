@@ -5,9 +5,8 @@
  * with the stage that OWNS it. A stage may read anything; it writes only its
  * own fields. Every field was declared here from story 1 onward, before its
  * stage existed, so no later story could invent a second conflicting name for
- * one. As of story 5 the stages that WRITE are `discover`, `cluster`, `route`,
- * `debate` and `output`; the fields owned by `judge` are still declared and left
- * unset, and will be written by story 6.
+ * one. As of story 6 every stage WRITES: `discover`, `cluster`, `route`,
+ * `debate`, `judge` and `output`.
  *
  * AD-8's ownership list for discovery, in full and in one place: **claim,
  * reasoning, locus, severity, author, source, lens.** Nothing else. `source` and
@@ -47,6 +46,26 @@
  * finding never receives one — that absence is what tells a reader the finding
  * was never argued, which is a different fact from having been argued to no
  * conclusion.
+ *
+ * AD-8's ownership list for the JUDGE (story 6): **evidence, factCheck,
+ * logicEval, verdict**, the judge entries it appends to `history`, and — only on
+ * budget exhaustion — `unresolved`. Nothing else, and the exclusions matter as
+ * much as the list:
+ *
+ * - `exit` is DEBATE's and is read, never written. The judge branches on it and
+ *   on the exit entry's `exitReason`; rewriting either would change the record of
+ *   what happened before the judge existed.
+ * - `severity`, `coDiscovery` and `clusterSeverity` are read and never written
+ *   (AD-10, AD-9). A verdict is not a severity and never becomes one.
+ * - `rank` is OUTPUT's. The judge decides what is true, not what sorts first.
+ * - the finding is never removed, `judge-ruled-invalid` included. An invalid
+ *   finding is reported as invalid, not hidden — AD-6's honesty rule applies to a
+ *   verdict as much as to a degradation.
+ *
+ * `unresolved` therefore has TWO writers, debate and judge, and that is
+ * deliberate rather than an AD-8 exception: the field records WHICH STAGE the
+ * budget died at, so the stage that ran out is necessarily the one that writes
+ * it, and `diedAtStage` is what keeps the two apart.
  */
 
 /** AD-10 — the severity scale is exactly these four values, and nothing else. */
@@ -80,6 +99,62 @@ export interface Locus {
 export type Stage = "discover" | "cluster" | "route" | "debate" | "judge" | "output"
 
 /**
+ * WHY a debate ended, beside WHAT its exit was — the vocabulary `Entry.exitReason`
+ * is drawn from.
+ *
+ * `Finding.exit` is three values and three words are not enough for the judge,
+ * and AD-6 is the reason: a room that AGREED and a room where nobody but the
+ * author ever spoke both land on `converged`, and "nobody contested it because
+ * nobody answered" rendered as "the standing positions settled" is a degraded
+ * review reading exactly like a good one.
+ *
+ * IT LIVES IN THE DOMAIN, not in `core/stages/debate.ts`, because `Entry` is a
+ * domain type and a stage may not own a field's vocabulary while the domain owns
+ * its declaration. Story 5 encoded the reason INTO the entry's `kind`
+ * (`debate-exit-<exit>-<reason>`) and read it back with `kind.split("-").at(-1)`;
+ * `deferred-work.md` recorded that the honest shape is a typed field "the moment
+ * story 6 wants to branch on a reason", and story 6 does — the judge must tell
+ * `uncontested` and `unsure` from `agreed`, because unanimous uncertainty must
+ * not reach a reader as a settled debate. The `kind` still carries the reason for
+ * a human reading the record; the TYPED FIELD is what code branches on.
+ */
+export type ExitReason =
+  /** Two or more voices, all holding the same definite position. Real agreement. */
+  | "agreed"
+  /** The author withdrew. A finding dies only by its author's own hand. */
+  | "withdrawn"
+  /**
+   * ONE voice was ever heard. Nobody disagreed because nobody else answered —
+   * which is not the same fact as agreement and must never render as one.
+   */
+  | "uncontested"
+  /**
+   * Every standing position is `unsure`. Unanimous uncertainty is a settled
+   * debate in the sense that nobody is going to move, and it is precisely the
+   * case the judge must know was unresolved BY EVIDENCE rather than agreed.
+   */
+  | "unsure"
+  /** People spoke and nobody moved. `cost-model.md` lever 3. */
+  | "restated"
+  /** Nobody stated a position at all. More rounds cannot help. */
+  | "silent"
+  /**
+   * The round budget ran out with the room still open — the ONLY reason the
+   * end-of-stage sweep may write, and never a reason `exitFor` returns.
+   *
+   * It exists because the sweep used to reuse `restated`, whose sentence
+   * ("nobody moved… the remaining rounds were not spent") is false of every
+   * finding that actually reaches the sweep: a room that had stopped moving
+   * exits `stalled` from `exitFor` first, so anything surviving to the cap was
+   * still moving, and every round WAS spent (code review 2026-08-26).
+   *
+   * The one-word constraint story 5 recorded here is GONE (story 6): it existed
+   * only because the reason was recovered by splitting `kind` on `-`, and the
+   * typed field below is read directly. A future hyphenated reason is safe.
+   */
+  | "capped"
+
+/**
  * AD-7 — `history` is append-only. Every entry carries at minimum
  * `{ stage, actor, at, kind, body }`. Debate-round entries (story 5) add the
  * round fields; they are optional here so the shape does not change later.
@@ -98,6 +173,13 @@ export interface Entry {
   positionChanged?: boolean
   concession?: string
   citations?: string[]
+  /**
+   * Set on a DEBATE EXIT entry and on nothing else (story 6). Optional because
+   * every other entry kind legitimately has no exit reason — not because an exit
+   * entry may omit it: `recordExit` in `core/stages/debate.ts` is the one writer
+   * and always sets it.
+   */
+  exitReason?: ExitReason
 }
 
 /**
@@ -187,16 +269,46 @@ export interface Finding {
   exit?: "converged" | "stalled" | "cap"
 
   // ---- judge owns (AD-8) — story 6 ----
-  /** AD-9 — evidence stays separate from verdict and co-discovery. */
+  /**
+   * AD-9 / AD-11 — what the Evidence Extractor pulled out of the argument, as
+   * model-authored prose. Kept separate from `verdict` and `coDiscovery`, and
+   * never fused with either.
+   *
+   * ABSENT IS NOT "no evidence". It means no extractor ran — a
+   * verify-independently finding has no transcript to extract from, and a
+   * finding the budget stranded may have died before its extractor turn. Output
+   * renders the absence as `assertion only`, which is the honest reading of both.
+   */
   evidence?: string
+  /**
+   * The Fact-Checker's prose, prefixed by MAD with whether the check was
+   * VERIFIED or UNVERIFIED (AD-13): a check that opened no file and ran no test
+   * is not a fact-check, and a reader must not have to infer that from the
+   * wording a model chose.
+   */
   factCheck?: string
+  /**
+   * The Logic Evaluator's prose. ADVISORY, and absent on every
+   * verify-independently finding by design — there is no argument to evaluate
+   * when there was no debate (`pipeline-stages.md` §5).
+   */
   logicEval?: string
   verdict?: Verdict
 
   // ---- output owns (AD-8) ----
   rank?: number
 
-  /** AD-6d — set when the budget ran out before this finding was decided. */
+  /**
+   * AD-6d — set when the budget ran out before this finding was decided.
+   *
+   * Written by DEBATE or by JUDGE, whichever stage the money ran out in, and
+   * `diedAtStage` is what tells them apart. Two writers of one field is not an
+   * AD-8 exception: the field's whole content is "which stage stopped", so the
+   * stage that stopped is necessarily its author.
+   *
+   * A finding carrying this has NO `verdict`. Undecided and decided-invalid are
+   * different facts and output prints them in different sections.
+   */
   unresolved?: { diedAtStage: Stage; reason: string }
 
   /** AD-7 — append-only. */

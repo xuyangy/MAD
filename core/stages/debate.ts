@@ -75,7 +75,12 @@
 import { z } from "zod"
 
 import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
-import { appendEntry, effectiveSeverity, type Finding } from "../domain/finding.ts"
+import {
+  appendEntry,
+  effectiveSeverity,
+  type ExitReason,
+  type Finding,
+} from "../domain/finding.ts"
 import type { Roster } from "../domain/roster.ts"
 import type { DebateCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
@@ -481,11 +486,11 @@ function buildPrompt(
  * append-only record AD-7 makes authoritative and story 6's judge reads exactly
  * this. A second copy of the same fact is a second thing that can be wrong.
  */
-function isDebatePosition(value: string | undefined): value is DebatePosition {
+export function isDebatePosition(value: string | undefined): value is DebatePosition {
   return value !== undefined && (DEBATE_POSITIONS as readonly string[]).includes(value)
 }
 
-function standingPositions(finding: Finding): Map<string, DebatePosition> {
+export function standingPositions(finding: Finding): Map<string, DebatePosition> {
   const standing = new Map<string, DebatePosition>()
   for (const entry of finding.history) {
     if (entry.stage !== "debate" || entry.round === undefined) continue
@@ -506,56 +511,17 @@ function standingPositions(finding: Finding): Map<string, DebatePosition> {
 /**
  * WHY a debate ended, beside WHAT its exit was.
  *
- * `Finding.exit` is a three-value field declared in story 1 and this story must
- * not widen it (AD-8, and the story's own Code Map). But three words are not
- * enough for story 6's judge, and AD-6 is the reason: a room that AGREED and a
- * room where nobody but the author ever spoke both land on `converged` today,
- * and "nobody contested it because nobody answered" rendered as "the standing
- * positions settled" is a degraded review reading exactly like a good one.
+ * The vocabulary MOVED TO `core/domain/finding.ts` at story 6, with `Entry`,
+ * which is where a field's type belongs when the field is on a domain record.
+ * Read the reasons there; this stage is still their only writer.
  *
- * So the reason rides in the exit entry's `kind` — `debate-exit-<exit>-<reason>`
- * — which is a free string on the append-only record the judge already reads,
- * costs no new field, and keeps `startsWith("debate-exit-")` working for anyone
- * who only wants to know that an exit happened.
+ * The reason is now written to a TYPED `Entry.exitReason` and ALSO encoded in
+ * the entry's `kind` (`debate-exit-<exit>-<reason>`). Both, deliberately: the
+ * `kind` is what a human reads in a dumped record and what
+ * `startsWith("debate-exit-")` finds, and the field is what code branches on.
+ * `exitReasonOf` reads the field — story 5's `kind.split("-").at(-1)` is gone,
+ * which is the `deferred-work.md` entry about that string protocol, closed.
  */
-type ExitReason =
-  /** Two or more voices, all holding the same definite position. Real agreement. */
-  | "agreed"
-  /** The author withdrew. A finding dies only by its author's own hand. */
-  | "withdrawn"
-  /**
-   * ONE voice was ever heard. Nobody disagreed because nobody else answered —
-   * which is not the same fact as agreement and must never render as one.
-   */
-  | "uncontested"
-  /**
-   * Every standing position is `unsure`. Unanimous uncertainty is a settled
-   * debate in the sense that nobody is going to move, and it is precisely the
-   * case the judge must know was unresolved BY EVIDENCE rather than agreed.
-   */
-  | "unsure"
-  /** People spoke and nobody moved. `cost-model.md` lever 3. */
-  | "restated"
-  /** Nobody stated a position at all. More rounds cannot help. */
-  | "silent"
-  /**
-   * The round budget ran out with the room still open — the ONLY reason the
-   * end-of-stage sweep may write, and never a reason `exitFor` returns.
-   *
-   * It exists because the sweep used to reuse `restated`, whose sentence
-   * ("nobody moved… the remaining rounds were not spent") is false of every
-   * finding that actually reaches the sweep: a room that had stopped moving
-   * exits `stalled` from `exitFor` first, so anything surviving to the cap was
-   * still moving, and every round WAS spent (code review 2026-08-26).
-   *
-   * ONE WORD, DELIBERATELY. `exitReasonOf` recovers the reason with
-   * `kind.split("-").at(-1)`, so a hyphenated reason (`round-limit`) decodes to
-   * `"limit"` silently — no type error, and it would fail quietly because the
-   * counts branch only on `uncontested`/`unsure` today. Any future reason added
-   * here is subject to the same constraint until that string protocol becomes a
-   * typed field.
-   */
-  | "capped"
 
 interface Decision {
   exit: "converged" | "stalled" | "cap"
@@ -1024,14 +990,20 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
 
 /**
  * The reason a finding exited, read back off the append-only record — the same
- * place story 6's judge reads it, so the counts and the judge cannot disagree.
+ * place the judge reads it, so the counts and the judge cannot disagree.
+ *
+ * EXPORTED at story 6, because the judge is the second reader. It reads the
+ * TYPED `Entry.exitReason` rather than splitting the entry's `kind` on `-`,
+ * which is the `deferred-work.md` entry about that string protocol, closed: a
+ * hyphenated reason used to decode to its last word with no type error anywhere.
+ * The entry is still LOCATED by its `kind` prefix, which is a MAD-authored
+ * constant and not a value any model supplies.
  */
-function exitReasonOf(finding: Finding): ExitReason | undefined {
+export function exitReasonOf(finding: Finding): ExitReason | undefined {
   for (let i = finding.history.length - 1; i >= 0; i -= 1) {
-    const kind = finding.history[i]!.kind
-    if (!kind.startsWith("debate-exit-")) continue
-    const reason = kind.split("-").at(-1)
-    return reason as ExitReason
+    const entry = finding.history[i]!
+    if (!entry.kind.startsWith("debate-exit-")) continue
+    return entry.exitReason
   }
   return undefined
 }
@@ -1053,6 +1025,10 @@ function recordExit(finding: Finding, decision: Decision, round: number, at: str
     actor: "mad",
     at,
     kind: `debate-exit-${decision.exit}-${decision.reason}`,
+    // TYPED, beside the `kind` rather than instead of it (story 6). The `kind`
+    // is what a human reads and what `startsWith("debate-exit-")` locates; this
+    // is what the judge and the counts branch on.
+    exitReason: decision.reason,
     body: exitBody(decision, round),
   })
 }

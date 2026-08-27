@@ -313,7 +313,10 @@ describe("review — the story 9 control arm seam", () => {
     expect(record.startedAt).toBe("2026-08-13T00:00:00.000Z")
     expect(record.finishedAt).toBeDefined()
     expect(record.roster.slots).toHaveLength(1)
-    expect(record.ledger.entries).toHaveLength(1)
+    // One discovery turn, plus the ONE judge turn a threshold-skipped finding
+    // costs: verify-independently is the Fact-Checker and nothing else (story 6).
+    expect(record.ledger.entries).toHaveLength(2)
+    expect(record.ledger.entries.map((e) => e.stage)).toEqual(["discover", "judge"])
     expect(record.ledger.total.output).toBeGreaterThan(0)
   })
 
@@ -569,7 +572,12 @@ describe("review — no lens finding carries a co-discovery prior (AD-17d)", () 
 
     expect(record.roster.lensSlots).toEqual([])
     expect(record.lensInstructions).toEqual([])
-    expect(backend.calls).toHaveLength(3) // one billed turn per pool slot, no more
+    // One billed discovery turn per pool slot, no more — plus the single
+    // verify-independently judge turn the one finding costs (story 6). The
+    // assertion is about the LENS pass adding nothing, so the judge call is
+    // counted separately rather than folded into the pool total.
+    expect(backend.calls.filter((c) => c.role === undefined)).toHaveLength(3)
+    expect(backend.calls.filter((c) => c.role !== undefined)).toHaveLength(1)
     expect(record.findings.every((f) => f.source === "pool")).toBe(true)
     expect(record.findings.every((f) => f.coDiscovery?.answered === 3)).toBe(true)
   })
@@ -930,7 +938,12 @@ describe("review — CAP-4 per-finding debate, through the whole pipeline", () =
     expect(flip.positionChanged).toBe(true)
     expect(flip.concession).toContain("guard")
     // AD-8 — the withdrawal/verdict boundary holds through the real pipeline.
-    expect(ledgerFinding.verdict).toBeUndefined()
+    // DEBATE still writes no verdict; the JUDGE writes it afterwards, and the
+    // entry that carries it says which stage did (story 6). Asserting the field
+    // is merely unset stopped being the right test the moment a judge existed.
+    const verdictEntry = ledgerFinding.history.find((e) => e.kind.startsWith("judge-verdict-"))!
+    expect(verdictEntry.stage).toBe("judge")
+    expect(ledgerFinding.history.filter((e) => e.stage === "debate" && e.kind.includes("verdict"))).toEqual([])
     expect(rendered).toContain("debate: converged")
     expect(record.debateCounts?.converged).toBe(2)
   })

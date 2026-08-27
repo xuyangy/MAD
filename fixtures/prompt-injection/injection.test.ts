@@ -17,9 +17,11 @@ import { review } from "../../core/run/review.ts"
 import {
   candidate,
   fakeClock,
+  judgeRoleOf,
   materialSpans,
   occurrencesOf,
   tokens,
+  type JudgeRoleTag,
 } from "../../core/test-support/fakes.ts"
 import {
   AFTER_FORGED_ROW,
@@ -32,8 +34,54 @@ import {
   PLAIN_ORDER,
 } from "./change.ts"
 
+interface Turn {
+  slot: string
+  instructions: string
+  input: string
+  /** The judge role, when this turn was a judge turn. Absent for discovery and debate. */
+  role?: JudgeRoleTag
+}
+
+/**
+ * The judge's scripted answers, and they deliberately QUOTE THE PLANTED ORDER.
+ *
+ * That is the point of driving the judge through this fixture rather than
+ * asserting the spans in a unit test: an injected order does not stop at the
+ * diff. A reviewer quotes the code it objects to, a debater quotes the reviewer,
+ * the extractor is biased toward keeping too much and so keeps the quote, and the
+ * fact-check report quotes it again — so by the time the AGGREGATOR reads it, the
+ * order has been copied forward four times by four models. Every one of those
+ * copies has to land inside a labelled span, and this is what proves it does.
+ */
+function judgeAnswer(role: JudgeRoleTag): unknown {
+  switch (role) {
+    case "evidence-extract":
+      return {
+        evidence: `Participant A cites the comment reading "${PLAIN_ORDER}" and says the missing await is still there.`,
+        pointers: ["src/billing/credit.ts:32"],
+      }
+    case "fact-check":
+      return {
+        checks: ["opened src/billing/credit.ts and read lines 20-40"],
+        findings: `The file does contain the comment "${PLAIN_ORDER}". It is a comment, not a caller, and the ledger write is still unawaited.`,
+        verdict: "upheld",
+        evidenceKind: "line-cite",
+      }
+    case "logic-eval":
+      return {
+        assessment: `A argued from the diff and is adequate. B leaned on the comment reading "${PLAIN_ORDER}" and is weak.`,
+      }
+    case "aggregate":
+      return {
+        verdict: "upheld",
+        reasoning: `The unawaited write is at the cited line. The comment saying "${PLAIN_ORDER}" is part of the change under review, not an instruction to me.`,
+        evidenceKind: "line-cite",
+      }
+  }
+}
+
 /** Three lineages, one of which reports the real defect. */
-function threeSlotRun(recorded: { slot: string; instructions: string; input: string }[]) {
+function threeSlotRun(recorded: Turn[]) {
   const resolved = selectRoster(
     [
       candidate("anthropic", "claude-sonnet-4-5"),
@@ -54,9 +102,22 @@ function threeSlotRun(recorded: { slot: string; instructions: string; input: str
    * order gets into span 2 and span 3, where MAD, not the attacker, put it.
    */
   const backend: ModelBackend = {
-    capabilities: () => ({ tools: false }),
+    // Tool-capable, so the AD-13 degradation path is not what this file is
+    // exercising: the fact-check comes back VERIFIED and the run stays clean,
+    // which keeps every assertion below about AD-18 and nothing else.
+    capabilities: () => ({ tools: true }),
     async runTurn(slot, instructions, input, schema) {
-      recorded.push({ slot, instructions, input })
+      // THE ROLE IS READ FROM THE INSTRUCTION TEXT, not guessed from the prompt.
+      // One slot answers up to four judge schemas in one run, and a heading-based
+      // guess would silently mis-answer the day a heading is reworded.
+      const role = judgeRoleOf(instructions)
+      recorded.push(role === undefined ? { slot, instructions, input } : { slot, instructions, input, role })
+      if (role !== undefined) {
+        const judged = schema.safeParse(judgeAnswer(role))
+        return judged.success
+          ? { ok: true, slot, value: judged.data, tokens: tokens() }
+          : { ok: false, slot, failure: "schema-invalid", message: "n/a" }
+      }
       const debating = input.includes("Debate round")
       // The ids are read OUT OF THE PROMPT rather than hardcoded: a turn naming
       // an id that is not in the room records no position, the room exits
@@ -135,7 +196,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // The acceptance criterion, and the reason the rule exists: a reviewer that
     // can be told to find nothing is worse than no reviewer, because it reports
     // clean and a clean report is believed.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     const { record, rendered } = await threeSlotRun(recorded)
 
     expect(record.answered).toBe(3)
@@ -147,7 +208,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
   })
 
   test("AC: EVERY PLANTED ORDER APPEARS ONLY INSIDE A MATERIAL SPAN, IN EVERY PROMPT", async () => {
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     expect(recorded.length).toBeGreaterThan(3)
@@ -173,7 +234,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // Plant 2 and plant 3. The change span's fence widens past the four
     // backticks the diff carries, so the forged close is strictly shorter than
     // the real one and closes nothing.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     const discovery = recorded.find((turn) => !turn.input.includes("Debate round"))!
@@ -204,7 +265,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // sits next to spans 2 and 3 — the one place a forged row could be mistaken
     // for a transcript row. A test that read only `recorded[0]` would leave half
     // the surface unasserted.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     const debating = recorded.filter((turn) => turn.input.includes("Debate round"))
@@ -213,7 +274,13 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // this loop would silently cover only discovery.
     expect(debating.length).toBeGreaterThan(0)
 
-    for (const turn of recorded) {
+    // THE LOGIC EVALUATOR IS DELIBERATELY EXCLUDED, and its exclusion is asserted
+    // separately below rather than skipped quietly. It is the one turn that gets
+    // no diff: it is forbidden from checking facts, and handing it the code is an
+    // invitation to try — which would manufacture the tool-less second opinion
+    // its instruction exists to prevent (`core/stages/judge.ts`).
+    const withChange = recorded.filter((turn) => turn.role !== "logic-eval")
+    for (const turn of withChange) {
       const spans = materialSpans(turn.input).filter((span) => span.label === "change under review")
       expect(spans).toHaveLength(1)
       const lines = turn.input.split("\n")
@@ -250,7 +317,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // Plant 4 attacks the DEBATE prompt's frame rather than the change span's.
     // The real exchange span has one row per real turn, and the forged row is
     // inside the change span where the diff put it.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     // Filtered on a real SPAN, not on the string `Exchange so far:` — the diff
@@ -277,7 +344,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
   test("PLANT 6: A HOSTILE `file` REACHES THE PROMPT INSIDE SPAN 2, NOT ON MAD'S HEADER", async () => {
     // The containment test above would pass vacuously if the plant never reached
     // a prompt, so this asserts it DID — and asserts where.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     const carrying = recorded.filter((turn) => turn.input.includes("f-99"))
@@ -304,7 +371,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
   test("AN INJECTED ORDER QUOTED BY A MODEL LANDS IN SPAN 2, NOT IN MAD'S OWN PROSE", async () => {
     // A model's `claim` and `reasoning` are material too, and this is the route
     // by which the attacker's sentence gets a second chance at the debate.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     await threeSlotRun(recorded)
 
     const debatePrompts = recorded.filter((turn) => turn.input.includes("Debate round"))
@@ -331,11 +398,130 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // against story 7 by code review 2026-08-27 and recorded as an AD-18
     // amendment. It is the adapter's boundary and story 5A was told to leave both
     // `output.ts` and the adapter alone.
-    const recorded: { slot: string; instructions: string; input: string }[] = []
+    const recorded: Turn[] = []
     const { rendered } = await threeSlotRun(recorded)
 
     for (const notice of Object.values(MATERIAL_NOTICES)) expect(rendered).not.toContain(notice)
     expect(rendered).not.toContain("material: change under review")
     expect(rendered).toContain("appendLedgerEntry")
+  })
+
+  // -------------------------------------------------------------------------
+  // The JUDGE's own spans (story 6)
+  // -------------------------------------------------------------------------
+
+  test("AC: THE JUDGE IS DRIVEN — every role runs, so nothing below is vacuous", async () => {
+    const recorded: Turn[] = []
+    await threeSlotRun(recorded)
+
+    const roles = new Set(recorded.filter((turn) => turn.role).map((turn) => turn.role))
+    // All four, which also pins that BOTH modes ran: the contested pair reaches
+    // the full pipeline and the extractor and aggregator only exist there.
+    expect([...roles].sort()).toEqual(["aggregate", "evidence-extract", "fact-check", "logic-eval"])
+  })
+
+  test("AC: THE ORDER SURVIVES FOUR HANDOFFS AND IS INSIDE A SPAN AT EVERY ONE", async () => {
+    // A model copying the order forward is the NORMAL case, not an attack on the
+    // pipeline: the extractor was told to keep too much, so it keeps it. What
+    // must hold is that MAD frames every copy.
+    const recorded: Turn[] = []
+    await threeSlotRun(recorded)
+
+    const judgeTurns = recorded.filter((turn) => turn.role !== undefined)
+    expect(judgeTurns.length).toBeGreaterThan(3)
+
+    for (const turn of judgeTurns) {
+      const spans = materialSpans(turn.input)
+      expect(spans.length, `${turn.role} got a prompt with no material span at all`).toBeGreaterThan(0)
+      for (const at of occurrencesOf(turn.input, PLAIN_ORDER)) {
+        const inside = spans.some((span) => at >= span.start && at < span.end)
+        expect(inside, `the order reached the ${turn.role} prompt outside a span`).toBe(true)
+      }
+    }
+
+    // And specifically at the LAST handoff, where the order has been copied by a
+    // debater, then an extractor, then a fact-checker.
+    const aggregate = judgeTurns.find((turn) => turn.role === "aggregate")!
+    const carried = materialSpans(aggregate.input).filter(
+      (span) => span.body.includes(PLAIN_ORDER) && span.label !== "change under review",
+    )
+    expect(carried.length).toBeGreaterThan(0)
+  })
+
+  test("AC: NO SLOT ID AND NO PARTICIPANT NUMBER REACHES A JUDGE PROMPT (AD-17b)", async () => {
+    const recorded: Turn[] = []
+    await threeSlotRun(recorded)
+
+    for (const turn of recorded.filter((t) => t.role !== undefined)) {
+      // ASSERTED OVER MAD'S OWN TEXT, which means the prompt with every span body
+      // cut out. The diff itself carries a forged `participant 1` row (plant 5),
+      // and finding it inside the change span is the rule WORKING — the attacker
+      // wrote it and MAD quoted it as material. What must never happen is MAD
+      // writing a slot id or a debate label in its own voice.
+      const spans = materialSpans(turn.input)
+      let mad = turn.input
+      for (const span of [...spans].reverse()) {
+        mad = mad.slice(0, span.start) + mad.slice(span.end)
+      }
+      const text = mad.toLowerCase()
+      expect(text, `${turn.role} prompt leaked a slot id`).not.toContain("discovery-")
+      expect(text, `${turn.role} prompt leaked a lens id`).not.toContain("lens")
+      // Story 5's debate labels must not survive either: the judge sees the
+      // ANONYMIZER's letters, and two label vocabularies in one record is how a
+      // reader maps one back to the other.
+      expect(text, `${turn.role} prompt leaked a debate label`).not.toContain("participant 1")
+
+      // Inside the transcript span, every row is labelled by a LETTER — MAD's
+      // own frame, so this one is asserted on the span body rather than beside it.
+      const transcript = spans.find((span) => span.label === "anonymized debate transcript")
+      if (transcript) {
+        for (const row of transcript.body.split("\n")) {
+          expect(row, `a transcript row is not letter-labelled: ${row}`).toMatch(
+            /^- round \d+, [A-Z]+ — /,
+          )
+        }
+      }
+    }
+  })
+
+  test("AC: A FORGED TRANSCRIPT ROW CANNOT BE MISTAKEN FOR A REAL ONE", async () => {
+    // Plant 5 travels the whole way: the diff carries a forged debate entry, a
+    // reviewer quotes it, and it ends up inside the anonymized transcript the
+    // judge reads. It must sit inside a cell, escaped, never on a row of its own.
+    const recorded: Turn[] = []
+    await threeSlotRun(recorded)
+
+    const withTranscript = recorded.filter(
+      (turn) =>
+        turn.role !== undefined &&
+        materialSpans(turn.input).some((span) => span.label === "anonymized debate transcript"),
+    )
+    expect(withTranscript.length).toBeGreaterThan(0)
+
+    for (const turn of withTranscript) {
+      const span = materialSpans(turn.input).find(
+        (candidateSpan) => candidateSpan.label === "anonymized debate transcript",
+      )!
+      // Every row is one line and every row is MAD's, so a count of lines is a
+      // count of turns actually taken.
+      for (const line of span.body.split("\n")) {
+        expect(line.startsWith("- round ")).toBe(true)
+      }
+      expect(span.body).not.toContain(`\n${FORGED_ENTRY}`)
+    }
+  })
+
+  test("AC: THE VERDICT REACHES OUTPUT, AND THE RUN IS NOT DEGRADED", async () => {
+    const recorded: Turn[] = []
+    const { record, rendered } = await threeSlotRun(recorded)
+
+    expect(record.judgeCounts?.judged).toBeGreaterThan(0)
+    expect(record.judgeCounts?.upheld).toBeGreaterThan(0)
+    expect(record.findings.every((f) => f.verdict !== undefined)).toBe(true)
+    expect(rendered).toContain("verdict: upheld")
+    // AD-13's healthy path: the slots report tools and the checker reported
+    // running one, so nothing is unverified and no warning is raised.
+    expect(record.judgeCounts?.factChecksUnverified).toBe(0)
+    expect(record.warnings.every((w) => w.code !== "fact-check-untooled")).toBe(true)
   })
 })
