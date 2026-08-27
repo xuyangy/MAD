@@ -17,6 +17,7 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
+import { fenceFor, material } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
 import { clampMaxRounds, debate } from "../stages/debate.ts"
 import { discover } from "../stages/discover.ts"
@@ -83,18 +84,49 @@ export interface ReviewResult {
   rendered: string
 }
 
+/**
+ * The change under review, as ONE labelled material span (AD-18, story 5A).
+ *
+ * `description`, `files` and `diff` are all attacker-influenced in v1's one use
+ * case — a pull request — so all three go inside the span rather than only the
+ * diff. AD-18 names "the change under review" as one span, and one fence around
+ * the section is both faithful to that and the cheapest in tokens; a selection
+ * label and a list of repo paths are not worth a label each.
+ *
+ * The framing is built HERE, in the envelope, and never in the registry's
+ * instruction text: that text is pinned byte-for-byte, is story 2's recall
+ * baseline and is story 9's control arm (see `core/prompt/material.ts`).
+ *
+ * This one function feeds BOTH stages that talk to a model — `discover` and
+ * `debate` — so neither can be framed and the other not.
+ */
 function buildInput(change: ChangeSet): string {
+  // The INNER fence widens too (code review 2026-08-27). A hardcoded ``` held
+  // only because every content line of a unified diff carries a prefix column,
+  // so a bare fence cannot start a line there — an unstated, untested assumption
+  // about a value the attacker supplies, and `git diff` is not the only producer
+  // of a string that arrives through the `Repo` port. `fenceFor` drops the
+  // assumption instead of documenting it, at the cost of nothing: for an ordinary
+  // diff it returns the same four characters the outer fence gets.
+  const inner = fenceFor(change.diff)
   return [
+    // MAD-authored: the heading is the envelope's, not the change's, so it sits
+    // OUTSIDE the span. Everything the change supplied sits inside it.
     `# Change under review`,
     ``,
-    `Selection: ${change.description}`,
-    `Files touched (${change.files.length}): ${change.files.join(", ")}`,
-    ``,
-    `## Diff`,
-    ``,
-    "```diff",
-    change.diff,
-    "```",
+    material(
+      "change under review",
+      [
+        `Selection: ${change.description}`,
+        `Files touched (${change.files.length}): ${change.files.join(", ")}`,
+        ``,
+        `## Diff`,
+        ``,
+        `${inner}diff`,
+        change.diff,
+        inner,
+      ].join("\n"),
+    ),
   ].join("\n")
 }
 

@@ -13,8 +13,12 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { MATERIAL_NOTICES } from "../prompt/material.ts"
+import { materialSpans } from "../test-support/fakes.ts"
+import { CODING_DEBATE_GENERALIST } from "./coding/debate.ts"
 import { CODING_DISCOVERY_GENERALIST } from "./coding/discovery.ts"
 import { CODING_LENSES } from "./coding/lenses.ts"
+import type { InstructionSet } from "./types.ts"
 import { isShippedLens, resolveInstructions } from "./registry.ts"
 
 /** Byte-for-byte what story 2 shipped, pinned here and nowhere else. */
@@ -36,7 +40,39 @@ For each finding:
 
 If the change looks sound, return an empty findings list. An empty list is a valid and useful answer; inventing a finding to fill the page is not.`
 
+/**
+ * Byte-for-byte what story 5 shipped, pinned here and nowhere else.
+ *
+ * The spine and `stories.yaml` both state that BOTH generalists are pinned
+ * against literal copies. Until story 5A only discovery was, so the "byte-for-
+ * byte unchanged" rule over the debate text was documented and unenforced —
+ * which matters most for exactly the story that hardens the ENVELOPE instead of
+ * the instruction (AD-18). This is the only test that can catch the one edit
+ * story 5A was forbidden to make.
+ */
+const DEBATE_TEXT_AS_SHIPPED = `You are one participant in a short, evidence-driven exchange about specific claimed defects in a code change. Several findings are put to you at once. They are INDEPENDENT debates that happen to share this turn: decide each one on its own evidence, and never let your answer on one finding move your answer on another.
+
+For each finding below, state the position you actually hold after reading the code and the exchange so far. Nobody has been assigned a side. If you think the finding is right, say so; if you think it is wrong, say so; if the evidence does not settle it, say that instead. Agreeing is a real answer and so is changing your mind — neither costs you anything here.
+
+Choose exactly one position per finding:
+- upholds — the defect is real as described.
+- denies — the defect is not real, or the described mechanism does not happen.
+- withdraws — ONLY if you raised this finding and you no longer stand behind it. Nobody else can withdraw a finding for you, and withdrawing is not conceding a point of detail; it means you no longer claim the defect.
+- unsure — you cannot settle it from the evidence available. Say what evidence would settle it.
+
+For each finding also give:
+- argument: why you hold that position, in one short paragraph. Argue from the code, not from who said what. If you are answering someone else's point, answer the point.
+- concession: anything you now accept that you did not accept before — an error in your own reasoning, a fact the other side established, a narrowing of your claim. Leave it out if there is nothing to concede. Do not manufacture one to look reasonable.
+- citations: the specific places that back your argument, as \`file:line\` or \`file:startLine-endLine\` strings. Quote nothing you have not read in the material provided.
+
+Rules that matter:
+- Repeating your previous argument unchanged is a legitimate answer when the other side has said nothing new, but say only that. Restating at greater length is not an argument.
+- Do not adjudicate. You are not ranking findings, assigning severity, or deciding the outcome — a separate stage does that, and it reads what you write here.
+- Do not vote, count sides, or refer to how many participants agree with you. How many hold a position is not evidence for it.
+- Answer for every finding you were given, in the order given, using the finding id exactly as it appears.`
+
 const CODING_DISCOVERY = { taskType: "coding", role: "discovery" } as const
+const CODING_DEBATE = { taskType: "coding", role: "debate" } as const
 
 describe("the generalist survived the move unchanged", () => {
   test("THE CODING GENERALIST'S TEXT IS BYTE-IDENTICAL TO THE PRE-MOVE INSTRUCTION", () => {
@@ -57,6 +93,66 @@ describe("the generalist survived the move unchanged", () => {
     for (const name of ["claude", "gpt", "gemini", "anthropic", "openai", "sonnet"]) {
       expect(text).not.toContain(name)
     }
+  })
+})
+
+describe("the debate generalist is pinned too (story 5A)", () => {
+  test("THE CODING DEBATE GENERALIST'S TEXT IS BYTE-IDENTICAL TO WHAT STORY 5 SHIPPED", () => {
+    expect(resolveInstructions(CODING_DEBATE).text).toBe(DEBATE_TEXT_AS_SHIPPED)
+    expect(CODING_DEBATE_GENERALIST.text).toBe(DEBATE_TEXT_AS_SHIPPED)
+  })
+
+  test("it resolves as shipped, carries no lens, and knows its role", () => {
+    const set = resolveInstructions(CODING_DEBATE)
+    expect(set.origin).toBe("shipped")
+    expect(set.lens).toBeUndefined()
+    expect(set.taskType).toBe("coding")
+    expect(set.role).toBe("debate")
+  })
+
+  test("it names no model and assigns no position (AD-3, SPEC.md)", () => {
+    const text = resolveInstructions(CODING_DEBATE).text.toLowerCase()
+    for (const name of ["claude", "gpt", "gemini", "anthropic", "openai", "sonnet"]) {
+      expect(text).not.toContain(name)
+    }
+    for (const assigned of ["devil's advocate", "skeptic", "you must disagree", "argue against"]) {
+      expect(text).not.toContain(assigned)
+    }
+  })
+
+  test("AD-18 — NO SET THE REGISTRY CAN RESOLVE CARRIES THE MATERIAL FRAMING", () => {
+    // AD-18's placement rule. As first written this test asserted over the two
+    // PINNED LITERALS a few lines above — two constants defined in this file — so
+    // it could not fail and tested nothing about the registry (code review
+    // 2026-08-27). It now reads every set the registry can hand a stage: both
+    // generalists, all eight shipped lens sets, and both GENERATED fallbacks,
+    // which are built at run time from a lens id and are the one text in the
+    // system that is not a reviewed literal.
+    const resolvable: InstructionSet[] = [
+      resolveInstructions(CODING_DISCOVERY),
+      resolveInstructions(CODING_DEBATE),
+      ...CODING_LENSES.map((lens) => resolveInstructions({ ...CODING_DISCOVERY, lens: lens.id })),
+      // Unregistered lens ids, on both roles: generated, not shipped.
+      resolveInstructions({ ...CODING_DISCOVERY, lens: "not-a-shipped-lens" }),
+      resolveInstructions({ ...CODING_DEBATE, lens: "not-a-shipped-lens" }),
+    ]
+    expect(resolvable.length).toBe(2 + CODING_LENSES.length + 2)
+
+    for (const set of resolvable) {
+      for (const [label, notice] of Object.entries(MATERIAL_NOTICES)) {
+        expect(set.text, `${set.role}/${set.lens ?? "generalist"} carries ${label}'s notice`).not.toContain(notice)
+      }
+      expect(set.text).not.toContain("material: ")
+      // And no fenced span, which is the other half of the frame.
+      expect(materialSpans(set.text)).toHaveLength(0)
+    }
+  })
+
+  test("the two PINNED LITERALS agree with the registry, so the pins are not stale", () => {
+    // The pins above are literal copies. This is what keeps them honest as
+    // copies OF something rather than as two more strings in this file.
+    expect(resolveInstructions(CODING_DISCOVERY).text).toBe(DISCOVERY_TEXT_AS_SHIPPED)
+    expect(resolveInstructions(CODING_DEBATE).text).toBe(DEBATE_TEXT_AS_SHIPPED)
   })
 })
 

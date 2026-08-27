@@ -83,6 +83,7 @@ import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { Envelope, ModelBackend } from "../ports/model-backend.ts"
+import { listCell, material, oneLine } from "../prompt/material.ts"
 
 /**
  * `pipeline-stages.md` §4 gives debate a round cap and does not name a number.
@@ -351,6 +352,25 @@ async function runDebateTurn(
  * The change under review appears ONCE, not once per finding — that is most of
  * what batching buys. Each finding carries its own transcript so far, with every
  * speaker rendered as `participant N` (AD-17a; see the module header).
+ *
+ * ## AD-18 — two of v1's three material spans are built here (story 5A)
+ *
+ * `input.input` already arrives wrapped as span 1, the change under review; the
+ * two this function owns are model-authored PROSE, which is material for exactly
+ * the same reason a diff is:
+ *
+ * - **Span 2, the finding's `claim` and `reasoning`.** Written by a discovery
+ *   model, echoed back into a later turn — nothing MAD wrote.
+ * - **Span 3, the exchange so far.** `body`, `position`, `concession` and
+ *   `citations` are all model-authored (`core/domain/finding.ts` — `position` is
+ *   a free `string`, not an enum), and the debate transcript is the route by
+ *   which one debater instructs the next.
+ *
+ * Inside span 3, one entry stays ONE LINE. The span's fence stops content
+ * escaping the block, but the per-entry row is MAD's own frame and a `body`
+ * carrying a newline would render a forged sibling entry INSIDE a correctly
+ * labelled span — a debate turn nobody took. `oneLine` closes that and nothing
+ * else; see its comment on why an encoding here is not the filter AD-18 forbids.
  */
 function buildPrompt(
   input: DebateInput,
@@ -370,7 +390,11 @@ function buildPrompt(
 
   for (const room of rooms) {
     const { finding } = room
-    const { file, startLine, endLine } = finding.locus
+    const { startLine, endLine } = finding.locus
+    // `file` IS MODEL-AUTHORED and can carry line breaks, so it is a cell like
+    // any other (code review 2026-08-27). The line numbers are `number`s and
+    // need nothing. The assembled locus goes inside span 2 below.
+    const file = oneLine(finding.locus.file)
     const locus =
       startLine === undefined
         ? file
@@ -379,29 +403,70 @@ function buildPrompt(
           : `${file}:${startLine}-${endLine}`
     const you = room.labels.get(slot) ?? "an observer"
 
+    // MAD'S OWN HEADER LINE, and everything on it is MAD's: `finding.id` comes
+    // from `clock.id("finding")` and `effectiveSeverity` is computed. THE LOCUS
+    // IS NOT — see below.
     lines.push(
       ``,
-      `## finding \`${finding.id}\` — ${locus} [${effectiveSeverity(finding)}]`,
+      `## finding \`${finding.id}\` [${effectiveSeverity(finding)}]`,
       // The room is told who RAISED the finding, because "a finding dies only by
       // its author's own withdrawal" is a rule the author has to be able to
       // apply — and a non-author has to know that `withdraws` is not theirs.
       `Raised by: ${room.labels.get(finding.author) ?? "participant ?"}. You are ${you}.`,
       ``,
-      `Claim: ${finding.claim}`,
     )
-    if (finding.reasoning.trim().length > 0) lines.push(`Reasoning: ${finding.reasoning}`)
+
+    // Span 2 (AD-18). `File:`, `Claim:` and `Reasoning:` are MAD's labels, but
+    // every value beside them is a discovery model's, so each label goes inside
+    // the span with the value it labels rather than the span being split around
+    // it. An empty `reasoning` still omits its line entirely, exactly as before.
+    //
+    // THE LOCUS IS IN HERE, not on the header line above (code review
+    // 2026-08-27). `Finding.locus.file` is `z.string().min(1)` in discovery's
+    // schema and `toLocus` normalizes backslashes and a leading `./` and nothing
+    // else — so the path is model-authored text exactly like the claim is, and on
+    // the header it was model text OUTSIDE every span, directly under MAD's own
+    // `# Findings` heading. `oneLine` alone would stop it writing extra LINES
+    // there and would still leave an injected order sitting in MAD's own voice.
+    //
+    // EVERY CELL GOES THROUGH `oneLine`, for the reason the exchange rows do:
+    // these lines are MAD's frame inside the span, so a `claim` carrying a break
+    // plus `Reasoning: …` forges a MAD-labelled line that the fence cannot stop
+    // — the forgery impersonates the frame from inside the span rather than
+    // escaping it. The two spans are escaped by one rule, not two.
+    const claimLines = [`File: ${locus}`, `Claim: ${oneLine(finding.claim)}`]
+    if (finding.reasoning.trim().length > 0) {
+      claimLines.push(`Reasoning: ${oneLine(finding.reasoning)}`)
+    }
+    lines.push(material("finding locus, claim and reasoning", claimLines.join("\n")))
 
     const transcript = finding.history.filter((entry) => entry.stage === "debate" && entry.round !== undefined)
     if (transcript.length === 0) {
+      // MAD-authored, so it gets NO span: framing MAD's own sentence as material
+      // would tell the model to disregard the one line here that is an
+      // instruction about the state of the room.
       lines.push(``, `No positions have been stated yet.`)
     } else {
-      lines.push(``, `Exchange so far:`)
+      // Span 3 (AD-18) — the whole exchange as ONE span, with one entry to one
+      // line so a `body` cannot forge a sibling entry.
+      const rows: string[] = []
       for (const entry of transcript) {
         const who = room.labels.get(entry.actor) ?? "a participant"
-        const cited = entry.citations && entry.citations.length > 0 ? ` [cites ${entry.citations.join(", ")}]` : ""
-        const conceded = entry.concession ? ` (conceded: ${entry.concession})` : ""
-        lines.push(`- round ${entry.round}, ${who} — ${entry.position}: ${entry.body}${cited}${conceded}`)
+        // QUOTED, not merely escaped: the list joins on `", "` and a citation
+        // may contain it, which rendered as several citations and put evidence
+        // nobody cited in front of a debater (code review 2026-08-27).
+        const citations = entry.citations?.map(listCell) ?? []
+        const cited = citations.length > 0 ? ` [cites ${citations.join(", ")}]` : ""
+        const conceded = entry.concession ? ` (conceded: ${oneLine(entry.concession)})` : ""
+        // `position` is optional on `Entry` and always set on a round entry, so
+        // the fallback is unreachable — and printing `undefined` at a debater
+        // would be worse than printing nothing.
+        const position = oneLine(entry.position ?? "")
+        rows.push(
+          `- round ${entry.round}, ${who} — ${position}: ${oneLine(entry.body)}${cited}${conceded}`,
+        )
       }
+      lines.push(``, `Exchange so far:`, material("debate exchange so far", rows.join("\n")))
     }
   }
 

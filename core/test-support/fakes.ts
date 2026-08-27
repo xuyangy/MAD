@@ -15,6 +15,7 @@ import type {
   TurnFailure,
 } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
+import { type MaterialLabel, MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 
 /** Deterministic clock: fixed time, counted ids. */
 export function fakeClock(at = "2026-08-13T00:00:00.000Z"): Clock {
@@ -108,4 +109,91 @@ export function fakeChange(): ChangeSet {
     files: ["src/pay.ts"],
     diff: "--- a/src/pay.ts\n+++ b/src/pay.ts\n@@ -1 +1 @@\n-const fee = 0\n+const fee = total * rate\n",
   }
+}
+
+/** One material span found in a prompt, with the offsets of its BODY. */
+export interface MaterialSpan {
+  label: MaterialLabel
+  body: string
+  /** Offset of the body's first byte in the prompt. */
+  start: number
+  /** Offset one past the body's last byte. Equals `start` for an empty body. */
+  end: number
+}
+
+/**
+ * The material spans in one prompt (AD-18), read the way a reader would.
+ *
+ * Deliberately NOT `material()` in reverse: a helper that rebuilt the expected
+ * string from the function under test would pass under any change made to both.
+ * It scans for a labelled fence line, then takes every line up to the first line
+ * exactly equal to that fence — which is also why a forged header inside a body
+ * cannot open a span of its own, since it is consumed as body before the scan
+ * reaches it.
+ *
+ * ## It THROWS rather than tolerating a malformed span
+ *
+ * Three failures, all of which a lenient parser turned into a passing test (code
+ * review 2026-08-27):
+ *
+ * - **No closing fence.** Treating end-of-input as the close made every "the
+ *   order is inside the span" assertion true for a span that never closed, and
+ *   clamping the end offset instead scored a plant on the final line as OUTSIDE
+ *   the span — a real regression failing with a misleading message.
+ * - **No notice.** Matching only the fence line meant a span emitted with no
+ *   notice sentence passed every pipeline test, while AD-18's rule is the
+ *   sentence as much as the fence.
+ * - **An unknown label.** Every label is a literal in `MaterialLabel`, so one the
+ *   parser does not recognise at the top level is either a new span nobody
+ *   updated this list for, or content that got out.
+ *
+ * Throwing puts the diagnosis in the failure message instead of leaving the
+ * caller to work out which of its own assertions lied.
+ */
+export function materialSpans(prompt: string): MaterialSpan[] {
+  const spans: MaterialSpan[] = []
+  const lines = prompt.split("\n")
+  let offset = 0
+  const offsets = lines.map((line) => {
+    const at = offset
+    offset += line.length + 1
+    return at
+  })
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^(`{3,})material: (.+)$/.exec(lines[i]!)
+    if (!open) continue
+    const [fence, label] = [open[1]!, open[2]!]
+
+    if (!(label in MATERIAL_NOTICES)) {
+      throw new Error(`unknown material label "${label}" opened a span at line ${i + 1}`)
+    }
+    const known = label as MaterialLabel
+    if (lines[i - 1] !== noticeFor(known)) {
+      throw new Error(
+        `material span "${label}" is not preceded by its notice sentence (line ${i} reads ${JSON.stringify(lines[i - 1] ?? null)})`,
+      )
+    }
+
+    let j = i + 1
+    for (; j < lines.length && lines[j] !== fence; j += 1) {}
+    if (j >= lines.length) {
+      throw new Error(`material span "${label}" opened at line ${i + 1} is never closed`)
+    }
+
+    const body = lines.slice(i + 1, j).join("\n")
+    const start = offsets[i + 1]!
+    spans.push({ label: known, body, start, end: start + body.length })
+    i = j
+  }
+  return spans
+}
+
+/** Every offset at which `needle` occurs in `haystack`. */
+export function occurrencesOf(haystack: string, needle: string): number[] {
+  const found: number[] = []
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    found.push(at)
+  }
+  return found
 }
