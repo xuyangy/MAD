@@ -81,7 +81,7 @@ function judgeAnswer(role: JudgeRoleTag): unknown {
 }
 
 /** Three lineages, one of which reports the real defect. */
-function threeSlotRun(recorded: Turn[]) {
+function threeSlotRun(recorded: Turn[], options: { tools?: boolean } = {}) {
   const resolved = selectRoster(
     [
       candidate("anthropic", "claude-sonnet-4-5"),
@@ -102,10 +102,17 @@ function threeSlotRun(recorded: Turn[]) {
    * order gets into span 2 and span 3, where MAD, not the attacker, put it.
    */
   const backend: ModelBackend = {
-    // Tool-capable, so the AD-13 degradation path is not what this file is
-    // exercising: the fact-check comes back VERIFIED and the run stays clean,
-    // which keeps every assertion below about AD-18 and nothing else.
-    capabilities: () => ({ tools: true }),
+    // Tool-capable BY DEFAULT, so the AD-13 degradation path is not what most of
+    // this file is exercising: the fact-check comes back VERIFIED and the run
+    // stays clean, which keeps every assertion below about AD-18 and nothing
+    // else.
+    //
+    // OVERRIDABLE since code review 2026-08-28. Story 6 changed this line from
+    // `false` to `true`, which was right for the AD-18 tests and left the AD-13
+    // untooled path — an acceptance criterion of its own — covered only by unit
+    // tests against `FakeBackend`, never through the real `review()` seam this
+    // file exists to drive. The last test in this file takes the other branch.
+    capabilities: () => ({ tools: options.tools ?? true }),
     async runTurn(slot, instructions, input, schema) {
       // THE ROLE IS READ FROM THE INSTRUCTION TEXT, not guessed from the prompt.
       // One slot answers up to four judge schemas in one run, and a heading-based
@@ -523,5 +530,34 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // running one, so nothing is unverified and no warning is raised.
     expect(record.judgeCounts?.factChecksUnverified).toBe(0)
     expect(record.warnings.every((w) => w.code !== "fact-check-untooled")).toBe(true)
+  })
+
+  test("AC: AN UNTOOLED ROSTER STILL COMPLETES, AND SAYS SO EVERYWHERE (AD-13)", async () => {
+    // The third acceptance criterion, END TO END rather than against a fake
+    // backend (code review 2026-08-28): "given no answering pool slot reports
+    // `tools: true`… every fact-check is recorded unverified, a
+    // `fact-check-untooled` warning is raised, the aggregator prompt says the
+    // fact-check is unverified, and the run still completes with verdicts".
+    const recorded: Turn[] = []
+    const { record, rendered } = await threeSlotRun(recorded, { tools: false })
+
+    // The run COMPLETES. AD-13 forbids refusing it.
+    expect(record.judgeCounts?.judged).toBeGreaterThan(0)
+    expect(record.findings.some((f) => f.verdict !== undefined)).toBe(true)
+
+    // Every check that ran is unverified, and the warning is raised once.
+    expect(record.judgeCounts?.factChecksUnverified).toBeGreaterThan(0)
+    expect(record.warnings.some((w) => w.code === "fact-check-untooled")).toBe(true)
+
+    // MAD's attestation reaches the AGGREGATOR, outside any span, in words.
+    const aggregate = recorded.filter((turn) => turn.role === "aggregate")
+    expect(aggregate.length).toBeGreaterThan(0)
+    for (const turn of aggregate) {
+      expect(turn.input).toContain("This check was UNVERIFIED")
+    }
+
+    // And it reaches the READER, both per finding and in the summary.
+    expect(rendered).toContain("CHECK NOT VERIFIED — nothing was opened or run")
+    expect(rendered).toContain("OPENED NOTHING AND RAN")
   })
 })

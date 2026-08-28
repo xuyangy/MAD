@@ -453,6 +453,18 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // Every model that answered is represented as an arm, including any that
     // raised nothing — CAP-1's criterion is over every PARTICIPATING model.
     expect(comparison.members).toHaveLength(record.answered)
+
+    // REPORTED, NOT ASSERTED (AC #6, and the spine's "re-run and report" rule for
+    // any story that moves what a model is shown). The assertions above are
+    // properties that hold at any fixture size; this line is the NUMBER a story
+    // quotes when it has to show the baseline did not move. Printed the way
+    // `scripts/clustering-rates.ts` prints its two rates, and for the same reason
+    // — a number nobody can see is a number nobody can check.
+    console.log(
+      `CAP-1 pooled recall = ${comparison.pooled.found}/${comparison.pooled.total} ` +
+        `(best single member: ${Math.max(...comparison.members.map((m) => m.recall.found))}/` +
+        `${comparison.pooled.total})`,
+    )
   })
 
   test("nobody finds everything — the unfound defects are still counted against the pool", async () => {

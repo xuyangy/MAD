@@ -502,6 +502,15 @@ describe("the judge generalists are pinned from the day they shipped", () => {
       // READS it, so a stage that re-elicited it would change what already
       // happened. The scale words are the tell — `coding/discovery.ts` is the
       // only shipped set that may spell them.
+      //
+      // WHY NOT ALL FOUR SCALE VALUES (code review 2026-08-28): `high`, `medium`
+      // and `low` are ordinary English that a non-discovery instruction may
+      // legitimately use — `low` is a substring of `follow`, which
+      // `coding/logic-eval.ts` contains. The two words below are the ones that
+      // appear ONLY in the scale, so they are the ones that can be asserted
+      // without a false positive. The pairing `critical` + `exploitable` is the
+      // scale's first rung spelled out, which is what a set re-eliciting severity
+      // would have to reproduce.
       const text = resolveInstructions(key).text.toLowerCase()
       for (const word of ["critical", "exploitable"]) expect(text).not.toContain(word)
     })

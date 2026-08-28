@@ -1210,7 +1210,9 @@ const JUDGE_COUNTS: JudgeCounts = {
   ruledInvalid: 0,
   notAdjudicated: 1,
   unresolved: 0,
+  notExamined: 0,
   factChecksUnverified: 0,
+  factChecksDroppedOut: 0,
   turns: 5,
   attempts: 5,
 }
@@ -1260,10 +1262,69 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
   test("the SUMMARY reports the stage's counts, and prints the two partitions apart", () => {
     const rendered = output(record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
 
-    expect(rendered).toContain("JUDGE: 3 finding(s) decided")
-    expect(rendered).toContain("1 after a debate, 1 checked independently, 1 withdrawn")
+    // "REACHED", and the buckets sum to it (code review 2026-08-28).
+    expect(rendered).toContain("JUDGE: 3 finding(s) reached")
+    expect(rendered).toContain(
+      "1 adjudicated after a debate, 1 in verify-independently mode, 1 withdrawn by whoever raised it.",
+    )
     expect(rendered).toContain("Verdicts: 1 upheld, 0 ruled invalid, 1 not settled, 1 withdrawn.")
-    expect(rendered).toContain("5 allocation(s) spent judging.")
+    expect(rendered).toContain("5 turn(s) requested while judging, each billed once.")
+  })
+
+  test("AD-6d — a run the budget stranded says so in the headline, and the buckets still sum", () => {
+    // WAS UNRENDERED BY ANY TEST until code review 2026-08-28: the shared fixture
+    // sets `unresolved: 0`, so this whole branch could be deleted and 677 tests
+    // still passed. A run that stranded findings mid-judge could therefore report
+    // as if it had decided everything it started.
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        judged: 5,
+        unresolved: 2,
+      }),
+    )
+
+    expect(rendered).toContain(
+      "JUDGE: 5 finding(s) reached — 1 adjudicated after a debate, 1 in verify-independently mode, " +
+        "1 withdrawn by whoever raised it, 2 stranded by the budget.",
+    )
+    expect(rendered).toContain("2 finding(s) ran out of budget before a verdict")
+  })
+
+  test("AD-6 — findings no surviving model could examine get their own count and line", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        judged: 5,
+        notExamined: 2,
+      }),
+    )
+
+    expect(rendered).toContain("2 never examined.")
+    expect(rendered).toContain("2 finding(s) were NEVER EXAMINED")
+  })
+
+  test("AD-12 — a check that NEVER ANSWERED is reported apart from one that opened nothing", () => {
+    // The two are different facts and a reader acts on them differently. Before
+    // code review 2026-08-28 a dropped-out check was silently counted into
+    // "checked independently" with no line contradicting it.
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        factChecksDroppedOut: 2,
+      }),
+    )
+
+    expect(rendered).toContain("2 check(s) against the code NEVER COMPLETED")
+    // And it did NOT claim they opened nothing — that is the other line.
+    expect(rendered).not.toContain("OPENED NOTHING AND RAN")
+  })
+
+  test("AD-6 — the withdrawn and not-settled explanations render, not just their counts", () => {
+    const rendered = output(record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("A withdrawn finding cost no judging at all")
+    expect(rendered).toContain('"Not settled" is a real answer, not a failure')
   })
 
   test("AD-6 — unverified checks are called out in the summary, loudly", () => {
@@ -1287,7 +1348,92 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
       }),
     )
 
-    expect(rendered).toContain("7 were BILLED: 2 needed their one retry.")
+    // Worded so the two numbers cannot be read as one set (code review
+    // 2026-08-28): "5 allocation(s) spent judging. 7 were BILLED" read as seven
+    // of the five just named.
+    expect(rendered).toContain(
+      "5 turn(s) requested while judging, billed as 7 calls — 2 needed the one retry AD-12 allows.",
+    )
+  })
+
+  test("a WITHDRAWN finding says no step was NEEDED, not that none completed", () => {
+    // The whole withdrawal render path was unpinned until code review
+    // 2026-08-28 — the `judged()` fixture always carried a fact-check entry, so
+    // no test reached the empty-steps branch and the fallback could be deleted
+    // outright. And the fallback itself said the wrong thing: the judge spends no
+    // turn on a withdrawal on purpose ("the FREE verdict"), so "no step
+    // completed" reported a failure where nothing was ever going to run.
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.history = [
+      {
+        stage: "judge",
+        actor: "mad",
+        at: "2026-08-13T00:00:00.000Z",
+        kind: "judge-verdict-withdrawn-by-author",
+        body: "The reviewer who raised this withdrew it during the exchange.",
+      },
+    ]
+    f.verdict = "withdrawn-by-author"
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("judge: no step needed — The reviewer who raised this withdrew it")
+    expect(rendered).not.toContain("no step completed")
+  })
+
+  test("a finding whose every judge step dropped out DOES say no step completed", () => {
+    // The other empty-steps case, and it is the opposite one: steps were meant to
+    // run and none did. The two must not render alike.
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.history = [
+      {
+        stage: "judge",
+        actor: "discovery-1",
+        at: "2026-08-13T00:00:00.000Z",
+        kind: "judge-verdict-not-adjudicated",
+        body: "The step that decides the verdict did not complete.",
+      },
+    ]
+    f.verdict = "not-adjudicated"
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("judge: no step completed")
+  })
+
+  test("AD-9 — long or multi-line evidence is ONE truncated cell in the column, whole under the finding", () => {
+    // UNPINNED until code review 2026-08-28: every fixture set a single short
+    // line, for which the truncating implementation and the old pass-through one
+    // return the same string. The extractor is instructed to keep too much, so
+    // paragraphs are the EXPECTED case, and an untruncated one wraps the row that
+    // AD-9 exists to keep readable as three columns.
+    const f = finding({ severity: "high", file: "a.ts", route: "debate", routeReason: "contested" })
+    f.history = judged()
+    f.verdict = "upheld"
+    f.evidence =
+      "Participant A pointed at src/pay.ts:12 and quoted the rounding line in full, which is a very long first line indeed.\n\nParticipant B did not answer it."
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    // The COLUMN: first line only, cut at 72 with an ellipsis.
+    expect(rendered).toContain(
+      "evidence: Participant A pointed at src/pay.ts:12 and quoted the rounding line in …",
+    )
+    // The second paragraph never reaches the column.
+    expect(rendered).not.toContain("evidence: Participant A pointed at src/pay.ts:12 and quoted the rounding line in full")
+    // But the WHOLE text is still under the finding.
+    expect(rendered).toContain("EVIDENCE EXTRACTED FROM THE ARGUMENT")
+    expect(rendered).toContain("Participant B did not answer it.")
+  })
+
+  test("evidence that is only whitespace reads as an assertion, not as a blank column", () => {
+    const f = finding({ severity: "high", file: "a.ts", route: "judge", routeReason: "3/3" })
+    f.history = judged({ logic: false })
+    f.evidence = "   \n  "
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    expect(rendered).toContain("evidence: assertion only")
   })
 
   test("the UNRESOLVED section carries the judge line too", () => {
@@ -1308,6 +1454,40 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
 
     expect(rendered).toContain("died at stage judge")
     expect(rendered).toContain("judge: checked against the code")
+  })
+})
+
+describe("ranking reads the judge's own entry kinds (code review 2026-08-28)", () => {
+  // DEMONSTRATED GAP: deleting the `|| entry.kind === "judge-evidence"` term from
+  // `evidenceRank` left 677 tests passing, so the CAP-6 "checked outranks
+  // unchecked" ordering could silently stop working. Each of the three kinds the
+  // function matches now has a rung of its own asserted.
+  const at = "2026-08-13T00:00:00.000Z"
+  const withJudgeKind = (file: string, kind: string | undefined): Finding => {
+    const f = finding({ severity: "high", file, coDiscovery: { raised: 1, answered: 3 } })
+    f.verdict = "upheld"
+    if (kind !== undefined) {
+      f.history = [{ stage: "judge", actor: "discovery-1", at, kind, body: "x" }]
+    }
+    return f
+  }
+
+  test("a VERIFIED check outranks an extraction, which outranks nothing at all", () => {
+    const ranked = rankFindings([
+      withJudgeKind("d.ts", undefined),
+      withJudgeKind("c.ts", "judge-logic-eval"),
+      withJudgeKind("b.ts", "judge-evidence"),
+      withJudgeKind("a.ts", "judge-fact-check-verified"),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts"])
+  })
+
+  test("an UNVERIFIED check ranks with an extraction, below a verified one", () => {
+    const ranked = rankFindings([
+      withJudgeKind("b.ts", "judge-fact-check-unverified"),
+      withJudgeKind("a.ts", "judge-fact-check-verified"),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts"])
   })
 })
 

@@ -2,10 +2,15 @@
  * AD-13 / CAP-8 — the `Tools` port: repo and git-history evidence, executed by
  * the HOST (host-integration.md: tool execution is the host's).
  *
- * Interfaces only (AD-1). Story 1 does not drive this port — the fact-checker
- * that needs it is story 6 — but the shape is fixed here so no stage invents
- * its own tool surface. An in-host backend uses this port; an out-of-process
- * backend has no access to it and declares `tools: true` to say it has its own.
+ * Interfaces only (AD-1), and STILL UNDRIVEN after story 6 (code review
+ * 2026-08-28). Story 6 shipped the fact-checker and took AD-13's SECOND route:
+ * `adapters/opencode/model-backend.ts` is out-of-process and declares
+ * `tools: true` to say it has its own, so nothing imports this port beyond
+ * `hasTools` / `factCheckTooled`. The header used to point the reader at story 6
+ * as the story that would drive it. The shape is still fixed here so no stage
+ * invents its own tool surface, and the consequence of the route taken —
+ * that MAD reads a declared capability rather than proving a check happened — is
+ * filed in `deferred-work.md`, not hidden here.
  */
 
 export interface GrepHit {

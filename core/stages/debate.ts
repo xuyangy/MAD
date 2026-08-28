@@ -233,6 +233,17 @@ export interface DebateStageResult extends DebateCounts {
   findings: Finding[]
   /** The clamped value this run actually debated under. */
   maxRounds: number
+  /**
+   * AD-6b — slots that failed both attempts during THIS stage (code review
+   * 2026-08-28).
+   *
+   * Discovery has always returned its own; debate kept the set local, so
+   * `review()` derived "who is still alive to be asked" from discovery alone and
+   * handed the judge slots that had already died arguing. Exposed for the reason
+   * discovery's is: the stage that watched a model fail is the only one that
+   * knows.
+   */
+  droppedOut: string[]
   warnings: Warning[]
 }
 
@@ -486,11 +497,11 @@ function buildPrompt(
  * append-only record AD-7 makes authoritative and story 6's judge reads exactly
  * this. A second copy of the same fact is a second thing that can be wrong.
  */
-export function isDebatePosition(value: string | undefined): value is DebatePosition {
+function isDebatePosition(value: string | undefined): value is DebatePosition {
   return value !== undefined && (DEBATE_POSITIONS as readonly string[]).includes(value)
 }
 
-export function standingPositions(finding: Finding): Map<string, DebatePosition> {
+function standingPositions(finding: Finding): Map<string, DebatePosition> {
   const standing = new Map<string, DebatePosition>()
   for (const entry of finding.history) {
     if (entry.stage !== "debate" || entry.round === undefined) continue
@@ -976,6 +987,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     maxRounds,
     warnings,
     debated: rooms.length,
+    droppedOut: [...droppedOutThisStage],
     converged,
     convergedUncontested,
     convergedUnsure,

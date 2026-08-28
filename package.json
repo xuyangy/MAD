@@ -2,7 +2,6 @@
   "name": "mad",
   "version": "0.1.0",
   "description": "MAD — multi-agent debate orchestrator for code review. Current slice: opencode adapter, roster resolution, parallel heterogeneous discovery over N models, finding clustering with co-discovery counted over distinct pool authors, severity-aware threshold routing, per-finding debate in sparse rooms batched one turn per model per round, and a decomposed judge — anonymizer, evidence extractor, fact-checker, logic evaluator, aggregator — that decides each verdict in one of two modes depending on whether the finding was ever argued, with fact outranking logic and a check that opened no file reported as unverified rather than as a fact. Co-discovery, verdict and evidence stay three separate numbers and are never fused. A token ledger answers \"may I spend?\" before every turn and surfaces rather than drops what the budget stranded. Every span of text a stage puts in front of a model that MAD did not author — the change under review, a finding's own prose, the debate exchange, the anonymized transcript, the extracted evidence, the check report and the argument rating — is delimited and labelled as material that is never an instruction, framed in the input envelope rather than in the instruction text, and enforced by a lint rule. Ships the CAP-1 recall harness over a seeded-defect change and the CAP-2 over-merge/under-merge harness over a hand-labelled pair set.",
-
   "type": "module",
   "private": true,
   "license": "Apache-2.0",

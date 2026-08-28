@@ -946,6 +946,26 @@ describe("review — CAP-4 per-finding debate, through the whole pipeline", () =
     expect(ledgerFinding.history.filter((e) => e.stage === "debate" && e.kind.includes("verdict"))).toEqual([])
     expect(rendered).toContain("debate: converged")
     expect(record.debateCounts?.converged).toBe(2)
+
+    // THE JUDGE SEAM, FIELD BY FIELD (code review 2026-08-28). `review()` copies
+    // eleven-odd counts off the stage result onto the record, and nothing
+    // asserted the mapping: swapping `notAdjudicated`↔`unresolved` and
+    // `turns`↔`attempts` left 677 tests passing, while the rendered summary — the
+    // one block a reader uses to weigh how much the verdicts are worth — would
+    // have carried confident wrong numbers. The five mode buckets must also still
+    // sum to `judged` after the copy.
+    const jc = record.judgeCounts!
+    expect(jc.judged).toBe(
+      jc.adjudicated + jc.verifiedIndependently + jc.withdrawnByAuthor + jc.unresolved + jc.notExamined,
+    )
+    expect(jc.judged).toBe(
+      jc.upheld + jc.ruledInvalid + jc.notAdjudicated + jc.withdrawnByAuthor + jc.unresolved + jc.notExamined,
+    )
+    expect(jc.attempts).toBeGreaterThanOrEqual(jc.turns)
+    expect(jc.judged).toBe(record.findings.length)
+    // And the rendered summary is built from THOSE numbers, not a recount.
+    expect(rendered).toContain(`JUDGE: ${jc.judged} finding(s) reached`)
+    expect(rendered).toContain(`${jc.adjudicated} adjudicated after a debate`)
   })
 
   test("AC: A TOKEN CAP THE SECOND ROUND WOULD EXCEED LEAVES FINDINGS UNRESOLVED, NOT DROPPED", async () => {

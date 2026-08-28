@@ -115,9 +115,12 @@ export function assignJudgeSlots(input: AssignJudgeSlotsInput): JudgeSlots | und
   const nonAuthors = preferred.filter((slot) => slot !== finding.author)
   const cycle = nonAuthors.length > 0 ? nonAuthors : preferred
 
-  // Rule 1 — tools outrank both other rules. Searched over `preferred` first so a
-  // tooled non-author wins over a tooled author, then over the whole eligible
-  // list, because AD-13's requirement is not negotiable against a preference.
+  // Rule 1 — tools outrank both other rules. Searched over `cycle` first so a
+  // tooled non-author wins over a tooled author, then over `preferred` — the
+  // whole eligible list, author included — because AD-13's requirement is not
+  // negotiable against a preference. (The two lists differ only in the
+  // author-only case, which is exactly the case this sentence is about, so the
+  // name matters: code review 2026-08-28 found it saying `preferred` first.)
   const factCheck =
     cycle.find((slot) => hasTools(slot)) ?? preferred.find((slot) => hasTools(slot)) ?? cycle[0]!
   const factCheckTooled = hasTools(factCheck)

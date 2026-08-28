@@ -251,6 +251,12 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     .concat(roster.lensSlots.map((slot) => slot.slot))
     .filter((slot) => !discovered.droppedOut.includes(slot))
 
+  // ONE BUILD (code review 2026-08-28). The framed change span is the largest
+  // string in the pipeline and both remaining stages need the same one. Building
+  // it twice cost a second copy for nothing and left two call sites that could
+  // drift apart if `buildInput` ever stopped being pure.
+  const framedChange = buildInput(change)
+
   const debated = await debate({
     findings: record.findings,
     // The pre-cluster union, so a cluster's CO-FINDERS are resolvable from
@@ -259,7 +265,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     roster,
     answeredSlots,
     backend,
-    input: buildInput(change),
+    input: framedChange,
     clock,
     ledger: record.ledger,
     maxRounds: record.maxRounds,
@@ -289,9 +295,13 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // the stage picks its own partition off `route` rather than being handed a
   // filtered array, so the one place that decides a finding's MODE stays `route`.
   //
-  // `answeredSlots` is REUSED, not recomputed. The judge's non-author preference
-  // and debate's non-author seat are answering the same question — who is still
-  // alive to be asked — and two derivations of that could disagree.
+  // `answeredSlots` is NARROWED, not recomputed (code review 2026-08-28). The
+  // judge's non-author preference and debate's non-author seat answer the same
+  // question — who is still alive to be asked — so the set is the same one debate
+  // got, minus the slots that died arguing. It used to be passed through
+  // unchanged, which made the comment claiming it answers that question false:
+  // the judge rediscovered every debate-dead slot by failing it twice, which is
+  // exactly the waste `noteDropOut` exists to prevent one stage further down.
   //
   // `runId` seeds the anonymizer's permutation together with each finding's id,
   // so two runs over one input produce one record (AD-17b, and the spine's
@@ -299,9 +309,9 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const judged = await judge({
     findings: record.findings,
     roster,
-    answeredSlots,
+    answeredSlots: answeredSlots.filter((slot) => !debated.droppedOut.includes(slot)),
     backend,
-    input: buildInput(change),
+    input: framedChange,
     clock,
     ledger: record.ledger,
     runId: record.runId,
@@ -313,6 +323,8 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     judged: judged.judged,
     adjudicated: judged.adjudicated,
     verifiedIndependently: judged.verifiedIndependently,
+    factChecksDroppedOut: judged.factChecksDroppedOut,
+    notExamined: judged.notExamined,
     withdrawnByAuthor: judged.withdrawnByAuthor,
     upheld: judged.upheld,
     ruledInvalid: judged.ruledInvalid,

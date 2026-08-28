@@ -116,7 +116,13 @@ import { exitReasonOf } from "./debate.ts"
  * at nothing would have its whole turn rejected over a legitimately empty list.
  */
 export const evidenceEnvelopeSchema = z.object({
-  evidence: z.string(),
+  // `.min(1)` (code review 2026-08-28). A bare `z.string()` accepted `""`, and
+  // the fact-check builder branches on `evidence === undefined` — so an empty
+  // extraction produced an empty labelled span AND suppressed the raw-transcript
+  // fallback, leaving the checker with neither. An extractor that returned
+  // nothing is a DROP-OUT (AD-12 salvages the raw payload), not a finding with no
+  // evidence.
+  evidence: z.string().min(1),
   pointers: z.array(z.string()).optional(),
 })
 
@@ -140,7 +146,10 @@ export const RULED_VERDICTS = ["upheld", "judge-ruled-invalid", "not-adjudicated
  */
 export const factCheckEnvelopeSchema = z.object({
   checks: z.array(z.string()).optional(),
-  findings: z.string(),
+  // `.min(1)` for `evidence`'s reason (code review 2026-08-28): an empty report
+  // renders an empty labelled span and an empty `What the check against the code
+  // found` heading, both of which claim a step produced content.
+  findings: z.string().min(1),
   unchecked: z.array(z.string()).optional(),
   verdict: z.enum(RULED_VERDICTS).optional(),
   evidenceKind: z.enum(EVIDENCE_KINDS).optional(),
@@ -148,7 +157,7 @@ export const factCheckEnvelopeSchema = z.object({
 
 /** AD-11 — the rating is prose. MAD computes on none of it; it is advisory. */
 export const logicEvalEnvelopeSchema = z.object({
-  assessment: z.string(),
+  assessment: z.string().min(1),
 })
 
 export const aggregateEnvelopeSchema = z.object({
@@ -252,7 +261,7 @@ async function runJudgeTurn<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Prompts — where AD-18's two new spans are built
+// Prompts — where AD-18's four new spans are built
 // ---------------------------------------------------------------------------
 
 /**
@@ -301,26 +310,95 @@ function coDiscoveryLine(finding: Finding): string {
 }
 
 /**
+ * AD-10 — severity is stated and immediately fenced off: the judge is told the
+ * number so it can weigh how much the answer matters, and told not to revisit it
+ * because routing already depended on it.
+ *
+ * WHO RECORDED IT IS CONDITIONAL (code review 2026-08-28). `effectiveSeverity` is
+ * `clusterSeverity ?? severity`, and `clusterSeverity` is the highest severity
+ * across a cluster's members, set only when it differs from the canonical's own
+ * (`finding.ts:248`). On a merged finding the number therefore came from a
+ * DIFFERENT reviewer than the one whose claim is shown two lines below it.
+ * "As recorded by the reviewer who raised it" is then false — MAD stating
+ * something untrue about its own run (AD-6), in the one block that exists to
+ * carry facts MAD computed.
+ */
+function severityLine(finding: Finding): string {
+  const merged =
+    finding.clusterSeverity !== undefined && finding.clusterSeverity !== finding.severity
+  return merged
+    ? `Severity: ${effectiveSeverity(finding)} — the highest recorded across the reviewers whose ` +
+        `findings were merged into this one, which is not necessarily the reviewer whose claim ` +
+        `is shown below. It is not yours to change.`
+    : `Severity, as recorded by the reviewer who raised it: ${effectiveSeverity(finding)}. It is ` +
+        `not yours to change.`
+}
+
+/**
+ * WHAT KIND OF ROOM this came out of, said only when that changes what the
+ * transcript means (code review 2026-08-28).
+ *
+ * `converged` is three different rooms wearing one word. `finding.ts:121` spells
+ * the difference out — `uncontested` is "ONE voice was ever heard… not the same
+ * fact as agreement and must never render as one", `unsure` is unanimous
+ * uncertainty — and the story's Design Note names telling them apart as the whole
+ * reason `ExitReason` became a typed field. Story 6 shipped reading it in exactly
+ * one place, for `withdrawn`, so an uncontested finding took the full four-turn
+ * path and its Logic Evaluator was asked to rate "each side" of a one-sided room.
+ *
+ * MAD-computed, so it sits outside every span. Emitted ONLY for the two reasons
+ * that mislead: an ordinary argued finding's prompt is byte-identical to what
+ * story 6 shipped, which keeps story 9's control arm unmoved everywhere the
+ * distinction does not apply.
+ */
+function roomLine(finding: Finding): string[] {
+  if (finding.exit !== "converged") return []
+  switch (exitReasonOf(finding)) {
+    case "uncontested":
+      return [
+        `The room did NOT contest this: only the participant who raised it ever spoke. Nobody ` +
+          `disagreed because nobody else answered, which is not agreement.`,
+      ]
+    case "unsure":
+      return [
+        `Every standing position in the room was UNSURE. That is unanimous uncertainty, not a ` +
+          `settled question.`,
+      ]
+    default:
+      return []
+  }
+}
+
+/**
  * The header every judge turn shares: what MAD is asking about, and the facts
  * MAD itself computed.
  *
- * Severity is stated and immediately fenced off (AD-10): the judge is told the
- * number so it can weigh how much the answer matters, and told not to revisit it
- * because routing already depended on it and a stage that changed it would change
- * what already happened.
+ * `withChange` (code review 2026-08-28). The Logic Evaluator gets no diff, so it
+ * must not get the HEADING either. `preamble` used to end with
+ * `# The change under review` unconditionally and `buildLogicEvalPrompt` then
+ * supplied no body, so that prompt rendered a MAD-authored heading with nothing
+ * under it — content asserted and not there (AD-6), read by a model that has just
+ * been told it cannot open the repository. The existing test asserts only that the
+ * span LABEL is absent, which an empty heading satisfies.
  */
-function preamble(finding: Finding, heading: string, mode: string): string[] {
-  return [
+function preamble(
+  finding: Finding,
+  heading: string,
+  mode: string,
+  withChange = true,
+): string[] {
+  const lines = [
     heading,
     ``,
     `You are looking at ONE claimed defect. ${mode}`,
     ``,
     coDiscoveryLine(finding),
-    `Severity, as recorded by the reviewer who raised it: ${effectiveSeverity(finding)}. It is not yours to change.`,
-    ``,
-    `# The change under review`,
+    severityLine(finding),
+    ...roomLine(finding),
     ``,
   ]
+  if (withChange) lines.push(`# The change under review`, ``)
+  return lines
 }
 
 /**
@@ -445,11 +523,14 @@ function buildLogicEvalPrompt(
       finding,
       `# Rate the reasoning`,
       `Judge how well each side argued. You cannot open the repository; a separate step has.`,
+      // NO change under review, AND NO HEADING FOR IT (code review 2026-08-28).
+      // The Logic Evaluator is forbidden from checking facts, and handing it the
+      // diff is an invitation to try — the one input that would let it
+      // manufacture the tool-less second opinion the instruction exists to
+      // prevent. The heading has to go with the body: an empty section is a
+      // claim that the change was withheld.
+      false,
     ),
-    // NO change under review. The Logic Evaluator is forbidden from checking
-    // facts, and handing it the diff is an invitation to try — the one input that
-    // would let it manufacture the tool-less second opinion the instruction
-    // exists to prevent.
     `# The finding`,
     ``,
     findingSpan(finding),
@@ -558,6 +639,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     judged: 0,
     adjudicated: 0,
     verifiedIndependently: 0,
+    factChecksDroppedOut: 0,
+    notExamined: 0,
     withdrawnByAuthor: 0,
     upheld: 0,
     ruledInvalid: 0,
@@ -695,14 +778,56 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     })
     if (!slots) {
       // Nothing left that can judge — either no pool slot answered discovery at
-      // all, or every one that did has since dropped out of this stage. Stop
-      // rather than repeat the same failure per finding, and say so once.
+      // all, or every one that did has since dropped out of this stage.
+      //
+      // CONTINUE, NOT BREAK (code review 2026-08-28). `break` left the loop, and
+      // the loop is where the FREE verdicts are written: `authorWithdrew` is
+      // checked at the top precisely because a withdrawal needs no model. Visit
+      // order is severity-descending, so `break` made "does this withdrawn
+      // finding get its verdict" depend on where it happened to sort against the
+      // first slot-less one — and every finding below the break also vanished
+      // from `judged`, so the count no reader could check disagreed with the
+      // prose warning that replaced it.
+      //
+      // `assignJudgeSlots` is pure and spends nothing, so re-asking it per
+      // finding costs a comparison, not a turn. It can also start SUCCEEDING
+      // again — it never does today, but a stage whose skip condition is
+      // re-evaluated cannot silently outlive its cause.
       unavailable = true
-      counts.judged -= 1
-      break
+      counts.notExamined += 1
+      continue
     }
 
     const transcript = anonymize(finding, `${runId}:${finding.id}`)
+    // AC #1 — "the record shows anonymized debaters in a randomized order"
+    // (code review 2026-08-28).
+    //
+    // `anonymize()` has always RETURNED `labels`, and its own doc comment says it
+    // does so "for a human debugging a verdict" — but story 6 shipped with no
+    // reader outside the tests, so the letters existed only inside prompts and in
+    // whatever model prose happened to quote them. A verdict a reader cannot map
+    // back to who argued it is the criterion unmet.
+    //
+    // A HISTORY ENTRY rather than a new field: `history` is append-only and
+    // already the judge's (AD-7/AD-8), so this costs no domain field and no
+    // second writer, and the mapping sits next to the verdict it explains.
+    // MAD-authored throughout — the letters and slot ids are both MAD's, so no
+    // span (AD-18); slot ids are cells in a MAD-owned frame, so each is escaped.
+    if (!transcript.empty) {
+      appendEntry(finding, {
+        stage: "judge",
+        actor: "mad",
+        at: clock.now(),
+        kind: "judge-anonymized",
+        body: [
+          `The exchange was shown to the judge with identities replaced, in an order seeded from ` +
+            `the run id and this finding's id.`,
+          ...[...transcript.labels.entries()].map(
+            ([slot, label]) => `- ${label} = ${oneLine(slot)}`,
+          ),
+        ].join("\n"),
+      })
+    }
     /**
      * WHETHER THERE IS AN ARGUMENT TO WEIGH — and it is not the same question as
      * which way `route` sent the finding (code review 2026-08-27).
@@ -784,9 +909,17 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     // The two run in PARALLEL — `pipeline-stages.md`'s diagram branches them from
     // the extractor and rejoins at the aggregator, and they share no input the
     // other produces. One barrier, so the pair costs one round of latency.
+    // ITS OWN GATE (code review 2026-08-28). One `mayISpend` above used to
+    // authorise BOTH of these turns. `ledger.ts` tolerates that — it may exceed
+    // the cap by the cost of turns already in flight — but AD-15 and this file's
+    // own `ledger` field comment say "before every turn", and the extractor and
+    // the aggregator each have one. A refusal here does not strand the finding:
+    // the fact-check is already in flight and gets to finish, and the aggregator
+    // gate below is what records the exhaustion. Asking costs nothing and
+    // preserves the single parallel barrier.
     const logicSlot = slots.byRole["logic-eval"]
     let logicPromise: Promise<TurnOutcome<LogicEvalEnvelope>> | undefined
-    if (argued) {
+    if (argued && mayISpend(ledger)) {
       counts.turns += 1
       logicPromise = runJudgeTurn(
         input,
@@ -805,7 +938,12 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // AD-13, both halves: the SLOT must be able to use tools, and the checker
       // must report having used them. Either absence means no fact was
       // established, however confident the prose reads.
-      const usedTools = (value.checks ?? []).length > 0
+      // A BLANK CHECK IS NOT A CHECK (code review 2026-08-28). This was
+      // `.length > 0`, so `checks: [""]` — or a list of whitespace — made
+      // `factVerified` true and put MAD's VERIFIED attestation in front of a
+      // report that opened nothing. AD-13's rule is that the checker reported
+      // having used them; an empty string reports nothing.
+      const usedTools = (value.checks ?? []).some((check) => check.trim().length > 0)
       factVerified = slots.factCheckTooled && usedTools
       if (!factVerified) {
         counts.factChecksUnverified += 1
@@ -867,6 +1005,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       }
     } else {
       noteDropOut(factSlot, "fact-check", factOutcome.envelope.message)
+      // COUNTED SEPARATELY (code review 2026-08-28). `verifiedIndependently` is
+      // the MODE and still increments below, because the five mode buckets have
+      // to sum to `judged` — but the summary used to print it as "N checked
+      // independently" with nothing to contradict it, and in this branch nothing
+      // was checked at all. `factChecksUnverified` does not cover this: that
+      // counts checks that ANSWERED while opening nothing. This one never
+      // answered.
+      counts.factChecksDroppedOut += 1
       if (!argued) {
         counts.verifiedIndependently += 1
         recordVerdict(
@@ -952,15 +1098,26 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // so "every finding below is unverified" became an overstatement the moment
       // any finding had already been judged. It now says what is true in both
       // cases: whatever was left is undecided by anybody.
+      // WORDED FOR BOTH WAYS IT IS REACHED (code review 2026-08-27). Dropping a
+      // dead slot for the rest of the stage made this reachable PARTWAY through,
+      // so "every finding below is unverified" became an overstatement the moment
+      // any finding had already been judged.
+      //
+      // IT NOW CARRIES A NUMBER (code review 2026-08-28). Prose saying "any
+      // finding below without a verdict" gave a reader nothing to check the
+      // prose against, and budget exhaustion — the other way a finding goes
+      // undecided — has had a counted bucket all along.
       message:
         `JUDGING STOPPED: no reviewer model was left to check, weigh or decide anything — either ` +
-        `none from the main pool answered, or every one that did has since failed. Any finding ` +
-        `below without a verdict was never examined by anyone, and is reported exactly as it was ` +
-        `raised.`,
+        `none from the main pool answered, or every one that did has since failed. ` +
+        `${counts.notExamined} finding(s) were never examined by anyone and are reported exactly ` +
+        `as they were raised. Findings whose author withdrew were still decided: that costs no ` +
+        `model turn.`,
       detail: {
         answeredSlots: [...input.answeredSlots],
         droppedOutInJudging: [...droppedOut],
         judged: counts.judged,
+        notExamined: counts.notExamined,
       },
     })
   }

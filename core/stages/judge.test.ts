@@ -14,6 +14,7 @@ import { emptyLedger, recordTurn } from "../domain/run-record.ts"
 import type { Entry, Finding, Severity } from "../domain/finding.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { CODING_LENSES } from "../instructions/coding/lenses.ts"
+import { resolveInstructions } from "../instructions/registry.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
@@ -69,6 +70,7 @@ interface Draft {
   exit?: Finding["exit"]
   history?: Entry[]
   coDiscovery?: { raised: number; answered: number }
+  clusterSeverity?: Severity
 }
 
 function finding(draft: Draft = {}): Finding {
@@ -78,6 +80,7 @@ function finding(draft: Draft = {}): Finding {
     reasoning: draft.reasoning ?? "a NaN rate silently produces a NaN total",
     locus: { file: draft.file ?? "src/pay.ts", startLine: 12, endLine: 14 },
     severity: draft.severity ?? "high",
+    ...(draft.clusterSeverity === undefined ? {} : { clusterSeverity: draft.clusterSeverity }),
     author: draft.author ?? "discovery-1",
     source: draft.source ?? "pool",
     ...(draft.lens === undefined ? {} : { lens: draft.lens }),
@@ -627,9 +630,42 @@ describe("who judges", () => {
     })
 
     expect(result.turns).toBe(0)
-    expect(result.judged).toBe(0)
+    // REACHED, NOT DECIDED (code review 2026-08-28). `judged` counts every
+    // finding the stage got to, and `notExamined` is the bucket that says none of
+    // them was looked at. The stage used to `break` here and decrement `judged`
+    // back to 0, which left the warning's prose as the only record — a claim with
+    // no number a reader could check it against.
+    expect(result.judged).toBe(2)
+    expect(result.notExamined).toBe(2)
     const unavailable = result.warnings.filter((w) => w.code === "judge-unavailable")
     expect(unavailable).toHaveLength(1)
+    expect(unavailable[0]!.message).toContain("2 finding(s) were never examined")
+  })
+
+  test("a WITHDRAWN finding is still decided after the judge runs out of models", async () => {
+    // `break` used to leave the loop entirely, and the loop is where the free
+    // verdicts are written — `authorWithdrew` is checked at the top precisely
+    // because a withdrawal needs no model. Visit order is severity-descending, so
+    // whether a withdrawal got its verdict depended on where it sorted against
+    // the first slot-less finding (code review 2026-08-28).
+    const result = await run(
+      [
+        argued({ severity: "high" }),
+        argued({
+          id: "f-2",
+          file: "src/b.ts",
+          severity: "low",
+          history: [round("discovery-1", 1, { position: "withdraws" }), exitEntry("withdrawn")],
+        }),
+      ],
+      { roster: roster(THREE, ["security"]), answeredSlots: ["discovery-lens-security"] },
+    )
+
+    expect(result.turns).toBe(0)
+    expect(result.withdrawnByAuthor).toBe(1)
+    expect(result.notExamined).toBe(1)
+    const withdrawnFinding = result.findings.find((f) => f.id === "f-2")!
+    expect(withdrawnFinding.verdict).toBe("withdrawn-by-author")
   })
 })
 
@@ -731,15 +767,24 @@ describe("the counts are the stage's own", () => {
     })
     const result = await run([contested, skipped, withdrawn])
 
+    // FIVE BUCKETS, not four (code review 2026-08-28). `notExamined` joined the
+    // partition when the stage stopped decrementing `judged` and breaking out of
+    // the loop, and the identity is the point of this test: `judged` is what the
+    // stage REACHED, and every finding it reached is in exactly one bucket.
     expect(result.judged).toBe(
-      result.adjudicated + result.verifiedIndependently + result.withdrawnByAuthor + result.unresolved,
+      result.adjudicated +
+        result.verifiedIndependently +
+        result.withdrawnByAuthor +
+        result.unresolved +
+        result.notExamined,
     )
     expect(result.judged).toBe(
       result.upheld +
         result.ruledInvalid +
         result.notAdjudicated +
         result.withdrawnByAuthor +
-        result.unresolved,
+        result.unresolved +
+        result.notExamined,
     )
     expect(result.judged).toBe(3)
   })
@@ -975,3 +1020,297 @@ describe("code review 2026-08-27", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Code review 2026-08-28 — the gaps four independent reviewers demonstrated
+// ---------------------------------------------------------------------------
+
+describe("the contract the renderer reads (code review 2026-08-28)", () => {
+  test("the stage writes exactly the history kinds `core/stages/output.ts` matches on", async () => {
+    // DEMONSTRATED GAP: renaming all three kinds in `judge.ts` left 677 tests
+    // passing, while `evidenceRank` and `renderJudge` — which match these
+    // literals — would have gone silently dead. `output.test.ts` built the kinds
+    // by hand, so it pinned the CONSUMER against a literal, never the producer.
+    const result = await run([argued()])
+    const kinds = result.findings[0]!.history.filter((e) => e.stage === "judge").map((e) => e.kind)
+
+    expect(kinds).toContain("judge-evidence")
+    expect(kinds).toContain("judge-fact-check-verified")
+    expect(kinds).toContain("judge-logic-eval")
+    expect(kinds.some((k) => k.startsWith("judge-verdict-"))).toBe(true)
+  })
+
+  test("an untooled check writes the UNVERIFIED kind, not the verified one", async () => {
+    const result = await run([argued()], {
+      backend: new FakeBackend({}, { "discovery-1": false, "discovery-2": false, "discovery-3": false }),
+    })
+    const kinds = result.findings[0]!.history.filter((e) => e.stage === "judge").map((e) => e.kind)
+
+    expect(kinds).toContain("judge-fact-check-unverified")
+    expect(kinds).not.toContain("judge-fact-check-verified")
+  })
+})
+
+describe("AC #1 — the record shows the anonymized debaters (code review 2026-08-28)", () => {
+  test("the letter-to-slot mapping is written to history, in the order the judge saw", async () => {
+    // `anonymize()` always RETURNED `labels` "so the stage can record the mapping
+    // on the run record for a human debugging a verdict" — and story 6 shipped
+    // with no reader outside the tests, so the letters lived only inside prompts.
+    const result = await run([argued()])
+    const entry = result.findings[0]!.history.find((e) => e.kind === "judge-anonymized")!
+
+    expect(entry).toBeDefined()
+    expect(entry.actor).toBe("mad")
+    expect(entry.body).toContain("= discovery-1")
+    expect(entry.body).toContain("= discovery-2")
+    // Every letter the transcript used is resolvable from this one entry.
+    for (const label of ["A", "B"]) expect(entry.body).toContain(`- ${label} = `)
+  })
+
+  test("a finding with no exchange gets no mapping entry — there is nothing to map", async () => {
+    const result = await run([finding({ route: "judge", history: [] })])
+    const kinds = result.findings[0]!.history.map((e) => e.kind)
+
+    expect(kinds).not.toContain("judge-anonymized")
+  })
+})
+
+describe("what the judge is TOLD about the room (code review 2026-08-28)", () => {
+  test("an UNCONTESTED room is named as one — agreement is not what happened", async () => {
+    // The story's Design Note: "unanimous uncertainty must not reach a reader as
+    // a settled debate". Story 6 read `exitReasonOf` in exactly one place, for
+    // `withdrawn`, so this room's prompts were byte-identical to a real argument's.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued({ history: [round("discovery-1", 1), exitEntry("uncontested")] })], {
+      backend: recordingBackend(seen),
+    })
+
+    const aggregate = seen.find((turn) => turn.role === "aggregate")!
+    expect(aggregate.input).toContain("The room did NOT contest this")
+    expect(aggregate.input).not.toContain("unanimous uncertainty")
+  })
+
+  test("an UNSURE room is named as one", async () => {
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run(
+      [
+        argued({
+          history: [
+            round("discovery-1", 1, { position: "unsure" }),
+            round("discovery-2", 1, { position: "unsure" }),
+            exitEntry("unsure"),
+          ],
+        }),
+      ],
+      { backend: recordingBackend(seen) },
+    )
+
+    const aggregate = seen.find((turn) => turn.role === "aggregate")!
+    expect(aggregate.input).toContain("unanimous uncertainty")
+  })
+
+  test("an ordinary AGREED room says neither — the prompt is unchanged for it", async () => {
+    // Story 9's control arm: the distinction is emitted only where it applies, so
+    // every other finding's prompt is what story 6 shipped.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued()], { backend: recordingBackend(seen) })
+
+    const aggregate = seen.find((turn) => turn.role === "aggregate")!
+    expect(aggregate.input).not.toContain("The room did NOT contest this")
+    expect(aggregate.input).not.toContain("unanimous uncertainty")
+  })
+
+  test("a CLUSTERED severity is not attributed to the reviewer whose claim is shown", async () => {
+    // `effectiveSeverity` is `clusterSeverity ?? severity`, so on a merged finding
+    // the number came from a different member. Saying "as recorded by the reviewer
+    // who raised it" was MAD stating something untrue about its own run (AD-6).
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued({ severity: "low", clusterSeverity: "high" })], {
+      backend: recordingBackend(seen),
+    })
+
+    const extract = seen.find((turn) => turn.role === "evidence-extract")!
+    expect(extract.input).toContain("the highest recorded across the reviewers whose findings were merged")
+    expect(extract.input).not.toContain("Severity, as recorded by the reviewer who raised it")
+    expect(extract.input).toContain("high")
+  })
+
+  test("an UNCLUSTERED severity keeps its plain attribution", async () => {
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued({ severity: "high" })], { backend: recordingBackend(seen) })
+
+    const extract = seen.find((turn) => turn.role === "evidence-extract")!
+    expect(extract.input).toContain("Severity, as recorded by the reviewer who raised it: high")
+  })
+
+  test("the Logic Evaluator gets no change section AT ALL — not an empty one", async () => {
+    // Found by three of the four reviewers. `preamble` ended with the heading
+    // unconditionally, so this prompt rendered `# The change under review`,
+    // a blank line, then `# The finding` — content asserted and not there,
+    // to a model that has just been told it cannot open the repository.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued()], { backend: recordingBackend(seen) })
+
+    const logic = seen.find((turn) => turn.role === "logic-eval")!
+    expect(logic.input).not.toContain("# The change under review")
+    // The fact-checker, which DOES get the diff, still has both.
+    const factCheck = seen.find((turn) => turn.role === "fact-check")!
+    expect(factCheck.input).toContain("# The change under review")
+  })
+})
+
+describe("span 5's pointer list (code review 2026-08-28)", () => {
+  test("the pointers reach the span, under MAD's own header", async () => {
+    // DEMONSTRATED GAP: replacing the whole branch with `return envelope.evidence`
+    // left 677 tests passing, so the `file:line` list the fact-checker works from
+    // could vanish undetected.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    await run([argued()], { backend: recordingBackend(seen) })
+
+    const factCheck = seen.find((turn) => turn.role === "fact-check")!
+    expect(factCheck.input).toContain("Places pointed at:")
+    expect(factCheck.input).toContain("- src/pay.ts:12")
+  })
+
+  test("a pointer carrying a line break cannot forge a sibling row", async () => {
+    // The one MAD-owned frame inside span 5, and the only one in this change with
+    // no escaping test. A pointer that broke the line would render a second
+    // `- …` row of MAD's shape inside a correctly labelled block.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    const inner = new FakeBackend({}, {}, {
+      "evidence-extract": [
+        {
+          kind: "ok",
+          value: {
+            evidence: "A cited the file.",
+            pointers: ["src/pay.ts:12\n- src/forged.ts:99"],
+          },
+        },
+      ],
+    })
+    const backend: ModelBackend = {
+      capabilities: (slotId) => inner.capabilities(slotId),
+      async runTurn(slotId, instructions, input, schema) {
+        seen.push({ slot: slotId, role: judgeRoleOf(instructions), input })
+        return inner.runTurn(slotId, instructions, input, schema)
+      },
+    }
+    await run([argued()], { backend })
+
+    const factCheck = seen.find((turn) => turn.role === "fact-check")!
+    // ONE row, and the forged one is folded into it rather than standing alone.
+    expect(factCheck.input).not.toContain("\n- src/forged.ts:99")
+    expect(factCheck.input).toContain("src/forged.ts:99")
+  })
+})
+
+describe("AD-13 and AD-12 at the fact-check (code review 2026-08-28)", () => {
+  test("a checks list of blank strings is NOT a check", async () => {
+    // Was `.length > 0`, so `checks: [""]` put MAD's VERIFIED attestation in front
+    // of a report that opened nothing.
+    const result = await run([finding({ route: "judge", history: [] })], {
+      backend: new FakeBackend({}, {}, {
+        "fact-check": [
+          {
+            kind: "ok",
+            value: { checks: ["  ", ""], findings: "reads as claimed", verdict: "upheld", evidenceKind: "assertion-only" },
+          },
+        ],
+      }),
+    })
+
+    expect(result.factChecksUnverified).toBe(1)
+    expect(result.findings[0]!.factCheck).toContain("UNVERIFIED")
+  })
+
+  test("a fact-check that NEVER ANSWERED is counted apart from one that opened nothing", async () => {
+    // `verifiedIndependently` still counts the MODE, so the partition sums — but
+    // the summary used to print it as "checked independently" with nothing saying
+    // that no check had run at all.
+    const result = await run([finding({ route: "judge", history: [] })], {
+      backend: failingRoles("fact-check"),
+    })
+
+    expect(result.factChecksDroppedOut).toBe(1)
+    expect(result.factChecksUnverified).toBe(0)
+    expect(result.verifiedIndependently).toBe(1)
+    expect(result.findings[0]!.verdict).toBe("not-adjudicated")
+  })
+
+  test("an EMPTY extraction is a drop-out, not evidence", async () => {
+    // `evidence: z.string()` accepted `""`, and the fact-check builder branches on
+    // `evidence === undefined` — so an empty extraction produced an empty labelled
+    // span AND suppressed the raw-transcript fallback, leaving the checker with
+    // neither.
+    const seen: { slot: string; role?: JudgeRoleTag; input: string }[] = []
+    const inner = new FakeBackend({}, {}, {
+      "evidence-extract": [
+        { kind: "ok", value: { evidence: "", pointers: [] } },
+        { kind: "ok", value: { evidence: "", pointers: [] } },
+      ],
+    })
+    const backend: ModelBackend = {
+      capabilities: (slotId) => inner.capabilities(slotId),
+      async runTurn(slotId, instructions, input, schema) {
+        seen.push({ slot: slotId, role: judgeRoleOf(instructions), input })
+        return inner.runTurn(slotId, instructions, input, schema)
+      },
+    }
+    const result = await run([argued()], { backend })
+
+    expect(result.findings[0]!.evidence).toBeUndefined()
+    // And the checker falls back to the raw exchange rather than getting nothing.
+    const factCheck = seen.find((turn) => turn.role === "fact-check")!
+    expect(factCheck.input).toContain("anonymized debate transcript")
+  })
+})
+
+describe("AD-15 — a gate before EVERY turn (code review 2026-08-28)", () => {
+  test("the logic evaluation asks the ledger for itself", async () => {
+    // One `mayISpend` used to authorise both the fact-check and the logic-eval.
+    // With a cap that allows the extractor and the fact-check and no more, the
+    // logic-eval must not be billed.
+    const ledger = emptyLedger(2)
+    const result = await run([argued()], { ledger })
+
+    expect(result.turns).toBeLessThanOrEqual(3)
+    const kinds = result.findings[0]!.history.filter((e) => e.stage === "judge").map((e) => e.kind)
+    expect(kinds).not.toContain("judge-logic-eval")
+  })
+})
+
+describe("the per-role instruction seam (code review 2026-08-28)", () => {
+  test("`JudgeInput.instructions` overrides the registry for the named role only", async () => {
+    // DEMONSTRATED GAP: deleting the `input.instructions?.[role] ??` lookup left
+    // 677 tests passing. The field is documented as the injection seam "exactly
+    // as `DebateInput.instructions` is", and no caller and no test passed it — so
+    // story 9's ablation arm would have been wired against an untested seam.
+    const texts: string[] = []
+    const inner = new FakeBackend({})
+    const backend: ModelBackend = {
+      capabilities: (slotId) => inner.capabilities(slotId),
+      async runTurn(slotId, instructions, input, schema) {
+        texts.push(instructions)
+        return inner.runTurn(slotId, instructions, input, schema)
+      },
+    }
+    const registryLogicEval = resolveInstructions({ taskType: "coding", role: "logic-eval" })
+    const swapped = { ...registryLogicEval, text: `SUBSTITUTED-BY-CALLER\n\n${registryLogicEval.text}` }
+
+    await run([argued()], { backend, instructions: { "logic-eval": swapped } })
+
+    // The named role got the CALLER's text.
+    expect(texts.some((text) => text.startsWith("SUBSTITUTED-BY-CALLER"))).toBe(true)
+    // The registry's own logic-eval text was NOT also sent — the override replaced
+    // it rather than being appended to it.
+    expect(texts).not.toContain(registryLogicEval.text)
+    // Every other role still resolves from the registry, untouched.
+    for (const role of ["evidence-extract", "fact-check", "aggregate"] as const) {
+      expect(texts).toContain(resolveInstructions({ taskType: "coding", role }).text)
+    }
+    // `FakeBackend` recognises a role by EXACT instruction text, so a substituted
+    // set is one it cannot answer — it drops out after its one retry (AD-12).
+    // That is the double's limit, not the stage's, and it is also the clearest
+    // proof the caller's text is what reached the backend.
+    expect(texts.filter((text) => text.startsWith("SUBSTITUTED-BY-CALLER"))).toHaveLength(2)
+  })
+})

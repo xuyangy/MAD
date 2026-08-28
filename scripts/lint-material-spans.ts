@@ -11,9 +11,14 @@
  * `deferred-work.md` while there were two `runTurn` call sites, and applied at
  * story 6, which adds the judge's own spans.
  *
- * ONE RULE, scoped to `core/` (adapters build no spans — AD-1 makes framing the
- * core's job): **no module but `core/prompt/material.ts` emits a span opener** —
- * three or more backticks immediately followed by `material: `.
+ * ONE RULE, over EVERY directory that could build a prompt: **no module but
+ * `core/prompt/material.ts` emits a span opener** — three or more backticks
+ * immediately followed by `material: `.
+ *
+ * The scope was `core/` alone until code review 2026-08-28, justified with
+ * "adapters build no spans — AD-1 makes framing the core's job". That is the
+ * assertion this script exists to stop taking on trust, and it left
+ * `fixtures/prompt-injection/`, which builds prompts, unread.
  *
  * The second rule `deferred-work.md` asked for — "`MaterialLabel` is the only
  * label source" — is deliberately NOT implemented here, because the type system
@@ -92,7 +97,12 @@ export async function main(): Promise<number> {
   const violations: Violation[] = []
   let checked = 0
 
-  const glob = new Glob("core/**/*.ts")
+  // EVERY DIRECTORY THAT COULD BUILD A PROMPT (code review 2026-08-28). This was
+  // `core/**/*.ts`, justified in the header with "adapters build no spans — AD-1
+  // makes framing the core's job" — which is precisely the assertion the script
+  // exists to stop taking on trust. `fixtures/prompt-injection/` builds prompts
+  // and was never read.
+  const glob = new Glob("{core,adapters,fixtures,scripts}/**/*.ts")
   for await (const path of glob.scan({ cwd: ROOT })) {
     const absolute = resolve(ROOT, path)
     const source = await Bun.file(absolute).text()
@@ -105,11 +115,11 @@ export async function main(): Promise<number> {
     for (const violation of violations) {
       console.error(`  ${violation.file}:${violation.line} — ${violation.why}`)
     }
-    console.error(`\n${violations.length} violation(s) in ${checked} file(s) under core/.`)
+    console.error(`\n${violations.length} violation(s) in ${checked} scanned file(s).`)
     return 1
   }
 
-  console.log(`AD-18 material spans OK — one emitter, ${checked} file(s) under core/ checked.`)
+  console.log(`AD-18 material spans OK — one emitter, ${checked} file(s) checked.`)
   return 0
 }
 

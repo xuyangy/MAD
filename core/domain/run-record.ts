@@ -316,9 +316,27 @@ export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
  * carrying it has no verdict at all, on purpose.
  */
 export interface JudgeCounts {
-  /** Findings the stage decided about — everything that arrived routed and undead. */
+  /**
+   * Findings the stage REACHED — everything that arrived routed and undead.
+   *
+   * "Reached", not "decided" (code review 2026-08-28). `unresolved` and
+   * `notExamined` are both counted in here and neither was decided by anybody, so
+   * a summary line calling this number "decided" over-counts in the flattering
+   * direction (AD-6). The five buckets below sum to it exactly:
+   * `adjudicated + verifiedIndependently + withdrawnByAuthor + unresolved +
+   * notExamined === judged`.
+   */
   judged: number
-  /** Full pipeline: extract, then fact-check and logic-eval, then aggregate. */
+  /**
+   * The MODE, not a completion record (clarified by code review 2026-08-28): a
+   * finding that arrived with a transcript and took the four-turn path — extract,
+   * then fact-check and logic-eval, then aggregate.
+   *
+   * It is counted even when the extractor or the fact-checker dropped out,
+   * because the mode is what the stage CHOSE and the partition above has to sum.
+   * What was actually completed is reported by `factChecksUnverified` and
+   * `factChecksDroppedOut`, which is where a reader looks to discount it.
+   */
   adjudicated: number
   /**
    * Fact-Checker only, no Logic Evaluator, ONE billed turn
@@ -332,6 +350,28 @@ export interface JudgeCounts {
    * `adjudicated` would claim an argument was weighed that never existed.
    */
   verifiedIndependently: number
+  /**
+   * AD-6/AD-12 — fact-check turns that never completed: the slot failed both
+   * attempts (code review 2026-08-28).
+   *
+   * Distinct from `factChecksUnverified`, which counts checks that DID answer
+   * while opening nothing. Without this, a verify-independently finding whose one
+   * and only check dropped out was still counted in `verifiedIndependently` and
+   * printed as "checked independently" — nothing had been checked at all, and no
+   * other line said so.
+   */
+  factChecksDroppedOut: number
+  /**
+   * AD-6 — findings the stage could not examine because no model was left to
+   * judge (code review 2026-08-28).
+   *
+   * Its own bucket rather than `unresolved`, because the causes are different and
+   * a reader acts on them differently: `unresolved` means the money ran out and
+   * more budget would decide it, this means every eligible slot is dead. The
+   * `judge-unavailable` warning stated it in prose and gave no number to check
+   * the prose against.
+   */
+  notExamined: number
   /** Short-circuited: the author withdrew in debate, so no model turn was spent. */
   withdrawnByAuthor: number
   upheld: number

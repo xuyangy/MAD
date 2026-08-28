@@ -457,10 +457,26 @@ function judgeSummary(record: RunRecord): string[] {
   const counts = record.judgeCounts
   if (!counts) return []
 
+  // "REACHED", NOT "DECIDED", AND THE PARTITION SUMS (code review 2026-08-28).
+  //
+  // `judged` counts every finding the stage got to, INCLUDING the ones the budget
+  // stranded and the ones no surviving model could examine. Calling that number
+  // "decided" and then naming three buckets that leave both out over-counted in
+  // the flattering direction, and the printed numbers did not add up to the one
+  // they were printed under.
+  //
+  // "in verify-independently mode", not "checked independently", for the same
+  // reason: it is the MODE the stage chose, and the check inside it can drop out
+  // — `factChecksDroppedOut` below is where a reader finds out that it did.
+  const stranded: string[] = []
+  if (counts.unresolved > 0) stranded.push(`${counts.unresolved} stranded by the budget`)
+  if (counts.notExamined > 0) stranded.push(`${counts.notExamined} never examined`)
+
   const lines: string[] = [
-    `JUDGE: ${counts.judged} finding(s) decided — ${counts.adjudicated} after a debate, ` +
-      `${counts.verifiedIndependently} checked independently, ` +
-      `${counts.withdrawnByAuthor} withdrawn by whoever raised it.`,
+    `JUDGE: ${counts.judged} finding(s) reached — ${counts.adjudicated} adjudicated after a ` +
+      `debate, ${counts.verifiedIndependently} in verify-independently mode, ` +
+      `${counts.withdrawnByAuthor} withdrawn by whoever raised it` +
+      `${stranded.length > 0 ? `, ${stranded.join(", ")}` : ""}.`,
     `  Verdicts: ${counts.upheld} upheld, ${counts.ruledInvalid} ruled invalid, ` +
       `${counts.notAdjudicated} not settled, ${counts.withdrawnByAuthor} withdrawn.`,
   ]
@@ -481,6 +497,24 @@ function judgeSummary(record: RunRecord): string[] {
     )
   }
 
+  if (counts.factChecksDroppedOut > 0) {
+    // AD-6b/AD-12 — DIFFERENT from the unverified line below, and a reader acts
+    // on it differently: an unverified check answered without opening anything,
+    // this one never answered at all.
+    lines.push(
+      `  ! ${counts.factChecksDroppedOut} check(s) against the code NEVER COMPLETED — the model`,
+      `  asked failed both attempts. Any finding relying on one was decided without it, or not`,
+      `  decided at all.`,
+    )
+  }
+
+  if (counts.notExamined > 0) {
+    lines.push(
+      `  ! ${counts.notExamined} finding(s) were NEVER EXAMINED: no reviewer model was left alive`,
+      `  to check, weigh or decide them. They are reported exactly as they were raised.`,
+    )
+  }
+
   if (counts.factChecksUnverified > 0) {
     lines.push(
       `  ! ${counts.factChecksUnverified} of the checks against the code OPENED NOTHING AND RAN`,
@@ -496,11 +530,16 @@ function judgeSummary(record: RunRecord): string[] {
     )
   }
 
+  // WORDED SO THE TWO NUMBERS CANNOT BE READ AS ONE SET (code review
+  // 2026-08-28). "5 allocation(s) spent judging. 7 were BILLED" reads as seven of
+  // the five just named. They are a request count and a billing count, and the
+  // retry is what separates them.
   lines.push(
-    `  ${counts.turns} allocation(s) spent judging.` +
+    `  ${counts.turns} turn(s) requested while judging` +
       (counts.attempts > counts.turns
-        ? ` ${counts.attempts} were BILLED: ${counts.attempts - counts.turns} needed their one retry.`
-        : ""),
+        ? `, billed as ${counts.attempts} calls — ${counts.attempts - counts.turns} needed the ` +
+          `one retry AD-12 allows.`
+        : `, each billed once.`),
   )
   lines.push("")
   return lines
@@ -549,7 +588,10 @@ function renderEvidence(finding: Finding): string {
 function renderJudge(finding: Finding): string | undefined {
   const entries = finding.history.filter((entry) => entry.stage === "judge")
   if (entries.length === 0) return undefined
-  const verdictEntry = entries.findLast?.((entry) => entry.kind.startsWith("judge-verdict-"))
+  // NO OPTIONAL CALL (code review 2026-08-28). `findLast` is ES2023 and the
+  // pinned Bun has it; `?.` only bought a silent path where the `— <why>` clause
+  // vanished and nothing failed.
+  const verdictEntry = entries.findLast((entry) => entry.kind.startsWith("judge-verdict-"))
   const checked = entries.some((entry) => entry.kind === "judge-fact-check-verified")
   const unverified = entries.some((entry) => entry.kind === "judge-fact-check-unverified")
   const weighed = entries.some((entry) => entry.kind === "judge-logic-eval")
@@ -560,7 +602,16 @@ function renderJudge(finding: Finding): string | undefined {
   if (checked) steps.push("checked against the code")
   else if (unverified) steps.push("CHECK NOT VERIFIED — nothing was opened or run")
   if (weighed) steps.push("argument quality weighed")
-  if (steps.length === 0) steps.push("no step completed")
+  if (steps.length === 0) {
+    // TWO EMPTY-STEP CASES, AND THEY ARE OPPOSITE (code review 2026-08-28). A
+    // withdrawal's only judge entry is its verdict, because the stage
+    // deliberately spends nothing on one — its own comment calls it "the FREE
+    // verdict". Printing "no step completed" for it said a step had failed where
+    // none was ever going to run, which is the AD-6 honesty rule pointed the
+    // other way: a clean outcome reading as a degraded one.
+    const withdrawn = verdictEntry?.kind === "judge-verdict-withdrawn-by-author"
+    steps.push(withdrawn ? "no step needed" : "no step completed")
+  }
 
   const why = verdictEntry?.body.split("\n")[0]
   return `      judge: ${steps.join(", ")}${why ? ` — ${why}` : ""}`

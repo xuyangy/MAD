@@ -1727,3 +1727,34 @@ describe("exit reason", () => {
     expect(exitReasonOf(finding)).toBe("capped")
   })
 })
+
+describe("the stage reports who died arguing (code review 2026-08-28)", () => {
+  test("`droppedOut` carries the slots that failed both attempts in THIS stage", async () => {
+    // Debate kept the set local, so `review()` derived "who is still alive to be
+    // asked" from discovery alone and handed the judge slots that had already
+    // died arguing — which the judge then rediscovered by failing each of them
+    // twice. Discovery has always returned its own list; this is the same
+    // affordance, from the stage that watched the failure.
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [{ kind: "fail", failure: "transport-error", message: "socket closed" }],
+    })
+    const result = await run([contested()], {}, { backend, maxRounds: 2 })
+
+    expect(result.droppedOut).toContain("discovery-2")
+    expect(result.droppedOut).not.toContain("discovery-1")
+  })
+
+  test("a clean run reports an empty list, not undefined", async () => {
+    const result = await run(
+      [contested()],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      },
+      { maxRounds: 2 },
+    )
+
+    expect(result.droppedOut).toEqual([])
+  })
+})
