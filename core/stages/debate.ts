@@ -81,7 +81,7 @@ import {
   type ExitReason,
   type Finding,
 } from "../domain/finding.ts"
-import type { Roster } from "../domain/roster.ts"
+import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { DebateCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -490,6 +490,30 @@ function buildPrompt(
 }
 
 /**
+ * Is this `Entry.position` one of the four positions this stage states?
+ *
+ * `Entry.position` is a plain `string?` on the shared append-only record, so
+ * nothing in the type system stops a writer — story 6's judge, a v2 memory
+ * replay — appending a debate entry with an off-vocabulary value. Every READER
+ * therefore validates rather than casting: an unchecked cast lets such a value
+ * join the agreement and movement tests here, and reach `core/stages/output.ts`'s
+ * rendered round header, with no error anywhere.
+ *
+ * EXPORTED at story 7 for that second reader (code review 2026-08-30). It was
+ * private while this file was the only one that read a position back; the
+ * renderer now prints one, and two validators for one vocabulary is how they
+ * come to disagree. It is a TYPE PREDICATE, so `output.ts`'s `debateRounds` can
+ * filter with it and drop a non-null assertion rather than trading one unchecked
+ * read for another.
+ *
+ * The doc comment that stood here belonged to `standingPositions` below, and is
+ * back on it.
+ */
+export function isDebatePosition(value: string | undefined): value is DebatePosition {
+  return value !== undefined && (DEBATE_POSITIONS as readonly string[]).includes(value)
+}
+
+/**
  * The standing positions in a room — the LATEST position each member has stated,
  * or nothing if they have never spoken.
  *
@@ -497,10 +521,6 @@ function buildPrompt(
  * append-only record AD-7 makes authoritative and story 6's judge reads exactly
  * this. A second copy of the same fact is a second thing that can be wrong.
  */
-function isDebatePosition(value: string | undefined): value is DebatePosition {
-  return value !== undefined && (DEBATE_POSITIONS as readonly string[]).includes(value)
-}
-
 function standingPositions(finding: Finding): Map<string, DebatePosition> {
   const standing = new Map<string, DebatePosition>()
   for (const entry of finding.history) {
@@ -618,6 +638,62 @@ function exitFor(
 }
 
 /**
+ * AD-6d's sentence about what a stranded finding CARRIES — one of three, chosen
+ * by counting rather than assumed.
+ *
+ * The sentence used to promise "the evidence they accumulated" unconditionally,
+ * and the promise is false in a state `core/run/review.ts` documents as
+ * reachable: a cap smaller than discovery's own spend leaves nothing for debate,
+ * the first gate refuses, and every contested finding is stranded with no round
+ * on the record. The warning then sat directly above rows reading `evidence so
+ * far: assertion only` — the exact sentence-under-warning pair story 7 exists to
+ * kill, produced by story 7's own text (acceptance audit 2026-08-30). AD-6's
+ * rule is that a claim is backed by the material it names OR the claim is
+ * reworded; this rewords it.
+ *
+ * ## The middle case is unreachable TODAY, and is written anyway
+ *
+ * A mixed strand cannot occur through this stage, and the reason is an
+ * invariant two functions apart: `mayISpend` is checked ONCE per round before
+ * the fan-out, so a round is all-or-nothing, and `exitFor`'s rule 1 exits any
+ * room that has produced no position as `stalled`/`silent` at the end of every
+ * round that runs. So either the gate refused at round 1 — every stranded room
+ * has nothing — or a round completed, and every position-less room already left
+ * with an exit. `withPositions` is therefore always `0` or `stranded.length`.
+ *
+ * It is written and tested regardless, because "some argued and some did not" is
+ * a third fact and reporting it as either of the other two is the same AD-6
+ * failure this function exists to fix — over-claiming for half of them or
+ * under-claiming for the other half. Both invariants above are one edit away
+ * from changing (a per-turn gate, or a fourth exit rule), and neither edit would
+ * look like it touches this sentence.
+ *
+ * EXPORTED AND PURE so the three branches are tested directly rather than
+ * through a pipeline state two of them can reach and the third cannot.
+ */
+export function carriedClause(stranded: number, withPositions: number): string {
+  if (withPositions === 0) {
+    return (
+      `None of them recorded a position before the budget ran out, so there is no accumulated ` +
+      `evidence to show: they are reported in the UNRESOLVED section with the stage they died ` +
+      `at, and nothing was dropped.`
+    )
+  }
+  if (withPositions >= stranded) {
+    return (
+      `They are reported in the UNRESOLVED section with the evidence they accumulated — nothing ` +
+      `was dropped.`
+    )
+  }
+  return (
+    `${withPositions} of them recorded positions before the budget ran out and are reported with ` +
+    `them; the other ${stranded - withPositions} recorded none, so there is nothing accumulated ` +
+    `to show for those. All are in the UNRESOLVED section with the stage they died at — nothing ` +
+    `was dropped.`
+  )
+}
+
+/**
  * Stage 4. Async, because unlike routing it spends turns.
  *
  * RUNS ONCE PER RUN, for `route()`'s reason: it appends history unconditionally
@@ -643,6 +719,12 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   // the same sequence and a diff between two run records is readable. Lens slots
   // follow pool slots, as they do in discovery.
   const slotOrder = [...input.roster.slots.map((s) => s.slot), ...input.roster.lensSlots.map((s) => s.slot)]
+
+  // AD-6b — the MODEL behind a slot id, so a drop-out report names the model and
+  // not only MAD's own role vocabulary. `core/domain/roster.ts` owns the one
+  // helper; the judge calls the same one (story 7, code review 2026-08-30).
+  const modelOf = (slot: string): string => modelNameOf(input.roster, slot)
+
   const orderOf = (slot: string): number => {
     const index = slotOrder.indexOf(slot)
     return index === -1 ? slotOrder.length : index
@@ -783,12 +865,14 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
             code: "model-dropped-out",
             stage: "debate",
             message:
-              `MODEL DROPPED OUT OF DEBATE: slot \`${outcome.slot}\` failed twice in round ${round} ` +
+              `MODEL DROPPED OUT OF DEBATE: \`${modelOf(outcome.slot)}\` (slot ${outcome.slot}) failed ` +
+              `twice in round ${round} ` +
               `(${outcome.envelope.failure}: ${outcome.envelope.message}). The round completed without ` +
               `it, and it is NOT asked again in any later round of this debate. Its silence is an ` +
               `abstention: it neither denied nor conceded any finding, and no debate waited on it.`,
             detail: {
               slot: outcome.slot,
+              model: modelOf(outcome.slot),
               round,
               failure: outcome.envelope.failure,
               error: outcome.envelope.message,
@@ -930,18 +1014,39 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
       })
     }
     if (stranded.length > 0) {
+      // AD-6 — THE CLAIM IS BACKED BY THE MATERIAL, OR THE CLAIM IS REWORDED
+      // (acceptance audit 2026-08-30). This sentence promised "the evidence they
+      // accumulated" UNCONDITIONALLY, and the promise is false in a state
+      // `core/run/review.ts` documents as reachable: a cap smaller than
+      // discovery's own spend leaves nothing for debate, the first gate refuses,
+      // and every contested finding is stranded with no round on the record. The
+      // warning then sat directly above rows reading `evidence so far: assertion
+      // only` — which is exactly the sentence-under-warning pair story 7 exists
+      // to kill, produced by story 7's own text.
+      //
+      // COUNTED, NOT ASSUMED, and counted through `standingPositions` — this
+      // file's own accessor, which validates the vocabulary on read — so the
+      // number cannot disagree with what `core/stages/output.ts` renders under
+      // each finding from the same entries.
+      const withPositions = stranded.filter(
+        (room) => standingPositions(room.finding).size > 0,
+      ).length
+      const carried = carriedClause(stranded.length, withPositions)
+
       warnings.push({
         code: "unresolved-findings",
         stage: "debate",
         message:
           `BUDGET EXHAUSTED IN DEBATE: ${stranded.length} contested finding(s) were still undecided ` +
-          `when the token cap of ${ledger.cap} was reached, ${where}. They are reported in the ` +
-          `UNRESOLVED section with the evidence they accumulated — nothing was dropped.`,
+          `when the token cap of ${ledger.cap} was reached, ${where}. ${carried}`,
         detail: {
           cap: ledger.cap,
           roundsRun: rounds,
           maxRounds,
           findings: stranded.map((room) => room.finding.id),
+          // The number the sentence above is built from, so a reader can check
+          // the prose against a count rather than against the prose.
+          withPositions,
         },
       })
     }

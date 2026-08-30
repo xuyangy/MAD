@@ -79,3 +79,37 @@ export interface Roster {
   /** Every provider the run will send code to, for disclosure (AD-3). */
   providers: string[]
 }
+
+/**
+ * AD-6b — the MODEL behind a slot id, for a warning that has to name it.
+ *
+ * `discovery-2` is MAD's own role vocabulary (`host-integration.md`) and names
+ * nobody; `anthropic/claude-sonnet-4-5` is the fact AD-6(b) asks a drop-out
+ * report to carry ("the run proceeds with a warning naming it"). Without it a
+ * reader has to cross-reference the ROSTER block by eye to learn which model
+ * failed.
+ *
+ * ONE HELPER, IN THE DOMAIN, because two stages need it and `Roster` is a domain
+ * type. `core/stages/debate.ts` and `core/stages/judge.ts` each held a private
+ * copy of this for one story; a second copy of a rule is a second thing that can
+ * drift, which is the argument that moved `DISCLOSURE_CODES` into
+ * `core/domain/warning.ts` beside its vocabulary. `core/stages/discover.ts` does
+ * NOT call it — it holds the `RosterSlot` itself and formats the name inline,
+ * which is where this shape was first set.
+ *
+ * BOTH COLLECTIONS ARE SEARCHED. A lens slot fills from the same candidate list
+ * and can drop out of debate exactly as a pool slot can (AD-4 amended); omitting
+ * `lensSlots` would answer AD-6(b) for a lens model with a denial that the model
+ * exists. Lens slots never JUDGE (`core/judge/slots.ts` builds from `slots`
+ * alone), so the term is unreachable from that caller — searched anyway, because
+ * one helper with one behaviour is what makes it one helper.
+ *
+ * A SLOT THE ROSTER CANNOT RESOLVE says so, rather than printing a slot id in a
+ * field every other value of which is a `provider/model`. Unreachable through
+ * both stages today — their slot ids come from the roster — and reached by
+ * `roster.test.ts` rather than left as an untested branch.
+ */
+export function modelNameOf(roster: Roster, slot: string): string {
+  const filled = [...roster.slots, ...roster.lensSlots].find((s) => s.slot === slot)
+  return filled ? `${filled.providerId}/${filled.modelId}` : "unresolved — not on the roster"
+}

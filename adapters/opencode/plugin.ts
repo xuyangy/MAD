@@ -13,7 +13,7 @@ import { tool } from "@opencode-ai/plugin"
 
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
-import { review } from "../../core/run/review.ts"
+import { frameForHostAgent, review } from "../../core/run/review.ts"
 import { NoCandidatesError } from "../../core/roster/select.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
 import { opencodeRepo } from "./repo.ts"
@@ -254,7 +254,19 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // AD-16 — the record stays in memory; nothing is written to the repo.
           return {
             title: `MAD review — ${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
-            output: rendered,
+            // AD-18's EIGHTH SPAN (story 7). A tool's `output` is read by the
+            // calling agent, which is a model, and the report quotes every
+            // model-authored claim, argument and judge report the run produced.
+            // This is the ONE return site that carries MODEL prose; the four
+            // above are MAD-authored sentences, though three of them do
+            // interpolate text MAD did not write either — `error.message` from
+            // git or a provider, and `args.target` from whoever called the tool.
+            // That is a live boundary of its own and is filed in
+            // `deferred-work.md` rather than claimed closed here.
+            // The framing belongs at this boundary and not in the render,
+            // because the same report also goes to a human, where a notice
+            // sentence is noise. `plugin-wiring.test.ts` fails if this reverts.
+            output: frameForHostAgent(rendered),
             metadata: {
               runId: record.runId,
               answered: record.answered,

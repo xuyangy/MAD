@@ -16,7 +16,7 @@ import {
   type SlotScript,
   type SlotStep,
 } from "../test-support/fakes.ts"
-import { review } from "./review.ts"
+import { frameForHostAgent, review } from "./review.ts"
 
 const ENVELOPE = {
   findings: [
@@ -1479,18 +1479,17 @@ describe("review — AD-18: the change under review is data, never instruction",
 })
 
 describe("review — AD-18: what the framing must NOT touch", () => {
-  test("THE CORE'S OWN RENDERER ADDS NO FRAMING — but see the deferral below", async () => {
+  test("THE CORE'S OWN RENDERER ADDS NO FRAMING — the framing is at the host boundary", async () => {
     // What this pins: `output()` renders for a reader, and story 5A put neither a
-    // notice sentence nor a fence into it. A material block in a review report
-    // would be a rendering bug.
+    // notice sentence nor a fence into it. A material block in a review report a
+    // human reads would be a rendering bug.
     //
-    // WHAT IT DOES NOT SETTLE, and did not when it was named "output is for a
-    // human": `adapters/opencode/plugin.ts` hands `rendered` to the HOST AGENT,
-    // which is a model — so the rendered run is a real unframed span on the way
-    // out of MAD, and a finding's model-authored `claim` is inside it. Filed
-    // against story 7 by code review 2026-08-27 and recorded as an AD-18
-    // amendment; it is the adapter's boundary, not this stage's, and this story
-    // was told not to touch either.
+    // THE DEFERRAL THIS COMMENT USED TO CARRY IS CLOSED (story 7). The rendered
+    // run really does reach a MODEL — `adapters/opencode/plugin.ts` returns it as
+    // the tool's `output` — and AD-18's eighth span now frames it THERE, via
+    // `frameForHostAgent` below, precisely because the same string is also shown
+    // to a human. The assertions here are unchanged and are what keeps the two
+    // boundaries apart: this one stays bare.
     const resolved = setup([["openai", "gpt-5"]])
     const { rendered } = await review({
       roster: resolved.roster,
@@ -1501,6 +1500,15 @@ describe("review — AD-18: what the framing must NOT touch", () => {
 
     for (const notice of Object.values(MATERIAL_NOTICES)) expect(rendered).not.toContain(notice)
     expect(rendered).not.toContain("material: change under review")
+
+    // AD-18's eighth span, at the ONE boundary a model reads: the same string,
+    // framed. `frameForHostAgent` adds the notice and the fence and edits nothing.
+    const framed = frameForHostAgent(rendered)
+    const spans = materialSpans(framed)
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.label).toBe("review report")
+    expect(spans[0]!.body).toBe(rendered)
+    expect(framed.startsWith(noticeFor("review report"))).toBe(true)
   })
 
   test("no stage, no route, no exit and no count moved — the record is what story 5 produced", async () => {

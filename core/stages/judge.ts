@@ -90,7 +90,7 @@ import {
   type Finding,
   type Verdict,
 } from "../domain/finding.ts"
-import type { Roster } from "../domain/roster.ts"
+import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { JudgeCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { anonymize, type AnonymizedTranscript } from "../judge/anonymize.ts"
@@ -654,6 +654,13 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   const droppedOut: string[] = []
   const untooled: string[] = []
 
+  // AD-6b — the MODEL behind a slot id. ONE helper, in `core/domain/roster.ts`,
+  // shared with `core/stages/debate.ts` rather than copied into it (story 7, code
+  // review 2026-08-30). Only its `roster.slots` term is reachable from here:
+  // `core/judge/slots.ts` builds the eligible set from the pool alone, so no lens
+  // slot ever takes a judge role and no lens slot can drop out of this stage.
+  const modelOf = (slot: string): string => modelNameOf(input.roster, slot)
+
   /**
    * Which of the three exhaustion facts applies to this finding.
    *
@@ -713,11 +720,19 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     warnings.push({
       code: "model-dropped-out",
       stage: "judge",
+      // AD-6b — THE MODEL, NOT ONLY THE SLOT (story 7). The wording here already
+      // said "the model behind \`discovery-2\`" and then printed the slot id,
+      // which named the thing it had just told the reader was not the point. A
+      // reader had to cross-reference the ROSTER block by eye to learn which
+      // model actually failed; AD-6(b) asks for "a warning naming it". The slot
+      // is kept beside the model because every other line of the run — the
+      // roster block, `raised by:`, the transcript — identifies a participant
+      // by it. `discover.ts` set this shape first.
       message:
-        `JUDGE TURN LOST: the model behind \`${slot}\` failed twice on the ${role} step and the run ` +
-        `continued without it. Any finding it was asked about is decided on what the other steps ` +
-        `produced, which is less than it should have been. (${message})`,
-      detail: { slot, role, message },
+        `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) failed twice on the ${role} step and ` +
+        `the run continued without it. Any finding it was asked about is decided on what the other ` +
+        `steps produced, which is less than it should have been. (${message})`,
+      detail: { slot, model: modelOf(slot), role, message },
     })
   }
 
@@ -795,6 +810,28 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // re-evaluated cannot silently outlive its cause.
       unavailable = true
       counts.notExamined += 1
+      // AD-6 — AND IT SAYS SO ON ITS OWN ROW (story 7). Until this entry existed
+      // the skip wrote no `unresolved`, no `verdict` and nothing to `history`, so
+      // the finding landed in the RESOLVED list with `renderJudge` silent — and a
+      // silent `judge:` line is exactly what a finding the judge examined and left
+      // undecided looks like. The JUDGE summary carried the count, but a reader
+      // scanning one finding had no way to tell which of them it was.
+      //
+      // A HISTORY ENTRY, not a field and not a count: `history` is append-only and
+      // already the judge's (AD-7/AD-8), `counts.notExamined` above is unchanged,
+      // and no `Finding` field is added. MAD-authored throughout, so no span
+      // (AD-18). `evidenceRank` matches three other kinds and not this one, so
+      // ordering is untouched.
+      appendEntry(finding, {
+        stage: "judge",
+        actor: "mad",
+        at: clock.now(),
+        kind: "judge-not-examined",
+        body:
+          `NEVER EXAMINED: no reviewer model was left to check, weigh or decide this finding — ` +
+          `either none from the main pool answered discovery, or every one that did has since ` +
+          `failed. It is reported exactly as it was raised.`,
+      })
       continue
     }
 

@@ -11,9 +11,9 @@
 import { describe, expect, test } from "bun:test"
 
 import type { ModelBackend } from "../../core/ports/model-backend.ts"
-import { MATERIAL_NOTICES, listCell, oneLine } from "../../core/prompt/material.ts"
+import { MATERIAL_NOTICES, listCell, noticeFor, oneLine } from "../../core/prompt/material.ts"
 import { selectRoster } from "../../core/roster/select.ts"
-import { review } from "../../core/run/review.ts"
+import { frameForHostAgent, review } from "../../core/run/review.ts"
 import {
   candidate,
   fakeClock,
@@ -399,17 +399,76 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // rendered run, and the real defect is still in it after a change that spent
     // five plants telling the reviewer to report nothing.
     //
-    // WHAT IT DOES NOT SETTLE: `adapters/opencode/plugin.ts` hands `rendered` to
-    // the HOST AGENT, which is a model — so the rendered run is itself an
-    // unframed span leaving MAD, carrying model-authored `claim` text. Filed
-    // against story 7 by code review 2026-08-27 and recorded as an AD-18
-    // amendment. It is the adapter's boundary and story 5A was told to leave both
-    // `output.ts` and the adapter alone.
+    // THE HUMAN-FACING HALF OF STORY 7's ANSWER. The rendered run reaches a MODEL
+    // too — `adapters/opencode/plugin.ts` returns it as the tool's `output` — and
+    // AD-18 requires it framed there. It is framed at THAT boundary and not here,
+    // because the same string is shown to a human, where a notice sentence and a
+    // fence are noise. The test below is the other half.
     const recorded: Turn[] = []
     const { rendered } = await threeSlotRun(recorded)
 
     for (const notice of Object.values(MATERIAL_NOTICES)) expect(rendered).not.toContain(notice)
     expect(rendered).not.toContain("material: change under review")
+    expect(rendered).toContain("appendLedgerEntry")
+  })
+
+  test("AD-18's EIGHTH SPAN — every planted order in the report lands inside ONE `review report` span", async () => {
+    // The gap story 5A left open and story 7 closes. `rendered` carries
+    // model-authored `claim`, `reasoning`, debate positions and judge reports —
+    // and this fixture's models have quoted the planted order into all of them:
+    // `discovery-1` puts it in its `reasoning`, `discovery-2` puts it in a
+    // `locus.file`, both debaters quote it in their arguments, and every judge
+    // role quotes it forward again. So the assertion below is not vacuous: the
+    // order really is in the report, several times over, by several routes.
+    //
+    // `frameForHostAgent` lives in `core/` precisely so this file can reach it
+    // (AD-1 permits `fixtures/` → `core/` and forbids the reverse), which is what
+    // makes an end-to-end assertion possible at all.
+    const recorded: Turn[] = []
+    const { rendered } = await threeSlotRun(recorded)
+    const framed = frameForHostAgent(rendered)
+
+    // ONE span, over the WHOLE report. Not one per prose block: `material()` puts
+    // the notice OUTSIDE the fence, so MAD's framing stays in MAD's own voice and
+    // the report's own computed lines are not themselves labelled as material.
+    const spans = materialSpans(framed)
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.label).toBe("review report")
+    expect(spans[0]!.body).toBe(rendered)
+
+    // The forged opener and the forged fence the diff planted are INSIDE the
+    // body wherever they survived into the report — `materialSpans` consumes
+    // them as body before its scan reaches them, which is why the count above is
+    // one and not three.
+    const span = spans[0]!
+    const planted = occurrencesOf(framed, PLAIN_ORDER)
+    expect(planted.length).toBeGreaterThan(0)
+    for (const order of INJECTED_ORDERS) {
+      for (const at of occurrencesOf(framed, order)) {
+        expect(at, `"${order}" at ${at} escaped the review report span`).toBeGreaterThanOrEqual(span.start)
+        expect(at + order.length).toBeLessThanOrEqual(span.end)
+      }
+    }
+
+    // THE FENCE ESCALATES PAST ANYTHING THE BODY CONTAINS, measured against the
+    // report ITSELF rather than against `fenceFor` (code review 2026-08-30).
+    // `expect(rendered).not.toContain(fenceFor(rendered))` was true by
+    // construction — `fenceFor` returns longest-run-plus-one — so it read as the
+    // safety proof for the eighth span and proved nothing. The run length is
+    // counted here, independently; `core/prompt/material.test.ts` owns the bound
+    // itself. No fence literal: this file is scanned by
+    // `scripts/lint-material-spans.ts` and is not exempt.
+    const opener = framed.split("\n")[1]!
+    const openerFence = opener.slice(0, opener.length - "material: review report".length)
+    const longestRun = Math.max(0, ...(rendered.match(/`+/g) ?? []).map((run) => run.length))
+    expect(openerFence.length).toBeGreaterThan(longestRun)
+    // ...and the block really does close on that same fence, at the end.
+    expect(framed.split("\n").at(-1)).toBe(openerFence)
+
+    // The framing ADDED a notice and edited nothing: the body is the report byte
+    // for byte (asserted above), and the notice is not in it.
+    expect(framed).toContain(noticeFor("review report"))
+    expect(rendered).not.toContain(noticeFor("review report"))
     expect(rendered).toContain("appendLedgerEntry")
   })
 

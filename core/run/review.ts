@@ -152,6 +152,37 @@ function buildInput(change: ChangeSet): string {
   ].join("\n")
 }
 
+/**
+ * AD-18's EIGHTH SPAN — the rendered run, framed for the host agent (story 7).
+ *
+ * `adapters/opencode/plugin.ts` returns the rendered run as the `mad_review`
+ * tool's `output`, and a tool's output is read by the calling agent, which is a
+ * model. The report quotes every `claim`, `reasoning`, debate position and judge
+ * report the run produced — model-authored prose, which is exactly the text
+ * AD-18 classifies as material everywhere else. Story 5A left this open on
+ * purpose and assigned it here.
+ *
+ * ## Why this lives in `core/` and is not inlined at the adapter
+ *
+ * Two reasons, and the second is the load-bearing one. AD-18 puts the framing in
+ * the envelope a caller builds, and every other span in the pipeline is built in
+ * `core/`; a ninth site that spelled a span differently would be exactly the
+ * drift `core/prompt/material.ts` exists to prevent. And `fixtures/` may import
+ * `core/` while `core/` may not import `fixtures/` (AD-1), so a function here is
+ * the only cheap route to a non-vacuous end-to-end test — the prompt-injection
+ * fixture drives `review()` and can then frame the same rendered string the
+ * adapter would.
+ *
+ * ## Why it is not applied inside `output()`
+ *
+ * The same report is shown to a HUMAN, where a notice sentence and a fence are
+ * noise (AD-18 amended 2026-08-27). `output()` therefore returns the bare report
+ * and this is applied at the ONE boundary where a model reads it.
+ */
+export function frameForHostAgent(rendered: string): string {
+  return material("review report", rendered)
+}
+
 export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const { roster, backend, clock, change } = deps
   // AD-11 amended — the pool's set comes from the registry, addressed by task

@@ -55,18 +55,43 @@
  * co-discovery is skipped or ties, ordering now falls through to verdict, then
  * evidence, then locus. Nothing is fused; each criterion still reads one thing.
  *
- * AD-6 — all six degradation reports are carried here and rendered: the
- * denominator, drop-outs, the roster warning, lens homogeneity, the unresolved
- * section, and (story 6) an unverified fact-check, which is the one most likely
- * to pass for a healthy run — a verdict reasoned from nothing looks exactly like
- * a verdict read out of the repo. The same rule covers what the finding list IS
- * while the pipeline is short of stages: before clustering runs it is a pool, not
- * a merged set, and a multi-model run says so (`pooledNotYetMerged`).
+ * Story 7 adds READS and, again, no writes — `rank` is still the only field this
+ * stage sets (AD-8) and `rankFindings` is UNTOUCHED: ranking was settled by story
+ * 6, and `stories.yaml`'s story-7 entry now carries a dated `STALE 2026-08-28`
+ * correction saying so. What it adds is the
+ * material behind the claims the page already made: the debate TRANSCRIPT under
+ * each finding, so a reader can weigh the argument CAP-6 asks them to weigh and
+ * not only its exit; a fallback for `evidence so far:` to the debate's last
+ * positions, so AD-6d's promise of "the evidence they accumulated" is true rather
+ * than answered with `assertion only`; `Warning.stage` and `source` printed as
+ * values; and disclosure-versus-degradation classified from `DISCLOSURE_CODES` in
+ * `core/domain/warning.ts` rather than from a denylist here.
+ *
+ * AD-18's eighth span is NOT here, deliberately. The rendered run reaches a model
+ * — the host agent reads the opencode tool's output — but it reaches a human too,
+ * where a notice sentence and a fence are noise. `output()` returns the bare
+ * report and `frameForHostAgent` (`core/run/review.ts`) frames it at the one
+ * boundary a model reads it. Nothing in this file emits a span (AD-18).
+ *
+ * AD-6 — all FIVE degradation reports are carried here and rendered: the
+ * denominator (a), drop-outs (b), the roster warning (c), the unresolved section
+ * (d), lens homogeneity (e). Five, not six: (f) `cancelled` has no signal to
+ * raise it and belongs to story 7A with the signal. (The claim here read "all
+ * six" before story 7 and was false — a comment claiming finished work is AD-6's
+ * own failure applied to the source.) Beside the five, story 6 added an
+ * unverified fact-check, which is the report most likely to pass for a healthy
+ * run — a verdict reasoned from nothing looks exactly like a verdict read out of
+ * the repo. The same rule covers what the finding list IS while the pipeline is
+ * short of stages: before clustering runs it is a pool, not a merged set, and a
+ * multi-model run says so (`pooledNotYetMerged`).
  */
 
-import { effectiveSeverity, severityRank, type Finding } from "../domain/finding.ts"
+import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
+import { DISCLOSURE_CODES } from "../domain/warning.ts"
+import { LINE_BREAKS, listCell, oneLine } from "../prompt/material.ts"
+import { isDebatePosition, type DebatePosition } from "./debate.ts"
 
 /**
  * The co-discovery ratio, computed at sort time and never stored (AD-9). A
@@ -195,6 +220,28 @@ export function rankFindings(findings: Finding[]): Finding[] {
   return ordered
 }
 
+/**
+ * AD-17e / AD-9 — who raised it, and `source` PRINTED AS A VALUE (story 7).
+ *
+ * The lens label has been rendered since CAP-11, so a lens finding always
+ * disclosed itself. A POOL finding said nothing at all: `source` — the field AD-9
+ * amended makes the ONE discriminator for "is a co-discovery prior claimable" —
+ * was readable only by its absence, which is exactly the inference from silence
+ * the amendment forbids everywhere else. A reader could not tell a pool finding
+ * from a finding whose `source` the renderer had simply not looked at.
+ *
+ * So both are named. The lens label keeps its existing wording beside it rather
+ * than replacing it: `source: lens` is the field, and WHICH lens found it is the
+ * fact AD-17(e) actually requires.
+ */
+function renderRaisedBy(finding: Finding): string {
+  if (finding.source !== "lens") return `      raised by: ${finding.author}  (source: pool)`
+  return (
+    `      raised by: ${finding.author}` +
+    `  (source: lens — lens-sourced: \`${finding.lens ?? "unnamed"}\`)`
+  )
+}
+
 function renderLocus(finding: Finding): string {
   const { file, startLine, endLine } = finding.locus
   if (startLine === undefined) return file
@@ -292,6 +339,114 @@ function renderDebate(finding: Finding): string | undefined {
   // was ever argued.
   const when = rounds === 0 ? `with no round on the record` : `after ${rounds} round(s)`
   return `      debate: ${finding.exit} ${when} — ${explanation ?? "no reason recorded"}`
+}
+
+/**
+ * The debate entries that actually carry a stated position, in round order.
+ *
+ * One accessor for the two readers below — the transcript and the `evidence so
+ * far:` fallback — so the two can never disagree about what "the argument" was.
+ *
+ * `position` is the filter, not `kind` alone: a `debate-round` entry is written
+ * once per position a participant stated (`core/stages/debate.ts`), and an entry
+ * without one is not something anybody argued. Round order is HISTORY order,
+ * which is append order (AD-7) and therefore already round order; the sort is a
+ * stable one on `round` so a record assembled by hand renders the same way, and
+ * two runs of one input render alike either way.
+ */
+function debateRounds(finding: Finding): (Entry & { position: DebatePosition })[] {
+  return finding.history
+    .filter(
+      // VALIDATED ON READ, NOT CAST (code review 2026-08-30). `Entry.position` is
+      // a plain `string?` on the shared append-only record — nothing in the type
+      // system stops a writer appending an off-vocabulary value, and this
+      // renderer interpolates it into a row MAD formats. `core/stages/debate.ts`
+      // validates the same field the same way on its own reads, and exports the
+      // one predicate rather than letting a second one drift from it.
+      (entry): entry is Entry & { position: DebatePosition } =>
+        entry.stage === "debate" && entry.kind === "debate-round" && isDebatePosition(entry.position),
+    )
+    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0))
+}
+
+/**
+ * CAP-6 — THE ARGUMENT THAT PRODUCED THE FINDING, which nothing rendered until
+ * story 7.
+ *
+ * `renderDebate` above prints an exit and a round count; the positions and the
+ * arguments themselves sat unread in `history`. CAP-6 asks a reader to weigh the
+ * argument, and a reader handed "converged after 2 round(s)" has been told a
+ * debate happened and shown none of it — which is the AD-6 failure applied to the
+ * one thing the whole pipeline exists to produce.
+ *
+ * WHAT IS PRINTED AND WHAT IS NOT. `round` and `actor` are MAD's own record of
+ * the exchange, `position` is checked against this stage's vocabulary on the way
+ * in (`debateRounds`), and `body`, `concession` and `citations` are the
+ * participant's own words (AD-11: model-authored prose passes through unparsed).
+ * What is NOT printed is `Warning.detail.raw` — the unvalidated model payload a
+ * failed envelope carries, which nothing on this path sanitizes.
+ *
+ * ## EVERY CELL IS COLLAPSED, INCLUDING THE ARGUMENT (AD-18 as amended by 5A)
+ *
+ * `round N — <actor> <position>` and `cites: …` are rows MAD formats, and
+ * `body`, `concession` and `citations` are cells MAD does not own.
+ *
+ * The ARGUMENT was the one left uncollapsed, on the argument that its lines are
+ * indented deeper than a round header. That was WRONG and a reviewer demonstrated
+ * it (code review 2026-08-30): `indent` puts the SAME ten-space prefix on every
+ * body line that MAD's own `cites:` row carries, so a body containing a break and
+ * then `cites: "src/NOT-REAL.ts:99"` renders a citation row byte-identical to
+ * MAD's — evidence nobody cited, inside the very span the host agent is told to
+ * read as evidence. A fence cannot stop it, because the forgery impersonates
+ * MAD's frame from INSIDE the span.
+ *
+ * So the body goes through `oneLine` like every other cell — which is exactly
+ * what `core/stages/debate.ts` already does when it renders the same entries into
+ * the exchange span, one entry to one line. `oneLine` collapses the whole
+ * `LINE_BREAKS` set, not `\n` alone, so a CR or a U+2028 forges no row either.
+ * The cost is that a long argument is one long line; the alternative is a
+ * transcript a reader cannot trust, and `claim` and `reasoning` below are still
+ * printed with their paragraphs (they sit under no MAD-owned row of their own,
+ * and are covered by their own deferred entry).
+ *
+ * NO SPAN AND NO FENCE (AD-18). This is the human-facing render; the framing is
+ * applied once, over the whole report, at the boundary a model reads it.
+ */
+function renderTranscript(finding: Finding): string[] {
+  const rounds = debateRounds(finding)
+  if (rounds.length === 0) return []
+
+  const lines = [`      the argument, in the participants' own words:`]
+  for (const entry of rounds) {
+    const conceded = entry.concession ? `  (conceded: ${oneLine(entry.concession)})` : ""
+    lines.push(`        round ${entry.round ?? "?"} — ${entry.actor} ${entry.position}${conceded}`)
+    lines.push(`          ${oneLine(entry.body)}`)
+    if (entry.citations && entry.citations.length > 0) {
+      lines.push(`          cites: ${entry.citations.map(listCell).join(", ")}`)
+    }
+  }
+  return lines
+}
+
+/**
+ * AD-6d — the last position each participant stood on, as the evidence fallback.
+ *
+ * The LAST one per participant, not every one: AD-6d asks for the evidence a
+ * stranded finding accumulated, and a participant that moved is represented by
+ * where it ended up.
+ *
+ * Order is first-appearance order in `debateRounds` — which is ROUND order, not
+ * raw `history` order, because `debateRounds` sorts (code review 2026-08-30; this
+ * comment said "in `history`", and the two differ in exactly the case a
+ * hand-assembled record produces). Either way it is a pure function of the
+ * record, so two runs of one input produce one string.
+ */
+function lastPositions(finding: Finding): string[] {
+  const standing = new Map<string, DebatePosition>()
+  for (const entry of debateRounds(finding)) {
+    standing.set(entry.actor, entry.position)
+  }
+  return [...standing.entries()].map(([actor, position]) => `${actor} ${position}`)
 }
 
 /**
@@ -560,19 +715,101 @@ function renderVerdict(finding: Finding): string {
 }
 
 /**
+ * One cell of the three-column row, clipped so the row cannot wrap.
+ *
+ * APPLIED BY THE CALLER, NOT BY `renderEvidence` (story 7). The clip belongs to
+ * the ROW, not to the field: the resolved list prints `evidence:` as one of three
+ * columns and AD-9 asks that row to stay readable as three, but the UNRESOLVED
+ * section prints `evidence so far:` on a line of its own, where clipping deletes
+ * the material AD-6d requires the run to hand over and there is no second copy of
+ * it below. One 72-character rule over both cut a participant off the end of the
+ * fallback list.
+ */
+function column(text: string): string {
+  return text.length > 72 ? `${text.slice(0, 71)}…` : text
+}
+
+/**
+ * Every line-break form, as a splitter, derived from AD-18's own exported SET.
+ *
+ * Built from `LINE_BREAKS` rather than written out, so a form added there is
+ * picked up here without anybody remembering to (`core/prompt/material.ts` owns
+ * the set and tests it). `\r\n` first, so a CRLF is one break and not two.
+ *
+ * `split("\n")` was the bug this replaces: a model's prose reaches MAD through
+ * JSON, so a `\r` or a U+2028 arrives verbatim, and a "first line" taken on `\n`
+ * alone silently carried the rest of the paragraph into a column (code review
+ * 2026-08-30).
+ */
+const LINE_BREAK_SPLIT = new RegExp(`\r\n|[${LINE_BREAKS.join("")}]`)
+
+/** The first line with anything on it, trimmed. `""` when there is none. */
+function firstNonBlankLine(text: string): string {
+  for (const line of text.split(LINE_BREAK_SPLIT)) {
+    const trimmed = line.trim()
+    if (trimmed.length > 0) return trimmed
+  }
+  return ""
+}
+
+/**
  * CAP-6 — WHAT WAS ACTUALLY PRODUCED, and `assertion only` is the honest reading
  * of an absent extraction rather than a placeholder.
  *
- * The extractor's prose can run to paragraphs, so the column carries its first
- * line and the full text goes under the finding. A column that wrapped would
- * make the three separate numbers unreadable as three columns, which is the one
- * thing AD-9 asks this row to be.
+ * The extractor's prose can run to paragraphs, so this carries its FIRST LINE
+ * and the full text goes under the finding.
+ *
+ * ## AD-6d — the fallback, and why `assertion only` was a false claim (story 7)
+ *
+ * `evidence` is written by ONE writer, the judge's Evidence Extractor. So every
+ * finding the budget stranded in DEBATE has none — and printed `evidence so far:
+ * assertion only` directly beneath an `unresolved-findings` warning promising the
+ * reader "the evidence they accumulated". Its positions and citations were sitting
+ * in `history` unread. `assertion only` is the honest reading of a finding nobody
+ * argued; it is a false one for a finding two models argued over for two rounds.
+ *
+ * So an absent extraction falls back to the debate's LAST standing positions, and
+ * only a finding with neither reads `assertion only`. AD-9 is untouched: this
+ * still reads ONE field — what was produced — and no scalar is computed from it.
+ * The fallback lives in this function rather than at the `evidence so far:` call
+ * site because the resolved list's `evidence:` column makes the same claim about
+ * the same absence, and two readings of one field is how they come to disagree.
  */
 function renderEvidence(finding: Finding): string {
-  if (finding.evidence === undefined) return "assertion only"
-  const first = finding.evidence.split("\n")[0]!.trim()
-  if (first.length === 0) return "assertion only"
-  return first.length > 72 ? `${first.slice(0, 71)}…` : first
+  // THE FIRST NON-BLANK LINE, not the first line (code review 2026-08-30). An
+  // extraction whose first line is blank made this fall through to the
+  // debate-positions branch and print "no extraction" over an extraction that
+  // exists — AD-6's honesty rule inverted, in the function whose whole job is to
+  // say what was actually produced.
+  const extracted = finding.evidence === undefined ? "" : firstNonBlankLine(finding.evidence)
+  if (extracted.length > 0) return extracted
+
+  const stood = lastPositions(finding)
+  if (stood.length === 0) return "assertion only"
+  return `no extraction — the debate's last positions: ${stood.join(", ")}`
+}
+
+/**
+ * The same field as `renderEvidence`, sized for the three-column row.
+ *
+ * THE FALLBACK IS SUMMARISED HERE, NOT CLIPPED (code review 2026-08-30). The
+ * prefix `no extraction — the debate's last positions: ` is 44 characters on its
+ * own, so `column()` left barely one participant before the ellipsis: a short
+ * TRUE string (`assertion only`) had been replaced by a truncated fragment, which
+ * is a worse answer than the one story 7 set out to fix. A count is short, exact,
+ * and points at the transcript printed under this same finding, which carries the
+ * positions in full — so nothing is lost and the row stays three columns.
+ *
+ * The UNRESOLVED section's `evidence so far:` line calls `renderEvidence`
+ * directly instead: it has no row to wrap and AD-6d wants the material itself.
+ */
+function evidenceColumn(finding: Finding): string {
+  const extracted = finding.evidence === undefined ? "" : firstNonBlankLine(finding.evidence)
+  if (extracted.length > 0) return column(extracted)
+
+  const stood = lastPositions(finding)
+  if (stood.length === 0) return "assertion only"
+  return `no extraction — ${stood.length} debate position(s), in the transcript below`
 }
 
 /**
@@ -595,6 +832,11 @@ function renderJudge(finding: Finding): string | undefined {
   const checked = entries.some((entry) => entry.kind === "judge-fact-check-verified")
   const unverified = entries.some((entry) => entry.kind === "judge-fact-check-unverified")
   const weighed = entries.some((entry) => entry.kind === "judge-logic-eval")
+  // AD-6 (story 7) — the judge REACHED this finding and could not examine it,
+  // which is a fact about the run and not the same as "the judge never got here".
+  // Its entry is the only judge entry such a finding has, so without this branch
+  // it fell through to `no step completed` — true, and silent about the cause.
+  const notExamined = entries.find((entry) => entry.kind === "judge-not-examined")
 
   const steps: string[] = []
   // AD-13 stated in the render, not only in the warning: a reader scanning one
@@ -602,6 +844,9 @@ function renderJudge(finding: Finding): string | undefined {
   if (checked) steps.push("checked against the code")
   else if (unverified) steps.push("CHECK NOT VERIFIED — nothing was opened or run")
   if (weighed) steps.push("argument quality weighed")
+  if (notExamined) {
+    steps.push("NEVER EXAMINED — no reviewer model was left to check, weigh or decide it")
+  }
   if (steps.length === 0) {
     // TWO EMPTY-STEP CASES, AND THEY ARE OPPOSITE (code review 2026-08-28). A
     // withdrawal's only judge entry is its verdict, because the stage
@@ -613,6 +858,12 @@ function renderJudge(finding: Finding): string | undefined {
     steps.push(withdrawn ? "no step needed" : "no step completed")
   }
 
+  // THE VERDICT'S REASON, AND ONLY THAT (code review 2026-08-30). Falling back to
+  // the not-examined entry's body printed the cause TWICE on one row — once as
+  // the step above and again here, in ~300 unclipped characters — because both
+  // are read off the same entry. The step names the cause; the entry's fuller
+  // wording is where a reader of the record finds it, and the JUDGE summary and
+  // the `judge-unavailable` warning both carry it in prose.
   const why = verdictEntry?.body.split("\n")[0]
   return `      judge: ${steps.join(", ")}${why ? ` — ${why}` : ""}`
 }
@@ -737,13 +988,27 @@ export function renderRunRecord(record: RunRecord): string {
   lines.push("")
 
   // ---- AD-6: warnings, rendered once, here, by output ----
-  const degradations = record.warnings.filter((w) => w.code !== "provider-fan-out")
-  const disclosures = record.warnings.filter((w) => w.code === "provider-fan-out")
+  //
+  // CLASSIFIED FROM A NAMED SET, NOT FROM A DENYLIST HERE (story 7). This read
+  // `code !== "provider-fan-out"`, which put the vocabulary in two files: a code
+  // added to `WarningCode` landed under "this run is degraded" whether or not
+  // that is what it meant, and nobody editing `core/domain/warning.ts` would see
+  // this line. `DISCLOSURE_CODES` lives beside the union; unlisted means
+  // degradation, which is the safe default.
+  const degradations = record.warnings.filter((w) => !DISCLOSURE_CODES.has(w.code))
+  const disclosures = record.warnings.filter((w) => DISCLOSURE_CODES.has(w.code))
 
   if (degradations.length > 0) {
     lines.push("WARNINGS — this run is degraded")
     for (const warning of degradations) {
-      lines.push(`  ! [${warning.code}] ${warning.message}`)
+      // THE STAGE IS RENDERED (story 7). `Warning.stage` was populated at all
+      // fourteen raise sites and printed at none, and it is the one fact the
+      // message prose does NOT reliably carry: `model-dropped-out` is raised by
+      // discover, debate and judge, and "which stage lost this model" changes
+      // what the reader should conclude — a discovery drop-out shrinks the
+      // co-discovery denominator, a judge drop-out does not. `detail` stays
+      // unrendered, deliberately; see the story's design notes.
+      lines.push(`  ! [${warning.stage}/${warning.code}] ${warning.message}`)
     }
     lines.push("")
   } else {
@@ -752,7 +1017,7 @@ export function renderRunRecord(record: RunRecord): string {
   }
 
   for (const disclosure of disclosures) {
-    lines.push(`DISCLOSURE: ${disclosure.message}`)
+    lines.push(`DISCLOSURE: [${disclosure.stage}/${disclosure.code}] ${disclosure.message}`)
     lines.push("")
   }
 
@@ -796,15 +1061,13 @@ export function renderRunRecord(record: RunRecord): string {
     lines.push(
       `      co-discovery: ${renderCoDiscovery(finding)}   ` +
         `verdict: ${renderVerdict(finding)}   ` +
-        `evidence: ${renderEvidence(finding)}`,
+        `evidence: ${evidenceColumn(finding)}`,
     )
     // AD-17e — the reader always learns a finding was lens-sourced and WHICH
     // lens found it. Read from `finding.lens`, never parsed back out of the slot
-    // id in `author` (AD-17, design notes).
-    lines.push(
-      `      raised by: ${finding.author}` +
-        (finding.source === "lens" ? `  (lens-sourced: \`${finding.lens ?? "unnamed"}\`)` : ""),
-    )
+    // id in `author` (AD-17, design notes). Story 7 names `source` for a POOL
+    // finding too; see `renderRaisedBy`.
+    lines.push(renderRaisedBy(finding))
     const merged = renderMerged(finding, record.pool)
     if (merged) lines.push(merged)
     // CAP-3 — why this finding took the path it did, per finding. The summary
@@ -821,6 +1084,13 @@ export function renderRunRecord(record: RunRecord): string {
     // been described before the ruling on it means anything.
     const judged = renderJudge(finding)
     if (judged) lines.push(judged)
+    // CAP-6 — THE ARGUMENT ITSELF, and BELOW the three one-line summaries above
+    // for their reason exactly: the route says the finding was contested, the
+    // exit says how the argument ended, the judge line says what was ruled — and
+    // only then is the transcript a thing the reader can read those against.
+    // Silent when no position was ever stated, so a `route: "judge"` finding and
+    // a pre-debate record gain nothing; the `route:` line stays the discriminator.
+    lines.push(...renderTranscript(finding))
     lines.push("")
     lines.push(indent(finding.claim, "      "))
     if (finding.reasoning.trim().length > 0) {
@@ -866,11 +1136,7 @@ export function renderRunRecord(record: RunRecord): string {
     // undecided finding by hand needs to know it carries no prior BECAUSE it was
     // prompted, not because judging never reached it. Latent until story 8
     // writes `unresolved`; found before it could ship (code review 2026-08-15).
-    lines.push(
-      `      raised by: ${finding.author}` +
-        (finding.source === "lens" ? `  (lens-sourced: \`${finding.lens ?? "unnamed"}\`)` : "") +
-        `   co-discovery: ${renderCoDiscovery(finding)}`,
-    )
+    lines.push(`${renderRaisedBy(finding)}   co-discovery: ${renderCoDiscovery(finding)}`)
     // AD-17e has no exception for this section either, and a merged canonical
     // that dies at a later stage carries the same absorbed lens member a
     // resolved one does. Same reasoning as the lens label on the line above.
@@ -895,6 +1161,16 @@ export function renderRunRecord(record: RunRecord): string {
     // finding between its turns rather than before all of them.
     const unresolvedJudge = renderJudge(finding)
     if (unresolvedJudge) lines.push(unresolvedJudge)
+    // CAP-6 / AD-6d IN THIS SECTION TOO (code review 2026-08-30). The transcript
+    // was rendered in the resolved list only, and this is the section AD-6d is
+    // actually about: a finding the budget stranded mid-debate is the one a
+    // reader has to decide BY HAND, and "you decide" over an argument the report
+    // will not show them is the failure story 7 exists to fix, sharpened. The
+    // `evidence so far:` line above summarises the standing positions; this is
+    // the argument behind them. Unlike `renderDebate`, this is NOT dead code
+    // here: rounds are appended as they happen, so a room stranded in round 2
+    // legitimately carries round 1's positions with no `exit` written.
+    lines.push(...renderTranscript(finding))
     // NO `debate:` LINE HERE, and that is an invariant rather than an omission
     // (code review 2026-08-24). `unresolved` is written ONLY for a room whose
     // `exit` is still undefined (`debate.ts`, AD-6d), and no code path writes an

@@ -1048,6 +1048,49 @@ describe("the contract the renderer reads (code review 2026-08-28)", () => {
     expect(kinds).toContain("judge-fact-check-unverified")
     expect(kinds).not.toContain("judge-fact-check-verified")
   })
+
+  test("AD-6 (story 7) — a finding nobody could examine gets the `judge-not-examined` kind", async () => {
+    // THE PRODUCER SIDE of the kind `renderJudge` matches on, pinned here for
+    // this block's own reason: `output.test.ts` builds the entry by hand, so it
+    // pins the CONSUMER against a literal and would stay green if the stage
+    // stopped writing one.
+    //
+    // Before this entry existed the skip wrote no `unresolved`, no `verdict` and
+    // nothing to `history` at all, so the finding landed in the RESOLVED list
+    // with the `judge:` line silent — indistinguishable, per finding, from one
+    // the judge examined and left undecided.
+    const result = await run([argued(), argued({ id: "f-2", file: "src/b.ts" })], {
+      roster: roster(THREE, ["security"]),
+      answeredSlots: ["discovery-lens-security"],
+    })
+
+    expect(result.notExamined).toBe(2)
+    for (const finding of result.findings) {
+      const entries = finding.history.filter((e) => e.stage === "judge")
+      expect(entries.map((e) => e.kind)).toEqual(["judge-not-examined"])
+      expect(entries[0]!.actor).toBe("mad")
+      expect(entries[0]!.body).toContain("NEVER EXAMINED")
+      // NO NEW FIELD AND NO SECOND WRITER (AD-8): the entry is the whole change.
+      expect(finding.verdict).toBeUndefined()
+      expect(finding.unresolved).toBeUndefined()
+    }
+  })
+
+  test("AD-6b (story 7) — the drop-out names the MODEL, not only the slot", async () => {
+    // A slot id is MAD's own role vocabulary and names nobody. The message used
+    // to read "the model behind `discovery-2`" and then print the slot id, so a
+    // reader had to walk back up to the ROSTER block to learn which model failed.
+    const result = await run([argued()], { backend: failingRoles("aggregate") })
+
+    const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
+    const slotId = dropped.detail?.slot as string
+    // `p/<modelId>` is what this file's `slot()` fixture resolves to. Read off
+    // the warning's own slot rather than hardcoded, because which slot takes the
+    // aggregate role is `assignJudgeSlots`' business, not this test's.
+    expect(dropped.message).toContain(`p/${slotId}`)
+    expect(dropped.message).toContain(`(slot ${slotId})`)
+    expect(dropped.detail?.model).toBe(`p/${slotId}`)
+  })
 })
 
 describe("AC #1 — the record shows the anonymized debaters (code review 2026-08-28)", () => {

@@ -5,11 +5,12 @@ import { z } from "zod"
 import { mayISpend, spent, type BudgetLedger } from "../budget/ledger.ts"
 import type { CoDiscovery, Entry, Finding, Severity } from "../domain/finding.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
-import { emptyLedger } from "../domain/run-record.ts"
+import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
 import { CODING_DEBATE_GENERALIST } from "../instructions/coding/debate.ts"
 import { CODING_LENS_INSTRUCTIONS } from "../instructions/coding/lenses.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
+import { output } from "./output.ts"
 import {
   fakeClock,
   FakeBackend,
@@ -19,6 +20,7 @@ import {
   type SlotStep,
 } from "../test-support/fakes.ts"
 import {
+  carriedClause,
   clampMaxRounds,
   debate,
   debateEnvelopeSchema,
@@ -844,6 +846,112 @@ describe("debate — AD-6d: the budget runs out, and nothing is dropped", () => 
     expect(result.warnings.some((w) => w.code === "unresolved-findings")).toBe(true)
   })
 
+  test("AD-6 — A ZERO-ROUND STRAND PROMISES NO EVIDENCE IT DOES NOT HAVE", async () => {
+    // THE HEADLINE BUG, in the one state that still had it (acceptance audit
+    // 2026-08-30). `core/run/review.ts` documents this as reachable: a cap
+    // smaller than discovery's own spend leaves nothing for debate, the first
+    // gate refuses, and every contested finding is stranded with no round on the
+    // record. The warning promised "the evidence they accumulated" regardless,
+    // and sat directly above rows reading `evidence so far: assertion only`.
+    const ledger = emptyLedger(0) as BudgetLedger
+    const finding = contested()
+    const result = await run([finding], { "discovery-1": [says({ findingId: "f-1", position: "upholds" })] }, {
+      ledger,
+      maxRounds: 3,
+    })
+
+    // Nothing was argued, and nothing pretends otherwise.
+    expect(result.rounds).toBe(0)
+    expect(roundEntries(finding)).toHaveLength(0)
+    const warning = result.warnings.find((w) => w.code === "unresolved-findings")!
+    expect(warning.detail?.withPositions).toBe(0)
+    expect(warning.message).not.toContain("with the evidence they accumulated")
+    expect(warning.message).toContain("None of them recorded a position")
+    // ...and it still says the AD-6d thing that IS true.
+    expect(warning.message).toContain("nothing was dropped")
+    expect(warning.message).toContain("the stage they died at")
+  })
+
+  test("AD-6 — THE WARNING'S PROMISE MATCHES THE ROW RENDERED UNDER IT", async () => {
+    // The pairing the suite was missing: `output.test.ts` pins the ROW and this
+    // file pinned the WARNING, and neither checked one against the other — which
+    // is how a false promise survived directly above the row that contradicts it.
+    // Rendered here through the real renderer over the real stage's output.
+    const ledger = emptyLedger(0) as BudgetLedger
+    const finding = contested()
+    const result = await run([finding], { "discovery-1": [says({ findingId: "f-1", position: "upholds" })] }, {
+      ledger,
+      maxRounds: 3,
+    })
+    const record: RunRecord = {
+      runId: "run-1",
+      startedAt: "t0",
+      roster: roster(["discovery-1", "discovery-2", "discovery-3"]),
+      answered: 3,
+      findings: result.findings,
+      pool: result.findings,
+      lensInstructions: [],
+      threshold: 0.8,
+      maxRounds: 3,
+      warnings: result.warnings,
+      ledger,
+    }
+    const rendered = output(record)
+
+    // The row says the finding accumulated nothing...
+    expect(rendered).toContain("evidence so far: assertion only")
+    // ...so the warning above it must not say it accumulated something.
+    expect(rendered).toContain("[debate/unresolved-findings]")
+    expect(rendered).not.toContain("with the evidence they accumulated")
+  })
+
+  test("when EVERY stranded room argued, the promise is kept as it was", async () => {
+    // The other end of the same split: a cap of 40 permits round 1 and refuses
+    // round 2, so both findings carry positions and the original sentence is
+    // TRUE. Rewording it away would have been the same failure pointed the other
+    // way — under-reporting material the run really does have.
+    const ledger = emptyLedger(40) as BudgetLedger
+    const findings = [contested({ id: "f-1" }), contested({ id: "f-2" })]
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" }, { findingId: "f-2", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "denies" }, { findingId: "f-2", position: "denies" })],
+    })
+    const result = await run(findings, {}, { backend, ledger, maxRounds: 3 })
+
+    const warning = result.warnings.find((w) => w.code === "unresolved-findings")!
+    expect(warning.detail?.withPositions).toBe(2)
+    expect(warning.message).toContain("with the evidence they accumulated")
+    expect(warning.message).not.toContain("None of them recorded")
+  })
+
+  test("THE SPLIT CASE IS WRITTEN AND TESTED, though this stage cannot reach it", () => {
+    // "Some argued and some did not" is a third fact, and reporting it as either
+    // of the other two is the same AD-6 failure — over-claiming for half of them
+    // or under-claiming for the other half.
+    //
+    // IT IS UNREACHABLE THROUGH THE STAGE TODAY, and the reason is an invariant
+    // two functions apart: `mayISpend` is checked once per ROUND before the
+    // fan-out, so a round is all-or-nothing, and `exitFor`'s rule 1 exits any
+    // room that produced no position as `stalled`/`silent` at the end of every
+    // round that runs. Either the gate refused at round 1 (nothing accumulated
+    // anywhere) or a round completed (every position-less room already left).
+    // Both invariants are one edit away from changing, and neither edit would
+    // look like it touches this sentence — so the branch is tested directly
+    // rather than left dead, and rather than through a state it cannot reach.
+    expect(carriedClause(3, 1)).toContain("1 of them recorded positions")
+    expect(carriedClause(3, 1)).toContain("the other 2 recorded none")
+    expect(carriedClause(3, 1)).toContain("nothing was dropped")
+    // ...and the two reachable ends, at the same seam the stage calls.
+    expect(carriedClause(2, 0)).toContain("None of them recorded a position")
+    expect(carriedClause(2, 0)).not.toContain("the evidence they accumulated")
+    expect(carriedClause(2, 2)).toContain("with the evidence they accumulated")
+    expect(carriedClause(2, 2)).not.toContain("None of them recorded")
+    // Every branch says the one thing AD-6d always requires.
+    for (const clause of [carriedClause(3, 1), carriedClause(2, 0), carriedClause(2, 2)]) {
+      expect(clause).toContain("nothing was dropped")
+    }
+  })
+
   test("a finding that ALREADY exited before the money ran out keeps its exit", async () => {
     // Exhaustion strands the undecided; it does not retroactively undecide
     // anything that had already settled.
@@ -1112,6 +1220,49 @@ describe("debate — a dead slot is dropped for the stage, not re-billed every r
     }, { maxRounds: 3 })
     const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
     expect(dropped.message).toContain("NOT asked again in any later round")
+  })
+
+  test("AD-6b (story 7) — the warning names the MODEL, not only the slot", async () => {
+    // AD-6(b) asks for "a warning naming it", and `discovery-2` is MAD's own role
+    // vocabulary: it names nobody, and a reader had to cross-reference the ROSTER
+    // block by eye to find out which model actually failed. `p/<modelId>` here is
+    // this file's `slot()` fixture (`providerId: "provider"`).
+    const result = await run([contested()], {
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [{ kind: "fail", failure: "transport-error", message: "socket closed" }],
+    })
+
+    const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(dropped.message).toContain("`provider/discovery-2`")
+    // The slot id is RETAINED beside it: it is what every other line of the run
+    // — the roster block, `raised by:`, the transcript — identifies a seat by.
+    expect(dropped.message).toContain("(slot discovery-2)")
+    expect(dropped.detail?.model).toBe("provider/discovery-2")
+    expect(dropped.detail?.slot).toBe("discovery-2")
+  })
+
+  test("AD-6b — A LENS SLOT'S DROP-OUT NAMES ITS MODEL TOO", async () => {
+    // DEMONSTRATED GAP (code review 2026-08-30): deleting the `lensSlots` term
+    // from the lookup left every test green and typecheck clean, and a lens
+    // model's drop-out then reported "unresolved — not on the roster" — AD-6(b)
+    // answered with a denial that the failing model exists. A lens slot fills
+    // from the same deduped candidate list (AD-4 amended) and is seated in a
+    // debate room like any other author, so it drops out like any other slot.
+    const lensAuthored = contested({ author: "discovery-lens-security", source: "lens", lens: "security" })
+    const result = await run(
+      [lensAuthored],
+      {
+        "discovery-lens-security": [{ kind: "fail", failure: "transport-error", message: "socket closed" }],
+        "discovery-1": [says({ findingId: "f-1", position: "denies" })],
+      },
+      { roster: roster(["discovery-1", "discovery-2"], ["security"]) },
+    )
+
+    const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(dropped.detail?.slot).toBe("discovery-lens-security")
+    expect(dropped.detail?.model).toBe("provider/discovery-lens-security")
+    expect(dropped.message).toContain("`provider/discovery-lens-security`")
+    expect(dropped.message).not.toContain("not on the roster")
   })
 })
 

@@ -19,6 +19,8 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { noticeFor } from "../../core/prompt/material.ts"
+import { materialSpans } from "../../core/test-support/fakes.ts"
 import {
   DEFAULT_DISCOVERY_SLOTS,
   MadPlugin,
@@ -194,5 +196,60 @@ describe("mad_review.execute — THE BACKEND RECEIVES POOL *AND* LENS SLOTS (CAP
     expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
     expect(result.title).toContain(`0/${DEFAULT_DISCOVERY_SLOTS}`)
     expect(result.title).toContain("+ 2 lens")
+  })
+})
+
+describe("mad_review.execute — THE REPORT LEAVES FRAMED (AD-18's eighth span, story 7)", () => {
+  /**
+   * The only place a reverted `output: frameForHostAgent(rendered)` fails.
+   *
+   * A tool's `output` is read by the calling agent, which is a model, and the
+   * report quotes every model-authored claim, argument and judge report the run
+   * produced. `injection.test.ts` proves the SPAN contains every planted order;
+   * nothing there drives `execute`, so nothing there would notice the adapter
+   * handing back the bare string. This does.
+   *
+   * NO FENCE LITERAL ANYWHERE BELOW. This file is scanned by
+   * `scripts/lint-material-spans.ts` and is not exempt, so the expectation is
+   * built at run time from the emitter's own helpers.
+   */
+  test("the whole report is ONE `review report` span, with the notice outside it", async () => {
+    const result = await executeWith({})
+
+    const spans = materialSpans(result.output)
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.label).toBe("review report")
+
+    // The notice is MAD's own voice and sits OUTSIDE the fence, which is what
+    // lets the whole report be framed honestly rather than each block inside it.
+    // Asserted as "not in the body", which CAN fail — a framing applied inside
+    // `output()` would trip it — rather than as `startsWith(noticeFor(...))`,
+    // which is true by construction of `material()` (code review 2026-08-30).
+    expect(spans[0]!.body).not.toContain(noticeFor("review report"))
+    expect(result.output.indexOf(noticeFor("review report"))).toBeLessThan(spans[0]!.start)
+
+    // The body is the report, unedited — the run this fixture drives answers
+    // nothing, so the report says so and that sentence is inside the span.
+    expect(spans[0]!.body).toContain("MAD review — run ")
+    expect(spans[0]!.body).toContain("NO MODEL ANSWERED")
+    expect(spans[0]!.body).toContain("TOKENS — turns:")
+  })
+
+  test("the fence is longer than any run of backticks the report contains", async () => {
+    // MEASURED AGAINST THE REPORT, NOT AGAINST `fenceFor` (code review
+    // 2026-08-30). `expect(body).not.toContain(fenceFor(body))` cannot fail —
+    // `fenceFor` returns longest-run-plus-one by definition — so it read as this
+    // span's safety proof and proved nothing. The run length is counted here
+    // independently; `core/prompt/material.test.ts` owns the bound itself. The
+    // report quotes model prose and a roster block full of backticked ids, so a
+    // fixed-width delimiter really would be closable from inside it.
+    const result = await executeWith({ lenses: ["security"] })
+    const body = materialSpans(result.output)[0]!.body
+    const opener = result.output.split("\n")[1]!
+    const openerFence = opener.slice(0, opener.length - "material: review report".length)
+
+    const longestRun = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length))
+    expect(openerFence.length).toBeGreaterThan(longestRun)
+    expect(result.output.split("\n").at(-1)).toBe(openerFence)
   })
 })
