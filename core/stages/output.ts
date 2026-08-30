@@ -56,14 +56,13 @@
  * evidence, then locus. Nothing is fused; each criterion still reads one thing.
  *
  * Story 7 adds READS and, again, no writes — `rank` is still the only field this
- * stage sets (AD-8) and `rankFindings` is UNTOUCHED: ranking was settled by story
- * 6, and `stories.yaml`'s story-7 entry now carries a dated `STALE 2026-08-28`
- * correction saying so. What it adds is the
- * material behind the claims the page already made: the debate TRANSCRIPT under
- * each finding, so a reader can weigh the argument CAP-6 asks them to weigh and
- * not only its exit; a fallback for `evidence so far:` to the debate's last
- * positions, so AD-6d's promise of "the evidence they accumulated" is true rather
- * than answered with `assertion only`; `Warning.stage` and `source` printed as
+ * stage sets (AD-8) and `rankFindings` is UNTOUCHED, because ranking was settled
+ * by story 6. What story 7 adds is the material behind the claims the page
+ * already made: the debate TRANSCRIPT under each finding, so a reader can weigh
+ * the argument CAP-6 asks them to weigh and not only its exit; a fallback for
+ * `evidence so far:` to the debate's last positions, so AD-6d's promise of "the
+ * evidence they accumulated" is true rather than answered with `assertion only`
+ * for a finding two models argued over; `Warning.stage` and `source` printed as
  * values; and disclosure-versus-degradation classified from `DISCLOSURE_CODES` in
  * `core/domain/warning.ts` rather than from a denylist here.
  *
@@ -90,8 +89,8 @@ import { effectiveSeverity, severityRank, type Entry, type Finding } from "../do
 
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
 import { DISCLOSURE_CODES } from "../domain/warning.ts"
-import { LINE_BREAKS, listCell, oneLine } from "../prompt/material.ts"
-import { isDebatePosition, type DebatePosition } from "./debate.ts"
+import { LINE_BREAK_CLASS, listCell, oneLine } from "../prompt/material.ts"
+import { isStatedPosition, type DebatePosition } from "./debate.ts"
 
 /**
  * The co-discovery ratio, computed at sort time and never stored (AD-9). A
@@ -242,8 +241,26 @@ function renderRaisedBy(finding: Finding): string {
   )
 }
 
+/**
+ * The finding's location, as ONE cell of a row MAD formats.
+ *
+ * `locus.file` IS A MODEL'S FREE STRING (code review 2026-08-30, second pass).
+ * `core/stages/discover.ts` validates it as `z.string().min(1)` and nothing
+ * narrows it after — so a `file` carrying a line break puts model-chosen text at
+ * MAD's own indentation, under MAD's own headings. Story 5A found this and moved
+ * the locus INTO a material span; story 7 then made the whole report a span the
+ * host agent is told to read as evidence, and a reviewer demonstrated with a live
+ * run that a break plus `  #99  [critical]  src/EVIL.ts:1` renders a finding
+ * nobody raised, INSIDE that span. A fence cannot stop it, because the forgery
+ * impersonates MAD's frame from inside the frame.
+ *
+ * So the cell is collapsed here, once, at the one function every reader of the
+ * locus goes through — the finding header, the unresolved section, and the change
+ * summary alike. `startLine` and `endLine` are numbers and forge nothing.
+ */
 function renderLocus(finding: Finding): string {
-  const { file, startLine, endLine } = finding.locus
+  const { startLine, endLine } = finding.locus
+  const file = oneLine(finding.locus.file)
   if (startLine === undefined) return file
   if (endLine === undefined || endLine === startLine) return `${file}:${startLine}`
   return `${file}:${startLine}-${endLine}`
@@ -347,26 +364,23 @@ function renderDebate(finding: Finding): string | undefined {
  * One accessor for the two readers below — the transcript and the `evidence so
  * far:` fallback — so the two can never disagree about what "the argument" was.
  *
- * `position` is the filter, not `kind` alone: a `debate-round` entry is written
- * once per position a participant stated (`core/stages/debate.ts`), and an entry
- * without one is not something anybody argued. Round order is HISTORY order,
- * which is append order (AD-7) and therefore already round order; the sort is a
- * stable one on `round` so a record assembled by hand renders the same way, and
- * two runs of one input render alike either way.
+ * `position` is part of the filter, not `kind` alone: a `debate-round` entry is
+ * written once per position a participant stated (`core/stages/debate.ts`), and
+ * an entry without one is not something anybody argued. Round order is HISTORY
+ * order, which is append order (AD-7) and therefore already round order; the sort
+ * is a stable one on `round` so a record assembled by hand renders the same way,
+ * and two runs of one input render alike either way.
+ *
+ * THE WHOLE FILTER IS `core/stages/debate.ts`'s (code review 2026-08-30, second
+ * pass). This filter and `standingPositions` there each had a predicate the other
+ * did not — `kind` here, `round` there — so the `unresolved-findings` warning's
+ * count and the transcript printed under it could have described different sets
+ * while a comment asserted they could not. `isStatedPosition` is now the one test
+ * for both, which also means this renderer can no longer be handed a round-less
+ * entry and print the literal `round ? —` in MAD's own voice.
  */
-function debateRounds(finding: Finding): (Entry & { position: DebatePosition })[] {
-  return finding.history
-    .filter(
-      // VALIDATED ON READ, NOT CAST (code review 2026-08-30). `Entry.position` is
-      // a plain `string?` on the shared append-only record — nothing in the type
-      // system stops a writer appending an off-vocabulary value, and this
-      // renderer interpolates it into a row MAD formats. `core/stages/debate.ts`
-      // validates the same field the same way on its own reads, and exports the
-      // one predicate rather than letting a second one drift from it.
-      (entry): entry is Entry & { position: DebatePosition } =>
-        entry.stage === "debate" && entry.kind === "debate-round" && isDebatePosition(entry.position),
-    )
-    .sort((a, b) => (a.round ?? 0) - (b.round ?? 0))
+function debateRounds(finding: Finding): (Entry & { position: DebatePosition; round: number })[] {
+  return finding.history.filter(isStatedPosition).sort((a, b) => a.round - b.round)
 }
 
 /**
@@ -419,7 +433,7 @@ function renderTranscript(finding: Finding): string[] {
   const lines = [`      the argument, in the participants' own words:`]
   for (const entry of rounds) {
     const conceded = entry.concession ? `  (conceded: ${oneLine(entry.concession)})` : ""
-    lines.push(`        round ${entry.round ?? "?"} — ${entry.actor} ${entry.position}${conceded}`)
+    lines.push(`        round ${entry.round} — ${oneLine(entry.actor)} ${entry.position}${conceded}`)
     lines.push(`          ${oneLine(entry.body)}`)
     if (entry.citations && entry.citations.length > 0) {
       lines.push(`          cites: ${entry.citations.map(listCell).join(", ")}`)
@@ -446,7 +460,12 @@ function lastPositions(finding: Finding): string[] {
   for (const entry of debateRounds(finding)) {
     standing.set(entry.actor, entry.position)
   }
-  return [...standing.entries()].map(([actor, position]) => `${actor} ${position}`)
+  // `listCell` ON THE ACTOR (code review 2026-08-30, second pass). These strings
+  // are joined with `", "` into MAD's own `evidence so far:` row, so an actor
+  // carrying a break or the separator itself would list participants nobody
+  // seated — the same cell hygiene the transcript's `body` and `citations`
+  // already get, applied to the one field that reaches a MAD-formatted row raw.
+  return [...standing.entries()].map(([actor, position]) => `${listCell(actor)} ${position}`)
 }
 
 /**
@@ -740,8 +759,14 @@ function column(text: string): string {
  * JSON, so a `\r` or a U+2028 arrives verbatim, and a "first line" taken on `\n`
  * alone silently carried the rest of the paragraph into a column (code review
  * 2026-08-30).
+ *
+ * THE CLASS COMES FROM `core/prompt/material.ts` TOO (code review 2026-08-30,
+ * second pass). Joining the raw members here built an UNESCAPED class, so a
+ * future member that is regex-meaningful (`\`, `]`, `^`, `-`) would have widened
+ * or broken it silently. `LINE_BREAK_CLASS` is the escaped form, and it is the
+ * same string AD-18's own escaper compiles — one set, one class, two readers.
  */
-const LINE_BREAK_SPLIT = new RegExp(`\r\n|[${LINE_BREAKS.join("")}]`)
+const LINE_BREAK_SPLIT = new RegExp(`\r\n|[${LINE_BREAK_CLASS}]`)
 
 /** The first line with anything on it, trimmed. `""` when there is none. */
 function firstNonBlankLine(text: string): string {
@@ -776,17 +801,39 @@ function firstNonBlankLine(text: string): string {
  * the same absence, and two readings of one field is how they come to disagree.
  */
 function renderEvidence(finding: Finding): string {
-  // THE FIRST NON-BLANK LINE, not the first line (code review 2026-08-30). An
-  // extraction whose first line is blank made this fall through to the
-  // debate-positions branch and print "no extraction" over an extraction that
-  // exists — AD-6's honesty rule inverted, in the function whose whole job is to
-  // say what was actually produced.
-  const extracted = finding.evidence === undefined ? "" : firstNonBlankLine(finding.evidence)
-  if (extracted.length > 0) return extracted
+  const state = evidenceState(finding)
+  if (state.kind === "extracted") return state.extracted
+  if (state.kind === "none") return "assertion only"
+  return `no extraction — the debate's last positions: ${state.stood.join(", ")}`
+}
 
+/**
+ * WHICH OF THE THREE EVIDENCE STATES A FINDING IS IN, decided once.
+ *
+ * ONE READING OF ONE FIELD (code review 2026-08-30, second pass).
+ * `renderEvidence`'s own doc argues the fallback belongs in a single function
+ * "because two readings of one field is how they come to disagree" — and then
+ * `evidenceColumn` was added below with the same two reads open-coded a second
+ * time. The two WORDINGS differ on purpose (one wraps a column, one does not);
+ * the DECISION must not. So the decision lives here and each caller only words
+ * it.
+ *
+ * THE FIRST NON-BLANK LINE, not the first line (code review 2026-08-30). An
+ * extraction whose first line is blank made this fall through to the
+ * debate-positions branch and print "no extraction" over an extraction that
+ * exists — AD-6's honesty rule inverted, in the function whose whole job is to
+ * say what was actually produced.
+ */
+type EvidenceState =
+  | { kind: "extracted"; extracted: string }
+  | { kind: "positions"; stood: string[] }
+  | { kind: "none" }
+
+function evidenceState(finding: Finding): EvidenceState {
+  const extracted = finding.evidence === undefined ? "" : firstNonBlankLine(finding.evidence)
+  if (extracted.length > 0) return { kind: "extracted", extracted }
   const stood = lastPositions(finding)
-  if (stood.length === 0) return "assertion only"
-  return `no extraction — the debate's last positions: ${stood.join(", ")}`
+  return stood.length === 0 ? { kind: "none" } : { kind: "positions", stood }
 }
 
 /**
@@ -804,12 +851,15 @@ function renderEvidence(finding: Finding): string {
  * directly instead: it has no row to wrap and AD-6d wants the material itself.
  */
 function evidenceColumn(finding: Finding): string {
-  const extracted = finding.evidence === undefined ? "" : firstNonBlankLine(finding.evidence)
-  if (extracted.length > 0) return column(extracted)
-
-  const stood = lastPositions(finding)
-  if (stood.length === 0) return "assertion only"
-  return `no extraction — ${stood.length} debate position(s), in the transcript below`
+  const state = evidenceState(finding)
+  if (state.kind === "extracted") return column(state.extracted)
+  if (state.kind === "none") return "assertion only"
+  // "STANDING position(s)", not "debate position(s)" (code review 2026-08-30,
+  // second pass). This is `lastPositions`' count — one per participant — and the
+  // transcript it points at prints one row per ROUND, so a two-participant
+  // two-round debate said "2" over four rows. Naming which count it is costs a
+  // word and removes the mismatch a reader would otherwise have to work out.
+  return `no extraction — ${state.stood.length} standing position(s), in the transcript below`
 }
 
 /**
@@ -864,7 +914,18 @@ function renderJudge(finding: Finding): string | undefined {
   // are read off the same entry. The step names the cause; the entry's fuller
   // wording is where a reader of the record finds it, and the JUDGE summary and
   // the `judge-unavailable` warning both carry it in prose.
-  const why = verdictEntry?.body.split("\n")[0]
+  //
+  // READ THROUGH `firstNonBlankLine`, NOT `split("\n")[0]` (code review
+  // 2026-08-30, second pass). This body is MODEL PROSE — `core/stages/judge.ts`
+  // writes `${value.reasoning}\n\nEvidence: …` from the aggregator's own words —
+  // so it is the same field shape `renderEvidence` above was fixed for, and it
+  // was left on the old reader in the same commit that added the new one. A `\r`
+  // or a U+2028 in the reasoning carried the WHOLE paragraph onto this row, and
+  // its continuation lines landed at column 0 inside the span the host agent is
+  // told to read as evidence. `oneLine` then collapses whatever survives, so no
+  // break in model prose can forge a second row out of MAD's `judge:` line.
+  const whyLine = verdictEntry === undefined ? "" : firstNonBlankLine(verdictEntry.body)
+  const why = whyLine.length > 0 ? oneLine(whyLine) : undefined
   return `      judge: ${steps.join(", ")}${why ? ` — ${why}` : ""}`
 }
 
@@ -934,11 +995,53 @@ function pooledNotYetMerged(record: RunRecord, resolved: readonly Finding[]): st
   return lines
 }
 
+/**
+ * Indent every non-empty line of a block.
+ *
+ * SPLIT ON THE WHOLE BREAK SET, NOT `\n` ALONE (code review 2026-08-30, second
+ * pass). This prints `claim`, `reasoning`, `evidence` and `factCheck` — all model
+ * prose — and a `\r` or a U+2028 left everything after it UNINDENTED, at column 0,
+ * inside the span the host agent is told to read as evidence. The file added
+ * `LINE_BREAK_SPLIT` for exactly this class and did not use it here. Rejoined
+ * with `\n` so the output normalises to one break form on the way out.
+ */
 function indent(text: string, prefix = "    "): string {
   return text
-    .split("\n")
+    .split(LINE_BREAK_SPLIT)
     .map((line) => (line.length > 0 ? prefix + line : line))
     .join("\n")
+}
+
+/**
+ * A BLOCK OF MODEL PROSE, collapsed to one line before it is indented.
+ *
+ * THE LAST ROUTE INTO MAD'S OWN VOICE (code review 2026-08-30, second pass, and
+ * a human decision the same day reversing the deferral).
+ *
+ * `claim`, `reasoning`, `evidence`, `factCheck` and `logicEval` are all written by
+ * a model and were all printed at `"      "` — the SAME six-space prefix MAD uses
+ * for its own `raised by:`, `route:`, `debate:` and `judge:` rows. A break in any
+ * of them followed by `judge: checked against the code` renders a judge line no
+ * judge wrote. Story 5A found the class, story 7 closed it for the transcript's
+ * `body`, `concession` and `citations` and DEFERRED these — a defensible call
+ * while the report was read only by a human.
+ *
+ * Story 7 is what changed that. `frameForHostAgent` makes the whole report a
+ * labelled span the host agent is told to read as evidence, so a forged row is no
+ * longer a cosmetic break in a terminal: it is a fabricated finding, or a verdict,
+ * handed to a model inside MAD's own attestation. An acceptance run demonstrated
+ * both. Shipping the span while leaving the cells open would have advertised as
+ * safe a block whose interior rows can be written by the material inside it.
+ *
+ * THE COST IS PARAGRAPHS, AND IT WAS ACCEPTED KNOWINGLY. `oneLine` collapses the
+ * whole `LINE_BREAKS` set to a literal `\n`, so a long argument or a
+ * multi-paragraph fact-check is one long line. That is the same trade story 7
+ * already made for the transcript body, for the same reason and with the same
+ * alternative: a report a reader cannot trust. Nothing is removed and nothing is
+ * judged — the escape is an encoding applied to the whole cell.
+ */
+function modelBlock(text: string): string {
+  return indent(oneLine(text), "      ")
 }
 
 /**
@@ -1092,10 +1195,10 @@ export function renderRunRecord(record: RunRecord): string {
     // a pre-debate record gain nothing; the `route:` line stays the discriminator.
     lines.push(...renderTranscript(finding))
     lines.push("")
-    lines.push(indent(finding.claim, "      "))
+    lines.push(modelBlock(finding.claim))
     if (finding.reasoning.trim().length > 0) {
       lines.push("")
-      lines.push(indent(finding.reasoning, "      "))
+      lines.push(modelBlock(finding.reasoning))
     }
     // AD-9 — the judge's three outputs, each under its own heading and never
     // merged into one paragraph. `factCheck` carries MAD's VERIFIED/UNVERIFIED
@@ -1104,17 +1207,17 @@ export function renderRunRecord(record: RunRecord): string {
     if (finding.evidence !== undefined) {
       lines.push("")
       lines.push("      EVIDENCE EXTRACTED FROM THE ARGUMENT")
-      lines.push(indent(finding.evidence, "      "))
+      lines.push(modelBlock(finding.evidence))
     }
     if (finding.factCheck !== undefined) {
       lines.push("")
       lines.push("      CHECKED AGAINST THE CODE")
-      lines.push(indent(finding.factCheck, "      "))
+      lines.push(modelBlock(finding.factCheck))
     }
     if (finding.logicEval !== undefined) {
       lines.push("")
       lines.push("      HOW WELL EACH SIDE ARGUED (advisory — the code outranks it)")
-      lines.push(indent(finding.logicEval, "      "))
+      lines.push(modelBlock(finding.logicEval))
     }
   }
   lines.push("")
@@ -1125,6 +1228,12 @@ export function renderRunRecord(record: RunRecord): string {
     lines.push("  Nothing was left undecided.")
   }
   for (const finding of unresolved) {
+    // ONE BLANK LINE PER FINDING, as the resolved list has always done (code
+    // review 2026-08-30, second pass). Without it consecutive undecided findings
+    // ran together, and story 7 made that worse by adding the transcript: MAD's
+    // own rows for one finding now abut the previous finding's claim prose at a
+    // near-identical indent, in the ONE section AD-6d says a human reads by hand.
+    lines.push("")
     lines.push(
       `  [${effectiveSeverity(finding)}] ${renderLocus(finding)} — died at stage ` +
         `${finding.unresolved?.diedAtStage} (${finding.unresolved?.reason})`,
@@ -1178,7 +1287,16 @@ export function renderRunRecord(record: RunRecord): string {
     // `renderDebate` call here was dead code sitting under a comment claiming
     // otherwise. What a reader needs in this section is the died-at-stage line
     // above, which already says the debate never reached an exit.
-    lines.push(indent(finding.claim, "      "))
+    //
+    // A BLANK LINE BEFORE THE CLAIM, AND ONE AFTER THE FINDING (code review
+    // 2026-08-30, second pass). The resolved list has always separated MAD's
+    // one-line rows from the model's claim prose this way; this section did not,
+    // and story 7 put the transcript directly above the claim at a near-identical
+    // indent — so model prose ran straight on from MAD's own transcript rows,
+    // and consecutive findings ran into each other, in the ONE section AD-6d says
+    // a human has to read by hand.
+    lines.push("")
+    lines.push(modelBlock(finding.claim))
   }
   lines.push("")
 

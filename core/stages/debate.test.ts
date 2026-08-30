@@ -21,6 +21,7 @@ import {
 } from "../test-support/fakes.ts"
 import {
   carriedClause,
+  isStatedPosition,
   clampMaxRounds,
   debate,
   debateEnvelopeSchema,
@@ -950,6 +951,43 @@ describe("debate — AD-6d: the budget runs out, and nothing is dropped", () => 
     for (const clause of [carriedClause(3, 1), carriedClause(2, 0), carriedClause(2, 2)]) {
       expect(clause).toContain("nothing was dropped")
     }
+  })
+
+  test("a contradictory pair THROWS rather than wording a state that cannot exist", () => {
+    // TWO SAME-TYPED POSITIONAL NUMBERS (code review 2026-08-30, second pass).
+    // Swapping them fell into the `withPositions >= stranded` branch and produced
+    // "with the evidence they accumulated" — the exact over-claim this function
+    // exists to prevent, delivered by the function meant to prevent it. The three
+    // branches above were tested and a contradictory pair never was.
+    expect(() => carriedClause(1, 3)).toThrow("not a countable state")
+    expect(() => carriedClause(0, 0)).toThrow("not a countable state")
+    expect(() => carriedClause(2, -1)).toThrow("not a countable state")
+  })
+
+  test("the warning's count and the transcript below it read the SAME entries", () => {
+    // The two readers had different predicates — `standingPositions` filtered on
+    // `round` and never `kind`, `output.ts`'s `debateRounds` on `kind` and never
+    // `round` — under a comment in this file asserting they could not disagree.
+    // A `debate-round` entry with no round reached one and not the other. Now
+    // `isStatedPosition` is the one test, so neither counts it.
+    const f = contested({ id: "f-1" })
+    f.unresolved = { diedAtStage: "debate", reason: "the token budget (1) ran out" }
+    f.history = [
+      ...f.history,
+      {
+        stage: "debate",
+        actor: "discovery-1",
+        at: "2026-08-13T00:00:00.000Z",
+        kind: "debate-round",
+        body: "no round on this entry",
+        position: "upholds",
+        positionChanged: false,
+      } as Entry,
+    ]
+
+    // Neither reader counts it. `core/stages/output.test.ts` pins the renderer's
+    // half of the same predicate against the same shape of entry.
+    expect(f.history.filter(isStatedPosition)).toHaveLength(0)
   })
 
   test("a finding that ALREADY exited before the money ran out keeps its exit", async () => {

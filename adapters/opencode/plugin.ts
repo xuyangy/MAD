@@ -261,8 +261,11 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // above are MAD-authored sentences, though three of them do
             // interpolate text MAD did not write either — `error.message` from
             // git or a provider, and `args.target` from whoever called the tool.
-            // That is a live boundary of its own and is filed in
-            // `deferred-work.md` rather than claimed closed here.
+            // That is a live boundary of its own, deliberately left open rather
+            // than claimed closed here. (It is filed in the planning ledger,
+            // which lives outside this repository — so this comment states the
+            // fact itself rather than pointing a reader at a file they cannot
+            // open. Code review 2026-08-30, second pass.)
             // The framing belongs at this boundary and not in the render,
             // because the same report also goes to a human, where a notice
             // sentence is noise. `plugin-wiring.test.ts` fails if this reverts.

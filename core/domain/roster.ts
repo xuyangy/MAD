@@ -108,8 +108,17 @@ export interface Roster {
  * field every other value of which is a `provider/model`. Unreachable through
  * both stages today — their slot ids come from the roster — and reached by
  * `roster.test.ts` rather than left as an untested branch.
+ *
+ * THE FAILURE VALUE IS A NAMED CONSTANT (code review 2026-08-30, second pass). It
+ * lands in `Warning.detail.model` beside `provider/model` ids, and it was a bare
+ * literal here and four more times in the tests — so a reader wanting to know
+ * whether a warning carries a real model name had a sentence to match on and
+ * nothing to import. Exported so a caller can TEST for it rather than compare
+ * prose, and so rewording it is one edit.
  */
+export const MODEL_UNRESOLVED = "unresolved — not on the roster"
+
 export function modelNameOf(roster: Roster, slot: string): string {
   const filled = [...roster.slots, ...roster.lensSlots].find((s) => s.slot === slot)
-  return filled ? `${filled.providerId}/${filled.modelId}` : "unresolved — not on the roster"
+  return filled ? `${filled.providerId}/${filled.modelId}` : MODEL_UNRESOLVED
 }

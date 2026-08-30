@@ -20,7 +20,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { noticeFor } from "../../core/prompt/material.ts"
-import { materialSpans } from "../../core/test-support/fakes.ts"
+import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
 import {
   DEFAULT_DISCOVERY_SLOTS,
   MadPlugin,
@@ -245,8 +245,7 @@ describe("mad_review.execute — THE REPORT LEAVES FRAMED (AD-18's eighth span, 
     // fixed-width delimiter really would be closable from inside it.
     const result = await executeWith({ lenses: ["security"] })
     const body = materialSpans(result.output)[0]!.body
-    const opener = result.output.split("\n")[1]!
-    const openerFence = opener.slice(0, opener.length - "material: review report".length)
+    const openerFence = fenceOf(result.output, "review report")
 
     const longestRun = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length))
     expect(openerFence.length).toBeGreaterThan(longestRun)

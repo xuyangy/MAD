@@ -251,8 +251,24 @@ export function material(label: MaterialLabel, body: string): string {
  */
 export const LINE_BREAKS = ["\n", "\r", "\u000b", "\u000c", "\u0085", "\u2028", "\u2029"] as const
 
+/**
+ * `LINE_BREAKS` as a regex character class, with every member escaped.
+ *
+ * DERIVED, NOT WRITTEN OUT (code review 2026-08-30, second pass). The escaper
+ * below and `core/stages/output.ts`'s splitter each built their own class, and
+ * only the splitter's was derived from the set — so `LINE_BREAKS` was the single
+ * source of truth for one of the two readers and a comment for the other. A form
+ * added to the set would have reached the renderer and been missed by `oneLine`,
+ * which is the one function AD-18 leans on.
+ *
+ * The escape is not ceremony either: a member that is regex-meaningful inside a
+ * class (`\`, `]`, `^`, `-`) would silently widen or break it. None of today's
+ * seven are, which is exactly why nobody would notice the day one is.
+ */
+export const LINE_BREAK_CLASS = LINE_BREAKS.map((c) => c.replace(/[\\\]^-]/g, "\\$&")).join("")
+
 /** `\r\n` first, so a CRLF collapses to ONE escape rather than two. */
-const LINE_BREAK_RE = /\r\n|[\n\r\u0085\u000b\u000c\u2028\u2029]/g
+const LINE_BREAK_RE = new RegExp(`\r\n|[${LINE_BREAK_CLASS}]`, "g")
 
 /**
  * Collapse line breaks in ONE cell of a row MAD itself formats.

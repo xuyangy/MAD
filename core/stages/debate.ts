@@ -78,6 +78,7 @@ import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
 import {
   appendEntry,
   effectiveSeverity,
+  type Entry,
   type ExitReason,
   type Finding,
 } from "../domain/finding.ts"
@@ -514,6 +515,43 @@ export function isDebatePosition(value: string | undefined): value is DebatePosi
 }
 
 /**
+ * ONE TEST FOR "THIS ENTRY IS A POSITION SOMEBODY STATED IN A ROUND".
+ *
+ * THE TWO READERS HAD DIFFERENT PREDICATES (code review 2026-08-30, second pass).
+ * `standingPositions` below filtered on `round !== undefined` and never looked at
+ * `kind`; `output.ts`'s `debateRounds` filtered on `kind === "debate-round"` and
+ * never looked at `round`. They agreed only by accident of the current writer
+ * set — this file appends exactly three debate kinds, and neither
+ * `budget-exhausted` nor `debate-exit-*` carries a round or a position. A future
+ * writer with both under some other kind, or a `debate-round` written without a
+ * round, would have made the `unresolved-findings` warning's count disagree with
+ * the transcript rendered directly beneath it. That warning's own comment claimed
+ * the two "cannot disagree", which is the class of unbacked claim story 7 exists
+ * to remove — so the claim is now held by one predicate rather than by the
+ * comment.
+ *
+ * VALIDATED ON READ, not cast (code review 2026-08-24). `Entry.position` is a
+ * plain `string?` on the shared append-only record, so nothing in the type system
+ * stops a future writer — story 6's judge, a v2 memory replay — appending a
+ * debate entry with an off-vocabulary position. An unchecked cast would let that
+ * value silently join the agreement and movement tests, corrupting an exit with
+ * no error anywhere. A value outside the vocabulary is not a position this stage
+ * stated, so it is not a position this stage counts. `round` is required for the
+ * same reason from the other side: a round-less entry is not something anybody
+ * stated IN a round, and the renderer had no round to print for it.
+ */
+export function isStatedPosition(
+  entry: Entry,
+): entry is Entry & { position: DebatePosition; round: number } {
+  return (
+    entry.stage === "debate" &&
+    entry.kind === "debate-round" &&
+    entry.round !== undefined &&
+    isDebatePosition(entry.position)
+  )
+}
+
+/**
  * The standing positions in a room — the LATEST position each member has stated,
  * or nothing if they have never spoken.
  *
@@ -524,16 +562,7 @@ export function isDebatePosition(value: string | undefined): value is DebatePosi
 function standingPositions(finding: Finding): Map<string, DebatePosition> {
   const standing = new Map<string, DebatePosition>()
   for (const entry of finding.history) {
-    if (entry.stage !== "debate" || entry.round === undefined) continue
-    // VALIDATED ON READ, not cast (code review 2026-08-24). `Entry.position` is
-    // a plain `string?` on the shared append-only record, so nothing in the type
-    // system stops a future writer — story 6's judge, a v2 memory replay —
-    // appending a debate entry with an off-vocabulary position. An unchecked
-    // cast would let that value silently join the agreement and movement tests,
-    // corrupting an exit with no error anywhere. A value outside the vocabulary
-    // is not a position this stage stated, so it is not a position this stage
-    // counts.
-    if (!isDebatePosition(entry.position)) continue
+    if (!isStatedPosition(entry)) continue
     standing.set(entry.actor, entry.position)
   }
   return standing
@@ -672,6 +701,20 @@ function exitFor(
  * through a pipeline state two of them can reach and the third cannot.
  */
 export function carriedClause(stranded: number, withPositions: number): string {
+  // THE ARGUMENTS ARE CHECKED, NOT TRUSTED (code review 2026-08-30, second pass).
+  // Two same-typed positional numbers with no guard: swapping them at the call
+  // site falls into the `withPositions >= stranded` branch and produces "with the
+  // evidence they accumulated" — the exact over-claim this function exists to
+  // prevent, delivered by the function meant to prevent it. `stranded === 0` had
+  // no defined answer either, and the caller only reaches here inside
+  // `stranded.length > 0`. A sentence about a set that cannot exist is a bug in
+  // the caller, and this stage's rule is that MAD fails loudly rather than
+  // wording something it cannot back.
+  if (stranded <= 0 || withPositions < 0 || withPositions > stranded) {
+    throw new Error(
+      `carriedClause: ${withPositions} of ${stranded} stranded finding(s) is not a countable state`,
+    )
+  }
   if (withPositions === 0) {
     return (
       `None of them recorded a position before the budget ran out, so there is no accumulated ` +

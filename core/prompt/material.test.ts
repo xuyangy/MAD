@@ -13,6 +13,7 @@ import { materialSpans } from "../test-support/fakes.ts"
 import {
   fenceFor,
   FENCE_CHAR,
+  LINE_BREAK_CLASS,
   LINE_BREAKS,
   listCell,
   material,
@@ -313,6 +314,23 @@ describe("oneLine — MAD's row frame cannot be forged from inside a cell", () =
     const rows = [`- round 1, participant 1 — upholds: ${oneLine(`real${forged}`)}`]
     const span = material("debate exchange so far", rows.join("\n"))
     expect(span.split("\n").filter((line) => line.startsWith("- round "))).toHaveLength(1)
+  })
+
+  test("the escaper's character class is DERIVED from the set, and every member is escaped", () => {
+    // TWO CLASSES, ONE SET (code review 2026-08-30, second pass). `oneLine`'s
+    // class was written out by hand while `core/stages/output.ts`'s splitter
+    // derived its own from `LINE_BREAKS` — so the set was the single source of
+    // truth for one reader and a comment for the other, and a form added to it
+    // would have reached the renderer and been missed by the one function AD-18
+    // leans on. Both now compile `LINE_BREAK_CLASS`.
+    for (const brk of LINE_BREAKS) expect(LINE_BREAK_CLASS).toContain(brk)
+    // A regex-meaningful member would silently widen or break the class. None of
+    // today's seven are, which is exactly why nobody would notice the day one is
+    // — so the escaping is asserted on the escaper itself, not on the members.
+    for (const meta of ["\\", "]", "^", "-"]) {
+      const cls = [meta].map((c) => c.replace(/[\\\]^-]/g, "\\$&")).join("")
+      expect(new RegExp(`[${cls}]`).test(meta)).toBe(true)
+    }
   })
 
   test("a run of line breaks collapses to one escape EACH, so nothing is merged away", () => {

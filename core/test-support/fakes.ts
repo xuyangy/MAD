@@ -264,6 +264,28 @@ export function materialSpans(prompt: string): MaterialSpan[] {
   return spans
 }
 
+/**
+ * The fence that opens `label`'s span, found by PARSING rather than by position.
+ *
+ * FOUND, NOT ASSUMED AT LINE 1 (code review 2026-08-30, second pass). Two tests —
+ * `adapters/opencode/plugin-wiring.test.ts` and
+ * `fixtures/prompt-injection/injection.test.ts` — each reverse-engineered the
+ * fence from `output.split("\n")[1]` and then subtracted the label's length,
+ * which assumes the notice is exactly one line AND that this is the first span.
+ * Both assumptions are true today and neither is checked: a notice that gains a
+ * break would have made both tests measure the wrong string and still PASS, in
+ * the one assertion that proves the fence outruns the body's longest backtick
+ * run. Parsing the opener cannot silently measure something else — it throws.
+ *
+ * No fence literal here either: this file is scanned by
+ * `scripts/lint-material-spans.ts` and is not exempt.
+ */
+export function fenceOf(text: string, label: MaterialLabel): string {
+  const opener = new RegExp(`^(\`{3,})material: ${label}$`, "m").exec(text)
+  if (!opener) throw new Error(`no material span labelled "${label}" opens in this text`)
+  return opener[1]!
+}
+
 /** Every offset at which `needle` occurs in `haystack`. */
 export function occurrencesOf(haystack: string, needle: string): number[] {
   const found: number[] = []

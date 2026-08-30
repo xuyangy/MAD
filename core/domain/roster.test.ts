@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { modelNameOf, type LensSlot, type Roster, type RosterSlot } from "./roster.ts"
+import { MODEL_UNRESOLVED, modelNameOf, type LensSlot, type Roster, type RosterSlot } from "./roster.ts"
 
 function slot(id: string, providerId: string, modelId: string): RosterSlot {
   return {
@@ -49,12 +49,12 @@ describe("modelNameOf (AD-6b)", () => {
     // roster — and covered here rather than left as an untested branch whose
     // output would otherwise be prose in a field that everywhere else holds a
     // `provider/model` id.
-    expect(modelNameOf(ROSTER, "discovery-9")).toBe("unresolved — not on the roster")
-    expect(modelNameOf(ROSTER, "")).toBe("unresolved — not on the roster")
+    expect(modelNameOf(ROSTER, "discovery-9")).toBe(MODEL_UNRESOLVED)
+    expect(modelNameOf(ROSTER, "")).toBe(MODEL_UNRESOLVED)
   })
 
   test("it reads the SLOT ID, never a substring of one", () => {
-    expect(modelNameOf(ROSTER, "discovery-")).toBe("unresolved — not on the roster")
-    expect(modelNameOf(ROSTER, "discovery-1 ")).toBe("unresolved — not on the roster")
+    expect(modelNameOf(ROSTER, "discovery-")).toBe(MODEL_UNRESOLVED)
+    expect(modelNameOf(ROSTER, "discovery-1 ")).toBe(MODEL_UNRESOLVED)
   })
 })

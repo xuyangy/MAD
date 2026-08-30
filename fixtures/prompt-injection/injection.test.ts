@@ -17,6 +17,7 @@ import { frameForHostAgent, review } from "../../core/run/review.ts"
 import {
   candidate,
   fakeClock,
+  fenceOf,
   judgeRoleOf,
   materialSpans,
   occurrencesOf,
@@ -458,8 +459,7 @@ describe("AD-18 end to end — a diff that orders the reviewer to report nothing
     // counted here, independently; `core/prompt/material.test.ts` owns the bound
     // itself. No fence literal: this file is scanned by
     // `scripts/lint-material-spans.ts` and is not exempt.
-    const opener = framed.split("\n")[1]!
-    const openerFence = opener.slice(0, opener.length - "material: review report".length)
+    const openerFence = fenceOf(framed, "review report")
     const longestRun = Math.max(0, ...(rendered.match(/`+/g) ?? []).map((run) => run.length))
     expect(openerFence.length).toBeGreaterThan(longestRun)
     // ...and the block really does close on that same fence, at the end.
