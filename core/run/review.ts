@@ -10,7 +10,8 @@
  */
 
 import type { Roster } from "../domain/roster.ts"
-import { clampTokenCap } from "../budget/ledger.ts"
+import { clampConcurrency, clampTokenCap, createLimiter } from "../budget/ledger.ts"
+import type { Stage } from "../domain/finding.ts"
 import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -77,6 +78,44 @@ export interface ReviewDeps {
    * `maxRounds`: this seam, never the `mad_review` tool surface.
    */
   tokenCap?: number
+  /**
+   * AD-15 amended (story 7A) — the PEAK: how many billed turns this run may have
+   * in flight at once. Defaulted and clamped by `clampConcurrency`; there is no
+   * "unlimited" value, because unlimited is the state this exists to remove.
+   *
+   * **IT BOUNDS RATE, NEVER TOTAL**, and the distinction is the one `tokenCap`'s
+   * note above makes in the other direction. A limiter refuses nothing and
+   * strands nothing: a turn that has to wait still runs, still bills, and still
+   * produces its finding. What changes is that twenty simultaneous sessions
+   * against one user's credentials become `maxConcurrency` at a time, so provider
+   * rate limiting arrives as wall-clock rather than as a `model-dropped-out`
+   * warning naming a model that was working fine.
+   *
+   * ONE LIMITER FOR THE WHOLE RUN, created here. A limiter per stage would give a
+   * peak of `stages × limit`, which is not a peak — and stages overlap only
+   * inside themselves today, so the single object costs nothing and stays true
+   * if that ever changes.
+   *
+   * Same `Ask First` as `tokenCap` and `maxRounds`: this seam, never the
+   * `mad_review` tool surface. Story 8 owns the user-facing number.
+   */
+  maxConcurrency?: number
+  /**
+   * AD-2 amended / AD-6f (story 7A) — the user's stop.
+   *
+   * Optional, and its absence is a run that cannot be cancelled — which is every
+   * caller before this story and every test that does not care. When it is
+   * present and fires, the core stops ISSUING turns; whether a turn already in
+   * flight is aborted is up to the backend and is deliberately not required
+   * (AD-2 amended), because requiring it would make an out-of-process backend
+   * unimplementable.
+   *
+   * A cancelled run still RENDERS. It reports where it stopped, keeps every
+   * finding it had, and is distinguishable at a glance from a finished one
+   * (AD-6f) — which is the entire reason cancellation is handled here rather
+   * than by letting the caller throw the result away.
+   */
+  signal?: AbortSignal
 }
 
 export interface ReviewResult {
@@ -210,7 +249,45 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     // unclamped `NaN` is the one that bites: `spent < NaN` is false for every
     // spend, so it refuses the first turn and the run then blames a budget
     // nobody set (code review 2026-08-24).
-    ledger: emptyLedger(clampTokenCap(deps.tokenCap)),
+    ledger: emptyLedger(clampTokenCap(deps.tokenCap), clampConcurrency(deps.maxConcurrency)),
+  }
+
+  // AD-15 amended — ONE limiter, created once, from the number the record now
+  // carries. Every stage's fan-out passes through this object, so "peak
+  // concurrency" is a property of the run rather than of whichever stage happens
+  // to be widest. Created from `record.ledger.maxConcurrency` and not from
+  // `deps` directly, so the number in force and the number reported are the same
+  // number — the fixpoint discipline `threshold` and `maxRounds` already follow.
+  const limiter = createLimiter(record.ledger.maxConcurrency)
+  const { signal } = deps
+
+  /**
+   * AD-6f — the ONE place a run records that the user stopped it.
+   *
+   * FIRST STAGE WINS. Every stage after the stop also sees an aborted signal and
+   * would report itself, so a last-write-wins field would say the run stopped in
+   * `judge` when it stopped in `discover` and every stage since had done nothing.
+   * The warning is raised here rather than by the stage for the same reason: a
+   * stage can only say "I stopped", and three stages each saying so truthfully
+   * is three warnings for one stop.
+   *
+   * The findings themselves are marked by the STAGES, not here — `unresolved` is
+   * a field they own (AD-8), and only they know which of their findings had been
+   * decided before the stop landed.
+   */
+  const noteCancelled = (stage: Stage): void => {
+    if (record.cancelled) return
+    record.cancelled = { stage }
+    record.warnings.push({
+      code: "run-cancelled",
+      stage,
+      message:
+        `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
+        `review — the findings below are what MAD had at that moment, and anything left undecided ` +
+        `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
+        `was retried after you stopped.`,
+      detail: { stage },
+    })
   }
 
   // ---- stage 1: discover ----
@@ -221,6 +298,8 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     input: buildInput(change),
     clock,
     ledger: record.ledger,
+    limiter,
+    signal,
   })
 
   record.answered = discovered.answered
@@ -231,6 +310,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // lens instruction from one generated at run time.
   record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
+  if (discovered.cancelled) noteCancelled("discover")
 
   // ---- stage 2: cluster ----
   //
@@ -300,6 +380,8 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     clock,
     ledger: record.ledger,
     maxRounds: record.maxRounds,
+    limiter,
+    signal,
   })
   // Re-stamped from the stage's return for routing's reason exactly: the record
   // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is
@@ -319,6 +401,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     attempts: debated.attempts,
   }
   record.warnings.push(...debated.warnings)
+  if (debated.cancelled) noteCancelled("debate")
 
   // ---- stage 5: judge ----
   //
@@ -346,6 +429,8 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     clock,
     ledger: record.ledger,
     runId: record.runId,
+    limiter,
+    signal,
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the
@@ -361,13 +446,49 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     ruledInvalid: judged.ruledInvalid,
     notAdjudicated: judged.notAdjudicated,
     unresolved: judged.unresolved,
+    unresolvedByCancellation: judged.unresolvedByCancellation,
     factChecksUnverified: judged.factChecksUnverified,
     turns: judged.turns,
     attempts: judged.attempts,
   }
   record.warnings.push(...judged.warnings)
+  if (judged.cancelled) noteCancelled("judge")
+
+  // AD-6f (code review 2026-08-31) — THE BACKSTOP, AND WHY A STAGE REPORT IS NOT
+  // ENOUGH ON ITS OWN.
+  //
+  // Every `noteCancelled` above is driven by a stage REPORTING that it skipped
+  // or received a cancelled turn, which is the right primary signal: it is what
+  // makes "the FIRST stage to stop" a fact rather than a guess. But a stage only
+  // reports a stop it had a turn left to refuse. A run can be stopped where no
+  // later stage needs one — discovery raises nothing, or every room is already
+  // closed, or every finding was withdrawn, or the stop simply lands after the
+  // last judge turn has returned. `debate` breaks on `open.length === 0` before
+  // it ever reaches its cancellation gate, and the judge's gate lives inside a
+  // per-finding loop that never runs. Nothing anywhere then said the user
+  // stopped the run, and the header, the warning, the title and
+  // `metadata.cancelled` were all silent — a stopped run rendering as a clean,
+  // finished review, which is the one thing AD-6(f) forbids outright.
+  //
+  // So the signal is read HERE too, once, after every turn-issuing stage. The
+  // stage named is the last one that actually issued a turn, because that is the
+  // last moment MAD was spending the user's money; naming `judge` unconditionally
+  // would put the run's stop in a stage that did nothing.
+  if (!record.cancelled && signal?.aborted) {
+    const lastActive: Stage =
+      judged.turns > 0 ? "judge" : debated.turns > 0 ? "debate" : "discover"
+    noteCancelled(lastActive)
+  }
 
   // ---- stage 6: output ----
+  //
+  // OUTPUT RUNS EVEN WHEN THE RUN WAS CANCELLED, and `finishedAt` is still
+  // stamped (AD-6f). A cancelled run finished REPORTING; it did not finish
+  // REVIEWING, and the difference is carried by `record.cancelled` — which the
+  // header line, the warnings block and the adapter's title all read. Throwing
+  // the report away instead would leave the user who stopped the run with
+  // nothing to show for the turns they already paid for, which is the opposite
+  // of what AD-6 asks for: a partial run is surfaced, never dropped.
   record.finishedAt = clock.now()
   const rendered = output(record)
 

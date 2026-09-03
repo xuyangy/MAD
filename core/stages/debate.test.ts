@@ -953,6 +953,35 @@ describe("debate — AD-6d: the budget runs out, and nothing is dropped", () => 
     }
   })
 
+  test("THE CAUSE IS A PARAMETER, so a cancelled run is never told the budget ran out", () => {
+    // Added by the code review of 2026-08-31, and it is the defect story 7A was
+    // written to prevent, surviving inside the one function the story's own Code
+    // Map told a reviewer to read first. `carriedClause` hardcoded "before the
+    // budget ran out", and the story's new cancellation warning reused it
+    // verbatim — so a run the user stopped read:
+    //
+    //   RUN CANCELLED DURING DEBATE: 2 contested finding(s) were still undecided
+    //   when you stopped the run, after round 1 of 3. None of them recorded a
+    //   position BEFORE THE BUDGET RAN OUT ...
+    //
+    // One sentence naming both causes, in the warning whose entire purpose is to
+    // tell them apart. AD-6(f) splits them everywhere else; this is where the
+    // split was missed.
+    expect(carriedClause(2, 0, "cancellation")).toContain("before you stopped the run")
+    expect(carriedClause(2, 0, "cancellation")).not.toContain("budget")
+    expect(carriedClause(3, 1, "cancellation")).toContain("before you stopped the run")
+    expect(carriedClause(3, 1, "cancellation")).not.toContain("budget")
+
+    // The budget wording is unchanged and is still the DEFAULT, so no existing
+    // caller moved when the parameter was added.
+    expect(carriedClause(2, 0)).toContain("before the budget ran out")
+    expect(carriedClause(2, 0, "budget")).toBe(carriedClause(2, 0))
+
+    // The middle branch has no cause clause to carry and must stay identical
+    // under both, rather than growing a sentence only one of them needs.
+    expect(carriedClause(2, 2, "cancellation")).toBe(carriedClause(2, 2, "budget"))
+  })
+
   test("a contradictory pair THROWS rather than wording a state that cannot exist", () => {
     // TWO SAME-TYPED POSITIONAL NUMBERS (code review 2026-08-30, second pass).
     // Swapping them fell into the `withPositions >= stranded` branch and produced

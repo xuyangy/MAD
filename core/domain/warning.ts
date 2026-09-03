@@ -55,6 +55,23 @@ export const WARNING_CODES = [
    * a degraded review indistinguishable from an undecided one.
    */
   "judge-unavailable",
+  /**
+   * AD-6f (story 7A) — THE USER STOPPED THE RUN.
+   *
+   * The sixth report, and a degradation rather than a disclosure: a stopped run
+   * is a PARTIAL run, which is precisely what AD-6 governs. Stories 2A, 3 and 4
+   * each declined a sixth code on the recorded ground that a clamp or a route is
+   * a decision rather than a partial run; a cancellation is not that, so the
+   * `Ask First` is answered here rather than declined a fourth time.
+   *
+   * It is raised ONCE per run, by `core/run/review.ts`, naming the stage the run
+   * stopped at — a fact about the run, which no single stage is in a position to
+   * state. It is NOT `model-dropped-out`: no model failed, and the findings it
+   * strands carry a cancellation reason that a reader can tell apart from
+   * `unresolved-findings`' budget reason. "We ran out of money" and "you pressed
+   * stop" are different facts, and neither is "we finished".
+   */
+  "run-cancelled",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

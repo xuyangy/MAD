@@ -257,9 +257,19 @@ describe("discover — drop-out (AD-6a, AD-6b, AD-12)", () => {
     const inner = new FakeBackend({ "discovery-2": [{ kind: "ok", value: ONE_FINDING }] })
     const exploding = {
       capabilities: () => ({ tools: false }),
-      runTurn: async (slot: string, i: string, input: string, schema: never) => {
+      runTurn: async (
+        slot: string,
+        i: string,
+        input: string,
+        schema: never,
+        signal?: AbortSignal,
+      ) => {
         if (slot === "discovery-1") throw new Error("backend exploded")
-        return inner.runTurn(slot, i, input, schema)
+        // FORWARDED (code review 2026-08-31). A wrapper that drops the signal
+        // makes the run it wraps uncancellable, so a future cancellation test
+        // routed through it would observe "no turns were stopped" and pass for
+        // exactly the wrong reason.
+        return inner.runTurn(slot, i, input, schema, signal)
       },
     }
 
@@ -348,6 +358,10 @@ class ConcurrencyProbe implements ModelBackend {
     instructions: string,
     input: string,
     schema: ZodType<T>,
+    // FORWARDED (code review 2026-08-31): a wrapper that drops the signal makes
+    // the run it wraps uncancellable, and a cancellation test routed through it
+    // would pass for exactly the wrong reason.
+    signal?: AbortSignal,
   ): Promise<Envelope<T>> {
     this.inFlight += 1
     this.peak = Math.max(this.peak, this.inFlight)
@@ -356,7 +370,7 @@ class ConcurrencyProbe implements ModelBackend {
       // completes. A `finally` owns the decrement: a throwing inner turn would
       // otherwise leave `inFlight` permanently inflated and `peak` meaningless.
       await Promise.resolve()
-      return await this.inner.runTurn(slot, instructions, input, schema)
+      return await this.inner.runTurn(slot, instructions, input, schema, signal)
     } finally {
       this.inFlight -= 1
     }
@@ -394,12 +408,16 @@ class SequencedBackend implements ModelBackend {
     instructions: string,
     input: string,
     schema: ZodType<T>,
+    // FORWARDED (code review 2026-08-31): a wrapper that drops the signal makes
+    // the run it wraps uncancellable, and a cancellation test routed through it
+    // would pass for exactly the wrong reason.
+    signal?: AbortSignal,
   ): Promise<Envelope<T>> {
     await this.gates.get(slot)!.promise
     this.completed.push(slot)
     const next = this.order[this.order.indexOf(slot) + 1]
     if (next) this.gates.get(next)!.open()
-    return this.inner.runTurn(slot, instructions, input, schema)
+    return this.inner.runTurn(slot, instructions, input, schema, signal)
   }
 }
 
@@ -418,9 +436,13 @@ class RecordingBackend implements ModelBackend {
     instructions: string,
     input: string,
     schema: ZodType<T>,
+    // FORWARDED (code review 2026-08-31): a wrapper that drops the signal makes
+    // the run it wraps uncancellable, and a cancellation test routed through it
+    // would pass for exactly the wrong reason.
+    signal?: AbortSignal,
   ): Promise<Envelope<T>> {
     this.seen.push({ slot, instructions, input })
-    return this.inner.runTurn(slot, instructions, input, schema)
+    return this.inner.runTurn(slot, instructions, input, schema, signal)
   }
 }
 

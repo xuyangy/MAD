@@ -13,8 +13,16 @@ import { tool } from "@opencode-ai/plugin"
 
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
+import { oneLine } from "../../core/prompt/material.ts"
 import { frameForHostAgent, review } from "../../core/run/review.ts"
 import { NoCandidatesError } from "../../core/roster/select.ts"
+import {
+  artifactRootFrom,
+  createTurnRecorder,
+  dumpRunArtifacts,
+  refusalFor,
+  type ArtifactOutcome,
+} from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
 import { opencodeRepo } from "./repo.ts"
 import { resolveRoster } from "./roster.ts"
@@ -160,7 +168,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
                 `co-discovery fraction and never count toward roster diversity.`,
             ),
         },
-        async execute(args) {
+        async execute(args, context) {
           // Belt and braces: the schema bounds it, and so does this, because the
           // value arrives from a model call and each slot costs real money.
           const slots = clampDiscoverySlots(args.slots)
@@ -221,13 +229,79 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
           })
 
+          // AD-16 amended (story 7A) — the turn recorder is constructed ONLY
+          // when the user turned the dump on. With the flag off `review()` gets
+          // the bare backend, so a fresh install allocates nothing and holds no
+          // prompt or answer in memory. The decorator satisfies the port and
+          // does nothing else: no retry, no swallowed failure, and the
+          // cancellation signal forwarded untouched — a stage cannot tell it is
+          // there, which is AD-16's "no stage learns that a file exists".
+          //
+          // The same `artifactRootFrom` the dump itself calls, on the same
+          // `process.env`, so the two cannot disagree about whether the flag is
+          // on.
+          //
+          // AND THE REFUSAL IS CHECKED HERE TOO (code review 2026-08-31). The
+          // gate used to read `artifactRootFrom` alone, so a user who pointed
+          // the variable at their own repository paid the memory cost of holding
+          // every prompt, instruction set and envelope for the whole run — and
+          // then got nothing, because the dump refused. The recorder is built
+          // only when there is a dump for it to feed.
+          const artifactRoot = artifactRootFrom(process.env)
+          const recorder =
+            artifactRoot !== undefined && refusalFor(artifactRoot, worktree) === undefined
+              ? createTurnRecorder()
+              : undefined
+
           const { record, rendered } = await review({
             roster: resolved.roster,
-            backend,
+            backend: recorder ? recorder.wrap(backend) : backend,
             clock: systemClock(),
             change,
             priorWarnings: resolved.warnings,
+            // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
+            // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story
+            // `execute` took one parameter and never read it: pressing stop in
+            // opencode abandoned the RESULT while the fan-out kept billing. The
+            // core stops issuing turns when it fires and reports where it
+            // stopped; `OpencodeModelBackend` also races it against the existing
+            // per-turn deadline, which narrows the window without being relied
+            // on (AD-2: the signal is not load-bearing).
+            signal: context.abort,
           })
+
+          // AD-16 amended (story 7A) — OFF UNLESS THE USER TURNED IT ON, and
+          // never inside the repository under review. It runs AFTER `review()`
+          // returns, on the finished record, so no stage can be affected by it
+          // and a failure here cannot cost the user their review. It is not a
+          // tool argument on purpose: see `adapters/opencode/artifacts.ts`.
+          //
+          // WRAPPED HERE AS WELL AS INSIDE (code review 2026-08-31). The story
+          // required its own try/catch at this call site and shipped without one,
+          // resting the guarantee entirely on the callee's "NEVER THROWS"
+          // header. That header is now true, and this is still here: the clause
+          // it protects — a dump failure must never cost the user their review —
+          // is worth two independent guards, and a later edit to `artifacts.ts`
+          // cannot quietly remove both.
+          let artifacts: ArtifactOutcome
+          try {
+            artifacts = await dumpRunArtifacts({
+              record,
+              change,
+              // The HUMAN render, deliberately unframed. The framed form below
+              // is for the host agent; a person opening `report.txt` in an
+              // editor is not the reader AD-18's notice sentence is addressed to.
+              rendered,
+              turns: recorder?.turns,
+              worktree,
+            })
+          } catch (error) {
+            artifacts = {
+              kind: "failed",
+              directory: artifactRoot ?? "(unknown)",
+              error: error instanceof Error ? error.message : String(error),
+            }
+          }
 
           // AD-6 reaches the headline too, not only the body. Two things this
           // line must not do: denominate on the FILLED roster, which turns a
@@ -251,9 +325,22 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           const lensLabel =
             record.roster.lensSlots.length > 0 ? ` + ${record.roster.lensSlots.length} lens` : ""
 
-          // AD-16 — the record stays in memory; nothing is written to the repo.
+          // AD-6f — THE TITLE SAYS IT TOO. The header line inside the report
+          // says it and so does a warning, but the title is the line a user sees
+          // in the transcript without opening anything, and "a cancelled run
+          // must never render as a finished one" is not satisfied by a fact
+          // three scrolls down. It leads, because everything after it is a count
+          // taken from a review that did not finish.
+          const cancelledLabel = record.cancelled
+            ? `CANCELLED during ${record.cancelled.stage} — partial review: `
+            : ""
+
+          // AD-16 — the record stays in memory, and nothing is EVER written to
+          // the repo. The artifact dump above writes outside it, only when the
+          // user set the flag, and refuses anything that resolves inside the
+          // worktree.
           return {
-            title: `MAD review — ${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
+            title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
             // AD-18's EIGHTH SPAN (story 7). A tool's `output` is read by the
             // calling agent, which is a model, and the report quotes every
             // model-authored claim, argument and judge report the run produced.
@@ -269,7 +356,13 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // The framing belongs at this boundary and not in the render,
             // because the same report also goes to a human, where a notice
             // sentence is noise. `plugin-wiring.test.ts` fails if this reverts.
-            output: frameForHostAgent(rendered),
+            // THE ARTIFACT NOTE SITS OUTSIDE THE SPAN, and it is MAD's own
+            // sentence (AD-18). It is appended rather than interpolated so the
+            // framed report keeps exactly the bytes `frameForHostAgent`
+            // produced. `artifactNote` collapses the one value MAD does not
+            // author — a filesystem error message — to a single line, so it
+            // cannot forge a row of MAD's own; see the function below.
+            output: `${frameForHostAgent(rendered)}${artifactNote(artifacts)}`,
             metadata: {
               runId: record.runId,
               answered: record.answered,
@@ -281,11 +374,59 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               lensInstructions: record.lensInstructions,
               warnings: record.warnings.map((w) => w.code),
               tokens: record.ledger.total,
+              // AD-6f — machine-readable beside the prose, for a host that wants
+              // to branch on it rather than read a title.
+              cancelled: record.cancelled?.stage,
+              // AD-15 amended — the peak this run was held to.
+              maxConcurrency: record.ledger.maxConcurrency,
+              // AD-16 — TWO FIELDS, NOT ONE OVERLOADED STRING (code review
+              // 2026-08-31). This used to be a single field holding either a
+              // directory path or the bare literal `"refused"`/`"failed"`, so a
+              // host could not tell "wrote to a directory" from "did not write"
+              // without string-matching MAD's own internal kind names — and a
+              // user whose scratch directory happened to be named `failed` broke
+              // it outright. The kind is the discriminant; the directory is data.
+              artifactsOutcome: artifacts.kind,
+              artifacts: artifacts.kind === "written" ? artifacts.directory : undefined,
             },
           }
         },
       }),
     },
+  }
+}
+
+/**
+ * One MAD-authored line about the artifact dump, or nothing at all.
+ *
+ * SILENT WHEN THE FLAG IS OFF, which is the default: a fresh install's tool
+ * output is byte-for-byte what it was before this story. The other three
+ * outcomes all say something the user can act on, and none of them is a failure
+ * of the review.
+ *
+ * TWO SPANS HERE ARE NOT MAD'S OWN WORDS, not one (code review 2026-08-31): the
+ * filesystem's error text, and the DIRECTORY — which comes from `MAD_ARTIFACTS`,
+ * which the user sets. The docstring used to claim only the first, and only the
+ * first was collapsed. Both now go through `oneLine` — the same collapse `core/stages/output.ts` applies to
+ * every model-authored cell — so a message carrying a line break cannot forge a
+ * row below the span. It is not fenced as material: it is a `mkdir`/`write`
+ * error from the local filesystem, not model prose, and a notice sentence on one
+ * diagnostic line costs more than it buys (the same call story 7 recorded for
+ * this file's four other `output:` sites).
+ */
+function artifactNote(outcome: ArtifactOutcome): string {
+  switch (outcome.kind) {
+    case "off":
+      return ""
+    case "written":
+      return `\n\nMAD wrote this run's artifacts to ${oneLine(outcome.directory)} (${outcome.files} files).`
+    case "refused":
+      return `\n\nMAD did NOT write run artifacts. ${oneLine(outcome.reason)}`
+    case "failed":
+      return (
+        `\n\nMAD could not write run artifacts to ${oneLine(outcome.directory)}: ` +
+        `${oneLine(outcome.error)}. The review above is unaffected.`
+      )
   }
 }
 

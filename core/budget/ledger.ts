@@ -123,3 +123,32 @@ export function mayISpend(ledger: BudgetLedger): boolean {
  */
 export { recordTurn }
 export type { LedgerEntry }
+
+/**
+ * AD-15 amended (story 7A) — the PEAK half of the same accountant, re-exported
+ * HERE for `recordTurn`'s reason exactly: a stage that holds a budget has one
+ * import for the whole of it, and there is no seam at which a stage could pick
+ * up a total without a peak or the other way round.
+ *
+ * It lives in its own module because this one is pure data plus two predicates
+ * and a semaphore is neither. See `core/budget/limiter.ts` for why the NUMBER
+ * rides on the ledger while the MECHANISM does not.
+ *
+ * WHAT AD-15 ACTUALLY BUYS HERE, STATED ACCURATELY (code review 2026-08-31).
+ * Story 7A's spec said the limiter is "created by `core/budget/ledger.ts` and by
+ * nothing else". That is not what ships and never was: this file re-exports
+ * `createLimiter`, and the one construction site is `core/run/review.ts`, which
+ * is the right place for it — one limiter for the whole run, created by the
+ * assembly, because a limiter per stage would be a peak of `stages x limit`.
+ * The property that actually holds, and the one AD-15 needs, is that NO STAGE
+ * CONSTRUCTS ONE. It is enforced in `scripts/lint-dependency-direction.ts`
+ * rather than asserted here, so it is tested rather than trusted — the same
+ * treatment the three clamps get.
+ */
+export {
+  clampConcurrency,
+  createLimiter,
+  DEFAULT_MAX_CONCURRENCY,
+  MAX_CONCURRENCY,
+} from "./limiter.ts"
+export type { ConcurrencyLimiter } from "./limiter.ts"

@@ -89,13 +89,58 @@ function escapesTo(file: string, specifier: string): { why: string } | undefined
 }
 
 /** Exported so the rule itself is unit-tested rather than merely trusted. */
+/**
+ * `core/budget/limiter.ts` MUST IMPORT NOTHING (code review 2026-08-31).
+ *
+ * `core/domain/run-record.ts` imports `DEFAULT_MAX_CONCURRENCY` from it, while
+ * `core/budget/ledger.ts` imports from `domain/` — so domain and budget point at
+ * each other, and the only reason there is no cycle is that this one file has no
+ * imports at all. That was a property promised in a doc comment and enforced by
+ * nothing, which is the shape of every layering rule that eventually breaks. It
+ * is a rule now, checked in the same pass as AD-1's, because the cost of it
+ * failing is a module cycle that surfaces as an undefined constant at import
+ * time rather than as an error anyone can read.
+ */
+const MUST_NOT_IMPORT = "core/budget/limiter.ts"
+
 export function scanSource(file: string, source: string): Violation[] {
   const violations: Violation[] = []
+  const unix = file.replaceAll("\\", "/")
+
+  // AD-15 — ONE ACCOUNTANT, AND NO STAGE BUILDS ITS OWN (code review
+  // 2026-08-31). `review()` constructs the run's single limiter; a stage
+  // constructing one would make the peak `stages x limit`, which is not a peak.
+  // Story 7A stated this property in prose and tested nothing, so this is the
+  // clause that makes it real. Checked ONCE per file, not once per import.
+  if (unix.startsWith("core/stages/") && !unix.endsWith(".test.ts") && /\bcreateLimiter\b/.test(source)) {
+    violations.push({
+      file,
+      specifier: "createLimiter",
+      why:
+        `AD-15 — a stage must not construct a limiter. \`core/run/review.ts\` creates the one ` +
+        `limiter for the whole run; a limiter per stage would make the peak \`stages x limit\`. ` +
+        `Take one through \`DiscoverInput\`/\`DebateInput\`/\`JudgeInput\` instead.`,
+    })
+  }
+
   IMPORT_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = IMPORT_RE.exec(source)) !== null) {
     const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
     if (!specifier) continue
+
+    if (unix === MUST_NOT_IMPORT) {
+      violations.push({
+        file,
+        specifier,
+        why:
+          `\`${MUST_NOT_IMPORT}\` must import nothing. \`core/domain/run-record.ts\` imports ` +
+          `\`DEFAULT_MAX_CONCURRENCY\` from it and \`core/budget/ledger.ts\` imports from ` +
+          `\`core/domain/\`; this file having no imports is the only thing keeping that from ` +
+          `being a cycle. Move the constant into \`core/domain/\` instead of importing here.`,
+      })
+      continue
+    }
 
     const escaped = escapesTo(file, specifier)
     if (escaped) {
@@ -134,7 +179,10 @@ export async function main(): Promise<number> {
     return 1
   }
 
-  console.log(`AD-1 dependency direction OK — ${checked} file(s) under core/ checked.`)
+  console.log(
+    `AD-1 dependency direction OK — ${checked} file(s) under core/ checked ` +
+      `(\`${MUST_NOT_IMPORT}\` imports nothing).`,
+  )
   return 0
 }
 

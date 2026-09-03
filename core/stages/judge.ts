@@ -83,6 +83,7 @@
 import { z } from "zod"
 
 import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
   effectiveSeverity,
@@ -98,7 +99,7 @@ import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { Envelope, ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
 
@@ -206,12 +207,25 @@ export interface JudgeInput {
    * registry, exactly as `DebateInput.instructions` is.
    */
   instructions?: Partial<Record<JudgeRole, InstructionSet>>
+  /**
+   * AD-15 amended — the budget's PEAK half. Optional for the reason the other
+   * two stages' is optional; `review()` always passes one.
+   */
+  limiter?: ConcurrencyLimiter
+  /** AD-2 amended / AD-6f — the user's stop. */
+  signal?: AbortSignal
 }
 
 export interface JudgeStageResult extends JudgeCounts {
   /** The same array, judged in place. The judge never filters. */
   findings: Finding[]
   warnings: Warning[]
+  /**
+   * AD-6f — whether this stage stopped issuing turns because the run was
+   * cancelled. The stage strands its own findings (it owns `unresolved`, AD-8);
+   * `review()` raises the one run-level warning that names the stage.
+   */
+  cancelled: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -237,9 +251,19 @@ async function runJudgeTurn<T>(
 ): Promise<TurnOutcome<T>> {
   let last: Envelope<T> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // AD-2 amended / AD-6f — never issue a turn the user stopped, and never
+    // retry one. `core/stages/discover.ts` carries the full argument; the loop
+    // over findings below checks the signal again, per finding, so a stop does
+    // not have to wait for the current finding's four roles to run out.
+    if (input.signal?.aborted) {
+      // `attempts: 0`, not 1 — see `discover.ts`'s `runWithOneRetry` for the
+      // argument and the Spec Change Log for the decision. A turn the core
+      // refused to issue was never billed, and `attempts` is the billed count.
+      return { envelope: cancelledTurn<T>(slot), attempts: attempt - 1 }
+    }
     let envelope: Envelope<T>
     try {
-      envelope = await input.backend.runTurn(slot, instructions, prompt, schema)
+      envelope = await input.backend.runTurn(slot, instructions, prompt, schema, input.signal)
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). One judge role throwing must not cost the finding its verdict,
@@ -255,6 +279,7 @@ async function runJudgeTurn<T>(
       recordTurn(input.ledger, { slot, stage: "judge", attempt, tokens: envelope.tokens })
     }
     if (envelope.ok) return { envelope, attempts: attempt }
+    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
     last = envelope
   }
   return { envelope: last!, attempts: 2 }
@@ -646,6 +671,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     ruledInvalid: 0,
     notAdjudicated: 0,
     unresolved: 0,
+    // AD-6f — the cancellation share of `unresolved`, kept as a count rather
+    // than derived at the end, so the record carries the split the two warnings
+    // and the JUDGE summary all print.
+    unresolvedByCancellation: 0,
     factChecksUnverified: 0,
     turns: 0,
     attempts: 0,
@@ -736,9 +765,78 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     })
   }
 
+
   const ordered = visitOrder(findings)
   let exhausted = false
   let unavailable = false
+  // AD-6f — a THIRD reason to stop, kept apart from `exhausted` for the reason
+  // `core/stages/debate.ts` records at its own gate: "the budget ran out" and
+  // "you pressed stop" are different facts, and one flag would print the first
+  // over every run that was really the second.
+  let cancelled = false
+
+  // DECLARED BELOW THE STATE IT MUTATES (code review 2026-08-31). `stoppedHere`
+  // closes over `cancelled` and `counts.unresolvedByCancellation`, and it used to
+  // sit roughly thirty lines ABOVE the `let cancelled` it writes — working only
+  // because the closure is never invoked until after that declaration has
+  // executed. That is a temporal-dead-zone `ReferenceError` one refactor away,
+  // and this file already places `turnsBefore` and `strandedWhere` below the
+  // state they own.
+  /**
+   * AD-2 amended / AD-6f — A CANCELLED TURN IS NOT A DROP-OUT, and this stage
+   * has four places it would silently become one.
+   *
+   * The per-finding gate above stops the run BETWEEN findings. This is the other
+   * half: the stop can land between two of one finding's four role turns, and
+   * every one of those four branches has an `else` that either blames the model
+   * (`noteDropOut`) or writes a verdict from what the other steps produced. Both
+   * are wrong here. Nothing failed, so no model is named; and a verdict assembled
+   * out of a judging pass the user interrupted is a DECIDED finding on the page,
+   * which is the exact "renders like a finished one" failure AD-6(f) exists to
+   * prevent, applied one finding at a time.
+   *
+   * Returns whether the caller must abandon this finding. It strands it with the
+   * cancellation reason and latches the flag, so every later finding takes the
+   * gate above without issuing anything.
+   */
+  const stoppedHere = (finding: Finding, envelope: Envelope<unknown>): boolean => {
+    if (envelope.ok || envelope.failure !== "cancelled") return false
+    cancelled = true
+    counts.unresolved += 1
+    counts.unresolvedByCancellation += 1
+    strandCancelled(finding, clock.now(), cancelledWhere())
+    return true
+  }
+
+  const { signal } = input
+  /**
+   * AD-15 amended — every turn this stage issues goes through the budget's peak
+   * half, including the two that fan out together below.
+   *
+   * IT IS ONLY EVER TWO TURNS HERE, and it is still routed through the limiter:
+   * "applied wherever a stage fans out" is a rule a reader can check, and an
+   * exception carved out for a small fan-out is a rule that has to be re-argued
+   * at every call site. The judge is also the stage that runs LAST, so its two
+   * turns per finding are competing with nothing else — the limiter costs it
+   * nothing and keeps one statement true everywhere.
+   */
+  const withSlot = <T>(turn: () => Promise<T>): Promise<T> =>
+    input.limiter ? input.limiter.run(turn) : turn()
+
+  /**
+   * The same three-way distinction `strandedWhere` draws, for the other cause.
+   *
+   * It is written out rather than shared because the two sentences differ in
+   * more than a noun: a budget that ran out before judging began says "raise the
+   * budget", and a stop before judging began says nothing of the kind. Sharing
+   * the shape and interpolating the cause would produce "an earlier finding used
+   * the last of the cancellation", which is how a template ends up saying
+   * something nobody wrote.
+   */
+  const cancelledWhere = (): CancelledWhere => {
+    if (counts.turns === 0) return `before judging could start`
+    return counts.turns > turnsBefore ? `while it was being judged` : `before it could be judged`
+  }
 
   for (const finding of ordered) {
     // Already dead: the budget ran out in debate. Its `unresolved` belongs to
@@ -763,6 +861,38 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           `withdrawn finding stays visible so a reader can see it was raised and dropped. No judge ` +
           `turn was spent on it.`,
       )
+      continue
+    }
+
+    // AD-6f — CHECKED PER FINDING, and it yields to `exhausted` when the budget
+    // latched FIRST (code review 2026-08-31).
+    //
+    // The original argument for putting this above the budget gate still holds
+    // and is why the gate is here at all: cancellation is the one condition that
+    // can become true between two findings without MAD doing anything, and a
+    // finding stranded by a stop must not be told the budget ran out WHEN THE
+    // BUDGET IS FINE. But that argument says nothing about the case where the
+    // budget is not fine. With the gates in the old order, a run that exhausted
+    // its budget and was THEN stopped reported "cancelled" for every remaining
+    // finding here while `debate.ts` reported "budget" for its own — one run,
+    // one situation, two causes, decided by nothing but which stage the reader
+    // happened to be looking at.
+    //
+    // FIRST CAUSE TO LATCH WINS, which is the rule the frozen matrix already
+    // states for a finding ("a finding already stranded by the budget keeps the
+    // budget reason") lifted from the finding to the run. `exhausted` latches
+    // when the budget gate first refuses, so testing it here makes the two
+    // stages agree without either of them re-reading the other's flag.
+    if (!exhausted && (cancelled || signal?.aborted)) {
+      cancelled = true
+      counts.judged += 1
+      // RESET FIRST, for `exhausted`'s reason exactly (code review 2026-08-27):
+      // `turnsBefore` is the count as THIS finding started, and this finding
+      // starts having spent nothing.
+      turnsBefore = counts.turns
+      counts.unresolved += 1
+      counts.unresolvedByCancellation += 1
+      strandCancelled(finding, clock.now(), cancelledWhere())
       continue
     }
 
@@ -902,12 +1032,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       }
       counts.turns += 1
       const slot = slots.byRole["evidence-extract"]
-      const outcome = await runJudgeTurn(
-        input,
-        slot,
-        instructionFor(input, "evidence-extract").text,
-        buildExtractPrompt(input, finding, transcript),
-        evidenceEnvelopeSchema,
+      const outcome = await withSlot(() =>
+        runJudgeTurn(
+          input,
+          slot,
+          instructionFor(input, "evidence-extract").text,
+          buildExtractPrompt(input, finding, transcript),
+          evidenceEnvelopeSchema,
+        ),
       )
       counts.attempts += outcome.attempts
       if (outcome.envelope.ok) {
@@ -920,6 +1052,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           kind: "judge-evidence",
           body: evidence,
         })
+      } else if (stoppedHere(finding, outcome.envelope)) {
+        continue
       } else {
         noteDropOut(slot, "evidence-extract", outcome.envelope.message)
       }
@@ -935,12 +1069,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
 
     const factSlot = slots.byRole["fact-check"]
     counts.turns += 1
-    const factPromise = runJudgeTurn(
-      input,
-      factSlot,
-      instructionFor(input, "fact-check").text,
-      buildFactCheckPrompt(input, finding, transcript, evidence, argued),
-      factCheckEnvelopeSchema,
+    const factPromise = withSlot(() =>
+      runJudgeTurn(
+        input,
+        factSlot,
+        instructionFor(input, "fact-check").text,
+        buildFactCheckPrompt(input, finding, transcript, evidence, argued),
+        factCheckEnvelopeSchema,
+      ),
     )
 
     // The two run in PARALLEL — `pipeline-stages.md`'s diagram branches them from
@@ -958,12 +1094,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     let logicPromise: Promise<TurnOutcome<LogicEvalEnvelope>> | undefined
     if (argued && mayISpend(ledger)) {
       counts.turns += 1
-      logicPromise = runJudgeTurn(
-        input,
-        logicSlot,
-        instructionFor(input, "logic-eval").text,
-        buildLogicEvalPrompt(finding, transcript, evidence),
-        logicEvalEnvelopeSchema,
+      logicPromise = withSlot(() =>
+        runJudgeTurn(
+          input,
+          logicSlot,
+          instructionFor(input, "logic-eval").text,
+          buildLogicEvalPrompt(finding, transcript, evidence),
+          logicEvalEnvelopeSchema,
+        ),
       )
     }
 
@@ -1040,6 +1178,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         )
         continue
       }
+    } else if (stoppedHere(finding, factOutcome.envelope)) {
+      continue
     } else {
       noteDropOut(factSlot, "fact-check", factOutcome.envelope.message)
       // COUNTED SEPARATELY (code review 2026-08-28). `verifiedIndependently` is
@@ -1073,6 +1213,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           kind: "judge-logic-eval",
           body: logicEvalProse,
         })
+      } else if (stoppedHere(finding, logicOutcome.envelope)) {
+        continue
       } else {
         noteDropOut(logicSlot, "logic-eval", logicOutcome.envelope.message)
       }
@@ -1086,26 +1228,28 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       continue
     }
 
-    counts.adjudicated += 1
     const aggregateSlot = slots.byRole.aggregate
     counts.turns += 1
-    const aggregateOutcome = await runJudgeTurn(
-      input,
-      aggregateSlot,
-      instructionFor(input, "aggregate").text,
-      buildAggregatePrompt(
+    const aggregateOutcome = await withSlot(() =>
+      runJudgeTurn(
         input,
-        finding,
-        evidence,
-        factCheckMaterial,
-        factVerified,
-        logicEvalProse,
+        aggregateSlot,
+        instructionFor(input, "aggregate").text,
+        buildAggregatePrompt(input, finding, evidence, factCheckMaterial, factVerified, logicEvalProse),
+        aggregateEnvelopeSchema,
       ),
-      aggregateEnvelopeSchema,
     )
     counts.attempts += aggregateOutcome.attempts
 
     if (aggregateOutcome.envelope.ok) {
+      // COUNTED AFTER THE TURN CAME BACK, not before it was issued (code review
+      // 2026-08-31). `counts.adjudicated += 1` used to sit above the aggregate
+      // turn, so a finding the user's stop caught at the aggregator was counted
+      // as adjudicated AND stranded as unresolved — a cancelled run claiming it
+      // decided findings it never decided. The budget gate a few lines up has
+      // always avoided this by refusing before the increment; cancellation now
+      // does the same by incrementing after.
+      counts.adjudicated += 1
       const value = aggregateOutcome.envelope.value
       recordVerdict(
         finding,
@@ -1113,7 +1257,13 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         `${value.reasoning}\n\nEvidence: ${value.evidenceKind}.`,
         aggregateSlot,
       )
+    } else if (stoppedHere(finding, aggregateOutcome.envelope)) {
+      continue
     } else {
+      // A drop-out still WRITES a verdict (`not-adjudicated`), so the finding
+      // did go through the aggregator and is counted; only the cancelled branch
+      // above returns without one.
+      counts.adjudicated += 1
       noteDropOut(aggregateSlot, "aggregate", aggregateOutcome.envelope.message)
       // A missing ruling is not a ruling. `not-adjudicated` is the honest value
       // and the warning above names the model that was supposed to produce one.
@@ -1173,19 +1323,38 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     })
   }
 
-  if (counts.unresolved > 0) {
+  // TWO CAUSES, TWO WARNINGS, AND THE COUNTS MUST NOT OVERLAP (AD-6f, story 7A).
+  // `counts.unresolved` is the field the summary and the UNRESOLVED section both
+  // read, so both causes increment it — but a warning that reported the total
+  // under either heading would tell a reader the budget stranded findings the
+  // user's own stop stranded, or the reverse. The budget's share is therefore
+  // the remainder, and the two numbers sum to `counts.unresolved` by
+  // construction rather than by a second count that could drift.
+  const strandedByBudget = counts.unresolved - counts.unresolvedByCancellation
+  if (strandedByBudget > 0) {
     warnings.push({
       code: "unresolved-findings",
       stage: "judge",
       message:
-        `BUDGET EXHAUSTED IN JUDGING: ${counts.unresolved} finding(s) were still undecided when the ` +
+        `BUDGET EXHAUSTED IN JUDGING: ${strandedByBudget} finding(s) were still undecided when the ` +
         `token cap of ${ledger.cap} was reached. They are reported in the UNRESOLVED section with ` +
         `the evidence they accumulated — nothing was dropped.`,
-      detail: { cap: ledger.cap, unresolved: counts.unresolved },
+      detail: { cap: ledger.cap, unresolved: strandedByBudget },
+    })
+  }
+  if (counts.unresolvedByCancellation > 0) {
+    warnings.push({
+      code: "unresolved-findings",
+      stage: "judge",
+      message:
+        `RUN CANCELLED DURING JUDGING: ${counts.unresolvedByCancellation} finding(s) were still undecided when you ` +
+        `stopped the run. They are reported in the UNRESOLVED section with whatever earlier steps ` +
+        `produced for them — nothing was dropped, and no model was asked again.`,
+      detail: { cause: "cancelled", unresolved: counts.unresolvedByCancellation },
     })
   }
 
-  return { findings, warnings, ...counts }
+  return { findings, warnings, cancelled, ...counts }
 }
 
 /**
@@ -1223,6 +1392,46 @@ function strand(finding: Finding, ledger: BudgetLedger, at: string, where: Stran
     kind: "judge-budget-exhausted",
     body:
       `Judging stopped ${where}: the token budget ran out. This finding was left undecided rather ` +
+      `than dropped, and whatever earlier steps produced for it is recorded above.`,
+  })
+}
+
+/**
+ * AD-6f — the three places a stop can land, and none of them mentions money.
+ *
+ * See `StrandedWhere` for why this distinction is drawn at all; see
+ * `cancelledWhere` for why these sentences are their own and not the budget's
+ * with a noun swapped.
+ */
+type CancelledWhere = `before judging could start` | `while it was being judged` | `before it could be judged`
+
+/**
+ * AD-6f — mark one finding as undecided because the USER stopped the run.
+ *
+ * `strand`'s sibling, and deliberately a separate function rather than a
+ * parameter on it: the two produce different `unresolved.reason` text, which is
+ * the string a reader sees in the UNRESOLVED section and the only thing that
+ * tells them which of the two happened. A shared function with a cause flag
+ * would put those two sentences one boolean apart, and AD-6(f)'s entire content
+ * is that they must be tellable apart.
+ *
+ * Like `strand`, it keeps whatever the finding accumulated — a finding stopped
+ * after its fact-check shows that fact-check — and gives it NO verdict, because
+ * none was reached. It takes no ledger, because the budget is not why this
+ * stopped and naming a cap here would be the flattering falsehood in reverse.
+ */
+function strandCancelled(finding: Finding, at: string, where: CancelledWhere): void {
+  finding.unresolved = {
+    diedAtStage: "judge",
+    reason: `the run was cancelled ${where}`,
+  }
+  appendEntry(finding, {
+    stage: "judge",
+    actor: "mad",
+    at,
+    kind: "run-cancelled",
+    body:
+      `Judging stopped ${where}: the run was cancelled. This finding was left undecided rather ` +
       `than dropped, and whatever earlier steps produced for it is recorded above.`,
   })
 }

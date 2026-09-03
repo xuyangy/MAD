@@ -17,7 +17,12 @@
  * that answers nothing (AD-6b: one slot's failure never costs the run).
  */
 
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtemp, readdir } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+
+import { ARTIFACTS_ENV } from "./artifacts.ts"
 
 import { noticeFor } from "../../core/prompt/material.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
@@ -74,10 +79,28 @@ interface ToolResult {
     answered?: number
     lensSlots?: string[]
     lensInstructions?: { lens: string; origin: string }[]
+    cancelled?: string
+    maxConcurrency?: number
+    artifacts?: string
+    artifactsOutcome?: string
   }
 }
 
-async function executeWith(args: Record<string, unknown>): Promise<ToolResult> {
+/**
+ * The host's `ToolContext`, as much of it as `execute` reads.
+ *
+ * Story 7A made that non-empty: `context.abort` is the host's `AbortSignal` and
+ * the plugin now passes it to `review()`. A fresh `AbortController` per call, so
+ * one test cannot cancel another, and never aborted unless a test aborts it.
+ */
+function fakeContext(signal?: AbortSignal): unknown {
+  return { abort: signal ?? new AbortController().signal }
+}
+
+async function executeWith(
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
   const plugin = await MadPlugin({
     client: fakeClient(),
     directory: ".",
@@ -87,8 +110,10 @@ async function executeWith(args: Record<string, unknown>): Promise<ToolResult> {
     serverUrl: "http://127.0.0.1:1",
     $: fakeShell(),
   } as never)
-  const tool = (plugin as { tool?: Record<string, { execute: (a: never) => Promise<ToolResult> }> }).tool
-  return tool!.mad_review!.execute(args as never)
+  const tool = (plugin as {
+    tool?: Record<string, { execute: (a: never, c: never) => Promise<ToolResult> }>
+  }).tool
+  return tool!.mad_review!.execute(args as never, fakeContext(signal) as never)
 }
 
 describe("mad_review.execute — the default actually reaches the roster (AC1, CAP-1)", () => {
@@ -249,6 +274,125 @@ describe("mad_review.execute — THE REPORT LEAVES FRAMED (AD-18's eighth span, 
 
     const longestRun = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length))
     expect(openerFence.length).toBeGreaterThan(longestRun)
+    // The closing fence is the LAST line, which also pins that story 7A's
+    // artifact note is silent when the flag is off — the default, and what a
+    // fresh install runs. (Set `MAD_ARTIFACTS` in your shell and this line is
+    // the one that tells you: the note is appended after the span, outside it.)
     expect(result.output.split("\n").at(-1)).toBe(openerFence)
+  })
+})
+
+describe("mad_review.execute — run control reaches the host boundary (story 7A)", () => {
+  test("THE HOST'S STOP SIGNAL IS READ: an already-aborted run issues no turn", async () => {
+    // `ToolContext.abort` has always been there and `execute` took one parameter
+    // and never read it, so pressing stop abandoned the RESULT while the fan-out
+    // kept billing. This is the only test that fails if `signal: context.abort`
+    // is reverted.
+    const controller = new AbortController()
+    controller.abort()
+    const result = await executeWith({}, controller.signal)
+
+    // AD-6f — the TITLE says it, because that is the line a user sees without
+    // opening anything, and it LEADS, because every count after it comes from a
+    // review that did not finish.
+    expect(result.title).toContain("CANCELLED during discover")
+    expect(result.title).toContain("partial review")
+    expect(result.metadata?.cancelled).toBe("discover")
+
+    // And the report inside the span says so too, on its first lines.
+    const body = materialSpans(result.output)[0]!.body
+    expect(body).toContain("RUN CANCELLED")
+    expect(body.indexOf("RUN CANCELLED")).toBeLessThan(body.indexOf("ROSTER"))
+  })
+
+  test("an un-cancelled run's title is unchanged", async () => {
+    const result = await executeWith({})
+    expect(result.title).not.toContain("CANCELLED")
+    expect(result.metadata?.cancelled).toBeUndefined()
+  })
+
+  test("AD-15 amended — the peak is reported at the boundary and in the report", async () => {
+    const result = await executeWith({})
+    expect(result.metadata?.maxConcurrency).toBeGreaterThanOrEqual(1)
+    expect(materialSpans(result.output)[0]!.body).toContain("model turn(s) in flight at once")
+  })
+
+  test("ARTIFACTS ARE OFF: no flag, no note, no metadata (AD-16)", async () => {
+    // The whole feature is invisible unless the user turned it on.
+    const result = await executeWith({})
+    expect(result.metadata?.artifacts).toBeUndefined()
+    expect(result.metadata?.artifactsOutcome).toBe("off")
+    expect(result.output).not.toContain("run artifacts")
+  })
+
+  /**
+   * AD-16 — THE DUMP, THROUGH THE PLUGIN, WHICH IS THE ONLY PLACE IT IS WIRED.
+   *
+   * Added by the code review of 2026-08-31. `artifacts.test.ts` drives
+   * `dumpRunArtifacts` and `createTurnRecorder` DIRECTLY with an explicit `env`,
+   * and the test above covered only the flag-off shape — so nothing in the suite
+   * ever set `MAD_ARTIFACTS`, which is what `plugin.ts` actually reads.
+   * Instrumenting the recorder branch and the three note branches gave zero hits.
+   *
+   * What that cost: revert `recorder.wrap(backend)` to a bare `backend`, or drop
+   * the `turns:` argument, and the dump still reports `kind: "written"` with its
+   * run files and ZERO `turn-*.json` — the per-turn envelopes the module calls
+   * the single most useful thing in the dump — while every artifact test passes,
+   * because all of them bypass the plugin.
+   */
+  describe("AD-16 — the artifact dump, wired through `execute`", () => {
+    const previous = process.env[ARTIFACTS_ENV]
+    let scratch: string | undefined
+
+    afterEach(() => {
+      if (previous === undefined) delete process.env[ARTIFACTS_ENV]
+      else process.env[ARTIFACTS_ENV] = previous
+    })
+
+    test("FLAG ON: the run directory is written, named in metadata, and holds a turn file", async () => {
+      scratch = await mkdtemp(join(tmpdir(), "mad-wiring-"))
+      process.env[ARTIFACTS_ENV] = scratch
+
+      const result = await executeWith({})
+
+      expect(result.metadata?.artifactsOutcome).toBe("written")
+      const directory = result.metadata?.artifacts as string
+      expect(directory).toContain(scratch)
+      // The note is MAD's own line, and it follows the report rather than
+      // displacing it.
+      expect(result.output).toContain("MAD wrote this run's artifacts to")
+
+      const written = await readdir(directory)
+      expect(written).toContain("report.txt")
+      expect(written).toContain("record.json")
+      // THE ASSERTION THAT PINS THE RECORDER. Every turn in this fixture is a
+      // transport-error drop-out, and a drop-out is still a turn with an
+      // envelope — which is exactly the case a debugging user opens the dump
+      // for. Without `recorder.wrap(backend)` this array is empty and nothing
+      // else in the suite notices.
+      expect(written.some((name) => name.startsWith("turn-"))).toBe(true)
+    })
+
+    test("FLAG POINTED AT THE REPOSITORY: nothing is written, and the run says why", async () => {
+      // AD-16's one non-negotiable, through the seam a user actually reaches it
+      // by. `executeWith` builds the plugin with `worktree: "."`.
+      process.env[ARTIFACTS_ENV] = resolve(".")
+
+      const result = await executeWith({})
+
+      expect(result.metadata?.artifactsOutcome).toBe("refused")
+      expect(result.metadata?.artifacts).toBeUndefined()
+      expect(result.output).toContain("MAD did NOT write run artifacts")
+      expect(result.output).toContain("points inside the repository under review")
+    })
+
+    test("A REFUSED DUMP STILL RETURNS THE REVIEW, unharmed", async () => {
+      // The Never clause: a file MAD could not write is untidy; a review it
+      // destroyed is a broken tool.
+      process.env[ARTIFACTS_ENV] = resolve(".")
+      const result = await executeWith({})
+      expect(materialSpans(result.output)[0]!.body).toContain("model turn(s) in flight at once")
+      expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
+    })
   })
 })

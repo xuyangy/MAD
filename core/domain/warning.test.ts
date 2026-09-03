@@ -14,12 +14,13 @@ import { DISCLOSURE_CODES, WARNING_CODES, type WarningCode } from "./warning.ts"
 
 describe("the warning vocabulary (AD-6)", () => {
   test("THE COUNT IS PINNED, so a new code forces somebody to classify it", () => {
-    // Eleven: four roster reports, the drop-out, the denominator, the partial
+    // Twelve: four roster reports, the drop-out, the denominator, the partial
     // envelope, the provider disclosure, the unresolved section, the untooled
-    // fact-check, and the unavailable judge. Adding a twelfth is a deliberate
-    // act — AD-6's report set is an `Ask First` that three stories have declined
-    // — so it should not be possible to do it quietly.
-    expect(WARNING_CODES).toHaveLength(11)
+    // fact-check, the unavailable judge, and — from story 7A — the cancelled
+    // run. Adding a thirteenth is a deliberate act: AD-6's report set is an
+    // `Ask First` that three stories declined before 7A answered it, so it
+    // should not be possible to do it quietly.
+    expect(WARNING_CODES).toHaveLength(12)
   })
 
   test("every code is unique", () => {
@@ -44,16 +45,24 @@ describe("the warning vocabulary (AD-6)", () => {
     }
   })
 
-  test("the AD-6 clauses that HAVE a code all have one", () => {
+  test("ALL SIX AD-6 clauses have a code (story 7A completed the set)", () => {
     // (a) denominator, (b) drop-out, (c) roster, (d) unresolved, (e) lens
-    // homogeneity. (f) `cancelled` deliberately has none: no signal raises it and
-    // story 7A owns both. If a `cancelled` code ever appears here without that
-    // story, the run-control work landed half-done.
+    // homogeneity, (f) cancelled. Until story 7A the last one deliberately had
+    // NO code, because nothing raised it; this assertion was inverted then and
+    // is inverted here, on purpose, so the change is visible in the diff rather
+    // than absorbed by deleting a line.
     expect(WARNING_CODES).toContain("denominator-reduced")
     expect(WARNING_CODES).toContain("model-dropped-out")
     expect(WARNING_CODES).toContain("roster-single-lineage")
     expect(WARNING_CODES).toContain("unresolved-findings")
     expect(WARNING_CODES).toContain("roster-lens-homogeneous")
-    expect(WARNING_CODES.some((code) => code.includes("cancel"))).toBe(false)
+    expect(WARNING_CODES).toContain("run-cancelled")
+  })
+
+  test("AD-6f IS A DEGRADATION, NOT A DISCLOSURE", () => {
+    // A stopped run is a PARTIAL run, which is what AD-6 governs — the reader
+    // must be told the review is worth less than it looks, not merely informed
+    // of a configuration fact the way `provider-fan-out` informs them.
+    expect(DISCLOSURE_CODES.has("run-cancelled")).toBe(false)
   })
 })

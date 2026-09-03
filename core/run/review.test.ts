@@ -326,9 +326,16 @@ describe("review — the story 9 control arm seam", () => {
     const backend = new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] })
     const wrapped = {
       capabilities: backend.capabilities.bind(backend),
-      runTurn: async (slot: string, instructions: string, input: string, schema: never) => {
+      runTurn: async (
+        slot: string,
+        instructions: string,
+        input: string,
+        schema: never,
+        // FORWARDED (code review 2026-08-31) — see `discover.test.ts`.
+        signal?: AbortSignal,
+      ) => {
         seen = input
-        return backend.runTurn(slot, instructions, input, schema)
+        return backend.runTurn(slot, instructions, input, schema, signal)
       },
     }
     await review({

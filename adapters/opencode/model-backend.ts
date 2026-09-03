@@ -19,7 +19,12 @@ import { z, type ZodType } from "zod"
 
 import type { RosterSlot } from "../../core/domain/roster.ts"
 import { emptyTokenUsage, type TokenUsage } from "../../core/domain/run-record.ts"
-import type { BackendCapabilities, Envelope, ModelBackend } from "../../core/ports/model-backend.ts"
+import {
+  cancelledTurn,
+  type BackendCapabilities,
+  type Envelope,
+  type ModelBackend,
+} from "../../core/ports/model-backend.ts"
 
 type V2Client = ReturnType<typeof createOpencodeClient>
 
@@ -98,21 +103,67 @@ function describeError(error: unknown): string {
 }
 
 /**
+ * Thrown when the USER's signal fires while a turn is in flight, so the catch
+ * below can tell it apart from a timeout and from a transport failure.
+ *
+ * The three all mean "stop waiting" and they are three different facts about the
+ * run: a timeout is a drop-out and earns AD-6(b)'s retry, a transport failure is
+ * a drop-out too, and a cancellation is neither. One `Error` for all three would
+ * make the user's stop indistinguishable from a provider that hung — which is
+ * the one confusion AD-2's amendment exists to prevent.
+ */
+class TurnCancelledError extends Error {
+  constructor() {
+    super("the run was cancelled while this turn was in flight")
+    this.name = "TurnCancelledError"
+  }
+}
+
+/**
  * A provider that never answers must not stall the whole fan-out. The port is
  * request/response (AD-2), so a hung call has no other way to become the
  * timeout drop-out that `discover` already documents (AD-6b).
+ *
+ * STORY 7A — the user's stop races here too, and it composes with the deadline
+ * rather than replacing it. Both are "stop waiting"; they reject with different
+ * errors so the caller can report different facts. The abort listener is removed
+ * in the same `finally` the timer is cleared in, for the same reason: a listener
+ * left on a long-lived `AbortSignal` is a leak that grows with the number of
+ * turns, and discovery issues twenty of them.
+ *
+ * NOTE WHAT THIS DOES NOT DO: it does not abort the underlying request. The SDK
+ * call keeps running until the provider answers, and its tokens are still billed
+ * — MAD simply stops waiting for it. That is exactly the guarantee AD-2's
+ * amendment settles for ("a backend that cannot abort a request in flight still
+ * satisfies the port"), and it is why the core's own refusal to ISSUE the next
+ * turn is what actually stops the spending.
  */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
   try {
-    return await Promise.race([
+    const races: Promise<T>[] = [
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`turn timed out after ${ms}ms`)), ms)
       }),
-    ])
+    ]
+    if (signal) {
+      races.push(
+        new Promise<never>((_, reject) => {
+          if (signal.aborted) {
+            reject(new TurnCancelledError())
+            return
+          }
+          onAbort = () => reject(new TurnCancelledError())
+          signal.addEventListener("abort", onAbort, { once: true })
+        }),
+      )
+    }
+    return await Promise.race(races)
   } finally {
     if (timer) clearTimeout(timer)
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort)
   }
 }
 
@@ -167,12 +218,21 @@ export class OpencodeModelBackend implements ModelBackend {
     instructions: string,
     input: string,
     schema: ZodType<T>,
+    signal?: AbortSignal,
   ): Promise<Envelope<T>> {
     const rosterSlot = this.bySlot.get(slot)
     if (!rosterSlot) {
       // Programmer error: a slot the roster never filled (spine, Errors).
       throw new Error(`OpencodeModelBackend: unknown slot \`${slot}\``)
     }
+
+    // AD-2 amended / AD-6f — CHECKED BEFORE THE SESSION IS CREATED, not only
+    // before the prompt. Creating a session is a round trip to the host for a
+    // turn that will not run, and every one of them has to be disposed
+    // afterwards. The core already refuses to issue a cancelled turn; this is
+    // the second line of that defence, for the window between the core's check
+    // and this call.
+    if (signal?.aborted) return cancelledTurn<T>(slot)
 
     let sessionID: string
     try {
@@ -225,8 +285,13 @@ export class OpencodeModelBackend implements ModelBackend {
           parts: [{ type: "text", text: input }],
         }),
         this.timeoutMs,
+        signal,
       )
     } catch (error) {
+      // AD-2 amended — THE USER'S STOP IS NOT A TRANSPORT FAILURE. Reporting it
+      // as one would hand the stage a drop-out envelope, which earns AD-6(b)'s
+      // retry and puts a working provider's name in a degradation warning.
+      if (error instanceof TurnCancelledError) return cancelledTurn<T>(slot)
       // Only thrown for genuine transport failures; provider errors are returned.
       return { ok: false, slot, failure: "transport-error", message: describeError(error) }
     } finally {

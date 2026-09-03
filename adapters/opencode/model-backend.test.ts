@@ -238,6 +238,95 @@ describe("runTurn — errors are returned, never thrown (spine, Errors)", () => 
   })
 })
 
+/**
+ * AD-2 amended / AD-6f — THE USER'S STOP, IN THE BACKEND USERS ACTUALLY RUN.
+ *
+ * Added by the code review of 2026-08-31. Story 7A shipped three cancellation
+ * sites in this file — the pre-session check, the abort/timeout race inside
+ * `withTimeout`, and the `TurnCancelledError` catch — and NONE of them was
+ * executed by any test in the suite; instrumenting all three across 820 tests
+ * gave zero hits. `core/run/run-control.test.ts` covers cancellation only through
+ * `FakeBackend`, which has its own separate signal handling, so the adapter half
+ * of the story's first third was entirely unpinned.
+ *
+ * What that cost: delete the catch below and a turn the user stopped comes back
+ * as `transport-error` instead of `cancelled`. `runWithOneRetry` does not see
+ * `failure === "cancelled"`, so it spends AD-6(b)'s retry on a turn the user
+ * cancelled — billing them a second time to disobey them — and `discover.ts`'s
+ * guard does not fire, so the slot is pushed to `droppedOut` and a working
+ * provider is named in a `model-dropped-out` warning. That is the precise failure
+ * story 7A was written to prevent, and every test still passed while it was
+ * possible.
+ */
+describe("runTurn — cancellation (AD-2 amended, AD-6f)", () => {
+  test("ALREADY ABORTED: reports `cancelled` and never creates a session", async () => {
+    const { backend, calls } = backendWith()
+    const controller = new AbortController()
+    controller.abort()
+
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.failure).toBe("cancelled")
+    // THE ASSERTION THAT MATTERS: creating a session for a turn that will not run
+    // is a billed round trip for nothing, and every one of them has to be
+    // disposed afterwards.
+    expect(calls.create).toHaveLength(0)
+    expect(calls.prompt).toHaveLength(0)
+  })
+
+  test("ABORTED IN FLIGHT: `cancelled`, NOT `transport-error` — a stop is not a drop-out", async () => {
+    // The same `hang: true` fixture the timeout test uses, so the two paths are
+    // pinned against each other: both mean "stop waiting", and they must produce
+    // DIFFERENT failures. A timeout earns AD-6(b)'s retry; a stop must not.
+    const { backend, calls } = backendWith({ hang: true }, 10_000)
+    const controller = new AbortController()
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    controller.abort()
+    const result = await pending
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.failure).toBe("cancelled")
+    expect(!result.ok && result.failure).not.toBe("transport-error")
+    // The session was created before the stop landed, so it is still disposed —
+    // a cancelled turn must not orphan one.
+    expect(calls.create).toHaveLength(1)
+    expect(calls.delete).toHaveLength(1)
+  })
+
+  test("A LIVE SIGNAL THAT NEVER FIRES changes nothing", async () => {
+    // The signal is optional and last on the port precisely so a backend that
+    // ignores it still satisfies AD-2. Passing one that stays unaborted must be
+    // indistinguishable from passing none.
+    const controller = new AbortController()
+    const result = await backendWith({
+      reply: { data: { info: { structured: PAYLOAD } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.value).toEqual(PAYLOAD)
+  })
+
+  test("NO LISTENER IS LEFT BEHIND on a long-lived signal across many turns", async () => {
+    // `withTimeout` adds an `abort` listener per turn and removes it in the same
+    // `finally` it clears the timer in. The host's signal outlives the whole run
+    // and discovery issues twenty turns through it, so a dropped
+    // `removeEventListener` is a leak that grows with the fan-out — and nothing
+    // asserted the pairing until this test.
+    const { backend } = backendWith({ reply: { data: { info: { structured: PAYLOAD } } } })
+    const controller = new AbortController()
+    for (let i = 0; i < 20; i += 1) {
+      await backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    }
+    // Bun/Node expose the count through the events introspection API; when it is
+    // unavailable the assertion is skipped rather than faked.
+    const target = controller.signal as unknown as { listenerCount?: (t: string) => number }
+    if (typeof target.listenerCount === "function") {
+      expect(target.listenerCount("abort")).toBe(0)
+    }
+  })
+})
+
 describe("runTurn — token mapping (AD-15)", () => {
   test("maps input/output/reasoning and cache read/write to the ledger's shape", async () => {
     const result = await backendWith({

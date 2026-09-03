@@ -1212,6 +1212,7 @@ const JUDGE_COUNTS: JudgeCounts = {
   ruledInvalid: 0,
   notAdjudicated: 1,
   unresolved: 0,
+  unresolvedByCancellation: 0,
   notExamined: 0,
   factChecksUnverified: 0,
   factChecksDroppedOut: 0,
@@ -2179,5 +2180,58 @@ describe("the second review pass (2026-08-30) — the UNRESOLVED section stays r
     const headers = lines.map((l, i) => [l, i] as const).filter(([l]) => l.startsWith("  [high]"))
     expect(headers).toHaveLength(2)
     for (const [, i] of headers) expect(lines[i - 1]).toBe("")
+  })
+})
+
+describe("story 7A — a cancelled run never renders as a finished one (AD-6f)", () => {
+  test("THE HEADER SAYS IT, above the roster, before anything countable", () => {
+    // The warnings block says it too, and a reader scrolls past that block on
+    // the way to the findings. This is the first line under the title, so "this
+    // is not a complete review" is read before anything that could be mistaken
+    // for one.
+    const base = record([finding({ severity: "high", file: "a.ts" })])
+    base.cancelled = { stage: "debate" }
+    const rendered = output(base)
+
+    expect(rendered).toContain("RUN CANCELLED — you stopped this run during the debate stage.")
+    expect(rendered).toContain("This is a PARTIAL review.")
+    expect(rendered.indexOf("RUN CANCELLED")).toBeLessThan(rendered.indexOf("ROSTER"))
+  })
+
+  test("an un-cancelled run says nothing about stopping", () => {
+    // The negative row: every other story's report is unchanged.
+    const rendered = output(record([finding({ severity: "high", file: "a.ts" })]))
+    expect(rendered).not.toContain("RUN CANCELLED")
+    expect(rendered).not.toContain("PARTIAL review")
+  })
+
+  test("the stage named is the record's, and it is MAD's own closed vocabulary", () => {
+    // `Stage` is a union of MAD-authored words, so nothing a model writes can
+    // reach this line — which is why it is interpolated rather than escaped.
+    for (const stage of ["discover", "debate", "judge"] as const) {
+      const base = record([finding({ severity: "high", file: "a.ts" })])
+      base.cancelled = { stage }
+      expect(output(base)).toContain(`during the ${stage} stage`)
+    }
+  })
+})
+
+describe("story 7A — the peak is reported beside the total (AD-15 amended)", () => {
+  test("the PEAK line follows the TOKENS line and names the bound in force", () => {
+    const base = record([finding({ severity: "high", file: "a.ts" })])
+    base.ledger.maxConcurrency = 3
+    const lines = output(base).split("\n")
+    const tokensAt = lines.findIndex((l) => l.startsWith("TOKENS — turns:"))
+    expect(tokensAt).toBeGreaterThan(0)
+    expect(lines[tokensAt + 1]).toContain("PEAK — at most 3 model turn(s) in flight at once")
+  })
+
+  test("IT IS NOT A DEGRADATION — it never appears under the warnings heading", () => {
+    // Nothing about a bounded fan-out makes a review worth less, and printing it
+    // as a warning would be AD-6's honesty rule pointed the wrong way.
+    const rendered = output(record([finding({ severity: "high", file: "a.ts" })]))
+    const warningsBlock = rendered.slice(0, rendered.indexOf("FINDINGS ("))
+    expect(warningsBlock).not.toContain("PEAK —")
+    expect(rendered).toContain("nothing was refused or dropped by this bound")
   })
 })

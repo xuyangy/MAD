@@ -6,10 +6,16 @@
  * (story 9) reads two of them. v1 keeps it in memory and writes NOTHING — no
  * file is created in the user's repo. Serializing it is an adapter-side concern
  * that may be added behind a flag without touching a stage.
+ *
+ * AMENDED 2026-08-30 (story 7A): "writes NOTHING" above is the DEFAULT, and it
+ * is still what a fresh install does. AD-16's optional, additive persistence now
+ * exists — off unless the user turns it on, adapter-side, and never inside the
+ * user's repo. Nothing in this module knows about it.
  */
 
+import { DEFAULT_MAX_CONCURRENCY } from "../budget/limiter.ts"
 import type { InstructionOrigin } from "../instructions/types.ts"
-import type { Finding } from "./finding.ts"
+import type { Finding, Stage } from "./finding.ts"
 import type { Roster } from "./roster.ts"
 import type { Warning } from "./warning.ts"
 
@@ -82,6 +88,19 @@ export interface TokenLedger {
    * story 1 only ever did the first.
    */
   cap: number | null
+  /**
+   * AD-15 amended (story 7A) — the PEAK the run was held to: how many billed
+   * turns could be in flight at once. Already clamped; there is no "unlimited"
+   * value and `0` is not reachable (`core/budget/limiter.ts`).
+   *
+   * IT IS A NUMBER AND NOT THE LIMITER ITSELF, deliberately. This record is what
+   * story 7A's artifact dump serializes, and `JSON.stringify` drops a function
+   * field silently — a dumped ledger whose peak was invisible would be a record
+   * that quietly disagrees with the run that produced it. The number lives here,
+   * beside the total it is the second time scale of; the semaphore is created
+   * from it by `core/budget/limiter.ts` and held only for the length of the run.
+   */
+  maxConcurrency: number
 }
 
 export interface RunRecord {
@@ -177,6 +196,24 @@ export interface RunRecord {
    * run that never judged. Counted by the stage that decided them so a renderer
    * cannot produce a second, narrower partition of the same set.
    */
+  /**
+   * AD-6f (story 7A) — the user stopped the run, and this is the stage it
+   * stopped at.
+   *
+   * Optional, and its ABSENCE means the run was never cancelled — the shape the
+   * three `*Counts` fields above already use. It is the FIRST stage to observe
+   * the stop, never the last: later stages also see an aborted signal and would
+   * each overwrite it with their own name, leaving a record that says the run
+   * stopped in `judge` when it actually stopped in `discover` and every stage
+   * after that did nothing.
+   *
+   * It is a fact about the RUN and not about a finding, which is why it lives
+   * here and not on `Finding`. A finding left undecided by the stop carries
+   * `unresolved` with a cancellation reason, exactly as one stranded by the
+   * budget carries `unresolved` with a budget reason (AD-6d, AD-6f: same
+   * section, distinct causes).
+   */
+  cancelled?: { stage: Stage }
   judgeCounts?: JudgeCounts
   warnings: Warning[]
   ledger: TokenLedger
@@ -284,8 +321,11 @@ export function formatThreshold(threshold: number): string {
   return `${Number.parseFloat((threshold * 100).toFixed(2))}%`
 }
 
-export function emptyLedger(cap: number | null = null): TokenLedger {
-  return { entries: [], total: emptyTokenUsage(), cap }
+export function emptyLedger(
+  cap: number | null = null,
+  maxConcurrency: number = DEFAULT_MAX_CONCURRENCY,
+): TokenLedger {
+  return { entries: [], total: emptyTokenUsage(), cap, maxConcurrency }
 }
 
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
@@ -382,8 +422,23 @@ export interface JudgeCounts {
    * aggregator turn dropped out, because a missing ruling is not a ruling.
    */
   notAdjudicated: number
-  /** AD-6d — the budget ran out mid-judge. No exit, no verdict, nothing dropped. */
+  /**
+   * AD-6d/AD-6f — the finding was left undecided. TWO CAUSES SHARE THIS FIELD,
+   * because the UNRESOLVED section and the partition sum both need the total, and
+   * `unresolvedByCancellation` below carries the split rather than a second total
+   * that could drift from this one.
+   */
   unresolved: number
+  /**
+   * AD-6f (story 7A, code review 2026-08-31) — HOW MANY OF `unresolved` THE USER
+   * CAUSED. The budget's share is `unresolved - unresolvedByCancellation`, which
+   * is how the two judge warnings already split it. Carried on the record because
+   * the JUDGE summary line prints the same split and used to print the whole of
+   * `unresolved` as "stranded by the budget" — telling a reader the token cap
+   * stranded findings their own stop stranded, over a run where the budget was
+   * fine.
+   */
+  unresolvedByCancellation: number
   /**
    * AD-13 — fact-checks that ran on a slot with no tools, or whose checker
    * reported using none. A reasoning-only check is not a fact-check, and a run

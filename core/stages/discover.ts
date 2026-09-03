@@ -60,6 +60,24 @@
  * One slot's failure never costs another slot's findings (AD-6b): each turn is
  * isolated, and a backend that throws is converted into a failure envelope for
  * its own slot only.
+ *
+ * ## Story 7A — the fan-out is bounded, and it can be stopped
+ *
+ * Two changes, and neither touches the five properties above. Every turn is
+ * still STARTED before any is awaited and `Promise.all` still resolves
+ * positionally, so properties 3 and 4 hold word for word; what changed is that
+ * each turn now waits for a slot from the budget's concurrency limiter (AD-15
+ * amended), so the widest point of the run is `limiter.max` in flight rather
+ * than `slots + lenses`. At the shipped ceilings that was twenty simultaneous
+ * billed sessions against one user's credentials, and provider rate limiting
+ * then arrived as a `model-dropped-out` warning naming a model that was working.
+ *
+ * And a CANCELLED turn is not a drop-out (AD-2 amended, AD-6f). The retry loop
+ * refuses to issue a turn once the signal is aborted and returns without a
+ * second attempt: AD-6(b)'s one retry is for a model that failed, and retrying a
+ * turn the user cancelled spends their money to disobey them. `noteDropOut` is
+ * therefore never reached for a cancelled slot — that is the single place this
+ * stage could ship the exact failure story 7A exists to prevent.
  */
 
 import { z } from "zod"
@@ -76,8 +94,9 @@ import { recordTurn, type LensInstructionRecord, type TokenLedger } from "../dom
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
+import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { Envelope, ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 
 /**
  * AD-11 / AD-12 — the schema constrains ONLY the fields MAD computes on:
@@ -150,6 +169,18 @@ export interface DiscoverInput {
   input: string
   clock: Clock
   ledger: TokenLedger
+  /**
+   * AD-15 amended — the budget's PEAK half. Optional so a test driving this
+   * stage alone need not build one; absent means the fan-out is unbounded, which
+   * is the behaviour every caller had before story 7A. `review()` always passes
+   * one, so no real run is unbounded.
+   */
+  limiter?: ConcurrencyLimiter
+  /**
+   * AD-2 amended / AD-6f — the user's stop. Optional: a caller that cannot be
+   * cancelled passes nothing and this stage behaves exactly as it did.
+   */
+  signal?: AbortSignal
 }
 
 export interface DiscoverResult {
@@ -175,6 +206,14 @@ export interface DiscoverResult {
    */
   lensInstructions: LensInstructionRecord[]
   warnings: Warning[]
+  /**
+   * AD-6f — whether this stage stopped issuing turns because the run was
+   * cancelled. `review()` reads it to name the stage in the ONE run-level
+   * warning; the stage does not raise that warning itself, because "where did
+   * the run stop" is a fact about the run and every stage after this one would
+   * report it too.
+   */
+  cancelled: boolean
 }
 
 function toLocus(raw: { file: string; startLine?: number; endLine?: number }): Locus {
@@ -188,7 +227,22 @@ function toLocus(raw: { file: string; startLine?: number; endLine?: number }): L
   return { file, startLine, endLine }
 }
 
-/** One turn plus, on failure, exactly one retry (AD-6b, AD-12). */
+/**
+ * One turn plus, on failure, exactly one retry (AD-6b, AD-12).
+ *
+ * ## Cancellation short-circuits the retry, and that is the whole rule
+ *
+ * The signal is checked BEFORE each attempt, so the second attempt is never
+ * issued for a turn the user stopped — AD-6(b)'s retry exists for a model that
+ * failed, and spending a user's money twice to disobey them is not a retry
+ * policy. A backend that honours the signal and returns `cancelled` gets the
+ * same treatment: the loop returns immediately with `attempts: 1` rather than
+ * counting a second billed call the caller never made.
+ *
+ * The check is what makes cancellation work on EVERY backend (AD-2 amended). A
+ * backend that ignores the signal entirely still stops costing money here,
+ * because the core never issues the next turn.
+ */
 async function runWithOneRetry(
   input: DiscoverInput,
   slot: string,
@@ -196,9 +250,28 @@ async function runWithOneRetry(
 ): Promise<{ envelope: Envelope<DiscoveryEnvelope>; attempts: number }> {
   let last: Envelope<DiscoveryEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (input.signal?.aborted) {
+      // NOT `last`, and not `attempts: 2`. A turn that was never issued is not a
+      // turn that failed twice.
+      //
+      // AND IT IS `0`, NOT `1` (code review 2026-08-31, decision recorded in the
+      // Spec Change Log). Story 7A's I/O matrix said 1; `attempts` is read
+      // everywhere else in this codebase as BILLED CALLS — `output.ts` prints it
+      // as "N turn(s) were BILLED against those M allocation(s)" — and a turn the
+      // core refused to issue was never billed. Returning 1 here would make that
+      // line overstate spend on exactly the runs a user stopped to save money.
+      // The matrix row's actual content, "never 2", is what this preserves.
+      return { envelope: cancelledTurn<DiscoveryEnvelope>(slot), attempts: attempt - 1 }
+    }
     let envelope: Envelope<DiscoveryEnvelope>
     try {
-      envelope = await input.backend.runTurn(slot, instructions, input.input, discoveryEnvelopeSchema)
+      envelope = await input.backend.runTurn(
+        slot,
+        instructions,
+        input.input,
+        discoveryEnvelopeSchema,
+        input.signal,
+      )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). If one throws anyway, that is still this slot's problem and
@@ -214,6 +287,10 @@ async function runWithOneRetry(
       recordTurn(input.ledger, { slot, stage: "discover", attempt, tokens: envelope.tokens })
     }
     if (envelope.ok) return { envelope, attempts: attempt }
+    // A backend that DID honour the signal reports `cancelled`. Same rule as the
+    // pre-check above: no second attempt, and the attempt that was billed is
+    // counted honestly.
+    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
     last = envelope
   }
   return { envelope: last!, attempts: 2 }
@@ -233,11 +310,17 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   }))
 
   // Spine, Concurrency: discovery fans out in parallel across the roster — every
-  // turn is started before any is awaited, so peak concurrency equals the slot
-  // count rather than the fan-out degenerating into a sequence. Every slot is
-  // isolated: `runWithOneRetry` converts a throw into a failure envelope, so one
-  // bad backend cannot abort the whole fan-out and cost the run every other
-  // model's findings (AD-6b).
+  // turn is started before any is awaited, so the fan-out does not degenerate
+  // into a sequence. Every slot is isolated: `runWithOneRetry` converts a throw
+  // into a failure envelope, so one bad backend cannot abort the whole fan-out
+  // and cost the run every other model's findings (AD-6b).
+  //
+  // PEAK CONCURRENCY IS THE LIMITER'S, NOT THE SLOT COUNT (AD-15 amended, story
+  // 7A). This comment used to say the two were equal, and that was the problem:
+  // at the shipped ceilings the slot count is 12 + 8 = 20 simultaneous billed
+  // sessions against one user's credentials. `withSlot` wraps each INDIVIDUAL
+  // turn rather than either `Promise.all`, so the array shape — and pooling
+  // contract 3's positional resolution with it — is exactly what it was.
   //
   // Pooling contract 5: pool turns and lens turns start in ONE fan-out, so peak
   // concurrency is pool + lens slots and the lens pass costs no extra wall-clock
@@ -253,18 +336,21 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // Pooling contract 3: `Promise.all` resolves POSITIONALLY, so `outcomes` is in
   // roster order however the turns actually completed — and the pool's entries
   // precede the lens slots' by construction of the array.
+  const withSlot = <T>(turn: () => Promise<T>): Promise<T> =>
+    input.limiter ? input.limiter.run(turn) : turn()
+
   const [poolOutcomes, lensOutcomes] = await Promise.all([
     Promise.all(
       roster.slots.map(async (rosterSlot) => ({
         rosterSlot,
-        ...(await runWithOneRetry(input, rosterSlot.slot, input.instructions.text)),
+        ...(await withSlot(() => runWithOneRetry(input, rosterSlot.slot, input.instructions.text))),
       })),
     ),
     Promise.all(
       roster.lensSlots.map(async (lensSlot, index) => ({
         rosterSlot: lensSlot as RosterSlot,
         lens: lensSlot.lens,
-        ...(await runWithOneRetry(input, lensSlot.slot, lensSets[index]!.text)),
+        ...(await withSlot(() => runWithOneRetry(input, lensSlot.slot, lensSets[index]!.text))),
       })),
     ),
   ])
@@ -303,6 +389,20 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     }
 
     if (!raised) {
+      // AD-2 amended / AD-6f — A CANCELLED TURN IS NOT A DROP-OUT, and this is
+      // the branch where it would silently become one. The model did not fail;
+      // it was never asked. Reporting it here would blame a working provider for
+      // the user's own stop, put its name in a degradation warning, and add it
+      // to `droppedOut` — which `review()` reads to decide who is still alive to
+      // debate, so one cancelled run would exclude a healthy model from a LATER
+      // stage's rooms. Cancellation is reported ONCE, by `review()`, under
+      // AD-6(f).
+      //
+      // The denominator still shrinks, because this slot genuinely did not
+      // answer and AD-6(a) counts answers rather than requests. What must not
+      // happen — and does not — is a model being named as the cause.
+      if (!envelope.ok && envelope.failure === "cancelled") return false
+
       // AD-6b — retried once already; proceed with a warning naming the model.
       droppedOut.push(rosterSlot.slot)
       warnings.push({
@@ -396,16 +496,43 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // the fraction. Compared against the POOL only: `roster.slots.length` never
   // includes a lens slot, so a dropped-out lens can never make this fire and a
   // filled lens roster can never make it stop firing.
+  // AD-6f — read off the OUTCOMES, not off `input.signal.aborted`. A stop that
+  // arrives after the last turn has already returned cancelled nothing here, and
+  // this stage must not claim to be where the run stopped when it finished its
+  // work; the next stage to actually skip a turn is the honest answer, and
+  // `review()` takes the FIRST stage that reports one.
+  const cancelled = [...poolOutcomes, ...lensOutcomes].some(
+    (outcome) => !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
+  )
+
   if (answered < roster.slots.length) {
+    // AD-6f (code review 2026-08-31, decision recorded in the Spec Change Log) —
+    // A CANCELLED RUN SAYS WHY THE DENOMINATOR SHRANK.
+    //
+    // The number itself is right either way, and this warning already takes care
+    // never to NAME a model. But "Only 1 of 3 roster model(s) answered" over a
+    // run the user stopped still reads as the roster under-delivering, when the
+    // other two were simply never asked. Story 7A's whole thesis is that
+    // degradation is reported honestly, and a cause the report knows and does not
+    // print is the same failure one step quieter.
+    const becauseStopped = cancelled
+      ? ` The remaining ${roster.slots.length - answered} were never asked: you stopped the run.`
+      : ""
     warnings.push({
       code: "denominator-reduced",
       stage: "discover",
       message:
-        `Only ${answered} of ${roster.slots.length} roster model(s) answered. Every co-discovery ` +
-        `fraction below is over ${answered}, not over ${roster.requested} requested.`,
-      detail: { answered, filled: roster.slots.length, requested: roster.requested },
+        `Only ${answered} of ${roster.slots.length} roster model(s) answered.${becauseStopped} ` +
+        `Every co-discovery fraction below is over ${answered}, not over ${roster.requested} ` +
+        `requested.`,
+      detail: {
+        answered,
+        filled: roster.slots.length,
+        requested: roster.requested,
+        cancelled,
+      },
     })
   }
 
-  return { findings, answered, droppedOut, lensInstructions, warnings }
+  return { findings, answered, droppedOut, lensInstructions, warnings, cancelled }
 }

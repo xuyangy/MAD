@@ -75,6 +75,7 @@
 import { z } from "zod"
 
 import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
   effectiveSeverity,
@@ -88,7 +89,7 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { Envelope, ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import { listCell, material, oneLine } from "../prompt/material.ts"
 
 /**
@@ -227,6 +228,14 @@ export interface DebateInput {
   ledger: BudgetLedger
   /** The round cap. Defaulted and clamped; never read raw. */
   maxRounds?: number
+  /**
+   * AD-15 amended — the budget's PEAK half, applied per participant per round.
+   * Optional for the reason `DiscoverInput.limiter` is optional: a test driving
+   * this stage alone need not build one, and `review()` always passes one.
+   */
+  limiter?: ConcurrencyLimiter
+  /** AD-2 amended / AD-6f — the user's stop. */
+  signal?: AbortSignal
 }
 
 export interface DebateStageResult extends DebateCounts {
@@ -246,6 +255,12 @@ export interface DebateStageResult extends DebateCounts {
    */
   droppedOut: string[]
   warnings: Warning[]
+  /**
+   * AD-6f — whether this stage stopped issuing rounds because the run was
+   * cancelled. `review()` raises the one run-level warning; this stage strands
+   * its own open rooms, because `unresolved` is a field it owns (AD-8).
+   */
+  cancelled: boolean
 }
 
 /** One finding's room: who is in it, in a stable order, and their labels. */
@@ -340,9 +355,25 @@ async function runDebateTurn(
 ): Promise<{ envelope: Envelope<DebateEnvelope>; attempts: number }> {
   let last: Envelope<DebateEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // AD-2 amended / AD-6f — never ISSUE a turn the user stopped, and never
+    // retry one. `core/stages/discover.ts` carries the full argument; the rule
+    // is the same here and the round loop below checks the signal again before
+    // it commits a whole round's fan-out.
+    if (input.signal?.aborted) {
+      // `attempts: 0`, not 1 — see `discover.ts`'s `runWithOneRetry` for the
+      // argument and the Spec Change Log for the decision. A turn the core
+      // refused to issue was never billed, and `attempts` is the billed count.
+      return { envelope: cancelledTurn<DebateEnvelope>(slot), attempts: attempt - 1 }
+    }
     let envelope: Envelope<DebateEnvelope>
     try {
-      envelope = await input.backend.runTurn(slot, instructions, prompt, debateEnvelopeSchema)
+      envelope = await input.backend.runTurn(
+        slot,
+        instructions,
+        prompt,
+        debateEnvelopeSchema,
+        input.signal,
+      )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). If one throws anyway, that is this slot's problem and must not
@@ -358,6 +389,7 @@ async function runDebateTurn(
       recordTurn(input.ledger, { slot, stage: "debate", attempt, tokens: envelope.tokens })
     }
     if (envelope.ok) return { envelope, attempts: attempt }
+    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
     last = envelope
   }
   return { envelope: last!, attempts: 2 }
@@ -700,7 +732,28 @@ function exitFor(
  * EXPORTED AND PURE so the three branches are tested directly rather than
  * through a pipeline state two of them can reach and the third cannot.
  */
-export function carriedClause(stranded: number, withPositions: number): string {
+/**
+ * WHY THE RUN STOPPED, as the half-sentence `carriedClause` embeds.
+ *
+ * Added by the code review of 2026-08-31. `carriedClause` hardcoded "before the
+ * budget ran out", and story 7A reused it verbatim for the CANCELLATION warning
+ * — so a run the user stopped was told, in the warning whose entire purpose is to
+ * say the opposite, that the token budget ran out. It is the same fused sentence
+ * AD-6(f) splits everywhere else, surviving in the one function the story's own
+ * Code Map told a reader to read first.
+ */
+export type StrandCause = "budget" | "cancellation"
+
+const CAUSE_CLAUSE: Record<StrandCause, string> = {
+  budget: "before the budget ran out",
+  cancellation: "before you stopped the run",
+}
+
+export function carriedClause(
+  stranded: number,
+  withPositions: number,
+  cause: StrandCause = "budget",
+): string {
   // THE ARGUMENTS ARE CHECKED, NOT TRUSTED (code review 2026-08-30, second pass).
   // Two same-typed positional numbers with no guard: swapping them at the call
   // site falls into the `withPositions >= stranded` branch and produces "with the
@@ -717,7 +770,7 @@ export function carriedClause(stranded: number, withPositions: number): string {
   }
   if (withPositions === 0) {
     return (
-      `None of them recorded a position before the budget ran out, so there is no accumulated ` +
+      `None of them recorded a position ${CAUSE_CLAUSE[cause]}, so there is no accumulated ` +
       `evidence to show: they are reported in the UNRESOLVED section with the stage they died ` +
       `at, and nothing was dropped.`
     )
@@ -729,7 +782,7 @@ export function carriedClause(stranded: number, withPositions: number): string {
     )
   }
   return (
-    `${withPositions} of them recorded positions before the budget ran out and are reported with ` +
+    `${withPositions} of them recorded positions ${CAUSE_CLAUSE[cause]} and are reported with ` +
     `them; the other ${stranded - withPositions} recorded none, so there is nothing accumulated ` +
     `to show for those. All are in the UNRESOLVED section with the stage they died at — nothing ` +
     `was dropped.`
@@ -821,8 +874,15 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   let turns = 0
   let attempts = 0
   let exhausted = false
+  // AD-6f — a SECOND, separate reason to stop. See the gate in the round loop
+  // for why it is not folded into `exhausted`.
+  let cancelled = false
 
-  for (let round = 1; round <= maxRounds && !exhausted; round += 1) {
+  const { signal } = input
+  const withSlot = <T>(turn: () => Promise<T>): Promise<T> =>
+    input.limiter ? input.limiter.run(turn) : turn()
+
+  for (let round = 1; round <= maxRounds && !exhausted && !cancelled; round += 1) {
     const open = rooms.filter((room) => room.finding.exit === undefined && !room.finding.unresolved)
     if (open.length === 0) break
 
@@ -853,8 +913,24 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
       break
     }
 
+    // AD-6f — THE SECOND REASON NOT TO ISSUE A ROUND, and it gets its OWN FLAG.
+    //
+    // Reusing `exhausted` would have been one line shorter and would have made
+    // every cancelled run report "the token budget ran out" — a sentence naming
+    // a cause that did not happen, printed over findings the user themselves
+    // stopped. AD-6(f)'s whole content is that the two must be tellable apart,
+    // so they are two flags, two `unresolved` reasons, and two warnings.
+    //
+    // Checked HERE as well as inside `runDebateTurn` because the round is the
+    // unit a reader can interpret: a round issued and then abandoned mid-fan-out
+    // leaves half a round of positions on the record, which is a round nobody
+    // can read a movement out of, and the ledger would carry the spend anyway.
+    if (signal?.aborted) {
+      cancelled = true
+      break
+    }
+
     rounds += 1
-    turns += permitted.length
 
     // The FAN-OUT and then the BARRIER — every turn is started before any is
     // awaited (`discover.ts`'s shape), so the round costs one round of latency
@@ -871,7 +947,12 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
       permitted.map(async (slot) => ({
         slot,
         rooms: bySlot.get(slot)!,
-        ...(await runDebateTurn(input, slot, debateInstructionText, buildPrompt(input, slot, bySlot.get(slot)!, round))),
+        // AD-15 amended — through the budget's peak half, per participant. The
+        // fan-out shape and its positional resolution are unchanged; only the
+        // number in flight is bounded (`core/budget/limiter.ts`).
+        ...(await withSlot(() =>
+          runDebateTurn(input, slot, debateInstructionText, buildPrompt(input, slot, bySlot.get(slot)!, round)),
+        )),
       })),
     )
 
@@ -880,7 +961,19 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // allocation and two billed calls, so the two numbers legitimately differ
     // and the renderer prints both rather than one captioned as the other (code
     // review 2026-08-24).
-    for (const outcome of outcomes) attempts += outcome.attempts
+    //
+    // COUNTED AFTER THE FAN-OUT, AND CANCELLED SEATS ARE NOT COUNTED (code
+    // review 2026-08-31). `turns += permitted.length` used to run before the
+    // round was issued, so a stop landing mid-round counted every permitted
+    // seat — including the ones that came back `cancelled` without a backend
+    // ever being called. Nothing surfaced it, because `output.ts` prints the
+    // allocation-versus-billing comparison only when `attempts > turns`; but the
+    // record is what story 7A's own artifact dump serializes for a human to
+    // read, and `discover.ts` has always been scrupulous about exactly this.
+    for (const outcome of outcomes) {
+      attempts += outcome.attempts
+      if (outcome.envelope.ok || outcome.envelope.failure !== "cancelled") turns += 1
+    }
 
     const at = clock.now()
     const movedPerFinding = new Map<string, Set<string>>()
@@ -892,6 +985,18 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
 
     for (const outcome of outcomes) {
       if (!outcome.envelope.ok) {
+        // AD-2 amended / AD-6f — A CANCELLED TURN IS NOT A DROP-OUT. The model
+        // did not fail twice in this round; the user stopped the run mid-round,
+        // and a slot added to `droppedOutThisStage` here would be excluded from
+        // every later round AND handed to the judge as dead, on the strength of
+        // a failure that never happened. `core/stages/discover.ts` carries the
+        // full argument. The round's flag is set below and the strand block
+        // reports it once, under AD-6(f).
+        if (outcome.envelope.failure === "cancelled") {
+          cancelled = true
+          continue
+        }
+
         // AD-6b / AD-12 — retried once already. The round PROCEEDS without this
         // slot and the run says so, naming it. Silence is abstention: nothing
         // below records a position for it, so its absence cannot move, stall or
@@ -1002,6 +1107,16 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
 
     // The exit test runs after every position in the round is recorded, so it
     // reads one complete round rather than a partial one.
+    //
+    // NOT OVER A ROUND THE STOP CUT IN HALF (AD-6f, story 7A). If the signal
+    // fired mid-fan-out, some seats returned a cancelled envelope and stated no
+    // position — and `exitFor` reads silence as abstention, so a two-seat room
+    // whose second seat was cancelled would exit `stalled` with reason `silent`.
+    // That is a CONCLUSION drawn from the user's stop: a finding the run never
+    // finished arguing, rendered as one that was argued and went nowhere. The
+    // positions that were stated stay on the record; the room stays open and is
+    // stranded, with the cancellation named as the cause.
+    if (cancelled) break
     for (const room of open) {
       const decided = exitFor(
         room.finding,
@@ -1017,12 +1132,79 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   // The cap. Anything still open after the last round exits `cap` — a real exit
   // with a transcript behind it, not a failure. It reaches the judge like the
   // other two.
-  if (!exhausted) {
+  //
+  // NOT AFTER A CANCELLATION EITHER (AD-6f, story 7A). `cap` is a real exit with
+  // a transcript behind it and it means "we argued this to the round ceiling";
+  // over a room the user stopped, that is a claim about an argument that never
+  // finished, printed under a finding nobody spent the rounds on. A cancelled
+  // room is stranded below, exactly as a budget-stranded one is.
+  if (!exhausted && !cancelled) {
     const at = clock.now()
     for (const room of rooms) {
       if (room.finding.exit === undefined && !room.finding.unresolved) {
         recordExit(room.finding, { exit: "cap", reason: "capped" }, maxRounds, at)
       }
+    }
+  }
+
+  // AD-6f — THE USER STOPPED IT, and that is a different fact from the budget
+  // running out. Same shape as the exhaustion block below, same section in the
+  // report (AD-6d), a distinct cause in every sentence: no `exit` is written,
+  // because no exit happened, and no round cap is mentioned, because the cap is
+  // not why this stopped.
+  if (cancelled) {
+    const at = clock.now()
+    const stranded = rooms.filter(
+      (room) => room.finding.exit === undefined && !room.finding.unresolved,
+    )
+    // The same three-way distinction the budget path had to learn (`where`
+    // below): "after round 0" is not English and not true, and a run stopped
+    // before debate could start is a different thing to tell a reader than one
+    // stopped part-way through arguing.
+    const where =
+      rounds === 0
+        ? `before its first round could run`
+        : `after round ${rounds} of ${maxRounds}`
+    for (const room of stranded) {
+      room.finding.unresolved = {
+        diedAtStage: "debate",
+        reason: `the run was cancelled ${where}`,
+      }
+      appendEntry(room.finding, {
+        stage: "debate",
+        actor: "mad",
+        at,
+        kind: "run-cancelled",
+        body:
+          `Debate stopped ${where}: the run was cancelled. This finding was left undecided ` +
+          `rather than dropped, and no model was asked again.`,
+      })
+    }
+    if (stranded.length > 0) {
+      // COUNTED, NOT ASSUMED — `carriedClause` and `standingPositions`, the same
+      // two the budget warning below goes through, for the same reason: this
+      // sentence sits directly above rows reading `evidence so far: …` and must
+      // not promise material the run does not hold (AD-6). A cancelled run makes
+      // the empty case COMMON rather than a corner: a user who stops during
+      // discovery strands every contested finding with no round on the record.
+      const withPositions = stranded.filter(
+        (room) => standingPositions(room.finding).size > 0,
+      ).length
+      warnings.push({
+        code: "unresolved-findings",
+        stage: "debate",
+        message:
+          `RUN CANCELLED DURING DEBATE: ${stranded.length} contested finding(s) were still ` +
+          `undecided when you stopped the run, ${where}. ` +
+          `${carriedClause(stranded.length, withPositions, "cancellation")}`,
+        detail: {
+          cause: "cancelled",
+          roundsRun: rounds,
+          maxRounds,
+          findings: stranded.map((room) => room.finding.id),
+          withPositions,
+        },
+      })
     }
   }
 
@@ -1145,6 +1327,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     rounds,
     turns,
     attempts,
+    cancelled,
   }
 }
 

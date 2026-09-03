@@ -9,11 +9,12 @@ import type { Candidate } from "../domain/roster.ts"
 import { CODING_AGGREGATE, CODING_EVIDENCE_EXTRACT, CODING_FACT_CHECK, CODING_LOGIC_EVAL } from "../instructions/coding/judge.ts"
 import { emptyTokenUsage, type TokenUsage } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
-import type {
-  BackendCapabilities,
-  Envelope,
-  ModelBackend,
-  TurnFailure,
+import {
+  cancelledTurn,
+  type BackendCapabilities,
+  type Envelope,
+  type ModelBackend,
+  type TurnFailure,
 } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
 import { type MaterialLabel, MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
@@ -120,7 +121,21 @@ export class FakeBackend implements ModelBackend {
     private readonly toolcall: Record<string, boolean> = {},
     /** Per-judge-role overrides. Absent roles use `DEFAULT_JUDGE_ANSWERS`. */
     private readonly judgeScript: Partial<Record<JudgeRoleTag, SlotScript>> = {},
+    /**
+     * Story 7A — run before a turn produces its answer, while the turn counts as
+     * IN FLIGHT.
+     *
+     * It is what lets a test observe concurrency (hold turns open and read
+     * `peakInFlight`) and what lets one abort the run at a chosen point in the
+     * pipeline rather than at a wall-clock moment nobody can pin. Awaited, so a
+     * hook that returns a promise really does hold the turn open.
+     */
+    private readonly beforeTurn?: (call: { slot: string; role?: JudgeRoleTag }) => Promise<void> | void,
   ) {}
+
+  /** Story 7A — how many turns are answering right now, and the high-water mark. */
+  inFlight = 0
+  peakInFlight = 0
 
   capabilities(slot: string): BackendCapabilities {
     return { tools: this.toolcall[slot] !== false }
@@ -131,12 +146,41 @@ export class FakeBackend implements ModelBackend {
     instructions: string,
     _input: string,
     schema: ZodType<T>,
+    signal?: AbortSignal,
   ): Promise<Envelope<T>> {
     const role = judgeRoleOf(instructions)
+
+    // AD-2 amended — the fake honours the signal the way the real adapter does,
+    // and BEFORE it records the call: a turn refused for cancellation was never
+    // issued, so it must not appear in `calls` and must not consume an attempt.
+    // A fake that recorded it anyway would make "the core stopped issuing turns"
+    // untestable from the one place a test can see.
+    if (signal?.aborted) return cancelledTurn<T>(slot)
+
     const key = role === undefined ? slot : `${slot}\0${role}`
     const attempt = (this.attempts.get(key) ?? 0) + 1
     this.attempts.set(key, attempt)
     this.calls.push(role === undefined ? { slot, attempt } : { slot, attempt, role })
+
+    this.inFlight += 1
+    this.peakInFlight = Math.max(this.peakInFlight, this.inFlight)
+    try {
+      if (this.beforeTurn) await this.beforeTurn({ slot, ...(role === undefined ? {} : { role }) })
+      // Re-checked AFTER the hook: a hook that aborts the run is the normal way
+      // a test cancels mid-pipeline, and this turn is then one the user stopped.
+      if (signal?.aborted) return cancelledTurn<T>(slot)
+      return this.answer(slot, role, attempt, schema)
+    } finally {
+      this.inFlight -= 1
+    }
+  }
+
+  private answer<T>(
+    slot: string,
+    role: JudgeRoleTag | undefined,
+    attempt: number,
+    schema: ZodType<T>,
+  ): Envelope<T> {
 
     const steps =
       role === undefined

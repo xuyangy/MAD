@@ -72,12 +72,24 @@
  * report and `frameForHostAgent` (`core/run/review.ts`) frames it at the one
  * boundary a model reads it. Nothing in this file emits a span (AD-18).
  *
- * AD-6 — all FIVE degradation reports are carried here and rendered: the
+ * Story 7A adds two lines and no new read of a finding. A cancelled run says so
+ * in its HEADER, above the roster and before any count — the warnings block also
+ * carries it, and a reader scrolls past that block on the way to the findings, so
+ * "this is not a complete review" has to be the first thing under the title
+ * (AD-6f). And the `TOKENS —` line gains a `PEAK —` line beneath it: the bound on
+ * turns in flight is MAD-computed and is NOT a degradation, so it sits beside the
+ * spend it is the second time scale of rather than under the warnings heading
+ * (AD-15 amended).
+ *
+ * AD-6 — ALL SIX degradation reports are carried here and rendered: the
  * denominator (a), drop-outs (b), the roster warning (c), the unresolved section
- * (d), lens homogeneity (e). Five, not six: (f) `cancelled` has no signal to
- * raise it and belongs to story 7A with the signal. (The claim here read "all
- * six" before story 7 and was false — a comment claiming finished work is AD-6's
- * own failure applied to the source.) Beside the five, story 6 added an
+ * (d), lens homogeneity (e), and — from story 7A — the cancelled run (f). Six is
+ * now true, and the count in this paragraph has been wrong in BOTH directions:
+ * it read "all six" before story 7, when five existed and (f) had no signal to
+ * raise it; story 7 corrected it to five and named 7A as the story that would
+ * make it six. A comment claiming finished work is AD-6's own failure applied to
+ * the source, which is why the number is edited rather than left vague. Beside
+ * the six, story 6 added an
  * unverified fact-check, which is the report most likely to pass for a healthy
  * run — a verdict reasoned from nothing looks exactly like a verdict read out of
  * the repo. The same rule covers what the finding list IS while the pipeline is
@@ -642,8 +654,19 @@ function judgeSummary(record: RunRecord): string[] {
   // "in verify-independently mode", not "checked independently", for the same
   // reason: it is the MODE the stage chose, and the check inside it can drop out
   // — `factChecksDroppedOut` below is where a reader finds out that it did.
+  //
+  // AND THE TWO CAUSES OF `unresolved` ARE SPLIT HERE TOO (code review
+  // 2026-08-31). This line used to print the whole of `counts.unresolved` as
+  // "stranded by the budget", which over a cancelled run told a reader the token
+  // cap stranded findings their own stop stranded — while the two warnings a few
+  // lines above already had the split right. The summary and the warnings now
+  // read off the same two numbers.
+  const strandedByBudget = counts.unresolved - counts.unresolvedByCancellation
   const stranded: string[] = []
-  if (counts.unresolved > 0) stranded.push(`${counts.unresolved} stranded by the budget`)
+  if (strandedByBudget > 0) stranded.push(`${strandedByBudget} stranded by the budget`)
+  if (counts.unresolvedByCancellation > 0) {
+    stranded.push(`${counts.unresolvedByCancellation} left undecided when you stopped the run`)
+  }
   if (counts.notExamined > 0) stranded.push(`${counts.notExamined} never examined`)
 
   const lines: string[] = [
@@ -1053,6 +1076,21 @@ export function renderRunRecord(record: RunRecord): string {
 
   lines.push(`MAD review — run ${record.runId}`)
   lines.push("=".repeat(60))
+  // AD-6f — A CANCELLED RUN MUST NEVER RENDER AS A FINISHED ONE, and the
+  // warnings block below is not enough on its own.
+  //
+  // The warning is there, and it is correct, and it sits under a heading a
+  // reader scrolls past on the way to the findings — the same reason AD-6's
+  // other reports are attached to the rows they qualify rather than only listed.
+  // This is the first line under the title, before the roster, so "this is not a
+  // complete review" is read before anything that could be mistaken for one. It
+  // is deliberately MAD-authored and interpolates only `Stage`, which is a
+  // closed union of MAD's own words — nothing here can be written by a model.
+  if (record.cancelled) {
+    lines.push(`RUN CANCELLED — you stopped this run during the ${record.cancelled.stage} stage.`)
+    lines.push(`This is a PARTIAL review. See the warnings and the UNRESOLVED section below.`)
+    lines.push("=".repeat(60))
+  }
   lines.push("")
 
   // ---- roster, with the degradation facts attached ----
@@ -1145,10 +1183,36 @@ export function renderRunRecord(record: RunRecord): string {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
     // never render the same. An empty list after a roster that all dropped out
     // is not a clean review; saying so is the whole point of the invariant.
-    if (record.answered === 0) {
+    //
+    // AD-6f (code review 2026-08-31) — AND "NOBODY ANSWERED" AND "YOU STOPPED
+    // IT" ARE A THIRD PAIR OF OPPOSITE FACTS. Until this branch existed, a run
+    // the user cancelled before any slot answered printed "Every slot in the
+    // roster failed or dropped out" three lines below a `run-cancelled` warning
+    // saying no model failed — the report contradicting itself, with the half a
+    // reader reaches later blaming providers that were working. That is the
+    // exact false degradation report story 7A exists to remove, and it was one
+    // render further down than the story looked. `record.cancelled` is checked
+    // FIRST because a stop explains the empty roster completely: a slot that was
+    // never asked did not drop out.
+    if (record.cancelled && record.answered === 0) {
+      lines.push("  NOTHING WAS EXAMINED — you stopped this run before any model answered.")
+      lines.push(
+        `  No model failed and no model was retried; the run stopped during the ` +
+          `${record.cancelled.stage} stage.`,
+      )
+    } else if (record.answered === 0) {
       lines.push("  NO MODEL ANSWERED — this is not a clean review.")
       lines.push("  Every slot in the roster failed or dropped out; nothing was examined.")
       lines.push("  See the warnings above for which models failed and why.")
+    } else if (record.cancelled) {
+      // Models answered and raised nothing, AND the user stopped the run. Both
+      // are true and the second is the one that bounds what the first is worth:
+      // "nothing was found" over a roster that was cut short is not the same
+      // claim as "nothing was found" over one that ran to completion.
+      lines.push(
+        `  No findings were raised by the ${record.answered} model(s) that answered ` +
+          `before you stopped the run.`,
+      )
     } else {
       lines.push(`  No findings were raised by the ${record.answered} model(s) that answered.`)
     }
@@ -1305,6 +1369,15 @@ export function renderRunRecord(record: RunRecord): string {
   lines.push(
     `TOKENS — turns: ${record.ledger.entries.length} | in: ${t.input} | out: ${t.output} | ` +
       `reasoning: ${t.reasoning} | cache r/w: ${t.cacheRead}/${t.cacheWrite}`,
+  )
+  // AD-15 amended (story 7A) — the PEAK, beside the total it is the second time
+  // scale of. It is MAD-computed and it is not a degradation, so it belongs on
+  // this line rather than under the warnings heading: nothing about a bounded
+  // fan-out makes a review worth less. A reader comparing two runs' wall-clock
+  // needs the number that bounded them, and story 8's presets will move it.
+  lines.push(
+    `PEAK — at most ${record.ledger.maxConcurrency} model turn(s) in flight at once ` +
+      `(rate, not total; nothing was refused or dropped by this bound).`,
   )
 
   return lines.join("\n")
