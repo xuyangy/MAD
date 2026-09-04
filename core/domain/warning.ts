@@ -99,6 +99,37 @@ export const WARNING_CODES = [
    * lens slots went unasked and the discovery ceiling that refused them.
    */
   "discovery-truncated",
+  /**
+   * AD-3 amended / AD-6c (story 8A) — A PIN THE RUN COULD NOT HONOUR.
+   *
+   * The fourteenth code, and it exists because NO EXISTING CODE CAN CARRY THE
+   * FACT WITHOUT LYING. AD-3's amendment requires a pin the host does not offer
+   * to be reported and its slot to fall through to ranking — and when ranking
+   * backfills that slot the roster comes out FULL, so `roster-underfilled` does
+   * not fire at all. If it were made to fire, its message ("the host offers only
+   * N distinct model(s)... add a provider") would be false twice over: the host
+   * may offer plenty, and adding a provider is not the fix for a misspelled pin.
+   * `provider-fan-out` is a disclosure and would file a request MAD could not
+   * honour as a fact about configuration.
+   *
+   * Stories 2A, 3 and 4 each declined a new code on the recorded ground that a
+   * clamp or a route is a decision rather than a partial run. A pin that named a
+   * model the run then did not use is not that: the caller asked for a specific
+   * roster and got a different one, which is a fact about what was reviewed.
+   *
+   * IT IS ABOUT THE PIN AND NEVER ABOUT THE ROSTER'S QUALITY. It carries a
+   * per-pin reason — `not-offered`, `dedupe-collapsed`, `no-slot`, `malformed` —
+   * and says nothing about diversity, because the four AD-6c reports already say
+   * everything there is to say about that and say it identically whether a slot
+   * was pinned or ranked. In particular it must never grow a sentence like "you
+   * pinned these, so adding a provider will not help": that is false whenever
+   * fewer pins than slots were given, and it is the "the user asked for it"
+   * suppression AD-4's amendment forbids, wearing a remedy note as a disguise.
+   *
+   * Raised ONCE per run, by `core/roster/select.ts`, and only when pins were
+   * supplied and at least one was not honoured.
+   */
+  "roster-pin-unhonoured",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

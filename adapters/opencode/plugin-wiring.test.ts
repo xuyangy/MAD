@@ -81,6 +81,7 @@ interface ToolResult {
     lensInstructions?: { lens: string; origin: string }[]
     cancelled?: string
     maxConcurrency?: number
+    warnings?: string[]
     preset?: string
     tokenCap?: number | null
     budgetSkipped?: number
@@ -474,5 +475,59 @@ describe("mad_review.execute — CAP-7: the budget and the preset reach the core
     const result = await executeWith({ preset: "thorough" })
     expect(result.metadata?.lensSlots).toEqual([])
     expect(result.metadata?.maxConcurrency).toBe(4)
+  })
+})
+
+describe("mad_review.execute — AD-3 amended: `models` pins the roster (story 8A)", () => {
+  test("A PINNED MODEL TAKES discovery-1, and the report says which models were billed", async () => {
+    // The end-to-end assertion: the argument reaches the roster and the roster
+    // reaches the run. `provider-fan-out` names what code was actually sent to.
+    const pinned = await executeWith({ models: ["google/gemini-2.5-pro"], slots: 1 })
+    expect(pinned.output).toContain("google/gemini-2.5-pro")
+    expect(pinned.metadata?.requested).toBe(1)
+
+    // The UNPINNED sibling, so the assertion above is about the pin and not
+    // about whatever this host happens to rank first.
+    const unpinned = await executeWith({ slots: 1 })
+    expect(unpinned.output).not.toContain("google/gemini-2.5-pro")
+  })
+
+  test("OMITTING `models` LEAVES TODAY'S ROSTER UNTOUCHED", async () => {
+    const base = await executeWith({})
+    const empty = await executeWith({ models: [] })
+    expect(empty.metadata?.requested).toBe(base.metadata?.requested)
+    expect(empty.metadata?.warnings).toEqual(base.metadata?.warnings)
+    expect(empty.metadata?.warnings).not.toContain("roster-pin-unhonoured")
+  })
+
+  test("A PIN THIS HOST DOES NOT OFFER IS REPORTED AND THE RUN PROCEEDS (AD-3)", async () => {
+    const result = await executeWith({ models: ["anthropic/claude-opus-9"] })
+    expect(result.metadata?.warnings).toContain("roster-pin-unhonoured")
+    expect(result.output).toContain("this host does not offer it")
+    // Not a refusal, and not a no-provider error: the slot fell through and the
+    // roster filled.
+    expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
+    expect(result.title).not.toContain("no providers")
+  })
+
+  test("A MALFORMED PIN REACHES THE CORE AND IS REPORTED, not swallowed by the clamp", async () => {
+    const result = await executeWith({ models: ["gpt-5"] })
+    expect(result.metadata?.warnings).toContain("roster-pin-unhonoured")
+    expect(result.output).toContain("not a usable provider/model pair")
+  })
+
+  test("PINNING SUPPRESSES NO DEGRADATION REPORT — the pinned run warns as loudly", async () => {
+    // The whole point of the story, checked at the surface a user touches. This
+    // host offers three distinct lineages, so asking for five slots underfills it
+    // and narrows it whether or not anything is pinned; the assertion is that the
+    // pinned run's warning set is EQUAL to the unpinned run's, not merely
+    // non-empty. (`roster-single-lineage` alone would be a false premise here:
+    // pinning one Claude model still leaves ranking to fill the other two slots
+    // from the other two lineages, and it correctly does.)
+    const unpinned = await executeWith({ slots: 5 })
+    const pinned = await executeWith({ models: ["anthropic/claude-sonnet-4-5"], slots: 5 })
+
+    expect(unpinned.metadata?.warnings).toContain("roster-underfilled")
+    expect(pinned.metadata?.warnings).toEqual(unpinned.metadata?.warnings)
   })
 })

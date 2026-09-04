@@ -11,7 +11,7 @@
 import type { PluginInput } from "@opencode-ai/plugin"
 
 import type { Candidate } from "../../core/domain/roster.ts"
-import { selectRoster, type SelectResult } from "../../core/roster/select.ts"
+import { selectRoster, type Pin, type SelectResult } from "../../core/roster/select.ts"
 
 /**
  * The opencode config key a user edits to add a provider. Named verbatim in the
@@ -96,6 +96,18 @@ export async function resolveRoster(
   slots: number,
   /** CAP-11 — ordered lens ids. Empty by default, so a fresh install runs no lens turn (AD-3). */
   lenses: readonly string[] = [],
+  /**
+   * AD-3 amended (story 8A) — discovery slots the caller named, in fill order.
+   * Empty by default, so a caller that pins nothing gets the roster this adapter
+   * resolved before this story.
+   *
+   * They are NOT validated against the host here. `selectRoster` resolves them
+   * against the deduped candidate list and reports every miss itself, which is
+   * the only place that can tell "the host does not offer it" apart from "dedupe
+   * already collapsed it" — and this function must not become a second, quieter
+   * authority on which pins are usable.
+   */
+  pins: readonly Pin[] = [],
 ): Promise<SelectResult> {
   const candidates = await enumerateCandidates(client)
   // Throws NoCandidatesError when the host has nothing configured — unusable
@@ -103,6 +115,7 @@ export async function resolveRoster(
   return selectRoster(candidates, {
     slots,
     lenses,
+    pins,
     providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
   })
 }

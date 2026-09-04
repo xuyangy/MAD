@@ -17,11 +17,11 @@ describe("the warning vocabulary (AD-6)", () => {
     // Thirteen: four roster reports, the drop-out, the denominator, the partial
     // envelope, the provider disclosure, the unresolved section, the untooled
     // fact-check, the unavailable judge, from story 7A the cancelled run, and
-    // from story 8 the budget-truncated discovery. Adding a fourteenth is a
-    // deliberate act: AD-6's report set is an `Ask First` that three stories
-    // declined before 7A answered it, so it should not be possible to do it
-    // quietly.
-    expect(WARNING_CODES).toHaveLength(13)
+    // from story 8 the budget-truncated discovery, and from story 8A the pin the
+    // run could not honour. Adding a fifteenth is a deliberate act: AD-6's report
+    // set is an `Ask First` that three stories declined before 7A answered it,
+    // so it should not be possible to do it quietly.
+    expect(WARNING_CODES).toHaveLength(14)
   })
 
   test("every code is unique", () => {

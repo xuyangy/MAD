@@ -21,7 +21,7 @@ import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
 import { oneLine } from "../../core/prompt/material.ts"
 import { frameForHostAgent, review } from "../../core/run/review.ts"
-import { NoCandidatesError } from "../../core/roster/select.ts"
+import { NoCandidatesError, type Pin } from "../../core/roster/select.ts"
 import {
   artifactRootFrom,
   createTurnRecorder,
@@ -116,6 +116,43 @@ export const MAX_LENS_SLOTS = 8
  * schema rejects a non-array first; this is the same belt-and-braces the slot
  * clamp already applies, for the same reason.
  */
+/**
+ * AD-3 amended (story 8A) — the caller's pinned models, bounded on the way in.
+ *
+ * `provider/model`, split at the FIRST `/` because a model id may contain one
+ * (`openrouter/anthropic/claude-sonnet-4-5` is a real shape) while a provider id
+ * may not.
+ *
+ * IT DEDUPES NOTHING AND DROPS NOTHING. Two pins naming one model, a pin the
+ * host lacks, a string with no `/` at all — every one of them survives this
+ * function and reaches `selectRoster`, which reports it. This layer CANNOT raise
+ * a `Warning`: anything it silently discards is a request the user made and
+ * nobody ever answered. That is the opposite of `clampLenses`, which drops
+ * duplicates because a duplicate lens is a slot that cannot exist, and it is
+ * deliberate rather than an inconsistency.
+ *
+ * The `Array.isArray` guard is `clampLenses`' guard for `clampLenses`' reason: a
+ * bare string arriving from a model call would otherwise iterate BY CHARACTER.
+ * The length cap is `MAX_DISCOVERY_SLOTS` because a pin can never fill more than
+ * a slot, and an unbounded list arriving from a model is an unbounded loop and
+ * an unbounded warning message.
+ */
+export function clampPins(models: readonly string[] | undefined): Pin[] {
+  if (!models || !Array.isArray(models)) return []
+  const kept: Pin[] = []
+  for (const raw of models) {
+    const value = typeof raw === "string" ? raw.trim() : ""
+    if (value.length === 0) continue
+    const cut = value.indexOf("/")
+    // No separator: kept as a MALFORMED pin rather than dropped, so the core
+    // reports it. An empty `providerId` is what `resolvePins` reads as malformed.
+    if (cut < 0) kept.push({ providerId: "", modelId: value })
+    else kept.push({ providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() })
+    if (kept.length >= MAX_DISCOVERY_SLOTS) break
+  }
+  return kept
+}
+
 export function clampLenses(lenses: readonly string[] | undefined): string[] {
   if (!lenses || !Array.isArray(lenses)) return []
   const seen = new Set<string>()
@@ -200,6 +237,21 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
                 `than three, and it is the only setting here that costs more. A preset moves ` +
                 `numbers, never policy, and an argument you pass explicitly always beats it.`,
             ),
+          models: tool.schema
+            .array(tool.schema.string())
+            .max(MAX_DISCOVERY_SLOTS)
+            .optional()
+            .describe(
+              `OPTIONAL discovery models to PIN, as \`provider/model\` strings, filling slots in ` +
+                `the order given before the rest are chosen automatically. Omit to let MAD choose ` +
+                `the whole roster, which is the default and what AD-3 expects. Name only models ` +
+                `this host already has configured — MAD holds no credentials and adds no ` +
+                `provider. A model this host does not offer is REPORTED and its slot falls back ` +
+                `to automatic selection; the run is never refused. Pinning does NOT buy a ` +
+                `diversity claim: two providers reaching one model still fill one slot, and a ` +
+                `roster you pinned onto one model family is reported as narrow exactly as loudly ` +
+                `as one MAD chose.`,
+            ),
         },
         async execute(args, context) {
           // Belt and braces: the schema bounds it, and so does this, because the
@@ -216,10 +268,13 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           const preset = clampPreset(args.preset)
           const dials = PRESET_DIALS[preset]
           const lenses = clampLenses(args.lenses !== undefined ? args.lenses : [...dials.lenses])
+          // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
+          // clamp deliberately discards nothing a user asked for.
+          const pins = clampPins(args.models)
 
           let resolved
           try {
-            resolved = await resolveRoster(client, slots, lenses)
+            resolved = await resolveRoster(client, slots, lenses, pins)
           } catch (error) {
             if (error instanceof NoCandidatesError) {
               // Matrix row "No providers": fail with guidance, not a stack trace.

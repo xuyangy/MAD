@@ -4,8 +4,22 @@
  * (1) Dedupe candidates by normalized model identity — family plus version,
  *     snapshot date stripped — so one model never occupies two slots regardless
  *     of how many providers reach it.
- * (2) Rank, filling slots to maximize distinct lineages first, then distinct
- *     models within a lineage.
+ * (0) AD-4 amended (story 8A) — resolve the caller's PINS against the deduped
+ *     list, consuming at most `slots` of it. Numbered zero and written second
+ *     because it is step zero of the RANKING and not of the module: dedupe still
+ *     runs first, over the whole raw candidate list, and a pin can only ever
+ *     claim something dedupe has already collapsed. `resolvePins` takes
+ *     `readonly Deduped[]` and cannot be handed a `Candidate[]`, so that order
+ *     is a compile error to violate rather than a convention to remember.
+ * (2) Rank the REMAINDER, filling the slots the pins did not take to maximize
+ *     distinct lineages first, then distinct models within a lineage.
+ *
+ * A pinned slot is an ordinary `RosterSlot` with an ordinary `discovery-N` id.
+ * NOTHING downstream of the fill can tell it from a ranked one — `RosterSlot`
+ * has no `pinned` field and `Roster` has no third collection — which is how the
+ * "the user asked for it" suppression AD-4's amendment forbids is prevented:
+ * there is no flag for such a branch to read, so writing one would mean adding
+ * the field first, in a diff a reviewer can see.
  *
  * Getting the order wrong is the single most damaging thing this system can do:
  * every co-discovery number downstream inherits the error.
@@ -21,6 +35,7 @@
  */
 
 import { lineageOf, normalizeModelIdentity, UNVERIFIED_LINEAGE } from "../domain/lineage.ts"
+import { oneLine } from "../prompt/material.ts"
 import type { Candidate, LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import type { Warning } from "../domain/warning.ts"
 
@@ -44,6 +59,21 @@ export interface SelectOptions {
    * by this capability's existence).
    */
   lenses?: readonly string[]
+  /**
+   * AD-3 amended (story 8A) — discovery slots the CALLER named, in the order
+   * they should fill, resolved before ranking sees anything.
+   *
+   * Absent or empty means byte-for-byte the roster this repo resolved before
+   * this story: AD-3's Rule is that user config may OVERRIDE the selection and
+   * is never REQUIRED to produce one, and a pinless run must therefore be
+   * unchanged rather than merely equivalent.
+   *
+   * Pinning is not MAD naming a model. The USER names it, from what the HOST
+   * already offers, and a pin that names something the host does not offer is
+   * reported and falls through to ranking — MAD holds no credential, adds no
+   * provider, and does not refuse the run.
+   */
+  pins?: readonly Pin[]
 }
 
 export interface SelectResult {
@@ -90,6 +120,152 @@ export function dedupeByIdentity(candidates: readonly Candidate[]): Deduped[] {
     byIdentity.set(identity, { candidate, identity, alsoAvailableVia: [] })
   }
   return [...byIdentity.values()]
+}
+
+/**
+ * AD-3 amended (story 8A) — one discovery slot the caller named.
+ *
+ * Structurally a `Candidate` minus the capability flags, and deliberately not a
+ * `Candidate`: a pin is a REQUEST, not an offer. What the model can do is the
+ * host's fact to report, never the caller's to assert, so `toolcall` is not on
+ * this type and a pinned slot reads its capability from the deduped entry the
+ * host produced exactly as a ranked slot does.
+ */
+export type Pin = Pick<Candidate, "providerId" | "modelId">
+
+/**
+ * Why one pin did not fill a slot — or that it did.
+ *
+ * FOUR WAYS TO MISS, and they are separate values rather than one "unhonoured"
+ * because they have four different fixes and only one of them is the user's
+ * spelling. Collapsing them would produce a report that says a pin was not
+ * honoured without saying anything a reader could act on.
+ */
+export type PinOutcome =
+  /** It took a slot. */
+  | "filled"
+  /** The host does not offer this model, or not through this provider. */
+  | "not-offered"
+  /** Dedupe had already collapsed it into an entry an earlier pin took (AD-4). */
+  | "dedupe-collapsed"
+  /** Every slot was already filled by an earlier pin. */
+  | "no-slot"
+  /** Not a usable provider/model pair at all. */
+  | "malformed"
+
+export interface PinResolution {
+  pin: Pin
+  outcome: PinOutcome
+  /** The deduped entry it claimed. Present only when `outcome` is `filled`. */
+  entry?: Deduped
+}
+
+/**
+ * What step 0 produced. It NEVER ESCAPES `selectRoster`'s body — nothing on
+ * `Roster`, `RosterSlot` or `SelectResult` carries it — which is the property
+ * that keeps a pinned slot indistinguishable from a ranked one downstream.
+ */
+export interface PinnedStep {
+  /** The entries the pins claimed, in pin order. At most `slots` of them. */
+  filled: Deduped[]
+  /** Everything dedupe produced that no pin took, in dedupe order. */
+  remaining: Deduped[]
+  /** One per pin, in the order given. */
+  resolutions: PinResolution[]
+}
+
+/** How many characters of a caller-supplied id may reach a warning row. */
+const PIN_LABEL_MAX = 80
+
+/**
+ * A caller's pin, rendered safely into a MAD-authored warning row (AD-18).
+ *
+ * The pin id is the only string in this module MAD did not write, and it lands
+ * inside a code span in a degradation warning. Untouched, a backtick closes
+ * MAD's span and a newline starts a row of the caller's own — a forged report,
+ * in the one place a reader looks to find out whether the run is trustworthy.
+ *
+ * IT IS SANITIZED HERE, IN THE CORE, and not only at the adapter's clamp. The
+ * `review()` seam is exported and story 9's ablation harness calls it directly,
+ * where `clampPins` never runs; a defence that lives only in the adapter is a
+ * defence the one caller this story was written for does not have.
+ */
+export function pinLabel(pin: Pin): string {
+  const clip = (value: string): string =>
+    oneLine(String(value ?? "")).replaceAll("`", "'").slice(0, PIN_LABEL_MAX)
+  return `${clip(pin.providerId)}/${clip(pin.modelId)}`
+}
+
+/**
+ * AD-4 step 0 (story 8A) — resolve the caller's pins against the DEDUPED list.
+ *
+ * The parameter is `readonly Deduped[]` and that is the whole safety argument:
+ * dedupe has already run, over the whole candidate list, and a pin can only
+ * claim something that survived it. Two providers reaching one model meet ONE
+ * entry here, so the first pin takes it and the second is `dedupe-collapsed` and
+ * fills nothing — which may leave the roster short, which `roster-underfilled`
+ * then reports through its own untouched predicate. Pinning cannot buy a
+ * diversity claim the models do not support, because there is no second entry
+ * for it to buy.
+ *
+ * The provider half is matched CASE-INSENSITIVELY, and against
+ * `alsoAvailableVia` as well as the winning provider. A pin is reachable if the
+ * host offers that model through the named provider at all; reporting
+ * `bedrock/claude-sonnet-4-5` as "the host does not offer it" when bedrock is
+ * sitting in `alsoAvailableVia` would be a false statement about the host, in a
+ * warning whose whole job is to be actionable.
+ *
+ * It MUTATES NOTHING. `deduped` is not sorted, spliced or reordered, and no
+ * `alsoAvailableVia` array is touched — those arrays are shared by reference
+ * into the lens slots, so a mutation here would corrupt a collection this
+ * function is not even about.
+ */
+export function resolvePins(
+  deduped: readonly Deduped[],
+  pins: readonly Pin[],
+  slots: number,
+): PinnedStep {
+  const filled: Deduped[] = []
+  const resolutions: PinResolution[] = []
+  const consumed = new Set<Deduped>()
+
+  for (const pin of pins) {
+    const providerId = typeof pin.providerId === "string" ? pin.providerId.trim() : ""
+    const modelId = typeof pin.modelId === "string" ? pin.modelId.trim() : ""
+    if (providerId.length === 0 || modelId.length === 0) {
+      resolutions.push({ pin, outcome: "malformed" })
+      continue
+    }
+
+    const identity = normalizeModelIdentity(modelId)
+    const wanted = providerId.toLowerCase()
+    const entry = deduped.find(
+      (candidate) =>
+        candidate.identity === identity &&
+        (candidate.candidate.providerId.toLowerCase() === wanted ||
+          candidate.alsoAvailableVia.some((via) => via.toLowerCase() === wanted)),
+    )
+    if (!entry) {
+      resolutions.push({ pin, outcome: "not-offered" })
+      continue
+    }
+    if (consumed.has(entry)) {
+      resolutions.push({ pin, outcome: "dedupe-collapsed", entry })
+      continue
+    }
+    // Checked AFTER the two rejections above, deliberately: a surplus pin that
+    // ALSO names a model the host lacks should be reported as the misspelling it
+    // is, which is the fact the caller can act on.
+    if (filled.length >= slots) {
+      resolutions.push({ pin, outcome: "no-slot", entry })
+      continue
+    }
+    consumed.add(entry)
+    filled.push(entry)
+    resolutions.push({ pin, outcome: "filled", entry })
+  }
+
+  return { filled, remaining: deduped.filter((entry) => !consumed.has(entry)), resolutions }
 }
 
 /**
@@ -214,12 +390,22 @@ export function fillLensSlots(
 }
 
 export function selectRoster(candidates: readonly Candidate[], options: SelectOptions): SelectResult {
-  const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [] } = options
+  const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [], pins = [] } = options
   if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey)
   if (slots < 1) throw new Error("selectRoster: slots must be at least 1")
 
+  // AD-4 — DEDUPE FIRST, over the whole raw candidate list, and this is still
+  // the only line in the module that touches `candidates`. Everything below
+  // works on what survived it.
   const deduped = dedupeByIdentity(candidates)
-  const picked = rankByDiversity(deduped, slots)
+  // AD-4 step 0 (story 8A) — the pins claim from the deduped list; ranking gets
+  // the remainder and the slots the pins did not take. When `pins` is empty this
+  // is `resolvePins(deduped, [], slots)` returning `{filled: [], remaining:
+  // deduped, resolutions: []}`, so `picked` is `rankByDiversity(deduped, slots)`
+  // exactly as before — the pinless run is unchanged, not merely equivalent.
+  const pinning = resolvePins(deduped, pins, slots)
+  const ranked = rankByDiversity(pinning.remaining, slots - pinning.filled.length)
+  const picked = [...pinning.filled, ...ranked]
 
   const rosterSlots: RosterSlot[] = picked.map((entry, index) => ({
     slot: `${slotPrefix}-${index + 1}`,
@@ -270,6 +456,72 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       `Models: ${billedModels.join(", ")}.`,
     detail: { providers, models: billedModels },
   })
+
+  // AD-3 amended (story 8A) — A PIN THE RUN COULD NOT HONOUR, said once.
+  //
+  // It exists because no existing report can carry the fact without lying: when
+  // ranking backfills a missed pin the roster is FULL, so `roster-underfilled`
+  // never fires, and its remedy ("add a provider") is not the fix for a
+  // misspelled model id anyway.
+  //
+  // IT SAYS NOTHING ABOUT DIVERSITY. The four AD-6c reports below say everything
+  // there is to say about that, and say it identically whether a slot was pinned
+  // or ranked. A sentence here along the lines of "you pinned these, so adding a
+  // provider will not help" would be the suppression AD-4's amendment forbids
+  // wearing a remedy note as a disguise — and it would be FALSE whenever fewer
+  // pins than slots were given, since the ranked remainder is exactly what a new
+  // provider would change.
+  const unhonoured = pinning.resolutions.filter((r) => r.outcome !== "filled")
+  if (pins.length > 0 && unhonoured.length > 0) {
+    const reasonOf = (resolution: PinResolution): string => {
+      switch (resolution.outcome) {
+        case "not-offered":
+          return "this host does not offer it"
+        case "dedupe-collapsed": {
+          // Named by the SLOT that already serves the model, so the reader can
+          // see it is present rather than missing.
+          const serving = rosterSlots.find((slot) => slot.identity === resolution.entry?.identity)
+          return serving
+            ? `the same model already fills slot ${serving.slot}, so it cannot fill a second`
+            : "the same model was already pinned, so it cannot fill a second slot"
+        }
+        case "no-slot":
+          return `there were only ${slots} slot(s) and earlier pins took them all`
+        default:
+          return "it is not a usable provider/model pair"
+      }
+    }
+    const listed = unhonoured
+      .map((resolution) => `\`${pinLabel(resolution.pin)}\` (${reasonOf(resolution)})`)
+      .join("; ")
+    warnings.push({
+      code: "roster-pin-unhonoured",
+      stage: "roster",
+      message:
+        `PIN NOT HONOURED: ${unhonoured.length} of ${pins.length} pinned model(s) did not fill a ` +
+        `slot — ${listed}. Those slot(s) fell through to ranking and the run PROCEEDS with the ` +
+        `roster below; MAD names no model of its own and does not refuse a run over a pin. Check ` +
+        `the provider and model ids against the \`${providerConfigKey}\` key in your opencode ` +
+        `config.`,
+      detail: {
+        pins: unhonoured.map((resolution) => ({
+          providerId: pinLabel(resolution.pin).split("/")[0] ?? "",
+          modelId: pinLabel(resolution.pin).split("/").slice(1).join("/"),
+          reason: resolution.outcome,
+          ...(resolution.outcome === "dedupe-collapsed"
+            ? {
+                servedBy:
+                  rosterSlots.find((slot) => slot.identity === resolution.entry?.identity)?.slot ??
+                  "",
+              }
+            : {}),
+        })),
+        pinned: pinning.filled.length,
+        requested: pins.length,
+        providerConfigKey,
+      },
+    })
+  }
 
   // AD-6c — the roster is smaller than asked for. Distinct from the lineage
   // warning below: "requested 3, filled 1" is a different fact from "filled 3,

@@ -4,6 +4,7 @@ import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import {
   clampDiscoverySlots,
   clampLenses,
+  clampPins,
   DEFAULT_DISCOVERY_SLOTS,
   MAX_DISCOVERY_SLOTS,
   MAX_LENS_SLOTS,
@@ -122,5 +123,48 @@ describe("discovery lenses (CAP-11, AD-3, AD-15 amended)", () => {
     expect(clampLenses("security" as never)).toEqual([])
     expect(clampLenses(42 as never)).toEqual([])
     expect(clampLenses({ 0: "security", length: 1 } as never)).toEqual([])
+  })
+})
+
+describe("clampPins — bounded here, RESOLVED in the core (story 8A)", () => {
+  test("absent or non-array is no pins", () => {
+    expect(clampPins(undefined)).toEqual([])
+    expect(clampPins([])).toEqual([])
+    // A bare string would otherwise iterate BY CHARACTER, the same defect
+    // `clampLenses`' guard exists for.
+    expect(clampPins("openai/gpt-5" as unknown as string[])).toEqual([])
+  })
+
+  test("`provider/model` splits at the FIRST slash, so a model id may contain one", () => {
+    // `openrouter/anthropic/claude-sonnet-4-5` is a real shape.
+    expect(clampPins(["openai/gpt-5"])).toEqual([{ providerId: "openai", modelId: "gpt-5" }])
+    expect(clampPins(["openrouter/anthropic/claude-sonnet-4-5"])).toEqual([
+      { providerId: "openrouter", modelId: "anthropic/claude-sonnet-4-5" },
+    ])
+  })
+
+  test("IT KEEPS A MALFORMED ENTRY so the core can report it", () => {
+    // This layer cannot raise a Warning. Anything it silently discards is a
+    // request the user made that nobody ever answers — which is exactly the
+    // failure this story exists to remove one level up.
+    expect(clampPins(["gpt-5"])).toEqual([{ providerId: "", modelId: "gpt-5" }])
+  })
+
+  test("IT DEDUPES NOTHING — two pins on one model both reach the core", () => {
+    // The opposite of `clampLenses`, and deliberately: a duplicate lens is a slot
+    // that cannot exist, while a duplicate pin is a fact the roster report must
+    // state (AD-4, dedupe-collapsed).
+    expect(clampPins(["anthropic/claude-sonnet-4-5", "bedrock/claude-sonnet-4-5"])).toHaveLength(2)
+    expect(clampPins(["openai/gpt-5", "openai/gpt-5"])).toHaveLength(2)
+  })
+
+  test("whitespace is trimmed on both halves, and an empty entry is dropped", () => {
+    expect(clampPins(["  openai / gpt-5  "])).toEqual([{ providerId: "openai", modelId: "gpt-5" }])
+    expect(clampPins(["", "   "])).toEqual([])
+  })
+
+  test("the list is capped — a pin can never fill more than a slot", () => {
+    const many = Array.from({ length: 50 }, (_, i) => `p${i}/m${i}`)
+    expect(clampPins(many)).toHaveLength(MAX_DISCOVERY_SLOTS)
   })
 })

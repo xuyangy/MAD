@@ -132,6 +132,27 @@ describe("resolveRoster (AD-3, AD-4)", () => {
     expect(roster.distinctLineages).toBe(2)
   })
 
+  test("PINS REACH CORE SELECTION and change which model takes discovery-1 (story 8A)", async () => {
+    // The pass-through, and nothing more: this adapter validates no pin itself.
+    // `selectRoster` is the only place that can tell "the host does not offer it"
+    // from "dedupe already collapsed it", and a second, quieter authority here
+    // would be a miss reported twice or not at all.
+    const base = await resolveRoster(fakeClient(TWO_PROVIDERS), 2)
+    const pinned = await resolveRoster(fakeClient(TWO_PROVIDERS), 2, [], [
+      { providerId: base.roster.slots[1]!.providerId, modelId: base.roster.slots[1]!.modelId },
+    ])
+
+    expect(pinned.roster.slots[0]!.modelId).toBe(base.roster.slots[1]!.modelId)
+    expect(pinned.roster.distinctLineages).toBe(base.roster.distinctLineages)
+  })
+
+  test("omitting pins resolves the roster this adapter resolved before story 8A", async () => {
+    const base = await resolveRoster(fakeClient(TWO_PROVIDERS), 2)
+    const explicit = await resolveRoster(fakeClient(TWO_PROVIDERS), 2, [], [])
+    expect(explicit.roster).toEqual(base.roster)
+    expect(explicit.warnings).toEqual(base.warnings)
+  })
+
   test("no providers surfaces the guidance error, naming the opencode config key", async () => {
     const client = fakeClient({ providers: [], default: {} })
     await expect(resolveRoster(client, 1)).rejects.toThrow(NoCandidatesError)
