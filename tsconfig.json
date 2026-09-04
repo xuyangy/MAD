@@ -17,9 +17,10 @@
     "noFallthroughCasesInSwitch": true,
     "exactOptionalPropertyTypes": false
   },
-  // `fixtures` is in scope so the CAP-1 recall harness and its seeded-defect
-  // change are typechecked like everything else. AD-1's direction rule over the
-  // tree is the lint's job (`scripts/lint-dependency-direction.ts`), not
-  // tsconfig's: `fixtures` may import `core`, never the reverse.
-  "include": ["core", "adapters", "scripts", "fixtures"]
+  // `fixtures` and `ablation` are in scope so the CAP-1 recall harness, its
+  // seeded-defect change and CAP-9's ablation are typechecked like everything
+  // else. AD-1's direction rule over the trees is the lint's job
+  // (`scripts/lint-dependency-direction.ts`), not tsconfig's: both may import
+  // `core`, never the reverse.
+  "include": ["core", "adapters", "scripts", "fixtures", "ablation"]
 }

@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "bun run scripts/lint-dependency-direction.ts && bun run scripts/lint-material-spans.ts",
     "test": "bun test",
-    "clustering-rates": "bun run scripts/clustering-rates.ts"
+    "clustering-rates": "bun run scripts/clustering-rates.ts",
+    "ablation": "bun run scripts/ablation.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.18",

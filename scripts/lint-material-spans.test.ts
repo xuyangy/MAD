@@ -59,6 +59,13 @@ describe("AD-18 material-span rule", () => {
     expect(violations[0]!.line).toBe(3)
   })
 
+  test("THE ABLATION TREE IS SCANNED TOO (story 9)", () => {
+    // The ablation renders a report a reader may cite, and it interpolates
+    // model-authored claims into it. A second span emitter there would be the
+    // same forgery surface AD-18 closes everywhere else.
+    expect(scanSource("ablation/report.ts", `lines.push(\`${opener}\`)\n`)).toHaveLength(1)
+  })
+
   test("the real tree passes — one emitter", async () => {
     expect(await main()).toBe(0)
   })

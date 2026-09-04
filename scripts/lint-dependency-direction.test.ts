@@ -151,6 +151,31 @@ describe("AD-1 dependency-direction rule", () => {
     ).toHaveLength(0)
   })
 
+  test("CORE MAY NOT IMPORT FROM ablation/ (story 9's fourth tree)", () => {
+    // A measurement harness reachable from inside a stage would let an
+    // experiment's scaffolding ship inside the tool it is measuring.
+    expect(
+      scanSource("core/stages/output.ts", `import { armCost } from "../../ablation/compare.ts"\n`),
+    ).toHaveLength(1)
+    expect(
+      scanSource("core/run/review.ts", `import { runAblation } from "ablation/arms.ts"\n`),
+    ).toHaveLength(1)
+  })
+
+  test("THE ARROW POINTS ONE WAY — the shipped tree passes with ablation/ importing core and adapters", async () => {
+    // The non-vacuous sibling, and it is stated as a property of `main()` rather
+    // than of `scanSource`. `scanSource` applies the CORE rules to whatever path
+    // it is handed; it is `main()` that decides those rules govern `core/` alone
+    // by globbing that tree. Asking `scanSource` about an `ablation/` file would
+    // measure the scanner's scope rather than the rule (found while writing this
+    // test: it reports `ablation/live.ts`'s legitimate adapters import as a
+    // violation).
+    //
+    // `ablation/arms.ts` imports `core/`, `ablation/live.ts` imports `adapters/`,
+    // and both are shipped in the tree this assertion runs over.
+    expect(await main()).toBe(0)
+  })
+
   test("the shipped core/ tree passes", async () => {
     expect(await main()).toBe(0)
   })

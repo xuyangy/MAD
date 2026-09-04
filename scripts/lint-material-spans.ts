@@ -102,7 +102,7 @@ export async function main(): Promise<number> {
   // makes framing the core's job" — which is precisely the assertion the script
   // exists to stop taking on trust. `fixtures/prompt-injection/` builds prompts
   // and was never read.
-  const glob = new Glob("{core,adapters,fixtures,scripts}/**/*.ts")
+  const glob = new Glob("{core,adapters,fixtures,scripts,ablation}/**/*.ts")
   for await (const path of glob.scan({ cwd: ROOT })) {
     const absolute = resolve(ROOT, path)
     const source = await Bun.file(absolute).text()

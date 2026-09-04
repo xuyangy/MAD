@@ -12,15 +12,7 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { selectRoster } from "../../core/roster/select.ts"
-import { review } from "../../core/run/review.ts"
-import {
-  candidate,
-  fakeClock,
-  FakeBackend,
-  type SlotScript,
-  type SlotStep,
-} from "../../core/test-support/fakes.ts"
+import { LENSES, LENS_SCRIPTS, REFUND, SCRIPTS, seededArm } from "./arms.ts"
 import {
   lensRecallGain,
   missedDefects,
@@ -30,298 +22,6 @@ import {
 } from "../recall.ts"
 import { SEEDED_CHANGE, SEEDED_DEFECTS } from "./change.ts"
 
-const REFUND = "src/billing/refund.ts"
-const LEDGER = "src/billing/ledger.ts"
-
-/**
- * Three blind-spot profiles. Nobody sees the idempotency defect; the SQL
- * injection and the money-precision defect are each seen by two models, which is
- * what puts the same defect in the pool twice before clustering exists.
- */
-const SCRIPTS: Record<string, SlotScript> = {
-  // Reads for security and lifecycle; blind to money semantics and to async.
-  "discovery-1": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "The charges lookup interpolates `req.orderId` straight into the SQL text.",
-            reasoning:
-              "String interpolation into a query means a crafted order id rewrites the statement. " +
-              "Bind it as a parameterized value instead.",
-            severity: "critical",
-            file: REFUND,
-            startLine: 20,
-            endLine: 22,
-          },
-          {
-            claim: "`db.acquire()` sits outside any try/finally, so one path never gives the connection back.",
-            reasoning:
-              "When no charge matches, the function returns at line 24 and that connection is " +
-              "never released. Under load the pool is exhausted and every refund after it hangs.",
-            severity: "high",
-            file: REFUND,
-            startLine: 18,
-            endLine: 18,
-          },
-          {
-            claim: "`refundOrderSafely` swallows every failure and returns `{ ok: true }`.",
-            reasoning:
-              "An empty catch turns a failed gateway call into an answer the caller passes on to " +
-              "the customer as a completed refund.",
-            severity: "high",
-            file: REFUND,
-            startLine: 47,
-            endLine: 53,
-          },
-          {
-            // A finding matching no planted defect. A real arm raises some; the
-            // harness must not turn one into recall.
-            claim: "`RefundResult.refundId` is optional, so the shape of a good answer is ambiguous.",
-            reasoning: "Callers cannot tell a completed refund from a no-op without a second field.",
-            severity: "low",
-            file: REFUND,
-            startLine: 12,
-            endLine: 15,
-          },
-        ],
-      },
-    },
-  ],
-
-  // Reads for money semantics; blind to async and to the ledger's second file.
-  "discovery-2": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "The order id is concatenated into the charges query.",
-            reasoning:
-              "One quote character in the id breaks the statement and a crafted one rewrites it.",
-            severity: "critical",
-            file: REFUND,
-            startLine: 20,
-            endLine: 22,
-          },
-          {
-            claim: "The requested refund amount is never compared with the original charge.",
-            reasoning:
-              "`charge.amount_cents` is read and then discarded, so a caller can refund more than " +
-              "was charged, or pass a negative amount and credit a card that was never debited.",
-            severity: "critical",
-            file: REFUND,
-            startLine: 31,
-            endLine: 35,
-          },
-          {
-            claim: "`amountCents / 100` hands the gateway a floating point amount.",
-            reasoning:
-              "Cents divided by 100 is a binary float, so the rounding drifts on ordinary amounts. " +
-              "`charge.currency` is ignored as well, and a zero-decimal currency is refunded at a " +
-              "hundredth of face value.",
-            severity: "high",
-            file: REFUND,
-            startLine: 33,
-            endLine: 33,
-          },
-        ],
-      },
-    },
-  ],
-
-  // Reads for async and for cross-file state; blind to security and to the
-  // amount check.
-  "discovery-3": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "The `appendLedgerEntry` call is not awaited.",
-            reasoning:
-              "It returns a promise as of this same change, and the call is fire-and-forget, so " +
-              "`conn.release()` runs while the insert is still in flight and a rejected insert " +
-              "reaches nobody.",
-            severity: "high",
-            file: REFUND,
-            startLine: 37,
-            endLine: 41,
-          },
-          {
-            claim: "`appendLedgerEntry` mutates the in-memory balance before the insert.",
-            reasoning:
-              "The map is updated first and there is no rollback, so a failed insert leaves the " +
-              "process's balance out of sync with the table for as long as it runs.",
-            severity: "high",
-            file: LEDGER,
-            startLine: 16,
-            endLine: 22,
-          },
-          {
-            claim: "Money is divided by 100 into a float before it reaches the gateway.",
-            reasoning:
-              "`req.amountCents / 100` cannot represent every amount in binary, and the rounding " +
-              "it introduces lands on the customer's statement.",
-            severity: "medium",
-            file: REFUND,
-            startLine: 33,
-            endLine: 33,
-          },
-        ],
-      },
-    },
-  ],
-}
-
-const NOTICE = "src/billing/refund-notice.ts"
-
-/**
- * CAP-11's arms. Each lens reads the SAME change the pool just read, and the
- * three lens slots below cover the third file the unlensed scripts are blind to.
- *
- * `discovery-lens-security` is the control inside the control: it re-finds the
- * SQL injection two pool arms already raised, so `lensRecallGain` has an
- * overlapping lens finding to exclude. A gain number that counted it would be
- * measuring duplication, not coverage.
- */
-const LENS_SCRIPTS: Record<string, SlotScript> = {
-  "discovery-lens-performance": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "`notifyRefunds` issues two queries per row, sequentially, inside the batch loop.",
-            reasoning:
-              "This is an n+1 pattern in both directions: each row costs a charges lookup and a " +
-              "customers lookup, awaited one after the other, so a 500-row batch is 1000 round trip " +
-              "s where two set-based queries would answer the whole batch.",
-            severity: "high",
-            file: NOTICE,
-            startLine: 12,
-            endLine: 14,
-          },
-        ],
-      },
-    },
-  ],
-  "discovery-lens-privacy-a11y": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "The notice log line writes the customer's email and `card_number` in plain text.",
-            reasoning:
-              "Cardholder data is logged on every row of every batch and then lives wherever the " +
-              "logs live, for the whole retention period, reachable by anyone with log access.",
-            severity: "critical",
-            file: NOTICE,
-            startLine: 15,
-            endLine: 15,
-          },
-          {
-            claim: "The rendered notice is grey-on-grey and its image carries no alt attribute.",
-            reasoning:
-              "#9a9a9a on #a4a4a4 is far under any contrast minimum, so a low-vision customer " +
-              "cannot read the confirmation, and with no alt text a screen reader announces " +
-              "nothing at all where the confirmation image is.",
-            severity: "medium",
-            file: NOTICE,
-            startLine: 26,
-            endLine: 28,
-          },
-        ],
-      },
-    },
-  ],
-  "discovery-lens-tests": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "`notifyRefunds` sends irreversible customer email and the change ships no test for it.",
-            reasoning:
-              "Nothing here is covered: not the batch, not the empty batch, not a partial send " +
-              "where the third row throws after two customers have already been emailed.",
-            severity: "high",
-            file: NOTICE,
-            startLine: 10,
-            endLine: 11,
-          },
-        ],
-      },
-    },
-  ],
-  "discovery-lens-security": [
-    {
-      kind: "ok",
-      value: {
-        findings: [
-          {
-            claim: "The charges lookup interpolates the order id into the SQL text.",
-            reasoning:
-              "String interpolation into a query lets a crafted order id rewrite the statement. " +
-              "Two pool models raised this as well — it is deliberately NOT new coverage.",
-            severity: "critical",
-            file: REFUND,
-            startLine: 20,
-            endLine: 22,
-          },
-        ],
-      },
-    },
-  ],
-}
-
-const LENSES = ["performance", "privacy-a11y", "tests", "security"] as const
-
-/**
- * CAP-1 measures DISCOVERY recall, and story 5 put a debate stage inside
- * `review()` between discovery and output. Every scripted slot is therefore
- * asked a SECOND time, for a debate turn this fixture has no opinion about —
- * and `FakeBackend` repeats a script's last step, so without this the debate
- * turn would be handed the discovery envelope, fail validation twice, and
- * decorate a harness that asserts "clean, undegraded 3-model run" with three
- * drop-out warnings.
- *
- * `{turns: []}` is a VALID debate envelope meaning "I stated no position this
- * round". The stage treats it as abstention, which is exactly what this fixture
- * means: it neither denies nor concedes anything, raises no warning, moves no
- * position, and leaves the contested findings to exit at the round cap. The
- * recall numbers below are untouched by it — debate adds and removes no
- * findings — which is the property that keeps CAP-1's measurement the same
- * measurement it was before this stage existed.
- */
-const DEBATE_ABSTENTION: SlotStep = { kind: "ok", value: { turns: [] } }
-
-function abstainingInDebate(scripts: Record<string, SlotScript>): Record<string, SlotScript> {
-  return Object.fromEntries(
-    Object.entries(scripts).map(([slot, script]) => [slot, [...script, DEBATE_ABSTENTION]]),
-  )
-}
-
-/** Three lineages, three slots — the roster AD-4 ranks toward. */
-function threeSlotRun(lenses: readonly string[] = []) {
-  const resolved = selectRoster(
-    [
-      candidate("anthropic", "claude-sonnet-4-5"),
-      candidate("openai", "gpt-5"),
-      candidate("google", "gemini-2.5-pro"),
-    ],
-    { slots: 3, lenses, providerConfigKey: "provider" },
-  )
-  return review({
-    roster: resolved.roster,
-    backend: new FakeBackend(abstainingInDebate({ ...SCRIPTS, ...LENS_SCRIPTS })),
-    clock: fakeClock(),
-    change: SEEDED_CHANGE,
-    priorWarnings: resolved.warnings,
-  })
-}
 
 /**
  * Post-change line numbering for every file in a unified diff, so the defect
@@ -416,7 +116,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("POOLED RECALL STRICTLY EXCEEDS EVERY SINGLE MEMBER'S — CAP-1", async () => {
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
     expect(record.answered).toBe(3)
 
     // The roster answered in full (asserted above), so every filled slot is a
@@ -468,7 +168,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("nobody finds everything — the unfound defects are still counted against the pool", async () => {
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
     const pooled = recall(SEEDED_DEFECTS, record.pool)
 
     expect(pooled.found).toBeLessThan(pooled.total)
@@ -496,7 +196,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // measured, and the numbers below cannot have moved. Assert it rather than
     // reason it: a stage that started rewriting a claim would degrade CAP-1
     // silently, which is the one failure mode this measurement cannot survive.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
 
     expect(record.pool.length).toBeGreaterThan(0)
     for (const finding of record.pool) {
@@ -528,7 +228,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("per-model recall is derivable from `author` alone", async () => {
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
 
     // Partition on nothing but `author` — the field discovery writes (AD-8) —
     // and the arms fall out of one pooled run rather than needing N runs.
@@ -549,7 +249,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("a false positive is not recall", async () => {
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
     const shapeFinding = record.pool.find((f) => f.claim.includes("RefundResult.refundId"))
     expect(shapeFinding).toBeDefined()
     expect(recall(SEEDED_DEFECTS, [shapeFinding!])).toEqual({
@@ -559,7 +259,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("an injected matcher replaces the lexical default (AD-14's shape)", async () => {
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
     // A matcher that agrees with nothing proves the default is not hard-wired.
     expect(recall(SEEDED_DEFECTS, record.pool, () => false).found).toBe(0)
     expect(pooledRecallBeatsBestMember(SEEDED_DEFECTS, record.pool, () => false).beats).toBe(
@@ -572,8 +272,8 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
     // `pooledRecallBeatsBestMember` partitions on `source`, so turning lenses on
     // must not move CAP-1's comparison by a single count in either direction.
     const answered = ["discovery-1", "discovery-2", "discovery-3"]
-    const unlensed = await threeSlotRun()
-    const lensed = await threeSlotRun(LENSES)
+    const unlensed = await seededArm({ slots: 3 })
+    const lensed = await seededArm({ slots: 3, lenses: LENSES })
 
     const a = pooledRecallBeatsBestMember(SEEDED_DEFECTS, unlensed.record.pool, undefined, answered)
     const b = pooledRecallBeatsBestMember(SEEDED_DEFECTS, lensed.record.pool, undefined, answered)
@@ -588,7 +288,7 @@ describe("CAP-1 — pooled recall over the seeded-defect change", () => {
   })
 
   test("the run this is measured over is a clean, undegraded 3-model run", async () => {
-    const { record, rendered } = await threeSlotRun()
+    const { record, rendered } = await seededArm({ slots: 3 })
 
     // No drop-out, no reduced denominator, no single-lineage warning: the recall
     // number is not standing on a degraded run (AD-6).
@@ -617,7 +317,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // below is derived from `SEEDED_DEFECTS` and `Finding.source`; nothing is a
     // hardcoded count, because `change.ts` promises this set extends by adding
     // rows and story 9's third arm reuses the same harness.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
     const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
     expect(gain.beats).toBe(true)
@@ -634,7 +334,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
   test("a lens finding the pool already raised is NOT counted as a gain", async () => {
     // `discovery-lens-security` re-finds the SQL injection two pool arms raised.
     // A gain number that counted it would be measuring duplication.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
     const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
     const lensFindings = record.pool.filter((f) => f.source === "lens")
@@ -648,7 +348,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
   test("with no lenses there is no gain, and the fresh-install numbers are untouched", async () => {
     // AD-3 / AD-15 amended — the default path. Not "a small gain": none, and no
     // lens finding to compute one from.
-    const { record } = await threeSlotRun()
+    const { record } = await seededArm({ slots: 3 })
     const gain = lensRecallGain(SEEDED_DEFECTS, record.pool)
 
     expect(record.pool.every((f) => f.source === "pool")).toBe(true)
@@ -663,7 +363,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // later story can swap in a model-backed one without reopening the harness.
     // Untested, `lensRecallGain` could have reached for the lexical default
     // directly and nothing would have said so.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
 
     expect(lensRecallGain(SEEDED_DEFECTS, record.pool, () => false).beats).toBe(false)
     expect(lensRecallGain(SEEDED_DEFECTS, record.pool, () => false).lensOnlyDefects).toEqual([])
@@ -677,7 +377,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // The honesty property survives the extension: at least one planted defect
     // is findable by no arm at all, lensed or not, so a perfect score is still
     // not on offer and a matcher that credits everything shows up immediately.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
     const missed = missedDefects(SEEDED_DEFECTS, record.pool)
     expect(missed.length).toBeGreaterThan(0)
     expect(missed.map((d) => d.id)).toContain("unchecked-idempotency-key")
@@ -687,7 +387,7 @@ describe("CAP-11 — a lensed pass over the same change", () => {
     // Asserted here as well as in `review.test.ts` because this is the run that
     // most resembles a real one: a full pipeline over the real change, through
     // the same `review()` seam story 9's arms use.
-    const { record, rendered } = await threeSlotRun(LENSES)
+    const { record, rendered } = await seededArm({ slots: 3, lenses: LENSES })
 
     // Over the WHOLE POOL, absorbed members included: a lens finding carries no
     // prior wherever it ends up, and no pool finding carries a denominator that
@@ -718,7 +418,7 @@ describe("story 4 — routing did not move a discovery number", () => {
     // routing runs over the CANONICAL set — so an inserted stage must be invisible
     // here. Asserted structurally, because the numbers above passing unchanged is
     // evidence and this is the reason.
-    const { record } = await threeSlotRun(LENSES)
+    const { record } = await seededArm({ slots: 3, lenses: LENSES })
 
     // Only canonicals were routed; the pool still holds absorbed members that
     // nothing decided about. `pool.length >= findings.length` is true by

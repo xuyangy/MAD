@@ -36,6 +36,7 @@ const FORBIDDEN_FOR_CORE: { pattern: RegExp; why: string }[] = [
   // tree inside `core/` is legitimate; what is forbidden is reaching the
   // top-level one.
   { pattern: /^fixtures(\/|$)/, why: "core must not import from fixtures/" },
+  { pattern: /^ablation(\/|$)/, why: "core must not import from ablation/" },
   { pattern: /^@opencode-ai\//, why: "core must not import a harness SDK (@opencode-ai/*)" },
   { pattern: /^opencode(\/|$)/, why: "core must not import a harness SDK" },
   { pattern: /^@anthropic-ai\//, why: "core must not import a harness SDK" },
@@ -66,6 +67,11 @@ export interface Violation {
 const FORBIDDEN_TREES = [
   { tree: "fixtures", why: "core must not import from fixtures/" },
   { tree: "adapters", why: "core must not import from adapters/" },
+  // Story 9 — the fourth top-level tree. CAP-9's ablation drives `core/` from
+  // outside it, exactly as `fixtures/` does, and the arrow never points back: a
+  // measurement harness reachable from inside a stage would let an experiment's
+  // scaffolding ship inside the tool it is measuring.
+  { tree: "ablation", why: "core must not import from ablation/" },
 ] as const
 
 /**
