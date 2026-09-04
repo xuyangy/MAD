@@ -101,7 +101,38 @@ function escapesTo(file: string, specifier: string): { why: string } | undefined
  * failing is a module cycle that surfaces as an undefined constant at import
  * time rather than as an error anyone can read.
  */
-const MUST_NOT_IMPORT = "core/budget/limiter.ts"
+const MUST_NOT_IMPORT: ReadonlySet<string> = new Set([
+  "core/budget/limiter.ts",
+  // Story 8, and the same cycle for the same reason: `core/domain/run-record.ts`
+  // imports `SpendShares` from it while `core/budget/ledger.ts` imports from
+  // `core/domain/`. A SET rather than a second string because the property is
+  // "these files import nothing", and a rule written once per file is a rule
+  // somebody adds a third file to without noticing the second.
+  "core/budget/presets.ts",
+])
+
+/**
+ * AD-15 — the internals of the budget's stage shares, which a STAGE may not
+ * touch.
+ *
+ * A stage may ASK the accountant (`mayISpend`) and may ask it to phrase the
+ * answer (`ceilingClause`, `ceilingNamed`). A stage that reads `ledger.shares`
+ * and multiplies by the cap is a stage doing its own budget arithmetic, which is
+ * exactly what AD-15's first sentence forbids and what makes two authorities on
+ * "may I spend?" possible again. `budgetReport` is the renderer's one door: it
+ * returns finished figures, so `core/stages/output.ts` can print the BUDGET
+ * block without computing any part of it.
+ *
+ * Story 7A's commit records the general case: a layering property promised in
+ * prose and enforced by nothing is the shape that breaks.
+ */
+const STAGE_MUST_NOT_METER = [
+  "stageCeiling",
+  "spentInStage",
+  "clampSpendShares",
+  "CUMULATIVE_SHARE",
+  "ledger.shares",
+]
 
 export function scanSource(file: string, source: string): Violation[] {
   const violations: Violation[] = []
@@ -123,21 +154,43 @@ export function scanSource(file: string, source: string): Violation[] {
     })
   }
 
+  // AD-15 — AND NO STAGE METERS ITSELF (story 8). Same shape as the clause
+  // above, same reason, one file check rather than one per import.
+  if (unix.startsWith("core/stages/") && !unix.endsWith(".test.ts")) {
+    for (const symbol of STAGE_MUST_NOT_METER) {
+      // `ledger.shares` carries a dot, so it is matched literally; the bare
+      // identifiers get word boundaries so `stageCeilingFoo` is not a false hit.
+      const pattern = symbol.includes(".")
+        ? new RegExp(symbol.replaceAll(".", "\\."))
+        : new RegExp(`\\b${symbol}\\b`)
+      if (!pattern.test(source)) continue
+      violations.push({
+        file,
+        specifier: symbol,
+        why:
+          `AD-15 — a stage must not do budget arithmetic. \`${symbol}\` is an internal of the ` +
+          `accountant's stage shares. Ask \`mayISpend(ledger, stage)\`, phrase a refusal with ` +
+          `\`ceilingClause\`/\`ceilingNamed\`, and render figures from \`budgetReport\` — all ` +
+          `three return finished answers, so no stage has to compute a ceiling.`,
+      })
+    }
+  }
+
   IMPORT_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = IMPORT_RE.exec(source)) !== null) {
     const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
     if (!specifier) continue
 
-    if (unix === MUST_NOT_IMPORT) {
+    if (MUST_NOT_IMPORT.has(unix)) {
       violations.push({
         file,
         specifier,
         why:
-          `\`${MUST_NOT_IMPORT}\` must import nothing. \`core/domain/run-record.ts\` imports ` +
-          `\`DEFAULT_MAX_CONCURRENCY\` from it and \`core/budget/ledger.ts\` imports from ` +
-          `\`core/domain/\`; this file having no imports is the only thing keeping that from ` +
-          `being a cycle. Move the constant into \`core/domain/\` instead of importing here.`,
+          `\`${unix}\` must import nothing. \`core/domain/run-record.ts\` imports from it and ` +
+          `\`core/budget/ledger.ts\` imports from \`core/domain/\`; this file having no imports ` +
+          `is the only thing keeping that from being a cycle. Move what you need into ` +
+          `\`core/domain/\` instead of importing here.`,
       })
       continue
     }
@@ -181,7 +234,8 @@ export async function main(): Promise<number> {
 
   console.log(
     `AD-1 dependency direction OK — ${checked} file(s) under core/ checked ` +
-      `(\`${MUST_NOT_IMPORT}\` imports nothing).`,
+      `(${[...MUST_NOT_IMPORT].map((f) => `\`${f}\``).join(" and ")} import nothing; ` +
+      `no stage builds a limiter or meters its own budget).`,
   )
   return 0
 }

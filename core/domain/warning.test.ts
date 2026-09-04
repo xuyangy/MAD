@@ -14,13 +14,14 @@ import { DISCLOSURE_CODES, WARNING_CODES, type WarningCode } from "./warning.ts"
 
 describe("the warning vocabulary (AD-6)", () => {
   test("THE COUNT IS PINNED, so a new code forces somebody to classify it", () => {
-    // Twelve: four roster reports, the drop-out, the denominator, the partial
+    // Thirteen: four roster reports, the drop-out, the denominator, the partial
     // envelope, the provider disclosure, the unresolved section, the untooled
-    // fact-check, the unavailable judge, and — from story 7A — the cancelled
-    // run. Adding a thirteenth is a deliberate act: AD-6's report set is an
-    // `Ask First` that three stories declined before 7A answered it, so it
-    // should not be possible to do it quietly.
-    expect(WARNING_CODES).toHaveLength(12)
+    // fact-check, the unavailable judge, from story 7A the cancelled run, and
+    // from story 8 the budget-truncated discovery. Adding a fourteenth is a
+    // deliberate act: AD-6's report set is an `Ask First` that three stories
+    // declined before 7A answered it, so it should not be possible to do it
+    // quietly.
+    expect(WARNING_CODES).toHaveLength(13)
   })
 
   test("every code is unique", () => {

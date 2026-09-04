@@ -81,6 +81,9 @@ interface ToolResult {
     lensInstructions?: { lens: string; origin: string }[]
     cancelled?: string
     maxConcurrency?: number
+    preset?: string
+    tokenCap?: number | null
+    budgetSkipped?: number
     artifacts?: string
     artifactsOutcome?: string
   }
@@ -394,5 +397,82 @@ describe("mad_review.execute — run control reaches the host boundary (story 7A
       expect(materialSpans(result.output)[0]!.body).toContain("model turn(s) in flight at once")
       expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
     })
+  })
+})
+
+describe("mad_review.execute — CAP-7: the budget and the preset reach the core (story 8)", () => {
+  test("OMITTING BOTH REPRODUCES THE RUN THIS REPO SHIPPED BEFORE STORY 8", async () => {
+    // The identity property, checked at the surface a user actually touches. A
+    // preset table edit that broke it would fail here.
+    const result = await executeWith({})
+    expect(result.metadata?.preset).toBeUndefined()
+    expect(result.metadata?.tokenCap).toBeNull()
+    expect(result.metadata?.budgetSkipped).toBe(0)
+    expect(result.metadata?.lensSlots).toEqual([])
+    expect(result.metadata?.maxConcurrency).toBe(4)
+  })
+
+  test("`preset: \"normal\"` adds no lens slot and moves no ceiling", async () => {
+    const result = await executeWith({ preset: "normal" })
+    expect(result.metadata?.preset).toBe("normal")
+    expect(result.metadata?.lensSlots).toEqual([])
+    expect(result.metadata?.maxConcurrency).toBe(4)
+  })
+
+  test("PARANOID ADDS THREE LENS SLOTS TO THREE POOL SLOTS — SIX turns, not twelve", async () => {
+    // AD-15 corrected 2026-08-15: the fan-out is ADDITIVE, `slots + lenses`. The
+    // multiplicative reading the amendment originally carried would say 3 x
+    // (1 + 3) = 12, and sizing the presets against it would size them 2.25x too
+    // large. Counted at the seam so a later editor cannot reintroduce it.
+    const result = await executeWith({ preset: "paranoid" })
+    expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
+    expect(result.metadata?.lensSlots).toHaveLength(3)
+    expect(result.metadata?.lensInstructions?.map((l) => l.lens)).toEqual([
+      "security",
+      "reliability",
+      "outsider",
+    ])
+    // Every lens a preset names is SHIPPED, never generated at run time: a typo
+    // would buy three full-price discovery turns against instructions nobody
+    // wrote, and label them `generated` in the report.
+    for (const entry of result.metadata?.lensInstructions ?? []) {
+      expect(entry.origin).toBe("shipped")
+    }
+    expect(result.metadata!.requested! + result.metadata!.lensSlots!.length).toBe(6)
+    expect(result.metadata?.maxConcurrency).toBe(6)
+  })
+
+  test("AN EXPLICIT `lenses` BEATS THE PRESET — INCLUDING AN EXPLICIT EMPTY LIST", async () => {
+    // `args.lenses?.length` would read `[]` as "nothing asked for" and sell the
+    // caller three billed discovery turns they had just declined. The test is
+    // the whole reason the check is `!== undefined`.
+    const empty = await executeWith({ preset: "paranoid", lenses: [] })
+    expect(empty.metadata?.lensSlots).toEqual([])
+
+    const named = await executeWith({ preset: "paranoid", lenses: ["tests"] })
+    expect(named.metadata?.lensInstructions?.map((l) => l.lens)).toEqual(["tests"])
+  })
+
+  test("`budget` reaches the ledger as a TOKEN CAP", async () => {
+    const result = await executeWith({ budget: 50_000 })
+    expect(result.metadata?.tokenCap).toBe(50_000)
+  })
+
+  test("`budget: 0` RUNS AND ASKS NOBODY — MAD never refuses up front", async () => {
+    // `cost-model.md`: the tool starts a review it may not be able to finish and
+    // reports where it stopped. A zero budget is answered, not rejected.
+    const result = await executeWith({ budget: 0 })
+    expect(result.metadata?.tokenCap).toBe(0)
+    expect(result.metadata?.budgetSkipped).toBe(DEFAULT_DISCOVERY_SLOTS)
+    expect(result.output).toContain("the budget ran out before any model was asked")
+    expect(result.output).not.toContain("Every slot in the roster failed or dropped out")
+  })
+
+  test("AN UNRECOGNISED PRESET IS NOT A CRASH — it is `normal`", async () => {
+    // The value arrives from a model. AD-15's rule generalises: a request MAD
+    // cannot honour is an outcome, not an error.
+    const result = await executeWith({ preset: "thorough" })
+    expect(result.metadata?.lensSlots).toEqual([])
+    expect(result.metadata?.maxConcurrency).toBe(4)
   })
 })

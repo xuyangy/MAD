@@ -11,6 +11,12 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 
+import {
+  clampPreset,
+  PRESET_DIALS,
+  PRESETS,
+  SUGGESTED_BUDGET,
+} from "../../core/budget/ledger.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
 import { oneLine } from "../../core/prompt/material.ts"
@@ -167,12 +173,49 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
                 `the output says so. Lens findings are additive coverage: they carry no ` +
                 `co-discovery fraction and never count toward roster diversity.`,
             ),
+          budget: tool.schema
+            .number()
+            .int()
+            .min(0)
+            .optional()
+            .describe(
+              `OPTIONAL ceiling on this review, IN TOKENS — never in currency, because what a ` +
+                `token costs is this host's business and not MAD's. Omit for no ceiling, which is ` +
+                `the default. MAD STARTS A REVIEW IT MAY NOT BE ABLE TO FINISH and tells you ` +
+                `where it stopped; it never refuses up front. The number is split across the ` +
+                `three billing stages, so a cheap discovery hands its remainder to debate rather ` +
+                `than one stage eating the whole budget. Rough fits over a ~400-line change: ` +
+                `${SUGGESTED_BUDGET.quick} for quick, ${SUGGESTED_BUDGET.normal} for normal, ` +
+                `${SUGGESTED_BUDGET.paranoid} for paranoid.`,
+            ),
+          preset: tool.schema
+            .enum(PRESETS)
+            .optional()
+            .describe(
+              `OPTIONAL depth. \`normal\` (the default, and identical to passing nothing) routes ` +
+                `at a 0.8 co-discovery threshold with no lenses. \`quick\` drops the threshold to ` +
+                `0.5, so fewer findings are contested and fewer debate turns are billed. ` +
+                `\`paranoid\` raises it to 1.0 AND adds three lens slots (security, reliability, ` +
+                `outsider) — with the default 3 slots that is SIX billed discovery turns rather ` +
+                `than three, and it is the only setting here that costs more. A preset moves ` +
+                `numbers, never policy, and an argument you pass explicitly always beats it.`,
+            ),
         },
         async execute(args, context) {
           // Belt and braces: the schema bounds it, and so does this, because the
           // value arrives from a model call and each slot costs real money.
           const slots = clampDiscoverySlots(args.slots)
-          const lenses = clampLenses(args.lenses)
+          // CAP-7 (story 8) — RESOLVED BEFORE THE ROSTER, because the lens half
+          // of a preset is a roster decision and `resolveRoster` is what turns a
+          // lens list into slots.
+          //
+          // `args.lenses !== undefined` and NOT `args.lenses?.length`: an
+          // explicit `lenses: []` under `paranoid` is a caller declining the lens
+          // pass, and a truthiness test would silently sell them three billed
+          // discovery turns they just refused.
+          const preset = clampPreset(args.preset)
+          const dials = PRESET_DIALS[preset]
+          const lenses = clampLenses(args.lenses !== undefined ? args.lenses : [...dials.lenses])
 
           let resolved
           try {
@@ -259,6 +302,12 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             clock: systemClock(),
             change,
             priorWarnings: resolved.warnings,
+            // CAP-7 (story 8) — the two user-facing dials, and the only two on
+            // this surface. `tokenCap` is clamped again in `review()`; passing it
+            // through unclamped here would be fine, and it is clamped anyway for
+            // the reason `slots` is — the value arrives from a model call.
+            preset: args.preset === undefined ? undefined : preset,
+            tokenCap: args.budget,
             // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
             // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story
             // `execute` took one parameter and never read it: pressing stop in
@@ -379,6 +428,16 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               cancelled: record.cancelled?.stage,
               // AD-15 amended — the peak this run was held to.
               maxConcurrency: record.ledger.maxConcurrency,
+              // CAP-7 (story 8) — the two dials a caller set, and the one fact
+              // about the budget that changes what the review is WORTH.
+              //
+              // `budgetSkipped` is a COUNT and not the slot ids: a host branching
+              // on "was this review cut short" needs the number, and the ids are
+              // already in the rendered report and the `discovery-truncated`
+              // warning's detail for anyone who needs which.
+              preset: record.preset,
+              tokenCap: record.ledger.cap,
+              budgetSkipped: record.skippedForBudget?.length ?? 0,
               // AD-16 — TWO FIELDS, NOT ONE OVERLOADED STRING (code review
               // 2026-08-31). This used to be a single field holding either a
               // directory path or the bare literal `"refused"`/`"failed"`, so a

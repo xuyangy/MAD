@@ -154,4 +154,80 @@ describe("AD-1 dependency-direction rule", () => {
   test("the shipped core/ tree passes", async () => {
     expect(await main()).toBe(0)
   })
+
+  // -------------------------------------------------------------------------
+  // Story 8 — the presets module imports nothing, and no stage meters itself.
+  // -------------------------------------------------------------------------
+
+  test("`core/budget/presets.ts` importing ANYTHING is a violation", () => {
+    // `core/domain/run-record.ts` imports `SpendShares` from it while
+    // `core/budget/ledger.ts` imports from `core/domain/`. This file having no
+    // imports is the only thing keeping that from being a cycle — a property
+    // that was a doc comment for `limiter.ts` until it was made a rule.
+    expect(
+      scanSource("core/budget/presets.ts", `import { spent } from "./ledger.ts"
+`),
+    ).toHaveLength(1)
+    expect(
+      scanSource("core/budget/presets.ts", `import type { Stage } from "../domain/finding.ts"
+`),
+    ).toHaveLength(1)
+  })
+
+  test("the presets module with no imports passes", () => {
+    expect(scanSource("core/budget/presets.ts", `export const PRESETS = ["quick"]
+`)).toHaveLength(0)
+  })
+
+  test("A STAGE THAT READS THE SHARES OR COMPUTES A CEILING IS A VIOLATION", () => {
+    // AD-15 — a stage may ASK the accountant; a stage that multiplies the cap by
+    // a share is a stage metering itself, which is what the decision's first
+    // sentence forbids.
+    for (const symbol of ["stageCeiling", "spentInStage", "clampSpendShares", "CUMULATIVE_SHARE"]) {
+      expect(
+        scanSource("core/stages/debate.ts", `const x = ${symbol}(ledger, "debate")
+`),
+      ).toHaveLength(1)
+    }
+    expect(
+      scanSource("core/stages/output.ts", `const share = record.ledger.shares.debate
+`),
+    ).toHaveLength(1)
+  })
+
+  test("a stage that only ASKS the accountant passes", () => {
+    // The permitted vocabulary, and the whole point of the rule: all three of
+    // these return finished answers, so no stage has to compute a ceiling.
+    expect(
+      scanSource(
+        "core/stages/debate.ts",
+        `if (!mayISpend(ledger, "debate")) return
+const why = ceilingClause(ledger, "debate")
+` +
+          `const rows = budgetReport(ledger)
+const named = ceilingNamed(ledger, "debate")
+`,
+      ),
+    ).toHaveLength(0)
+  })
+
+  test("the rule is scoped to stages, and does not fire on the accountant itself", () => {
+    // `core/budget/ledger.ts` is where this arithmetic BELONGS.
+    expect(
+      scanSource("core/budget/ledger.ts", `export function stageCeiling() {}
+`),
+    ).toHaveLength(0)
+    // Nor on a stage's own test, which is where the internals are asserted.
+    expect(
+      scanSource("core/stages/debate.test.ts", `expect(stageCeiling(ledger, "debate")).toBe(1)
+`),
+    ).toHaveLength(0)
+  })
+
+  test("a near-miss identifier is NOT a violation — the match is word-bounded", () => {
+    expect(
+      scanSource("core/stages/debate.ts", `const stageCeilingLabel = "x"
+`),
+    ).toHaveLength(0)
+  })
 })

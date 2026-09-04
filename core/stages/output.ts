@@ -97,6 +97,7 @@
  * multi-model run says so (`pooledNotYetMerged`).
  */
 
+import { budgetReport, ceilingNamed, spentTokens } from "../budget/ledger.ts"
 import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
@@ -554,7 +555,12 @@ function debateSummary(record: RunRecord): string[] {
   // nobody can interpret, and a ceiling that only appears once it has been hit
   // is a ceiling the reader cannot check the run against (code review
   // 2026-08-24). `null` is rendered as words, never as a blank or a `0`.
-  const budget = record.ledger.cap === null ? "no token cap" : `token cap ${record.ledger.cap}`
+  // AD-15 (story 8) — the ceiling named here is the one DEBATE was actually held
+  // to, which with a share in force is not the cap. `ceilingNamed` owns both
+  // phrasings so this line cannot disagree with the strand reason printed under
+  // a finding, and it renders as `the token cap of N` whenever the two coincide.
+  const budget =
+    record.ledger.cap === null ? "no token cap" : ceilingNamed(record.ledger, "debate")
 
   const lines = [
     `DEBATE (round cap ${record.maxRounds}, ${budget}): ${counts.debated} contested finding(s), ` +
@@ -970,18 +976,28 @@ function renderJudge(finding: Finding): string | undefined {
  * re-announces this notice over a fully-clustered pool — a false statement, in
  * the one place AD-6 exists to keep honest. (Reviewed and bound, 2026-08-14.)
  *
- * The count is over the findings this notice actually sits above — the resolved
- * ones. Today nothing is unresolved, but AD-6d's section fills from story 8, and
- * a header counting findings printed in a different section is the kind of quiet
- * arithmetic error a reader has no way to catch.
+ * The count is over the whole POOL, resolved or not (story 8). It used to be
+ * over `resolved` alone, on the reasoning that a header should count the rows it
+ * sits above — correct while `unresolved` was unreachable, and wrong the moment
+ * story 8's budget made an all-unresolved run routine: the notice vanished
+ * exactly when the once-per-model pool it warns about was the only thing on the
+ * page. Both sections render pool findings, so the pool is the honest scope.
  */
-function pooledNotYetMerged(record: RunRecord, resolved: readonly Finding[]): string[] {
+function pooledNotYetMerged(record: RunRecord): string[] {
   // AD-17c/e — POOL-SCOPED, every number in it. `answered` already counts pool
   // models only (AD-6a); the count and the uniformity check below must match
   // that scope or the sentence describes a set it did not read. A lens finding
   // is additive coverage sitting in the same list, not a member of the union
   // this notice is about.
-  const pooled = resolved.filter((finding) => finding.source === "pool")
+  //
+  // AD-14 / deferred-work 2026-08-14 (closed by story 8) — DRIVEN OFF THE POOL,
+  // NOT OFF THE RESOLVED LIST. This read `resolved` alone, and the entry filed
+  // against it named exactly the state this story makes routine: when every
+  // finding dies at a stage, `resolved` is empty, the notice is suppressed, and
+  // the UNRESOLVED section below prints an unmerged pool — one defect once per
+  // model — with nothing above it saying so. The warning belongs above the rows
+  // a reader is about to be confused by, whichever section they are in.
+  const pooled = record.findings.filter((finding) => finding.source === "pool")
 
   if (record.answered <= 1) return []
   if (pooled.length === 0) return []
@@ -1167,7 +1183,7 @@ export function renderRunRecord(record: RunRecord): string {
   const unresolved = record.findings.filter((f) => f.unresolved)
 
   // ---- AD-6 — what the finding list below actually is, before clustering ----
-  lines.push(...pooledNotYetMerged(record, resolved))
+  lines.push(...pooledNotYetMerged(record))
 
   // ---- CAP-3 — the dial and the partition it produced ----
   lines.push(...routingSummary(record))
@@ -1199,6 +1215,21 @@ export function renderRunRecord(record: RunRecord): string {
       lines.push(
         `  No model failed and no model was retried; the run stopped during the ` +
           `${record.cancelled.stage} stage.`,
+      )
+    } else if (record.skippedForBudget !== undefined && record.answered === 0) {
+      // AD-15 / AD-6 (story 8) — THE SAME DEFECT, RE-OPENED BY A SECOND CAUSE.
+      // 7A fixed this branch for cancellation and the fix was cause-specific:
+      // once the budget can refuse a discovery turn, a run whose whole roster
+      // went unasked lands back on "Every slot in the roster failed or dropped
+      // out" — naming providers that never failed, three lines under a
+      // `discovery-truncated` warning saying no model failed. Ordered AFTER the
+      // cancellation branch (a stop explains an empty roster completely and is
+      // the user's own action) and BEFORE the bare `answered === 0`, which is
+      // the branch that would otherwise catch it.
+      lines.push("  NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+      lines.push(
+        `  No model failed and no model was retried; ${record.skippedForBudget.length} slot(s) ` +
+          `were skipped to stay inside the token budget.`,
       )
     } else if (record.answered === 0) {
       lines.push("  NO MODEL ANSWERED — this is not a clean review.")
@@ -1366,9 +1397,15 @@ export function renderRunRecord(record: RunRecord): string {
 
   // ---- AD-15 — tokens, never currency ----
   const t = record.ledger.total
+  // AD-15 / CAP-7 (story 8) — the SPEND AGAINST THE CEILING, on the one line
+  // that already existed, so the overshoot is visible to a reader who reads
+  // nothing else. Omitted entirely when there is no cap, so an uncapped run
+  // renders byte-identically to what it rendered before this story.
+  const spentClause =
+    record.ledger.cap === null ? "" : ` | spent: ${spentTokens(t)} of ${record.ledger.cap}`
   lines.push(
     `TOKENS — turns: ${record.ledger.entries.length} | in: ${t.input} | out: ${t.output} | ` +
-      `reasoning: ${t.reasoning} | cache r/w: ${t.cacheRead}/${t.cacheWrite}`,
+      `reasoning: ${t.reasoning} | cache r/w: ${t.cacheRead}/${t.cacheWrite}${spentClause}`,
   )
   // AD-15 amended (story 7A) — the PEAK, beside the total it is the second time
   // scale of. It is MAD-computed and it is not a degradation, so it belongs on
@@ -1379,6 +1416,7 @@ export function renderRunRecord(record: RunRecord): string {
     `PEAK — at most ${record.ledger.maxConcurrency} model turn(s) in flight at once ` +
       `(rate, not total; nothing was refused or dropped by this bound).`,
   )
+  lines.push(...budgetBlock(record))
 
   return lines.join("\n")
 }
@@ -1387,4 +1425,45 @@ export function renderRunRecord(record: RunRecord): string {
 export function output(record: RunRecord): string {
   record.findings = rankFindings(record.findings)
   return renderRunRecord(record)
+}
+
+/**
+ * AD-15 / CAP-7 (story 8) — where the money actually went, stage by stage.
+ *
+ * Prints NOTHING when there is no cap: an uncapped run has no ceilings to
+ * compare against, and a block of "spent X of no limit" rows is noise in the
+ * place a reader looks for a problem.
+ *
+ * THE RENDERER DOES NO BUDGET ARITHMETIC. Every number here comes back from
+ * `budgetReport` in `core/budget/ledger.ts` — a stage that read the shares off
+ * the ledger and multiplied would be a stage metering itself, which AD-15's
+ * first sentence forbids and `scripts/lint-dependency-direction.ts` mechanically
+ * prevents. It is also what keeps the printed figures from drifting from the
+ * ones the gate compared, since both are folded out of the same `entries`.
+ *
+ * The three stage figures need not sum to the run total, and that is not a bug
+ * to paper over: `LedgerEntry.stage` is a bare string, so an entry written by
+ * anything other than the three billing stages lands in no bucket. The TOKENS
+ * line above carries the true total, and this block never claims to replace it.
+ */
+function budgetBlock(record: RunRecord): string[] {
+  const { cap } = record.ledger
+  if (cap === null) return []
+
+  const preset = record.preset === undefined ? "no preset" : `preset ${record.preset}`
+  const lines = [`BUDGET (${preset}, token cap ${cap}) — each stage's share of that one cap:`]
+  for (const row of budgetReport(record.ledger)) {
+    const ceiling = row.ceiling === null ? "no ceiling" : `${row.ceiling}`
+    // The ceiling is CUMULATIVE, and saying so on every row is cheaper than a
+    // reader deducing it from three numbers that do not add up to the cap.
+    const over = row.ceiling !== null && row.spent > row.ceiling ? " — OVER" : ""
+    lines.push(`  ${row.stage}: ${row.spent} spent, cumulative ceiling ${ceiling}${over}`)
+  }
+  if (record.skippedForBudget !== undefined) {
+    lines.push(
+      `  ${record.skippedForBudget.length} discovery slot(s) were never asked, to stay inside ` +
+        `discovery's share. No model failed.`,
+    )
+  }
+  return lines
 }

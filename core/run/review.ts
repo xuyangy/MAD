@@ -10,7 +10,16 @@
  */
 
 import type { Roster } from "../domain/roster.ts"
-import { clampConcurrency, clampTokenCap, createLimiter } from "../budget/ledger.ts"
+import {
+  clampConcurrency,
+  clampPreset,
+  clampSpendShares,
+  clampTokenCap,
+  createLimiter,
+  PRESET_DIALS,
+  type Preset,
+  type SpendShares,
+} from "../budget/ledger.ts"
 import type { Stage } from "../domain/finding.ts"
 import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
@@ -61,17 +70,20 @@ export interface ReviewDeps {
    * `clampTokenCap`. Absent means NO ceiling, which is what every caller before
    * story 5 got.
    *
-   * **IT IS MEASURED OVER THE WHOLE RUN BUT ONLY GATES DEBATE.** The ledger
-   * records every stage's turns, so `spent` includes discovery — but debate is
-   * the only stage that asks `mayISpend` before spending, because it is the only
-   * stage story 5 gave a gate. The consequence is worth stating rather than
-   * discovering: a cap smaller than discovery's own spend leaves nothing for
-   * debate, so the first gate check refuses and EVERY contested finding is
-   * marked `unresolved { diedAtStage: "debate" }` without a single debate turn
-   * having run. That is honest — the run says exactly where it stopped (AD-6d) —
-   * but it is not "the budget was too small for the debate", it is "the budget
-   * was already gone". Story 8 owns the user-facing budget number and is where
-   * metering the earlier stages belongs.
+   * **IT IS MEASURED OVER THE WHOLE RUN, AND EVERY BILLING STAGE ASKS BEFORE IT
+   * SPENDS** (story 8). Each of the three is held to a CUMULATIVE SHARE of this
+   * one number — discovery may take the run to 30% of it, debate to 65%, the
+   * judge to all of it — so a cheap stage rolls its remainder forward and an
+   * expensive one cannot eat the whole cap before the next stage starts.
+   * `spendShares` below is the dial; `core/budget/presets.ts` holds the numbers
+   * and the reasoning.
+   *
+   * This paragraph used to say debate was the only gated stage, and to document
+   * the consequence: a cap smaller than discovery's own spend left nothing for
+   * debate, so its first gate refused and EVERY contested finding was marked
+   * `unresolved { diedAtStage: "debate" }` without a single debate turn having
+   * run — honest about where it stopped, but blaming the wrong stage. That state
+   * is what the shares close, and a test pins it closed.
    *
    * It lives on the LEDGER rather than beside it, so "may I spend?" is
    * answerable from one object (`core/budget/ledger.ts`). Same `Ask First` as
@@ -96,10 +108,48 @@ export interface ReviewDeps {
    * inside themselves today, so the single object costs nothing and stays true
    * if that ever changes.
    *
-   * Same `Ask First` as `tokenCap` and `maxRounds`: this seam, never the
-   * `mad_review` tool surface. Story 8 owns the user-facing number.
+   * Story 8 puts the user-facing number in front of it: `preset` moves this
+   * default, and `paranoid` raises it to 6 because it adds three discovery slots.
+   * The MECHANISM is still story 7A's and is still constructed here and nowhere
+   * else.
    */
   maxConcurrency?: number
+  /**
+   * CAP-7 (story 8) — ONE WORD that resolves to a table of dial values:
+   * `quick`, `normal` or `paranoid`. Clamped by `clampPreset`, which answers
+   * `normal` for anything it does not recognise.
+   *
+   * **AN EXPLICIT DIAL ALWAYS BEATS THE PRESET**, and that precedence is the
+   * whole contract of this field. A caller who passes `preset: "quick"` and
+   * `threshold: 0.9` gets 0.9 — the preset is a set of DEFAULTS for dials the
+   * caller did not state, never an override of ones they did. The alternative
+   * would make the two arguments fight, with the winner depending on the order
+   * they happen to be read in.
+   *
+   * `normal` is the IDENTITY preset: every value it carries is the shipped
+   * default verbatim, so `preset: "normal"` and passing nothing are the same run
+   * (AD-3). A test pins it, so a table edit cannot quietly break it.
+   *
+   * It does NOT move `maxRounds` (`cost-model.md`: the dial is which lenses, not
+   * how many rounds) and it does not move the slot count (AD-3: the roster is
+   * the host's configured models, not a word's decision). What it moves is
+   * `threshold`, which lenses run, and `maxConcurrency`.
+   */
+  preset?: Preset
+  /**
+   * AD-15 / CAP-7 (story 8) — how far into `tokenCap` each stage may take the
+   * run's total, as fractions. Clamped by `clampSpendShares`; absent means
+   * `CUMULATIVE_SHARE`, which is what every caller before this story got in
+   * effect, since no stage but debate and the judge was gated at all.
+   *
+   * Two of these are dials and the third is not: `judge` is forced to 1, because
+   * a judge share below 1 makes part of the stated cap unreachable — a ceiling
+   * that lies to the reader.
+   *
+   * Same `Ask First` as `maxRounds`: this seam, never the `mad_review` tool
+   * surface. The tool surface gets `budget` and `preset` and nothing else.
+   */
+  spendShares?: Partial<SpendShares>
   /**
    * AD-2 amended / AD-6f (story 7A) — the user's stop.
    *
@@ -229,6 +279,12 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const instructions =
     deps.instructions ?? resolveInstructions({ taskType: "coding", role: "discovery" })
 
+  // CAP-7 (story 8) — THE PRESET IS RESOLVED ONCE, HERE, and every dial below
+  // reads from `dials` rather than re-deriving it. Resolving it twice is how the
+  // two halves of one word start to disagree.
+  const preset: Preset = clampPreset(deps.preset)
+  const dials = PRESET_DIALS[preset]
+
   const record: RunRecord = {
     runId: clock.id("run"),
     startedAt: clock.now(),
@@ -239,7 +295,15 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     lensInstructions: [],
     // CAP-3 — clamped once, here, so the record carries the value routing
     // actually used rather than the one the caller asked for.
-    threshold: clampThreshold(deps.threshold),
+    // CAP-7 (story 8) — AN EXPLICIT DIAL BEATS THE PRESET. `??` and not `||`:
+    // `threshold: 0` is a caller asking for 0 and must not fall through to the
+    // preset's value. Resolved once, here, so the record carries what routing
+    // actually used.
+    threshold: clampThreshold(deps.threshold ?? dials.threshold),
+    // CAP-7 — recorded ONLY when the caller named one. Absent is a real fact:
+    // it says no preset was asked for, which is a different report from a run
+    // that asked for `normal` even though the two runs are identical today.
+    ...(deps.preset === undefined ? {} : { preset }),
     // CAP-4 — clamped once, here, for exactly `threshold`'s reason: the record
     // carries the value debate actually used, not the one the caller asked for.
     maxRounds: clampMaxRounds(deps.maxRounds),
@@ -249,7 +313,11 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     // unclamped `NaN` is the one that bites: `spent < NaN` is false for every
     // spend, so it refuses the first turn and the run then blames a budget
     // nobody set (code review 2026-08-24).
-    ledger: emptyLedger(clampTokenCap(deps.tokenCap), clampConcurrency(deps.maxConcurrency)),
+    ledger: emptyLedger(
+      clampTokenCap(deps.tokenCap),
+      clampConcurrency(deps.maxConcurrency ?? dials.maxConcurrency),
+      clampSpendShares(deps.spendShares),
+    ),
   }
 
   // AD-15 amended — ONE limiter, created once, from the number the record now
@@ -303,6 +371,12 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   })
 
   record.answered = discovered.answered
+  // AD-15 (story 8) — recorded only when it happened, for `cancelled`'s reason:
+  // absent is the ordinary run, and an always-present empty array would put a
+  // budget field on every artifact dump of a run no budget touched.
+  if (discovered.skippedForBudget.length > 0) {
+    record.skippedForBudget = [...discovered.skippedForBudget]
+  }
   // The pre-cluster union is RETAINED, not reconstructed. CAP-1's recall harness
   // measures the discovery pool, and a merged set is a different set.
   record.pool = discovered.findings
@@ -357,10 +431,21 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // discovery is the only stage that knows who answered. The non-author seat in
   // a debate room exists to produce a contest; offering it to a model that
   // already failed twice would buy a warning instead of an argument.
+  //
+  // AD-15 (story 8) — AND FROM THE SLOTS THE BUDGET REFUSED, which is the second
+  // half of the same rule and was a live defect the moment discovery gained a
+  // gate. `droppedOut` alone is not "who did not answer": a slot MAD never asked
+  // is in neither list, so it would have been seated as the non-author skeptic
+  // in a debate room and BILLED — under the very budget that refused to ask it.
+  // A model that never spoke cannot contest a finding, and paying for it out of
+  // an exhausted budget is the worst version of that.
   const answeredSlots = roster.slots
     .map((slot) => slot.slot)
     .concat(roster.lensSlots.map((slot) => slot.slot))
-    .filter((slot) => !discovered.droppedOut.includes(slot))
+    .filter(
+      (slot) =>
+        !discovered.droppedOut.includes(slot) && !discovered.skippedForBudget.includes(slot),
+    )
 
   // ONE BUILD (code review 2026-08-28). The framed change span is the largest
   // string in the pipeline and both remaining stages need the same one. Building

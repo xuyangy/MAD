@@ -72,6 +72,33 @@ export const WARNING_CODES = [
    * stop" are different facts, and neither is "we finished".
    */
   "run-cancelled",
+  /**
+   * AD-6a / AD-15 (story 8) — THE BUDGET TRUNCATED DISCOVERY.
+   *
+   * The seventh report, and a degradation for `run-cancelled`'s reason exactly:
+   * a roster MAD chose not to finish asking is a PARTIAL run, which is what AD-6
+   * governs. Stories 2A, 3 and 4 each declined a new code because a clamp or a
+   * route is a decision rather than a partial run; this is not that.
+   *
+   * IT IS NEITHER OF ITS TWO NEIGHBOURS, and the whole reason it exists is that
+   * folding it into either one would be a false report:
+   *
+   * - NOT `model-dropped-out`. No model failed and no model was even asked.
+   *   Naming a provider here would blame a working model for the user's own
+   *   budget, which is the exact class of dishonesty this tool is built against.
+   * - NOT `unresolved-findings`. That is AD-6d, raised over findings that exist
+   *   and were left undecided. At the point discovery is truncated there are no
+   *   findings yet to strand — the loss is recall, not adjudication.
+   *
+   * It sits BESIDE `denominator-reduced` rather than inside it: that code says
+   * the denominator shrank, this one says the budget is why. A host agent
+   * reading only codes can then tell a budget-truncated roster from an
+   * under-delivering one, which is the whole argument for a code over a sentence.
+   *
+   * Raised ONCE per run, by `core/stages/discover.ts`, naming how many pool and
+   * lens slots went unasked and the discovery ceiling that refused them.
+   */
+  "discovery-truncated",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

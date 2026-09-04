@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import type { Finding, Severity } from "../domain/finding.ts"
 import {
   emptyLedger,
+  recordTurn,
   type DebateCounts,
   type JudgeCounts,
   type RouteCounts,
@@ -1127,7 +1128,13 @@ describe("the exit and the cap that produced it are rendered (CAP-4)", () => {
     // reader cannot check the run against.
     const capped = record([debated("converged", 1)], 1, [], 0.8, undefined, debateCounts())
     capped.ledger.cap = 5000
-    expect(output(capped)).toContain("DEBATE (round cap 3, token cap 5000)")
+    // AD-15 (story 8) — AND IT IS DEBATE'S CEILING, NOT THE CAP. With the shares
+    // in force debate is held to 65% of the cap, so naming the cap here would
+    // print a number debate was never allowed to reach, three lines above a
+    // strand reason naming the real one. floor(5000 * 0.65) = 3250.
+    expect(output(capped)).toContain(
+      "DEBATE (round cap 3, debate's share of the token cap (3250 of 5000))",
+    )
   })
 
   test("BILLED ATTEMPTS ARE RECONCILED AGAINST ALLOCATIONS when they differ", () => {
@@ -2233,5 +2240,119 @@ describe("story 7A — the peak is reported beside the total (AD-15 amended)", (
     const warningsBlock = rendered.slice(0, rendered.indexOf("FINDINGS ("))
     expect(warningsBlock).not.toContain("PEAK —")
     expect(rendered).toContain("nothing was refused or dropped by this bound")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 8 — the BUDGET block, and the empty-findings branch a budget re-opens.
+// ---------------------------------------------------------------------------
+
+describe("AD-15 / CAP-7 — the BUDGET block (story 8)", () => {
+  test("an UNCAPPED run renders no BUDGET block and no `spent` clause at all", () => {
+    // The uncapped run must render byte-identically to what it rendered before
+    // this story: a block of "spent X of no limit" rows is noise in the place a
+    // reader looks for a problem.
+    const rendered = output(record([finding({ severity: "high", file: "src/a.ts" })], 1))
+    expect(rendered).not.toContain("BUDGET (")
+    expect(rendered).not.toContain(" | spent: ")
+  })
+
+  test("a capped run puts the spend against the cap ON THE TOKENS LINE", () => {
+    // So the overshoot is visible even to a reader who reads only the one line
+    // that existed before this story.
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 5000
+    recordTurn(capped.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: { input: 100, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    })
+    expect(output(capped)).toContain(" | spent: 150 of 5000")
+  })
+
+  test("the per-stage figures RE-ADD to the TOKENS line, so the block cannot drift from it", () => {
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 1000
+    const bill = (stage: string, input: number) =>
+      recordTurn(capped.ledger, {
+        slot: "discovery-1",
+        stage,
+        attempt: 1,
+        tokens: { input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    bill("discover", 100)
+    bill("debate", 200)
+    bill("judge", 30)
+
+    const rendered = output(capped)
+    expect(rendered).toContain("  discover: 100 spent, cumulative ceiling 300")
+    expect(rendered).toContain("  debate: 200 spent, cumulative ceiling 650")
+    expect(rendered).toContain("  judge: 30 spent, cumulative ceiling 1000")
+    expect(rendered).toContain(" | spent: 330 of 1000")
+    expect(100 + 200 + 30).toBe(330)
+  })
+
+  test("the block NAMES THE PRESET when one was asked for, and says so when none was", () => {
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 1000
+    expect(output(capped)).toContain("BUDGET (no preset, token cap 1000)")
+    capped.preset = "paranoid"
+    expect(output(capped)).toContain("BUDGET (preset paranoid, token cap 1000)")
+  })
+
+  test("A STAGE OVER ITS CEILING IS MARKED — the overshoot is stated, never hidden", () => {
+    // `mayISpend` is a question about the total and not an estimate of the next
+    // turn's cost, so a run CAN exceed a ceiling by the turns already in flight.
+    // The honest thing is to print it.
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 100
+    recordTurn(capped.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: { input: 90, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    })
+    expect(output(capped)).toContain("discover: 90 spent, cumulative ceiling 30 — OVER")
+  })
+})
+
+describe("AD-6 — an empty finding list after a budget-truncated discovery (story 8)", () => {
+  test("IT SAYS THE BUDGET RAN OUT, never that every model failed", () => {
+    // 7A fixed this branch for cancellation, and the fix was cause-specific.
+    // Once the budget can refuse a discovery turn, a run whose whole roster went
+    // unasked lands back on "Every slot in the roster failed or dropped out" —
+    // naming providers that never failed, under a warning saying none did.
+    const starved = record([], 0)
+    starved.ledger.cap = 0
+    starved.skippedForBudget = ["discovery-1", "discovery-2", "discovery-3"]
+
+    const rendered = output(starved)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+    expect(rendered).toContain("3 slot(s) were skipped to stay inside the token budget")
+    expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+    expect(rendered).not.toContain("NO MODEL ANSWERED")
+  })
+
+  test("A STOP STILL WINS OVER THE BUDGET — the two causes stay tellable apart (AD-6d vs AD-6f)", () => {
+    // A run that was both truncated and then stopped reports the STOP, because a
+    // stop explains an empty roster completely and is the user's own action.
+    // Neither branch may ever print the other's sentence.
+    const both = record([], 0)
+    both.ledger.cap = 0
+    both.skippedForBudget = ["discovery-1"]
+    both.cancelled = { stage: "discover" }
+
+    const rendered = output(both)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
+    expect(rendered).not.toContain("the budget ran out before any model was asked")
+  })
+
+  test("A DROPPED-OUT ROSTER STILL SAYS SO — the new branch does not swallow the old one", () => {
+    // The branch is entered only when the budget actually skipped something, so
+    // a run whose models really did all fail keeps the report it always had.
+    const failed = record([], 0)
+    failed.ledger.cap = 1000
+    expect(output(failed)).toContain("Every slot in the roster failed or dropped out")
   })
 })

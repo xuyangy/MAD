@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
+import { DISCLOSURE_CODES } from "../domain/warning.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { selectRoster } from "../roster/select.ts"
@@ -1546,5 +1547,279 @@ describe("review — AD-18: what the framing must NOT touch", () => {
     })
     expect(record.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
     expect(record.maxRounds).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 8 — CAP-7: one budget number, one preset, and the stage shares.
+//
+// Every fake turn bills exactly 30 tokens (`tokens()` is 10 in + 20 out), which
+// is what makes a ceiling in these tests a countable number of turns rather than
+// an estimate. `maxConcurrency: 1` where the count matters: the limiter admits a
+// whole wave at once, so at the default peak three slots all pass the gate at
+// spend 0 — the documented overshoot, and not what these tests are measuring.
+// ---------------------------------------------------------------------------
+
+const TURN_COST = 30
+
+describe("review — CAP-7: passing nothing is the run this repo already shipped", () => {
+  test("omitting both new arguments changes no dial and no ceiling", async () => {
+    const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.preset).toBeUndefined()
+    expect(record.ledger.cap).toBeNull()
+    expect(record.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
+    expect(record.maxRounds).toBe(DEFAULT_MAX_ROUNDS)
+    expect(record.skippedForBudget).toBeUndefined()
+  })
+
+  test("`preset: \"normal\"` RESOLVES TO THE SAME DIALS — it is the identity (AD-3)", async () => {
+    // The property a table edit must never break. `preset` is still recorded,
+    // because "asked for normal" and "asked for nothing" are different requests
+    // even when they are the same run.
+    const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      preset: "normal",
+    })
+
+    expect(record.preset).toBe("normal")
+    expect(record.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
+    expect(record.ledger.maxConcurrency).toBe(4)
+  })
+
+  test("AN EXPLICIT DIAL BEATS THE PRESET", async () => {
+    // The precedence rule, and it is the only one that keeps the two arguments
+    // from fighting: a preset defaults what the caller did not state.
+    const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      preset: "quick",
+      threshold: 0.9,
+    })
+
+    expect(record.threshold).toBe(0.9)
+  })
+
+  test("`preset: \"quick\"` moves the threshold, and `paranoid` moves it the other way", async () => {
+    const run = async (preset: "quick" | "paranoid") => {
+      const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+      const { record } = await review({
+        roster: resolved.roster,
+        backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+        clock: fakeClock(),
+        change: fakeChange(),
+        priorWarnings: resolved.warnings,
+        preset,
+      })
+      return record
+    }
+
+    expect((await run("quick")).threshold).toBe(0.5)
+    expect((await run("paranoid")).threshold).toBe(1)
+    expect((await run("paranoid")).ledger.maxConcurrency).toBe(6)
+  })
+})
+
+describe("review — CAP-7: the budget truncates discovery, and says so honestly", () => {
+  const threeSlots = () =>
+    setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2-5-pro"],
+      ],
+      3,
+    )
+
+  const scripts = () =>
+    abstainingInDebate(
+      Object.fromEntries(
+        ["discovery-1", "discovery-2", "discovery-3"].map((slot) => [
+          slot,
+          [{ kind: "ok" as const, value: ENVELOPE }],
+        ]),
+      ),
+    )
+
+  test("A SLOT THE BUDGET REFUSED RAISES NO `model-dropped-out` AND IS NOT IN `droppedOut`", async () => {
+    // The false degradation this story could most easily have shipped: the
+    // refused slot takes the same code path a failed one takes, and every one of
+    // those sites would have named a provider that was working fine.
+    //
+    // cap 100 -> discovery's ceiling is floor(100 * 0.3) = 30 = exactly one
+    // turn. Slot 1 runs at spend 0; slots 2 and 3 ask at spend 30 and are
+    // refused.
+    const resolved = threeSlots()
+    const backend = new FakeBackend(scripts())
+    const { record } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 100,
+      maxConcurrency: 1,
+    })
+
+    expect(record.skippedForBudget).toEqual(["discovery-2", "discovery-3"])
+    expect(record.answered).toBe(1)
+    const codes = record.warnings.map((w) => w.code)
+    expect(codes).toContain("discovery-truncated")
+    expect(codes).not.toContain("model-dropped-out")
+    // Over DEGRADATIONS only. `provider-fan-out` is a disclosure and names every
+    // model in the roster by design (AD-3) — that is a fact about where the code
+    // was sent, not a claim that a model underperformed. The rule being tested
+    // is that no report saying the run is worth less blames a model MAD never
+    // asked.
+    const degradations = record.warnings.filter((w) => !DISCLOSURE_CODES.has(w.code))
+    for (const warning of degradations) {
+      expect(warning.message).not.toContain("gpt-5")
+      expect(warning.message).not.toContain("gemini-2-5-pro")
+    }
+  })
+
+  test("`denominator-reduced` NAMES THE BUDGET as the reason the denominator shrank", async () => {
+    // A cause the report knows and does not print is the same failure one step
+    // quieter — the rule story 7A set for cancellation, applied to the second
+    // cause MAD knows about.
+    const resolved = threeSlots()
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 100,
+      maxConcurrency: 1,
+    })
+
+    const reduced = record.warnings.find((w) => w.code === "denominator-reduced")
+    expect(reduced?.message).toContain("2 were never asked: the budget ran out before their turn.")
+    expect(reduced?.detail).toMatchObject({ answered: 1, skippedForBudget: 2 })
+  })
+
+  test("A SLOT THE BUDGET REFUSED IS NEVER SEATED IN A LATER STAGE'S ROOM", async () => {
+    // `answeredSlots` filtered `droppedOut` alone, so a slot MAD never asked
+    // would have been offered the non-author seat in a debate room and BILLED —
+    // under the very budget that refused to ask it. A model that never spoke
+    // cannot contest a finding.
+    const resolved = threeSlots()
+    const backend = new FakeBackend(scripts())
+    await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 100,
+      maxConcurrency: 1,
+    })
+
+    const spoke = new Set(backend.calls.map((call) => call.slot))
+    expect(spoke.has("discovery-2")).toBe(false)
+    expect(spoke.has("discovery-3")).toBe(false)
+  })
+
+  test("`budget: 0` STARTS THE RUN AND ASKS NOBODY — it never refuses up front", async () => {
+    // `cost-model.md`: the tool starts a review it may not be able to finish and
+    // reports where it stopped. A zero budget is a strange request and this is
+    // the honest answer to it — not a throw, and not a refusal to run.
+    const resolved = threeSlots()
+    const backend = new FakeBackend(scripts())
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 0,
+    })
+
+    expect(backend.calls).toHaveLength(0)
+    expect(record.answered).toBe(0)
+    expect(record.skippedForBudget).toHaveLength(3)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+    // AD-6 — and it must NOT say the roster failed, three lines under a warning
+    // saying no model failed. This is 7A's defect re-opened by a second cause.
+    expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+  })
+
+  test("EXHAUSTION IS AN OUTCOME — a budget too small for the run does not throw", async () => {
+    const resolved = threeSlots()
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 1,
+    })
+
+    expect(record.finishedAt).toBeDefined()
+    expect(record.cancelled).toBeUndefined()
+  })
+
+  test("DISCOVERY NO LONGER EATS THE WHOLE CAP — the defect `review.ts` documented is closed", async () => {
+    // The state the old doc comment described: a cap smaller than discovery's
+    // own spend left NOTHING for debate, so debate's first gate refused and
+    // every contested finding stranded with no debate turn run. With the shares,
+    // discovery is cut off at 30% and the other 70% is still there.
+    const resolved = threeSlots()
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 100,
+      maxConcurrency: 1,
+    })
+
+    // Discovery spent one turn and stopped; it did not spend the cap.
+    const discoverySpend = record.ledger.entries
+      .filter((entry) => entry.stage === "discover")
+      .reduce((sum, entry) => sum + entry.tokens.input + entry.tokens.output, 0)
+    expect(discoverySpend).toBe(TURN_COST)
+    expect(discoverySpend).toBeLessThan(record.ledger.cap!)
+  })
+
+  test("a run inside its budget is refused NOTHING and strands NOTHING (CAP-7's criterion)", async () => {
+    // SPEC.md CAP-7: a run given only a budget and a preset COMPLETES within it.
+    // The suggested budgets are sized for a real workload; this fake workload is
+    // far smaller, so the assertion is that a comfortable budget changes nothing
+    // at all — no truncation, no strand, no budget warning.
+    const resolved = threeSlots()
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      preset: "normal",
+      tokenCap: 400_000,
+    })
+
+    expect(record.skippedForBudget).toBeUndefined()
+    expect(record.answered).toBe(3)
+    const codes = record.warnings.map((w) => w.code)
+    expect(codes).not.toContain("discovery-truncated")
+    expect(codes).not.toContain("unresolved-findings")
+    for (const finding of record.findings) expect(finding.unresolved).toBeUndefined()
   })
 })

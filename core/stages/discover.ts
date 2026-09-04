@@ -90,6 +90,7 @@ import {
   type Locus,
 } from "../domain/finding.ts"
 import type { RosterSlot, Roster } from "../domain/roster.ts"
+import { ceilingNamed, mayISpend } from "../budget/ledger.ts"
 import { recordTurn, type LensInstructionRecord, type TokenLedger } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -199,6 +200,19 @@ export interface DiscoverResult {
   /** Slots that dropped out after their one retry — pool and lens alike. */
   droppedOut: string[]
   /**
+   * AD-15 / CAP-7 (story 8) — slots the BUDGET refused, pool and lens alike, in
+   * fan-out order. Never asked, so never billed and never blamed.
+   *
+   * Required and never optional, for the reason `pool` and `lensInstructions`
+   * are: absent and empty must not be two ways of saying the same thing.
+   *
+   * `review()` reads it for two separate jobs, and BOTH matter: it records the
+   * ids on the run, and it filters them out of `answeredSlots` — a slot that was
+   * never asked must not be seated as a skeptic in a debate room and billed
+   * under the very budget that refused it.
+   */
+  skippedForBudget: string[]
+  /**
    * AD-11 amended / AD-17e — one entry per lens slot, in `lensSlots` order,
    * saying whether its instruction was SHIPPED or GENERATED at run time. It
    * survives to output because a generated lens a reader cannot distinguish from
@@ -243,11 +257,30 @@ function toLocus(raw: { file: string; startLine?: number; endLine?: number }): L
  * backend that ignores the signal entirely still stops costing money here,
  * because the core never issues the next turn.
  */
+/**
+ * What one slot's turn came to — and the third possibility story 8 added.
+ *
+ * A LOCAL discriminated union, deliberately, and NOT a `budget-refused` member
+ * on the `TurnFailure` port union. Two reasons, and both are about honesty
+ * rather than tidiness:
+ *
+ *   1. The budget is the CORE's alone. A failure member no adapter may ever
+ *      produce is a port contract that lies about what a backend can return.
+ *   2. A fabricated failure ENVELOPE flows straight into `collect`'s `!raised`
+ *      branch, where it becomes a `model-dropped-out` warning naming a provider
+ *      that was working fine — the exact false degradation report this stage
+ *      already refuses to produce for cancellation.
+ */
+type SlotOutcome =
+  | { skippedForBudget: false; envelope: Envelope<DiscoveryEnvelope>; attempts: number }
+  /** Never asked. `attempts` is the count actually BILLED, so it is always 0. */
+  | { skippedForBudget: true; attempts: 0 }
+
 async function runWithOneRetry(
   input: DiscoverInput,
   slot: string,
   instructions: string,
-): Promise<{ envelope: Envelope<DiscoveryEnvelope>; attempts: number }> {
+): Promise<SlotOutcome> {
   let last: Envelope<DiscoveryEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     if (input.signal?.aborted) {
@@ -261,7 +294,42 @@ async function runWithOneRetry(
       // core refused to issue was never billed. Returning 1 here would make that
       // line overstate spend on exactly the runs a user stopped to save money.
       // The matrix row's actual content, "never 2", is what this preserves.
-      return { envelope: cancelledTurn<DiscoveryEnvelope>(slot), attempts: attempt - 1 }
+      return {
+        skippedForBudget: false,
+        envelope: cancelledTurn<DiscoveryEnvelope>(slot),
+        attempts: attempt - 1,
+      }
+    }
+    // AD-15 / CAP-7 (story 8) — THE BUDGET GATE, and it is on the FIRST attempt
+    // too, not only the retry.
+    //
+    // Gating only the retry would leave the widest stage in the run effectively
+    // unmetered, since a retry only ever happens after a failure: `budget: 0`
+    // would still bill the entire fan-out, and the defect `core/run/review.ts`
+    // documents in shipped source — discovery eats the cap, every contested
+    // finding strands at debate's first gate with no debate turn run — would
+    // survive the story written to close it.
+    //
+    // IT SITS HERE, INSIDE THE PER-SLOT CALL, and that placement is the point:
+    // `withSlot` wraps each individual `runWithOneRetry` rather than either
+    // `Promise.all`, so a slot asks after earlier slots have recorded their
+    // spend. A check before the fan-out would return the same answer for every
+    // slot and meter nothing.
+    //
+    // The known imprecision, stated rather than hidden: the limiter admits up to
+    // `maxConcurrency` turns at once, so a wave already in flight can carry the
+    // total past the ceiling — the same overshoot `mayISpend` documents for
+    // every gate in this codebase, bounded here by the peak rather than by the
+    // fan-out.
+    //
+    // `attempt - 1` is the billed count, for the reason the cancellation branch
+    // above gives at length: a turn the core refused to issue was never billed.
+    // On a refused RETRY it is 1, which is a slot that failed ONCE and could not
+    // be asked again — a different fact from failing twice, and `collect` words
+    // it differently.
+    if (!mayISpend(input.ledger, "discover")) {
+      if (attempt === 1) return { skippedForBudget: true, attempts: 0 }
+      return { skippedForBudget: false, envelope: last!, attempts: 1 }
     }
     let envelope: Envelope<DiscoveryEnvelope>
     try {
@@ -286,14 +354,16 @@ async function runWithOneRetry(
     if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "discover", attempt, tokens: envelope.tokens })
     }
-    if (envelope.ok) return { envelope, attempts: attempt }
+    if (envelope.ok) return { skippedForBudget: false, envelope, attempts: attempt }
     // A backend that DID honour the signal reports `cancelled`. Same rule as the
     // pre-check above: no second attempt, and the attempt that was billed is
     // counted honestly.
-    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
+    if (envelope.failure === "cancelled") {
+      return { skippedForBudget: false, envelope, attempts: attempt }
+    }
     last = envelope
   }
-  return { envelope: last!, attempts: 2 }
+  return { skippedForBudget: false, envelope: last!, attempts: 2 }
 }
 
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
@@ -358,6 +428,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const findings: Finding[] = []
   const warnings: Warning[] = []
   const droppedOut: string[] = []
+  const skippedForBudget: string[] = []
   let answered = 0
 
   /**
@@ -368,14 +439,27 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
    * place rather than inside a branch on `source`.
    */
   const collect = (
-    outcome: {
-      rosterSlot: RosterSlot
-      envelope: Envelope<DiscoveryEnvelope>
-    },
+    outcome: { rosterSlot: RosterSlot } & SlotOutcome,
     origin: { source: FindingSource; lens?: string },
   ): boolean => {
-    const { rosterSlot, envelope } = outcome
+    const { rosterSlot } = outcome
     const modelName = `${rosterSlot.providerId}/${rosterSlot.modelId}`
+
+    // AD-15 / AD-6a (story 8) — A SLOT THE BUDGET REFUSED IS NOT A DROP-OUT,
+    // and this is the branch where it would silently become one. Same shape,
+    // and the same reasoning, as the cancellation rule below it: the model did
+    // not fail, it was never asked. It gets no warning naming it and no place in
+    // `droppedOut`, which `review()` reads to decide who is still alive to
+    // debate.
+    //
+    // The denominator still shrinks — AD-6(a) counts answers, never requests —
+    // and `denominator-reduced`'s `becauseBudget` clause is where the cause is
+    // named, once, without a provider in it.
+    if (outcome.skippedForBudget) {
+      skippedForBudget.push(rosterSlot.slot)
+      return false
+    }
+    const { envelope } = outcome
 
     // AD-6a — before writing this model off, see whether part of its answer is
     // usable. One off-scale severity should cost one finding, not the model.
@@ -405,18 +489,28 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
 
       // AD-6b — retried once already; proceed with a warning naming the model.
       droppedOut.push(rosterSlot.slot)
+      // AD-6b / AD-15 (story 8) — "failed twice" IS A COUNT, AND IT MUST BE THE
+      // REAL ONE. When the budget refuses the retry, this model failed ONCE and
+      // was not asked again; saying "twice" would bill it for a turn nobody ran
+      // and overstate its unreliability in the one report a reader uses to judge
+      // it. The retry that did not happen is named by its actual cause.
+      const howOften =
+        outcome.attempts < 2
+          ? `failed once, and the budget refused the retry`
+          : `failed twice`
       warnings.push({
         code: "model-dropped-out",
         stage: "discover",
         // A salvage attempt can leave a technically-ok envelope with nothing
         // usable in it, so the cause is read only from the failure branch.
         message:
-          `MODEL DROPPED OUT: \`${modelName}\` (slot ${rosterSlot.slot}) failed twice ` +
+          `MODEL DROPPED OUT: \`${modelName}\` (slot ${rosterSlot.slot}) ${howOften} ` +
           `(${envelope.ok ? "no usable findings" : `${envelope.failure}: ${envelope.message}`}). ` +
           `The run continued without it, and it is excluded from the co-discovery denominator.`,
         detail: {
           slot: rosterSlot.slot,
           model: modelName,
+          attempts: outcome.attempts,
           failure: envelope.ok ? "none" : envelope.failure,
           error: envelope.ok ? "" : envelope.message,
         },
@@ -502,8 +596,46 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // work; the next stage to actually skip a turn is the honest answer, and
   // `review()` takes the FIRST stage that reports one.
   const cancelled = [...poolOutcomes, ...lensOutcomes].some(
-    (outcome) => !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
+    (outcome) =>
+      !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
   )
+
+  // AD-15 / AD-6 (story 8) — the budget truncated the roster, said ONCE, with no
+  // provider in it.
+  //
+  // It is a separate code from `denominator-reduced` beside it, and the split is
+  // the point: that one says the denominator shrank, this one says the budget is
+  // why. A host agent reading only `metadata.warnings` codes can then tell a
+  // budget-truncated roster from an under-delivering one, which is the whole
+  // argument for a code rather than a sentence.
+  //
+  // The lens count is reported separately from the pool count because they cost
+  // the same and mean different things: an unasked POOL slot costs the
+  // co-discovery denominator every later fraction divides by, while an unasked
+  // LENS slot costs only that lens's vantage (AD-17d).
+  if (skippedForBudget.length > 0) {
+    const poolSlots = new Set(roster.slots.map((rosterSlot) => rosterSlot.slot))
+    const poolSkipped = skippedForBudget.filter((slot) => poolSlots.has(slot)).length
+    const lensSkipped = skippedForBudget.length - poolSkipped
+    // The ceiling is NAMED BY THE ACCOUNTANT, not computed here. A stage that
+    // multiplies the cap by its own share is a stage metering itself, which
+    // AD-15 forbids and `scripts/lint-dependency-direction.ts` catches.
+    warnings.push({
+      code: "discovery-truncated",
+      stage: "discover",
+      message:
+        `BUDGET TRUNCATED DISCOVERY: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
+        `were never asked, because doing so would have taken the run past ` +
+        `${ceilingNamed(input.ledger, "discover")}. No model failed and none was retried; this ` +
+        `run examined the change with fewer models than it had available.`,
+      detail: {
+        slots: [...skippedForBudget],
+        poolSkipped,
+        lensSkipped,
+        cap: input.ledger.cap,
+      },
+    })
+  }
 
   if (answered < roster.slots.length) {
     // AD-6f (code review 2026-08-31, decision recorded in the Spec Change Log) —
@@ -518,21 +650,35 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     const becauseStopped = cancelled
       ? ` The remaining ${roster.slots.length - answered} were never asked: you stopped the run.`
       : ""
+    // AD-15 (story 8) — THE SAME RULE, FOR THE OTHER CAUSE MAD KNOWS ABOUT.
+    // The budget is a reason the report knows for the denominator being smaller,
+    // and a cause the report knows and does not print is the same failure one
+    // step quieter. Counted off the pool ids rather than off `answered`, because
+    // a run can lose slots to a drop-out AND to the budget at once — and both
+    // clauses can be true in one run, which is why this is a second clause
+    // rather than a branch.
+    const poolIds = new Set(roster.slots.map((rosterSlot) => rosterSlot.slot))
+    const poolSkippedCount = skippedForBudget.filter((slot) => poolIds.has(slot)).length
+    const becauseBudget =
+      poolSkippedCount > 0
+        ? ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
+        : ""
     warnings.push({
       code: "denominator-reduced",
       stage: "discover",
       message:
-        `Only ${answered} of ${roster.slots.length} roster model(s) answered.${becauseStopped} ` +
-        `Every co-discovery fraction below is over ${answered}, not over ${roster.requested} ` +
-        `requested.`,
+        `Only ${answered} of ${roster.slots.length} roster model(s) answered.${becauseStopped}` +
+        `${becauseBudget} Every co-discovery fraction below is over ${answered}, not over ` +
+        `${roster.requested} requested.`,
       detail: {
         answered,
         filled: roster.slots.length,
         requested: roster.requested,
         cancelled,
+        skippedForBudget: poolSkippedCount,
       },
     })
   }
 
-  return { findings, answered, droppedOut, lensInstructions, warnings, cancelled }
+  return { findings, answered, droppedOut, skippedForBudget, lensInstructions, warnings, cancelled }
 }

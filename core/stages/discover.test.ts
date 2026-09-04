@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import type { ZodType } from "zod"
 
+import { createLimiter } from "../budget/limiter.ts"
 import { emptyLedger } from "../domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../instructions/coding/discovery.ts"
 import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
@@ -925,5 +926,153 @@ describe("discover — the lens segment (CAP-11, AD-17)", () => {
     expect(lensTurn.instructions).toContain("The Security Sentinel")
     // The lens instruction still carries the generalist's contract verbatim.
     expect(lensTurn.instructions).toContain(DISCOVERY_INSTRUCTIONS.text)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 8 — the budget gate, at the stage that never had one.
+//
+// Every fake turn bills 30 tokens. `createLimiter(1)` serialises the fan-out so
+// a slot asks AFTER the slots before it recorded — at the default peak the whole
+// wave passes the gate at spend 0, which is the documented overshoot and not
+// what these tests measure.
+// ---------------------------------------------------------------------------
+
+function runCapped(
+  roster: ReturnType<typeof rosterOf>,
+  script: Record<string, SlotScript>,
+  cap: number | null,
+) {
+  const backend = new FakeBackend(script)
+  const ledger = emptyLedger(cap)
+  return {
+    backend,
+    ledger,
+    result: discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+      limiter: createLimiter(1),
+    }),
+  }
+}
+
+const THREE_MODELS: [string, string][] = [
+  ["anthropic", "claude-sonnet-4-5"],
+  ["openai", "gpt-5"],
+  ["google", "gemini-2-5-pro"],
+]
+
+const answering = (slots: string[]) =>
+  Object.fromEntries(slots.map((slot) => [slot, [{ kind: "ok" as const, value: ONE_FINDING }]]))
+
+describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
+  test("THE FIRST ATTEMPT IS GATED, not only the retry", async () => {
+    // Gating only the retry leaves the widest stage in the run effectively
+    // unmetered, because a retry only happens after a failure. `cap: 0` must
+    // therefore bill nothing at all.
+    const { backend, result } = runCapped(
+      rosterOf(3, THREE_MODELS),
+      answering(["discovery-1", "discovery-2", "discovery-3"]),
+      0,
+    )
+    const out = await result
+
+    expect(backend.calls).toHaveLength(0)
+    expect(out.answered).toBe(0)
+    expect(out.skippedForBudget).toEqual(["discovery-1", "discovery-2", "discovery-3"])
+  })
+
+  test("A REFUSED SLOT RAISES NO WARNING NAMING IT, and is not in `droppedOut`", async () => {
+    // cap 100 -> ceiling floor(100 * 0.3) = 30 = exactly one turn.
+    const { result } = runCapped(
+      rosterOf(3, THREE_MODELS),
+      answering(["discovery-1", "discovery-2", "discovery-3"]),
+      100,
+    )
+    const out = await result
+
+    expect(out.answered).toBe(1)
+    expect(out.droppedOut).toEqual([])
+    expect(out.skippedForBudget).toEqual(["discovery-2", "discovery-3"])
+    expect(out.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+  })
+
+  test("`discovery-truncated` is raised ONCE, and counts pool and lens slots apart", async () => {
+    // An unasked POOL slot costs the co-discovery denominator every later
+    // fraction divides by; an unasked LENS slot costs only that lens's vantage
+    // (AD-17d). Same price, different loss, so they are reported separately.
+    const { result } = runCapped(
+      rosterOf(3, THREE_MODELS, ["security"]),
+      answering(["discovery-1", "discovery-2", "discovery-3", "lens-1"]),
+      100,
+    )
+    const out = await result
+
+    const truncated = out.warnings.filter((w) => w.code === "discovery-truncated")
+    expect(truncated).toHaveLength(1)
+    expect(truncated[0]!.detail).toMatchObject({ poolSkipped: 2, lensSkipped: 1 })
+    expect(truncated[0]!.message).toContain("No model failed and none was retried")
+  })
+
+  test("A REFUSED RETRY IS NOT 'failed twice' — the count in the warning is the real one", async () => {
+    // The model failed ONCE and was not asked again. Saying "twice" would bill
+    // it for a turn nobody ran and overstate its unreliability in the one report
+    // a reader uses to judge it.
+    //
+    // cap 200 -> ceiling 60 = two turns. Slot 1 fails its first attempt (spend
+    // 30), asks for a retry at spend 30 < 60 and fails again... so instead:
+    // slot 1 fails at spend 30, retries at 30 (permitted, spend 60), and slot 2
+    // is refused. To refuse a RETRY, the ceiling must fall between the two.
+    const { result } = runCapped(
+      rosterOf(1, [["anthropic", "claude-sonnet-4-5"]]),
+      { "discovery-1": [{ kind: "fail", failure: "transport-error", message: "boom" }] },
+      100, // ceiling 30 = one turn: attempt 1 bills it, the retry is refused
+    )
+    const out = await result
+
+    const dropped = out.warnings.find((w) => w.code === "model-dropped-out")
+    expect(dropped?.message).toContain("failed once, and the budget refused the retry")
+    expect(dropped?.message).not.toContain("failed twice")
+    expect(dropped?.detail).toMatchObject({ attempts: 1 })
+    // It IS still a drop-out: the model was asked and did not deliver.
+    expect(out.droppedOut).toEqual(["discovery-1"])
+    expect(out.skippedForBudget).toEqual([])
+  })
+
+  test("`denominator-reduced` carries BOTH clauses when both causes are true", async () => {
+    // A run can lose slots to a drop-out AND to the budget at once, which is why
+    // the budget clause is a second sentence rather than a branch.
+    const { result } = runCapped(
+      rosterOf(3, THREE_MODELS),
+      {
+        "discovery-1": [{ kind: "fail", failure: "transport-error", message: "boom" }],
+        "discovery-2": [{ kind: "ok", value: ONE_FINDING }],
+        "discovery-3": [{ kind: "ok", value: ONE_FINDING }],
+      },
+      200, // ceiling 60 = two turns: slot 1 burns both on its failure and retry
+    )
+    const out = await result
+
+    const reduced = out.warnings.find((w) => w.code === "denominator-reduced")
+    expect(reduced?.message).toContain("the budget ran out before their turn")
+    expect(out.droppedOut).toEqual(["discovery-1"])
+    expect(out.skippedForBudget.length).toBeGreaterThan(0)
+  })
+
+  test("AN UNCAPPED RUN IS UNCHANGED — no skips, no new warning", async () => {
+    const { result } = runCapped(
+      rosterOf(3, THREE_MODELS),
+      answering(["discovery-1", "discovery-2", "discovery-3"]),
+      null,
+    )
+    const out = await result
+
+    expect(out.answered).toBe(3)
+    expect(out.skippedForBudget).toEqual([])
+    expect(out.warnings.map((w) => w.code)).not.toContain("discovery-truncated")
   })
 })

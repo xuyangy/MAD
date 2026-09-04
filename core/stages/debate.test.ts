@@ -811,7 +811,7 @@ describe("debate — AD-6d: the budget runs out, and nothing is dropped", () => 
     })
     const result = await run(findings, {}, { backend, ledger, maxRounds: 3 })
 
-    expect(mayISpend(ledger)).toBe(false)
+    expect(mayISpend(ledger, "debate")).toBe(false)
     expect(result.rounds).toBe(1)
     expect(backend.calls).toHaveLength(2)
 

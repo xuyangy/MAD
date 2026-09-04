@@ -74,7 +74,7 @@
 
 import { z } from "zod"
 
-import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import { ceilingClause, ceilingNamed, mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
@@ -908,7 +908,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // implied a half-spent round that cannot occur (code review 2026-08-24).
     // Half a round of positions is a round nobody can read a movement out of
     // anyway.
-    if (!mayISpend(ledger)) {
+    if (!mayISpend(ledger, "debate")) {
       exhausted = true
       break
     }
@@ -1226,7 +1226,14 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     for (const room of stranded) {
       room.finding.unresolved = {
         diedAtStage: "debate",
-        reason: `the token budget (${ledger.cap}) ran out ${where}`,
+        // AD-15 (story 8) — THE CEILING NAMED IS THE ONE DEBATE WAS HELD TO.
+        // This used to interpolate `ledger.cap`, which with a share in force is
+        // false: debate refuses at 65% of the cap, so it named 400000 over a run
+        // that had spent 260000 — a sentence the reader can check against the
+        // TOKENS line and find wrong. `ceilingClause` owns the phrasing for both
+        // stranding stages, so the two cannot drift, and returns today's wording
+        // character-for-character whenever the ceiling IS the cap.
+        reason: `${ceilingClause(ledger, "debate")} ${where}`,
       }
       appendEntry(room.finding, {
         stage: "debate",
@@ -1263,7 +1270,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         stage: "debate",
         message:
           `BUDGET EXHAUSTED IN DEBATE: ${stranded.length} contested finding(s) were still undecided ` +
-          `when the token cap of ${ledger.cap} was reached, ${where}. ${carried}`,
+          `when ${ceilingNamed(ledger, "debate")} was reached, ${where}. ${carried}`,
         detail: {
           cap: ledger.cap,
           roundsRun: rounds,

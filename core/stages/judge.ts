@@ -82,7 +82,7 @@
 
 import { z } from "zod"
 
-import { mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import { ceilingClause, mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
@@ -1024,7 +1024,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
 
     // ---- adjudicate: the extractor ----
     if (argued) {
-      if (!mayISpend(ledger)) {
+      if (!mayISpend(ledger, "judge")) {
         exhausted = true
         counts.unresolved += 1
         strand(finding, ledger, clock.now(), strandedWhere())
@@ -1060,7 +1060,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     }
 
     // ---- the fact-check, and in adjudicate mode the logic evaluation beside it ----
-    if (!mayISpend(ledger)) {
+    if (!mayISpend(ledger, "judge")) {
       exhausted = true
       counts.unresolved += 1
       strand(finding, ledger, clock.now(), strandedWhere())
@@ -1092,7 +1092,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     // preserves the single parallel barrier.
     const logicSlot = slots.byRole["logic-eval"]
     let logicPromise: Promise<TurnOutcome<LogicEvalEnvelope>> | undefined
-    if (argued && mayISpend(ledger)) {
+    if (argued && mayISpend(ledger, "judge")) {
       counts.turns += 1
       logicPromise = withSlot(() =>
         runJudgeTurn(
@@ -1221,7 +1221,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     }
 
     // ---- the aggregator ----
-    if (!mayISpend(ledger)) {
+    if (!mayISpend(ledger, "judge")) {
       exhausted = true
       counts.unresolved += 1
       strand(finding, ledger, clock.now(), strandedWhere())
@@ -1383,7 +1383,12 @@ type StrandedWhere =
 function strand(finding: Finding, ledger: BudgetLedger, at: string, where: StrandedWhere): void {
   finding.unresolved = {
     diedAtStage: "judge",
-    reason: `the token budget (${ledger.cap}) ran out ${where}`,
+    // AD-15 (story 8) — shared with debate so the two stages cannot drift in
+    // what they tell the user. The judge's ceiling IS the cap by construction
+    // (the judge's share is 1, and a share below 1 would make part of the
+    // stated cap unreachable), so this renders exactly as it always has
+    // in every reachable case; it is shared for the drift, not for the wording.
+    reason: `${ceilingClause(ledger, "judge")} ${where}`,
   }
   appendEntry(finding, {
     stage: "judge",

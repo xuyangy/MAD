@@ -14,6 +14,7 @@
  */
 
 import { DEFAULT_MAX_CONCURRENCY } from "../budget/limiter.ts"
+import { CUMULATIVE_SHARE, type Preset, type SpendShares } from "../budget/presets.ts"
 import type { InstructionOrigin } from "../instructions/types.ts"
 import type { Finding, Stage } from "./finding.ts"
 import type { Roster } from "./roster.ts"
@@ -101,6 +102,29 @@ export interface TokenLedger {
    * from it by `core/budget/limiter.ts` and held only for the length of the run.
    */
   maxConcurrency: number
+  /**
+   * CAP-7 (story 8) — how far into `cap` each stage may take the run's total,
+   * as FRACTIONS of it.
+   *
+   * It rides here beside `cap` for the reason `cap` itself does: "may I spend?"
+   * must be answerable from ONE object, and two fields that can disagree is the
+   * failure AD-15's single accountant exists to prevent.
+   *
+   * FRACTIONS AND NOT TOKEN NUMBERS, and that is the whole point. Three stored
+   * token ceilings would be three values derived from `cap` that can stop
+   * agreeing with it — precisely the disagreement the paragraph above forbids.
+   * A fraction is re-derived at every ask, from whatever cap is actually in
+   * force, so it cannot go stale.
+   *
+   * CUMULATIVE, not a per-stage pot: `shares.debate` is "debate may take the run
+   * to 65% of the cap", counting everything discovery already spent. The stages
+   * run strictly in sequence, so this is arithmetically a per-stage allowance
+   * with no per-stage counter to drift — and unspent budget rolls forward for
+   * free. `core/budget/presets.ts` carries the numbers and the reasoning; the
+   * gate that reads them is `core/budget/ledger.ts`. Nothing in this module
+   * enforces them, because recording and permitting are different jobs.
+   */
+  shares: SpendShares
 }
 
 export interface RunRecord {
@@ -214,6 +238,38 @@ export interface RunRecord {
    * section, distinct causes).
    */
   cancelled?: { stage: Stage }
+  /**
+   * CAP-7 (story 8) — the preset this run resolved its dials from, when a caller
+   * named one.
+   *
+   * OPTIONAL, and the absence is a real fact rather than a defaulted one: it
+   * says the caller named no preset. It is not "absent means normal" even though
+   * `normal` is the identity preset — a reader comparing two reports must be
+   * able to tell a run that asked for `normal` from a run that asked for
+   * nothing, because the two are the same run today and a table edit is all it
+   * would take for them to stop being. The VALUES it resolved to are already on
+   * the record separately (`threshold`, `ledger.cap`, `ledger.maxConcurrency`,
+   * `lensSlots`), so this field never has to be trusted to reconstruct them.
+   */
+  preset?: Preset
+  /**
+   * AD-6a / AD-15 (story 8) — the discovery slots the BUDGET refused, by slot
+   * id.
+   *
+   * A THIRD FACT, and not either of the two beside it. These models did not fail
+   * (`roster` / `model-dropped-out`) and the user did not stop the run
+   * (`cancelled`): MAD decided not to issue the turn, because issuing it would
+   * have taken the run past discovery's share of the cap. Folding it into either
+   * neighbour is the false-degradation report this whole tool exists to prevent
+   * — one blames a working provider, the other blames the user.
+   *
+   * It shrinks `answered`, and that is honest: `answered` counts answers, never
+   * requests. What must not happen, and does not, is a MODEL being named as the
+   * cause.
+   *
+   * Optional for the reason `cancelled` is optional: absent is the ordinary run.
+   */
+  skippedForBudget?: string[]
   judgeCounts?: JudgeCounts
   warnings: Warning[]
   ledger: TokenLedger
@@ -324,8 +380,9 @@ export function formatThreshold(threshold: number): string {
 export function emptyLedger(
   cap: number | null = null,
   maxConcurrency: number = DEFAULT_MAX_CONCURRENCY,
+  shares: SpendShares = CUMULATIVE_SHARE,
 ): TokenLedger {
-  return { entries: [], total: emptyTokenUsage(), cap, maxConcurrency }
+  return { entries: [], total: emptyTokenUsage(), cap, maxConcurrency, shares }
 }
 
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
