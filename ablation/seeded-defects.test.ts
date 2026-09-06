@@ -4,7 +4,7 @@ import { alignArms } from "./align.ts"
 import { runAblation } from "./arms.ts"
 import { CONTROL, LENSED, POOL, scriptedAblation, scriptedArms } from "./seeded-defects.ts"
 import { renderAblation } from "./report.ts"
-import { main } from "../scripts/ablation.ts"
+import { main, numericFlag } from "../scripts/ablation.ts"
 import { abstainingInDebate, LENS_SCRIPTS, SCRIPTS, SEEDED_CANDIDATES } from "../fixtures/seeded-defects/arms.ts"
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/change.ts"
 import { fakeClock, FakeBackend } from "../core/test-support/fakes.ts"
@@ -179,6 +179,87 @@ describe("the reporter", () => {
   test("a MISSING pin prints guidance and still returns 0", async () => {
     expect(await main(["bun", "ablation"])).toBe(0)
     expect(await main(["bun", "ablation", "--pin", "no-slash"])).toBe(0)
+  })
+
+  test("A MISTYPED --cap IS REFUSED, and never reaches clampTokenCap as `no ceiling`", async () => {
+    // The regression this pins (retrospective 2026-09-06, F1): `--cap abc` was
+    // `Number("abc")` = NaN, and `clampTokenCap(NaN)` is `null`, which means NO
+    // CEILING. The run completed, printed `cap none`, and returned 0 — on the one
+    // flag whose whole job is to bound spend. Under `--live` that is credentials.
+    const lines: string[] = []
+    const log = console.log
+    console.log = (line: string) => void lines.push(line)
+    try {
+      expect(await main(["bun", "ablation", "--pin", "openai/gpt-5", "--cap", "abc"])).toBe(0)
+    } finally {
+      console.log = log
+    }
+    const printed = lines.join("\n")
+    expect(printed).toContain("--cap must be a whole number")
+    expect(printed).toContain("Nothing was run and nothing was billed")
+    // NOT VACUOUS: the refusal must replace the report, not precede it. If the run
+    // still happened, the banner every rendered report carries would be here too.
+    expect(printed).not.toContain("SCRIPTED BACKEND")
+    expect(printed).not.toContain("cap none")
+  })
+
+  test("--repeats 0 is refused instead of throwing a raw TypeError", async () => {
+    // F2's mirror of the above: `Number("0")` is a fine number, so nothing rejected
+    // it, the empty arm array reached `scriptedAblation`, and the CLI died with
+    // `TypeError: undefined is not an object (evaluating 'a.spec')` and a NON-ZERO
+    // exit — against this module's own "main always returns 0".
+    const lines: string[] = []
+    const log = console.log
+    console.log = (line: string) => void lines.push(line)
+    try {
+      expect(await main(["bun", "ablation", "--pin", "openai/gpt-5", "--repeats", "0"])).toBe(0)
+    } finally {
+      console.log = log
+    }
+    expect(lines.join("\n")).toContain("--repeats must be 1 or more")
+  })
+
+  test("the other unreadable shapes, and the readable ones that must still pass", async () => {
+    const log = console.log
+    console.log = () => {}
+    try {
+      // Refused: no value, a bare flag where a value should be, a fraction,
+      // Infinity, and a negative cap.
+      for (const argv of [
+        ["--cap"],
+        ["--cap", "--live"],
+        ["--cap", "1.5"],
+        ["--cap", "Infinity"],
+        ["--cap", "-1"],
+        ["--repeats", "-2"],
+        ["--repeats", "2.5"],
+      ]) {
+        expect(await main(["bun", "ablation", "--pin", "openai/gpt-5", ...argv])).toBe(0)
+      }
+    } finally {
+      console.log = log
+    }
+
+    // Accepted, and the point of asserting it: `--cap 0` is a REAL explicit
+    // ceiling of zero, not rubbish, so the floor for `--cap` is 0 and not 1.
+    // Absent stays absent — no ceiling, which is the deliberate default.
+    expect(numericFlag(["--cap", "0"], "cap", 0)).toEqual({ ok: true, value: 0 })
+    expect(numericFlag(["--cap", "400"], "cap", 0)).toEqual({ ok: true, value: 400 })
+    expect(numericFlag([], "cap", 0)).toEqual({ ok: true, value: undefined })
+    expect(numericFlag(["--repeats", "3"], "repeats", 1)).toEqual({ ok: true, value: 3 })
+  })
+
+  test("a REFUSED run is refused BEFORE the arms run — structurally, not by promise", async () => {
+    // `--cap abc --live` would otherwise import `ablation/live.ts` and open an
+    // opencode client. It returns 0 without touching the live path, which is what
+    // "nothing was billed" has to mean.
+    const log = console.log
+    console.log = () => {}
+    try {
+      expect(await main(["bun", "ablation", "--pin", "openai/gpt-5", "--live", "--cap", "abc"])).toBe(0)
+    } finally {
+      console.log = log
+    }
   })
 
   test("the rendered report carries the unsuppressable banner", async () => {

@@ -34,6 +34,78 @@ function has(argv: readonly string[], name: string): boolean {
   return argv.includes(`--${name}`)
 }
 
+/**
+ * A numeric flag, VALIDATED AT THE SEAM — before any `clamp*` sees the value.
+ *
+ * The core's clamps are correct and they are not a substitute for this, because
+ * their answers to the same rubbish DELIBERATELY DIFFER (`core/budget/limiter.ts`
+ * writes the divergence out in full). `clampTokenCap(NaN)` is `null`, and `null`
+ * means NO CEILING — a coherent answer to "no budget was requested" and the wrong
+ * answer to "the budget was mistyped". So `--cap abc` used to complete a run with
+ * `cap none` printed and exit 0, on the flag whose whole job is to bound spend;
+ * under `--live` that is real credentials (retrospective 2026-09-06, F1).
+ *
+ * `--repeats 0` had the mirror failure at the other end: `Number("0")` is a
+ * perfectly good number, so nothing rejected it, and the empty arm array reached
+ * `scriptedAblation` and threw a raw `TypeError` out of the CLI — against this
+ * module's own "`main` always returns 0" (F2).
+ *
+ * Both are ONE defect: an unguarded seam. The three failing shapes are the same
+ * for every numeric flag, so they are answered once, here:
+ *
+ * - **Absent** is not an error. It is the caller declining to set the dial, and
+ *   each call site says what that means — no ceiling for `--cap`, one pass for
+ *   `--repeats`.
+ * - **Present but unreadable** — no value after the flag, a non-number, a
+ *   fraction, `Infinity` — is refused by NAME, so the message says which flag
+ *   and what it received. Fractions are refused rather than floored: a CLI that
+ *   silently rounds the number you typed is a CLI you cannot trust the report of.
+ * - **Out of range** is refused against a floor the caller states, because the
+ *   floor differs: a cap of 0 is a real, explicit ceiling of zero, and 0 repeats
+ *   is not a run.
+ *
+ * It REFUSES, it does not gate: like the missing-`--pin` path above, an invalid
+ * invocation prints and `main` still returns 0. The tests are what fail CI.
+ */
+type NumericFlag = { ok: true; value: number | undefined } | { ok: false; message: string }
+
+export function numericFlag(argv: readonly string[], name: string, min: number): NumericFlag {
+  if (!has(argv, name)) return { ok: true, value: undefined }
+  const raw = flag(argv, name)
+  if (raw === undefined || raw.trim() === "" || raw.startsWith("--")) {
+    return { ok: false, message: `--${name} needs a value. Nothing readable followed it.` }
+  }
+  const value = Number(raw)
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    return { ok: false, message: `--${name} must be a whole number. It received \`${raw}\`.` }
+  }
+  if (value < min) {
+    return { ok: false, message: `--${name} must be ${min} or more. It received \`${raw}\`.` }
+  }
+  return { ok: true, value }
+}
+
+/**
+ * Print why the invocation was refused, and return the module's one exit code.
+ *
+ * Refusing is not gating: this is the same shape the missing-`--pin` path uses,
+ * for the same reason recorded in the file header. What it buys is that the
+ * refusal happens before `scriptedAblation` or `runLiveAblation` is called at
+ * all, so "nothing was billed" is a structural fact rather than a promise.
+ */
+function refuse(message: string): number {
+  console.log(
+    `CAP-9 ablation — ${message}\n` +
+      "\n" +
+      "  bun run ablation --pin openai/gpt-5 --cap 400000 --repeats 3\n" +
+      "\n" +
+      "--cap bounds the tokens a run may spend and is shared by all three arms;\n" +
+      "omit it for no ceiling. --repeats runs each arm N times to establish a noise\n" +
+      "floor; omit it for one pass. Nothing was run and nothing was billed.",
+  )
+  return 0
+}
+
 /** `provider/model`, split at the FIRST slash — a model id may contain one. */
 export function parsePin(value: string): Pin | undefined {
   const cut = value.indexOf("/")
@@ -57,6 +129,15 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
     return 0
   }
 
+  // Both dials are read and checked BEFORE either path runs, so a mistyped flag
+  // costs nothing — not a scripted run, and under `--live` not a billed turn.
+  const cap = numericFlag(argv, "cap", 0)
+  if (!cap.ok) return refuse(cap.message)
+  const repeats = numericFlag(argv, "repeats", 1)
+  if (!repeats.ok) return refuse(repeats.message)
+  const tokenCap = cap.value
+  const repeatCount = repeats.value ?? 1
+
   if (has(argv, "live")) {
     // The live path deliberately lives in `ablation/live.ts` and is not inlined
     // here: it is the one module in this tree that imports `adapters/`, and CI
@@ -68,7 +149,7 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
       serverUrl: flag(argv, "server") ?? "http://localhost:4096",
       directory: flag(argv, "directory") ?? process.cwd(),
       ...(flag(argv, "target") === undefined ? {} : { target: flag(argv, "target")! }),
-      ...(flag(argv, "cap") === undefined ? {} : { tokenCap: Number(flag(argv, "cap")) }),
+      ...(tokenCap === undefined ? {} : { tokenCap }),
       // The lens arm is the third arm, and without this flag the live path could
       // only ever run two — while `LIVE-RUN.md` documented three and story 9's
       // whole third-arm thesis (do lenses earn their tokens?) had no live path at
@@ -76,7 +157,7 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
       ...(flag(argv, "lenses") === undefined
         ? {}
         : { lenses: flag(argv, "lenses")!.split(",").map((lens) => lens.trim()).filter(Boolean) }),
-      repeats: Number(flag(argv, "repeats") ?? 1),
+      repeats: repeatCount,
     })
     for (const line of renderAblation(report)) console.log(line)
     return 0
@@ -84,8 +165,8 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
 
   const report = await scriptedAblation({
     pin,
-    ...(flag(argv, "cap") === undefined ? {} : { tokenCap: Number(flag(argv, "cap")) }),
-    repeats: Number(flag(argv, "repeats") ?? 1),
+    ...(tokenCap === undefined ? {} : { tokenCap }),
+    repeats: repeatCount,
   })
   for (const line of renderAblation(report)) console.log(line)
   return 0
