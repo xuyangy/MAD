@@ -5,6 +5,7 @@
  *   bun run ablation --pin anthropic/claude-sonnet-4-5
  *   bun run ablation --pin openai/gpt-5 --cap 400000
  *   bun run ablation --pin openai/gpt-5 --live --server http://localhost:4096
+ *   bun run ablation --pin openai/gpt-5 --live --lenses security,reliability,outsider
  *
  * `--pin` is REQUIRED and has no default. MAD names no model
  * (`host-integration.md`), and a pin literal committed in this tree would be the
@@ -68,6 +69,13 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
       directory: flag(argv, "directory") ?? process.cwd(),
       ...(flag(argv, "target") === undefined ? {} : { target: flag(argv, "target")! }),
       ...(flag(argv, "cap") === undefined ? {} : { tokenCap: Number(flag(argv, "cap")) }),
+      // The lens arm is the third arm, and without this flag the live path could
+      // only ever run two — while `LIVE-RUN.md` documented three and story 9's
+      // whole third-arm thesis (do lenses earn their tokens?) had no live path at
+      // all (code review 2026-09-06).
+      ...(flag(argv, "lenses") === undefined
+        ? {}
+        : { lenses: flag(argv, "lenses")!.split(",").map((lens) => lens.trim()).filter(Boolean) }),
       repeats: Number(flag(argv, "repeats") ?? 1),
     })
     for (const line of renderAblation(report)) console.log(line)

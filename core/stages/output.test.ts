@@ -2356,3 +2356,86 @@ describe("AD-6 — an empty finding list after a budget-truncated discovery (sto
     expect(output(failed)).toContain("Every slot in the roster failed or dropped out")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Code review 2026-09-06 — the mixed-cause run, and the two sentences story 8's
+// Verification section named tests for and did not write.
+// ---------------------------------------------------------------------------
+
+describe("AD-6 — a run that lost a model AND was truncated says BOTH (code review 2026-09-06)", () => {
+  test("IT DOES NOT SAY 'No model failed' OVER A RUN WHERE A MODEL FAILED", () => {
+    // The critical finding. One slot burns both attempts and blows discovery's
+    // share; the remaining slots are then refused. `answered` is 0 and
+    // `skippedForBudget` is non-empty, so the budget branch used to fire and
+    // print "No model failed and no model was retried" three lines under a
+    // `model-dropped-out` warning naming the model that did. The causality is
+    // also backwards: the drop-out is what exhausted the share.
+    const mixed = record([], 0)
+    mixed.ledger.cap = 100
+    mixed.skippedForBudget = ["discovery-2", "discovery-3"]
+    mixed.warnings = [
+      {
+        code: "model-dropped-out",
+        stage: "discover",
+        message: "MODEL DROPPED OUT: `openai/gpt-5` (slot discovery-1) failed twice",
+        detail: {},
+      },
+    ]
+
+    const rendered = output(mixed)
+    expect(rendered).not.toContain("No model failed and no model was retried")
+    expect(rendered).not.toContain("the budget ran out before any model was asked")
+    expect(rendered).toContain("NO MODEL ANSWERED")
+    expect(rendered).toContain("2 further slot(s) were never asked at all")
+    expect(rendered).toContain("those were not skipped because a model failed")
+  })
+
+  test("THE PURE-BUDGET RUN IS UNCHANGED — the branch it was written for still fires", () => {
+    // The non-vacuous sibling: narrowing the guard must not cost the case story 8
+    // added it for.
+    const starved = record([], 0)
+    starved.ledger.cap = 0
+    starved.skippedForBudget = ["discovery-1", "discovery-2", "discovery-3"]
+
+    const rendered = output(starved)
+    expect(rendered).toContain("the budget ran out before any model was asked")
+    expect(rendered).toContain("No model failed and no model was retried")
+    expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+  })
+
+  test("the BUDGET block's skipped-slot line is scoped to its own slots", () => {
+    const starved = record([], 0)
+    starved.ledger.cap = 1000
+    starved.skippedForBudget = ["discovery-2"]
+    expect(output(starved)).toContain("those slots were not skipped because a model failed")
+  })
+})
+
+describe("the not-yet-merged notice is driven off the POOL (deferred-work 2026-08-14)", () => {
+  test("AN ALL-UNRESOLVED RUN STILL GETS THE NOTICE — the state story 8 made routine", () => {
+    // The deferred entry story 8 claims to close, pinned by a test for the first
+    // time (code review 2026-09-06). Driven off `resolved` alone, the notice
+    // vanished exactly when the once-per-model pool it warns about was the only
+    // thing on the page.
+    const unresolvedAll = record(
+      [
+        finding({ severity: "high", file: "src/a.ts", id: "f-1" }),
+        finding({ severity: "high", file: "src/b.ts", id: "f-2" }),
+      ],
+      2,
+    )
+    for (const f of unresolvedAll.findings) {
+      f.unresolved = { diedAtStage: "debate", reason: "the token budget (10) ran out" }
+      f.coDiscovery = { raised: 1, answered: 2 }
+    }
+
+    const rendered = output(unresolvedAll)
+    expect(rendered).toContain("POOL — NOT YET MERGED")
+    expect(rendered).toContain("ONE DEFECT MAY APPEAR ONCE PER MODEL")
+  })
+
+  test("a CLUSTERED run still suppresses it — the notice is about an unmerged pool", () => {
+    const clustered = record([finding({ severity: "high", file: "src/a.ts", clusterId: "c-1" })], 2)
+    expect(output(clustered)).not.toContain("POOL — NOT YET MERGED")
+  })
+})

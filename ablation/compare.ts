@@ -269,6 +269,8 @@ export interface PairingReport {
 export interface AblationReport {
   arms: {
     id: string
+    /** 0-based. Printed only when more than one repeat ran, so rows stay distinguishable. */
+    repeat: number
     label: string
     provenance: string
     slots: number
@@ -304,6 +306,13 @@ export interface AblationReport {
   matcherCalibration: { overMerge: { merged: number; of: number }; underMerge: { unmerged: number; of: number } }
   /** True when ANY arm was scripted. Drives a banner that cannot be suppressed. */
   anyScripted: boolean
+  /**
+   * How many times each arm ran. The report prints it, and prints NOT MEASURED
+   * for the noise floor at 1 — a single run cannot tell a real arm difference
+   * from run-to-run variation, and saying nothing would let a reader assume it
+   * could.
+   */
+  repeats: number
 }
 
 export interface BuildOptions {
@@ -315,11 +324,18 @@ export async function buildReport(
   runs: readonly ArmRun[],
   options: BuildOptions,
 ): Promise<AblationReport> {
-  const byId = new Map(runs.map((run) => [run.spec.id, run]))
+  // FIRST repeat wins, and it must, because both callers align on
+  // `runs.find(...)` — the first — while `new Map(runs.map(...))` is
+  // last-write-wins. Under `--repeats > 1` that spliced a difference count from
+  // repeat 0 beside confounder facts from repeat N-1: two different runs
+  // described as one row (code review 2026-09-06). One repeat, one row.
+  const byId = new Map<string, ArmRun>()
+  for (const run of runs) if (!byId.has(run.spec.id)) byId.set(run.spec.id, run)
 
   return {
     arms: runs.map((run) => ({
       id: run.spec.id,
+      repeat: run.repeat,
       label: run.spec.label,
       provenance: run.spec.provenance,
       slots: run.record.roster.slots.length,
@@ -356,5 +372,6 @@ export async function buildReport(
       await measurePairs(),
     ),
     anyScripted: runs.some((run) => run.spec.provenance === "scripted"),
+    repeats: new Set(runs.map((run) => run.repeat)).size,
   }
 }

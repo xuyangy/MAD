@@ -1976,3 +1976,49 @@ describe("the stage reports who died arguing (code review 2026-08-28)", () => {
     expect(result.droppedOut).toEqual([])
   })
 })
+
+describe("debate's money sentence names DEBATE's ceiling, not the cap (code review 2026-09-06)", () => {
+  // The verification gap story 8's own Verification section named a test for and
+  // did not write: reverting `ceilingClause`/`ceilingNamed` to interpolate
+  // `ledger.cap` broke NO test. With the shares in force that sentence is false —
+  // it names 400000 over a run that has spent 260000, and the reader can check it
+  // against the TOKENS line.
+  test("THE STRAND REASON NAMES DEBATE'S SHARE AND THE CAP, and the reader can check both", async () => {
+    // cap 100 -> debate's ceiling is floor(100 * 0.65) = 65. Round 1 runs at
+    // spend 0; round 2 is refused at spend 60... so use a cap where the two
+    // numbers differ visibly and the gate still bites.
+    const ledger = emptyLedger(60) as BudgetLedger
+    const findings = [contested({ id: "f-1" }), contested({ id: "f-2" })]
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" }, { findingId: "f-2", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "denies" }, { findingId: "f-2", position: "denies" })],
+    })
+    const result = await run(findings, {}, { backend, ledger, maxRounds: 3 })
+
+    for (const finding of findings) {
+      expect(finding.unresolved!.reason).toContain("debate's share of the token budget (39 of 60)")
+      // NOT the bare cap, which is the sentence this replaced.
+      expect(finding.unresolved!.reason).not.toBe("the token budget (60) ran out after round 1 of 3")
+    }
+
+    const warning = result.warnings.find((w) => w.code === "unresolved-findings")!
+    expect(warning.message).toContain("debate's share of the token cap (39 of 60)")
+  })
+
+  test("WITH NO SHARE IN FORCE THE SHIPPED WORDING IS BYTE-IDENTICAL", async () => {
+    // The non-vacuous sibling and the compatibility claim: when debate's ceiling
+    // IS the cap, `ceilingClause` returns the pre-story-8 sentence character for
+    // character. Every test written before the shares goes through this branch.
+    const ledger = emptyLedger(60) as BudgetLedger
+    ledger.shares = { discover: 1, debate: 1, judge: 1 }
+    const findings = [contested({ id: "f-1" })]
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "denies" })],
+    })
+    await run(findings, {}, { backend, ledger, maxRounds: 3 })
+
+    expect(findings[0]!.unresolved!.reason).toContain("the token budget (60) ran out")
+    expect(findings[0]!.unresolved!.reason).not.toContain("share of")
+  })
+})

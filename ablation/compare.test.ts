@@ -374,3 +374,43 @@ describe("confounders — stated beside the number they degrade", () => {
     expect(report.pairings[0]!.confounders.thresholdVacuousExceptCritical).toBe(true)
   })
 })
+
+describe("--repeats: one repeat, one row (code review 2026-09-06)", () => {
+  test("A PAIRING'S NUMBERS AND ITS CONFOUNDERS COME FROM THE SAME REPEAT", async () => {
+    // `new Map(runs.map(...))` is last-write-wins, while both callers align on
+    // `runs.find(...)` — the first. That spliced a difference count from repeat 0
+    // beside confounder facts from repeat N-1: two different runs described as
+    // one row.
+    const first = armRun("a", record())
+    const later: ArmRun = { ...armRun("a", record()), repeat: 1 }
+    later.record.threshold = 0.5
+    const b = armRun("b", record())
+
+    const report = await buildReport([first, later, b], {
+      pairings: [
+        {
+          a: "a",
+          b: "b",
+          alignment: await alignArms({ id: "a", findings: [] }, { id: "b", findings: [] }),
+        },
+      ],
+    })
+
+    // Repeat 0's threshold is 0.8, the same as arm b's, so an honest row reports
+    // no differing dial. Reading repeat 1 instead would report one.
+    expect(report.pairings[0]!.confounders.dialsDiffer).toEqual([])
+  })
+
+  test("`repeats` counts the distinct repeats, so the report can label the rows", async () => {
+    const first = armRun("a", record())
+    const later: ArmRun = { ...armRun("a", record()), repeat: 1 }
+    expect((await buildReport([first, later], { pairings: [] })).repeats).toBe(2)
+    expect((await buildReport([first], { pairings: [] })).repeats).toBe(1)
+  })
+
+  test("every arm row carries its repeat number", async () => {
+    const later: ArmRun = { ...armRun("a", record()), repeat: 1 }
+    const report = await buildReport([armRun("a", record()), later], { pairings: [] })
+    expect(report.arms.map((arm) => arm.repeat)).toEqual([0, 1])
+  })
+})

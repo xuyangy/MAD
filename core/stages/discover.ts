@@ -626,8 +626,9 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       message:
         `BUDGET TRUNCATED DISCOVERY: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
         `were never asked, because doing so would have taken the run past ` +
-        `${ceilingNamed(input.ledger, "discover")}. No model failed and none was retried; this ` +
-        `run examined the change with fewer models than it had available.`,
+        `${ceilingNamed(input.ledger, "discover")}. THOSE SLOTS were not skipped because a ` +
+        `model failed — they were never asked at all. This run examined the change with fewer ` +
+        `models than it had available.`,
       detail: {
         slots: [...skippedForBudget],
         poolSkipped,

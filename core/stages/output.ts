@@ -1195,6 +1195,12 @@ export function renderRunRecord(record: RunRecord): string {
   lines.push(...judgeSummary(record))
 
   lines.push(`FINDINGS (${resolved.length})`)
+  // The two facts the empty-findings branches below turn on, read once. A model
+  // DROPPING OUT and the budget SKIPPING a slot are independent and can both be
+  // true of one run; `record` carries no drop-out list, so the warning the
+  // discovery stage already raised is the signal (AD-6b).
+  const anyDroppedOut = record.warnings.some((warning) => warning.code === "model-dropped-out")
+  const skippedForBudget = record.skippedForBudget?.length ?? 0
   if (resolved.length === 0) {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
     // never render the same. An empty list after a roster that all dropped out
@@ -1216,7 +1222,7 @@ export function renderRunRecord(record: RunRecord): string {
         `  No model failed and no model was retried; the run stopped during the ` +
           `${record.cancelled.stage} stage.`,
       )
-    } else if (record.skippedForBudget !== undefined && record.answered === 0) {
+    } else if (skippedForBudget > 0 && record.answered === 0 && !anyDroppedOut) {
       // AD-15 / AD-6 (story 8) — THE SAME DEFECT, RE-OPENED BY A SECOND CAUSE.
       // 7A fixed this branch for cancellation and the fix was cause-specific:
       // once the budget can refuse a discovery turn, a run whose whole roster
@@ -1226,15 +1232,38 @@ export function renderRunRecord(record: RunRecord): string {
       // cancellation branch (a stop explains an empty roster completely and is
       // the user's own action) and BEFORE the bare `answered === 0`, which is
       // the branch that would otherwise catch it.
+      //
+      // `!anyDroppedOut` IS LOAD-BEARING (code review 2026-09-06, four verifiers
+      // reproduced it end to end). Without it this branch fires on a MIXED run —
+      // one slot burns both attempts and blows discovery's share, the rest are
+      // then refused — and prints "No model failed and no model was retried"
+      // three lines under a `model-dropped-out` warning naming the model that
+      // did. Worse, the causality is backwards: the drop-out is what exhausted
+      // the share that refused the others. A stop explains an empty roster
+      // completely; the budget explains only the slots it lists, which is why
+      // this guard is narrower than the cancellation guard above it.
+      //
+      // The mixed case falls through to the branch below and is reported
+      // ADDITIVELY, which is the shape `core/stages/discover.ts` already chose
+      // for `denominator-reduced`'s two clauses in this same diff.
       lines.push("  NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
       lines.push(
-        `  No model failed and no model was retried; ${record.skippedForBudget.length} slot(s) ` +
+        `  No model failed and no model was retried; ${skippedForBudget} slot(s) ` +
           `were skipped to stay inside the token budget.`,
       )
     } else if (record.answered === 0) {
       lines.push("  NO MODEL ANSWERED — this is not a clean review.")
       lines.push("  Every slot in the roster failed or dropped out; nothing was examined.")
       lines.push("  See the warnings above for which models failed and why.")
+      if (skippedForBudget > 0) {
+        // BOTH CAUSES, AS TWO CLAUSES. A run can lose slots to a drop-out AND to
+        // the budget at once, and the order matters to a reader: the drop-out
+        // came first and is what left nothing for the rest.
+        lines.push(
+          `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
+            `token budget — those were not skipped because a model failed.`,
+        )
+      }
     } else if (record.cancelled) {
       // Models answered and raised nothing, AND the user stopped the run. Both
       // are true and the second is the one that bounds what the first is worth:
@@ -1462,7 +1491,7 @@ function budgetBlock(record: RunRecord): string[] {
   if (record.skippedForBudget !== undefined) {
     lines.push(
       `  ${record.skippedForBudget.length} discovery slot(s) were never asked, to stay inside ` +
-        `discovery's share. No model failed.`,
+        `discovery's share — those slots were not skipped because a model failed.`,
     )
   }
   return lines

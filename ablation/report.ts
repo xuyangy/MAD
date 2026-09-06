@@ -82,16 +82,24 @@ export function renderAblation(report: AblationReport): string[] {
       ` (WITHIN-run set; \`bun run clustering-rates\` names which rows it gets wrong).`,
     "  BLOCK-KEY VETO. The matcher never compares two findings in different files, and never",
     "  compares a file-level finding with a line-cited one. Both counts are printed below.",
+    `  REPEATS: ${report.repeats}. NOISE FLOOR: ${
+      report.repeats > 1
+        ? "compare the spread between repeats of the SAME arm against the difference between arms"
+        : "NOT MEASURED — one run per arm cannot tell a real arm difference from run-to-run variation"
+    }.`,
   )
   lines.push("")
 
   // ---- Arms ----
   lines.push("ARMS")
   for (const arm of report.arms) {
+    // Labelled whenever more than one repeat ran. Without it `--repeats 3` printed
+    // three identical unlabelled blocks per arm (code review 2026-09-06).
+    const repeat = report.repeats > 1 ? ` repeat=${arm.repeat}` : ""
     const pins = arm.pinned.length > 0 ? ` pinned=${arm.pinned.join(",")}` : ""
     const lenses = arm.lenses.length > 0 ? ` lenses=${arm.lenses.join(",")}` : " lenses=none"
     lines.push(
-      `  ${arm.id} (${arm.label}) [${arm.provenance}] slots=${arm.slots}${lenses}${pins}`,
+      `  ${arm.id} (${arm.label}) [${arm.provenance}]${repeat} slots=${arm.slots}${lenses}${pins}`,
       `    answered: ${arm.answered} | canonical findings: ${arm.findings} | pooled: ${arm.pooled}` +
         ` | file-level (never alignable with a line-cited finding): ${arm.fileLevel}`,
       `    tokens: ${arm.cost.tokens} over ${arm.cost.billedTurns} billed turn(s), cap ${capText(arm.cost.cap)}` +
@@ -166,7 +174,10 @@ export function renderAblation(report: AblationReport): string[] {
   // ---- Token cost ----
   lines.push("2. TOKEN COST — a count of tokens. Not divided by the count above it.")
   for (const arm of report.arms) {
-    lines.push(`  ${arm.id}: ${arm.cost.tokens} token(s) over ${arm.cost.billedTurns} billed turn(s)`)
+    const repeat = report.repeats > 1 ? ` (repeat ${arm.repeat})` : ""
+    lines.push(
+      `  ${arm.id}${repeat}: ${arm.cost.tokens} token(s) over ${arm.cost.billedTurns} billed turn(s)`,
+    )
   }
   lines.push("")
 
@@ -206,6 +217,17 @@ export function renderAblation(report: AblationReport): string[] {
     lines.push(
       `  cost: ${report.lens.cost.tokens} token(s) over ${report.lens.cost.billedTurns} extra turn(s)`,
     )
+    if (report.lens.cost.tokens <= 0) {
+      // A DIFFERENCE OF LEDGERS, NOT A PRICE. Under a shared cap both arms can be
+      // cut off at the same ceiling, so the lensed arm's total is not higher and
+      // the subtraction goes to zero or below. Printed alone it reads as "the
+      // lenses were free" — beside a POSITIVE gain (code review 2026-09-06).
+      lines.push(
+        "  THIS IS NOT A PRICE. The lens cost is one arm's ledger minus another's, and both arms",
+        "  hit the same ceiling here, so what is shown is the cap and not what lenses cost.",
+        "  Re-run with a higher cap, or with none, to measure it.",
+      )
+    }
     lines.push(
       "  Whether that many defects is worth that many tokens is the READER's judgement.",
       "  This harness does not divide one by the other and reports no combined score.",

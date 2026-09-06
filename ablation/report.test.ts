@@ -6,6 +6,7 @@ import { renderAblation } from "./report.ts"
 function baseArm(id: string, overrides: Partial<AblationReport["arms"][number]> = {}) {
   return {
     id,
+    repeat: 0,
     label: id,
     provenance: "scripted",
     slots: 3,
@@ -55,6 +56,7 @@ function report(overrides: Partial<AblationReport> = {}): AblationReport {
     ],
     matcherCalibration: { overMerge: { merged: 1, of: 3 }, underMerge: { unmerged: 1, of: 5 } },
     anyScripted: true,
+    repeats: 1,
     ...overrides,
   }
 }
@@ -290,5 +292,62 @@ describe("an UNKNOWN is never rendered as a zero", () => {
     )
     expect(rendered).toContain("gain: not applicable")
     expect(rendered).toContain("270 token(s) over 9 extra turn(s)")
+  })
+})
+
+describe("repeats and the noise floor (code review 2026-09-06)", () => {
+  test("AT ONE REPEAT THE NOISE FLOOR IS `NOT MEASURED`, never implied to be zero", () => {
+    // A single run per arm cannot tell a real arm difference from run-to-run
+    // variation. Saying nothing lets a reader assume it can.
+    const rendered = text(report())
+    expect(rendered).toContain("REPEATS: 1")
+    expect(rendered).toContain("NOISE FLOOR: NOT MEASURED")
+  })
+
+  test("above one repeat the rows are LABELLED and the floor line changes", () => {
+    const many = report({
+      repeats: 3,
+      arms: [baseArm("a", { repeat: 0 }), baseArm("a", { repeat: 1 })],
+    })
+    const rendered = text(many)
+    expect(rendered).toContain("REPEATS: 3")
+    expect(rendered).toContain("repeat=0")
+    expect(rendered).toContain("repeat=1")
+    expect(rendered).toContain("(repeat 1)")
+    expect(rendered).not.toContain("NOISE FLOOR: NOT MEASURED")
+  })
+
+  test("at one repeat NO repeat label is printed — the number is noise when there is one row", () => {
+    expect(text(report())).not.toContain("repeat=")
+  })
+})
+
+describe("a zero or negative lens cost is not a price (code review 2026-09-06)", () => {
+  test("IT SAYS SO, because beside a positive gain it reads as 'the lenses were free'", () => {
+    const rendered = text(
+      report({
+        lens: {
+          gain: {
+            pool: { found: 7, total: 13 },
+            lens: { found: 5, total: 13 },
+            combined: { found: 11, total: 13 },
+            lensOnlyDefects: [
+              { id: "d-1", dimension: "tests", locus: { file: "x.ts" }, summary: "s", markers: [] },
+            ],
+            beats: true,
+          },
+          cost: { tokens: 0, billedTurns: 0 },
+        },
+      }),
+    )
+    expect(rendered).toContain("THIS IS NOT A PRICE")
+    expect(rendered).toContain("what is shown is the cap and not what lenses cost")
+  })
+
+  test("a POSITIVE cost prints no such caveat", () => {
+    const rendered = text(
+      report({ lens: { gain: undefined, cost: { tokens: 270, billedTurns: 9 } } }),
+    )
+    expect(rendered).not.toContain("THIS IS NOT A PRICE")
   })
 })

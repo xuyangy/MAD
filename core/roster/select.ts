@@ -12,7 +12,10 @@
  *     `readonly Deduped[]` and cannot be handed a `Candidate[]`, so that order
  *     is a compile error to violate rather than a convention to remember.
  * (2) Rank the REMAINDER, filling the slots the pins did not take to maximize
- *     distinct lineages first, then distinct models within a lineage.
+ *     distinct lineages ACROSS THE WHOLE ROSTER first — the lineages the pins
+ *     already hold are passed in, so the backfill never spends a slot on a
+ *     second model from one of them while a fresh lineage sits unused — then
+ *     distinct models within a lineage.
  *
  * A pinned slot is an ordinary `RosterSlot` with an ordinary `discovery-N` id.
  * NOTHING downstream of the fill can tell it from a ranked one — `RosterSlot`
@@ -274,7 +277,36 @@ export function resolvePins(
  * one bucket, because an unrecognized model is never counted as a fresh lineage
  * — grouping them is what stops N unknowns from looking like N lineages.
  */
-export function rankByDiversity(deduped: readonly Deduped[], slots: number): Deduped[] {
+export function rankByDiversity(
+  deduped: readonly Deduped[],
+  slots: number,
+  /**
+   * AD-4 / AD-5 (story 8A, code review 2026-09-06) — lineages some slot ALREADY
+   * holds, so this ranking does not hand out a second model from one of them
+   * while a fresh lineage sits unused.
+   *
+   * It exists because pinning made the omission reachable. This function used to
+   * see the whole candidate list, so "one model per lineage before any lineage
+   * gets a second" was true of the roster. Story 8A gave it only the pin
+   * REMAINDER, and the sentence quietly became true of the remainder alone: over
+   * `[sonnet, opus, gpt-5]` at two slots, pinning either Anthropic model returned
+   * the other one, produced a ONE-lineage roster where the unpinned run got two,
+   * and then printed `roster-single-lineage` telling the user to add a provider
+   * — a remedy a reviewer FOLLOWED, and the roster did not move, because the
+   * Anthropic bucket is still visited first.
+   *
+   * MAD caused the degradation, stated a false fact about the host inside a
+   * degradation report, and prescribed a fix that could not work. It is the same
+   * order-dependence `fillLensSlots` records as fixed on the lens side on
+   * 2026-08-15.
+   *
+   * IT DOES NOT PUT A PIN INTO RANKING (story 8A forbids that, and pins stay
+   * unreorderable and undroppable). It only DEPRIORITISES a bucket the pins
+   * already cover, at depth 0, so a fresh lineage is offered the next slot first.
+   * Every AD-6c warning text is unchanged.
+   */
+  occupiedLineages: ReadonlySet<string> = new Set(),
+): Deduped[] {
   const verified = new Map<string, Deduped[]>()
   const unverified: Deduped[] = []
 
@@ -289,7 +321,14 @@ export function rankByDiversity(deduped: readonly Deduped[], slots: number): Ded
     else verified.set(claim.lineage, [entry])
   }
 
-  const buckets = [...verified.values()]
+  // Fresh lineages first, occupied ones after — a stable partition, so the
+  // caller's ordering survives WITHIN each half exactly as it did before.
+  const fresh: Deduped[][] = []
+  const occupied: Deduped[][] = []
+  for (const [lineage, bucket] of verified) {
+    ;(occupiedLineages.has(lineage) ? occupied : fresh).push(bucket)
+  }
+  const buckets = [...fresh, ...occupied]
   const picked: Deduped[] = []
 
   // Pass n takes the nth model from each lineage, so distinct lineages fill
@@ -404,7 +443,21 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
   // deduped, resolutions: []}`, so `picked` is `rankByDiversity(deduped, slots)`
   // exactly as before — the pinless run is unchanged, not merely equivalent.
   const pinning = resolvePins(deduped, pins, slots)
-  const ranked = rankByDiversity(pinning.remaining, slots - pinning.filled.length)
+  // The lineages the pins already hold, so the backfill does not spend a slot on
+  // a second model from one of them while a fresh lineage goes unused. Verified
+  // lineages only: an unverified claim is evidence of nothing in either
+  // direction (AD-5), so it never marks a bucket occupied.
+  const pinnedLineages = new Set(
+    pinning.filled
+      .map((entry) => lineageOf(entry.candidate.modelId))
+      .filter((claim) => claim.verified)
+      .map((claim) => claim.lineage),
+  )
+  const ranked = rankByDiversity(
+    pinning.remaining,
+    slots - pinning.filled.length,
+    pinnedLineages,
+  )
   const picked = [...pinning.filled, ...ranked]
 
   const rosterSlots: RosterSlot[] = picked.map((entry, index) => ({

@@ -1015,7 +1015,10 @@ describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
     const truncated = out.warnings.filter((w) => w.code === "discovery-truncated")
     expect(truncated).toHaveLength(1)
     expect(truncated[0]!.detail).toMatchObject({ poolSkipped: 2, lensSkipped: 1 })
-    expect(truncated[0]!.message).toContain("No model failed and none was retried")
+    // SCOPED TO ITS OWN SLOTS (code review 2026-09-06). A model can drop out
+    // elsewhere in the same run — and its retry is a plausible reason discovery's
+    // share ran out at all — so a run-level "no model failed" would be false.
+    expect(truncated[0]!.message).toContain("THOSE SLOTS were not skipped because a model failed")
   })
 
   test("A REFUSED RETRY IS NOT 'failed twice' — the count in the warning is the real one", async () => {

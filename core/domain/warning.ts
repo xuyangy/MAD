@@ -83,9 +83,16 @@ export const WARNING_CODES = [
    * IT IS NEITHER OF ITS TWO NEIGHBOURS, and the whole reason it exists is that
    * folding it into either one would be a false report:
    *
-   * - NOT `model-dropped-out`. No model failed and no model was even asked.
-   *   Naming a provider here would blame a working model for the user's own
-   *   budget, which is the exact class of dishonesty this tool is built against.
+   * - NOT `model-dropped-out`. THE SLOTS THIS CODE NAMES were never asked, so no
+   *   model failed on them. Naming a provider here would blame a working model
+   *   for the user's own budget, which is the exact class of dishonesty this
+   *   tool is built against.
+   *
+   *   SCOPED TO ITS OWN SLOTS, and the message says so in as many words (code
+   *   review 2026-09-06). A model CAN drop out elsewhere in the same run — and
+   *   its retry is a plausible reason discovery's share ran out in the first
+   *   place — so a run-level "no model failed" would be false. The two reports
+   *   coexist and each speaks only for the slots it names.
    * - NOT `unresolved-findings`. That is AD-6d, raised over findings that exist
    *   and were left undecided. At the point discovery is truncated there are no
    *   findings yet to strand — the loss is recall, not adjudication.

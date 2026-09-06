@@ -928,3 +928,62 @@ describe("selectRoster with pins — the roster changes, the reports do not (sto
     expect(warnings.map((w) => w.code)).not.toContain("roster-pin-unhonoured")
   })
 })
+
+describe("a pin never costs the roster a lineage it could have kept (code review 2026-09-06)", () => {
+  // Two Anthropic models and one OpenAI. The unpinned roster at two slots takes
+  // one of each; pinning either Anthropic model used to return the OTHER one,
+  // because ranking saw only the remainder and knew nothing about the lineage the
+  // pin already held. That produced a one-lineage roster the unpinned run did not
+  // produce, and then told the user to add a provider — a remedy a reviewer
+  // FOLLOWED, with no effect, because the Anthropic bucket is still visited first.
+  const HOST_TWO_CLAUDE = [
+    candidate("anthropic", "claude-sonnet-4-5-20250929"),
+    candidate("anthropic", "claude-opus-4-1"),
+    candidate("openai", "gpt-5"),
+  ]
+
+  test("PINNING AN ANTHROPIC MODEL STILL LEAVES TWO LINEAGES", () => {
+    for (const modelId of ["claude-sonnet-4-5-20250929", "claude-opus-4-1"]) {
+      const { roster, warnings } = selectRoster(HOST_TWO_CLAUDE, {
+        ...OPTS,
+        slots: 2,
+        pins: [pin("anthropic", modelId)],
+      })
+
+      expect(roster.slots).toHaveLength(2)
+      expect(roster.distinctLineages).toBe(2)
+      expect(warnings.map((w) => w.code)).not.toContain("roster-single-lineage")
+      // The pin is still honoured and still first.
+      expect(roster.slots[0]!.modelId).toBe(modelId)
+    }
+  })
+
+  test("THE UNPINNED RUN IS THE BASELINE, and the pinned run matches it on diversity", () => {
+    // The non-vacuous sibling: the property is that pinning costs nothing, so the
+    // unpinned run has to actually get two lineages for the claim to mean anything.
+    const base = selectRoster(HOST_TWO_CLAUDE, { ...OPTS, slots: 2 })
+    expect(base.roster.distinctLineages).toBe(2)
+  })
+
+  test("a genuinely one-lineage host still warns — the fix does not suppress anything", () => {
+    // AD-4's amendment: pinning must never buy a diversity claim the models do not
+    // support. When the host really has one lineage, the warning still fires.
+    const { roster, warnings } = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5-20250929"), candidate("anthropic", "claude-opus-4-1")],
+      { ...OPTS, slots: 2, pins: [pin("anthropic", "claude-opus-4-1")] },
+    )
+    expect(roster.distinctLineages).toBe(1)
+    expect(warnings.map((w) => w.code)).toContain("roster-single-lineage")
+  })
+
+  test("an UNVERIFIED pinned lineage marks no bucket occupied (AD-5)", () => {
+    // An unverified claim is evidence of nothing in either direction, so it must
+    // not deprioritise a real lineage.
+    const { roster } = selectRoster(
+      [candidate("acme", "mystery-1"), candidate("openai", "gpt-5"), candidate("anthropic", "claude-opus-4-1")],
+      { ...OPTS, slots: 2, pins: [pin("acme", "mystery-1")] },
+    )
+    expect(roster.slots[0]!.modelId).toBe("mystery-1")
+    expect(roster.distinctLineages).toBe(1)
+  })
+})
