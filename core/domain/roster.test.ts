@@ -8,7 +8,14 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { MODEL_UNRESOLVED, modelNameOf, type LensSlot, type Roster, type RosterSlot } from "./roster.ts"
+import {
+  MODEL_AMBIGUOUS,
+  MODEL_UNRESOLVED,
+  modelNameOf,
+  type LensSlot,
+  type Roster,
+  type RosterSlot,
+} from "./roster.ts"
 
 function slot(id: string, providerId: string, modelId: string): RosterSlot {
   return {
@@ -51,6 +58,28 @@ describe("modelNameOf (AD-6b)", () => {
     // `provider/model` id.
     expect(modelNameOf(ROSTER, "discovery-9")).toBe(MODEL_UNRESOLVED)
     expect(modelNameOf(ROSTER, "")).toBe(MODEL_UNRESOLVED)
+  })
+
+  test("A SLOT ID CLAIMED BY BOTH COLLECTIONS says AMBIGUOUS, not the first match", () => {
+    // `slots` and `lensSlots` are disjoint by construction (AD-4 amended), so
+    // this is unreachable today — covered here rather than left as an untested
+    // branch, exactly as the unresolved case above is.
+    //
+    // The old `find` took the FIRST match silently, so a broken invariant became
+    // an AD-6(b) warning CONFIDENTLY NAMING THE WRONG MODEL (epic-1 retrospective
+    // ledger triage, entry 38). A wrong name is worse than no name: AD-6 exists
+    // so a degraded review is never indistinguishable from a good one, and a
+    // plausible wrong name is precisely indistinguishable.
+    const collided: Roster = {
+      ...ROSTER,
+      lensSlots: [{ ...slot("discovery-1", "google", "gemini-2.5-pro"), lens: "security" } as LensSlot],
+    }
+    expect(modelNameOf(collided, "discovery-1")).toBe(MODEL_AMBIGUOUS)
+
+    // NOT VACUOUS: the same roster still resolves every UNAMBIGUOUS id normally,
+    // so the branch is reached by collision and not by the fixture being broken.
+    expect(modelNameOf(collided, "discovery-2")).toBe("openai/gpt-5")
+    expect(modelNameOf(collided, "discovery-9")).toBe(MODEL_UNRESOLVED)
   })
 
   test("it reads the SLOT ID, never a substring of one", () => {

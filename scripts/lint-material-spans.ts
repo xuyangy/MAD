@@ -93,21 +93,45 @@ export function scanSource(file: string, source: string): Violation[] {
   return violations
 }
 
+/**
+ * EVERY DIRECTORY THAT COULD BUILD A PROMPT (code review 2026-08-28). This was
+ * scoped to `core/` alone, justified in the header with "adapters build no spans
+ * — AD-1 makes framing the core's job" — which is precisely the assertion the
+ * script exists to stop taking on trust. `fixtures/prompt-injection/` builds
+ * prompts and was never read.
+ */
+export const SCAN_GLOB = "{core,adapters,fixtures,scripts,ablation}/**/*.ts"
+
+/**
+ * The files this lint actually reads, repo-relative and POSIX, sorted.
+ *
+ * Exported so the SCOPE is testable and not only the RULE (epic-1 retrospective
+ * ledger triage, entry 60). The test that claimed "THE ABLATION TREE IS SCANNED
+ * TOO" called `scanSource` with a hand-written path, which consults no directory
+ * scope at all — so it passed whether or not the glob included `ablation/`. A
+ * mutation probe proved it: dropping `ablation` from the pattern above left the
+ * whole suite at 1057 pass, 0 fail. A test that cannot fail for the reason it
+ * names is worse than no test, because it reads as coverage.
+ *
+ * Asserting on this list instead means the scope is checked the same way the rule
+ * is — against what the script will really open.
+ */
+export async function scannedFiles(): Promise<string[]> {
+  const files: string[] = []
+  for await (const path of new Glob(SCAN_GLOB).scan({ cwd: ROOT })) {
+    files.push(relative(ROOT, resolve(ROOT, path)).replaceAll("\\", "/"))
+  }
+  return files.sort()
+}
+
 export async function main(): Promise<number> {
   const violations: Violation[] = []
   let checked = 0
 
-  // EVERY DIRECTORY THAT COULD BUILD A PROMPT (code review 2026-08-28). This was
-  // `core/**/*.ts`, justified in the header with "adapters build no spans — AD-1
-  // makes framing the core's job" — which is precisely the assertion the script
-  // exists to stop taking on trust. `fixtures/prompt-injection/` builds prompts
-  // and was never read.
-  const glob = new Glob("{core,adapters,fixtures,scripts,ablation}/**/*.ts")
-  for await (const path of glob.scan({ cwd: ROOT })) {
-    const absolute = resolve(ROOT, path)
-    const source = await Bun.file(absolute).text()
+  for (const path of await scannedFiles()) {
+    const source = await Bun.file(resolve(ROOT, path)).text()
     checked += 1
-    violations.push(...scanSource(relative(ROOT, absolute).replaceAll("\\", "/"), source))
+    violations.push(...scanSource(path, source))
   }
 
   if (violations.length > 0) {

@@ -763,7 +763,7 @@ describe("debate — AD-17a: the lens is out of scope here", () => {
     // (b) The lens does not reach the PROMPT either — not as text, and not
     // smuggled in through the slot id, which is where AD-17 says the leak hides.
     for (const prompt of prompts) {
-      expect(prompt).not.toContain("security")
+      expect(prompt.toLowerCase()).not.toContain("security")
       expect(prompt).not.toContain("discovery-lens")
       expect(prompt).toContain("participant 1")
     }
@@ -1745,7 +1745,7 @@ describe("debate — AD-18: what the framing must NOT touch", () => {
     })
 
     for (const prompt of prompts) {
-      expect(prompt).not.toContain("security")
+      expect(prompt.toLowerCase()).not.toContain("security")
       expect(prompt).not.toContain("discovery-lens")
       expect(prompt).not.toContain("discovery-1")
       expect(prompt).toContain("participant 1")

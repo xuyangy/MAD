@@ -1285,10 +1285,6 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // so "every finding below is unverified" became an overstatement the moment
       // any finding had already been judged. It now says what is true in both
       // cases: whatever was left is undecided by anybody.
-      // WORDED FOR BOTH WAYS IT IS REACHED (code review 2026-08-27). Dropping a
-      // dead slot for the rest of the stage made this reachable PARTWAY through,
-      // so "every finding below is unverified" became an overstatement the moment
-      // any finding had already been judged.
       //
       // IT NOW CARRIES A NUMBER (code review 2026-08-28). Prose saying "any
       // finding below without a verdict" gave a reader nothing to check the

@@ -77,7 +77,17 @@ export const LIVE_ARMS = (pin: Pin, lenses: readonly string[]): ArmSpec[] => [
 ]
 
 export async function runLiveAblation(options: LiveOptions): Promise<AblationReport> {
-  const client = createOpencodeClient({ baseUrl: options.serverUrl })
+  // SCOPED TO `--directory`, like every other client in this tree (epic-1
+  // retrospective ledger triage, entry 58). `OpencodeModelBackend` passes
+  // `directory` at its own construction site and `opencodeRepo` takes a
+  // worktree; this one took a bare `baseUrl`, so the candidate enumeration below
+  // asked the server about whatever directory it happened to consider current.
+  // Unexercised by CI — the live path is the one module CI can never run — which
+  // is why it survived to here rather than being caught by a test.
+  const client = createOpencodeClient({
+    baseUrl: options.serverUrl,
+    directory: options.directory,
+  })
   const candidates = await enumerateCandidates(client as never)
   const providerConfigKey = options.providerConfigKey ?? "provider"
   const lenses = options.lenses ?? []

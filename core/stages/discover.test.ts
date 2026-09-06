@@ -1015,6 +1015,13 @@ describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
     const truncated = out.warnings.filter((w) => w.code === "discovery-truncated")
     expect(truncated).toHaveLength(1)
     expect(truncated[0]!.detail).toMatchObject({ poolSkipped: 2, lensSkipped: 1 })
+    // AND THE SENTENCE, NOT ONLY THE DETAIL (epic-1 retrospective ledger triage,
+    // entry 64). The detail assertion above is real — swapping the two fields
+    // fails it. The rendered SENTENCE was not pinned by anything, so swapping
+    // `${poolSkipped}` and `${lensSkipped}` in the message left the whole suite
+    // green while the warning told the reader the exact opposite of the truth.
+    // The detail object is machine-read; this sentence is what a human acts on.
+    expect(truncated[0]!.message).toContain("2 pool slot(s) and 1 lens slot(s)")
     // SCOPED TO ITS OWN SLOTS (code review 2026-09-06). A model can drop out
     // elsewhere in the same run — and its retry is a plausible reason discovery's
     // share ran out at all — so a run-level "no model failed" would be false.

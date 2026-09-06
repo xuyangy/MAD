@@ -118,7 +118,28 @@ export interface Roster {
  */
 export const MODEL_UNRESOLVED = "unresolved — not on the roster"
 
+/**
+ * AN AMBIGUOUS SLOT ID GETS ITS OWN ANSWER (epic-1 retrospective ledger triage,
+ * entry 38). `slots` and `lensSlots` are disjoint by construction — AD-4's
+ * amendment puts lens slots in their own collection precisely so nothing
+ * downstream can confuse the two — but this helper searched the concatenation
+ * with `find`, which takes the FIRST match and says nothing. If the invariant
+ * ever broke, an AD-6(b) drop-out warning would confidently name the wrong
+ * model, and a warning that names the wrong model is worse than one that names
+ * none: AD-6 exists so a degraded review is never indistinguishable from a good
+ * one, and a plausible wrong name is exactly indistinguishable.
+ *
+ * Not an exception. The consistency conventions reserve those for programmer
+ * error and unusable host state, and this is reached while RENDERING a warning —
+ * throwing here would take down a run to complain about a label. A third named
+ * constant, on `MODEL_UNRESOLVED`'s own precedent, so a caller can test for it.
+ */
+export const MODEL_AMBIGUOUS = "ambiguous — slot id claimed by more than one roster entry"
+
 export function modelNameOf(roster: Roster, slot: string): string {
-  const filled = [...roster.slots, ...roster.lensSlots].find((s) => s.slot === slot)
-  return filled ? `${filled.providerId}/${filled.modelId}` : MODEL_UNRESOLVED
+  const matches = [...roster.slots, ...roster.lensSlots].filter((s) => s.slot === slot)
+  if (matches.length === 0) return MODEL_UNRESOLVED
+  if (matches.length > 1) return MODEL_AMBIGUOUS
+  const filled = matches[0]!
+  return `${filled.providerId}/${filled.modelId}`
 }

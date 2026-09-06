@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { main, scanSource } from "./lint-material-spans.ts"
+import { main, scanSource, scannedFiles } from "./lint-material-spans.ts"
 
 /**
  * Built at run time rather than written as a literal, so this test file does not
@@ -64,6 +64,35 @@ describe("AD-18 material-span rule", () => {
     // model-authored claims into it. A second span emitter there would be the
     // same forgery surface AD-18 closes everywhere else.
     expect(scanSource("ablation/report.ts", `lines.push(\`${opener}\`)\n`)).toHaveLength(1)
+  })
+
+  test("...AND THE SCOPE IS CHECKED, not just the rule (retrospective triage, entry 60)", async () => {
+    // The test above passes a path in by hand, and `scanSource` consults no
+    // directory scope — so it answered about `ablation/report.ts` whether or not
+    // the linter would ever OPEN that file. Proven vacuous by mutation: dropping
+    // `ablation` from `SCAN_GLOB` left the whole suite at 1057 pass, 0 fail.
+    //
+    // This asserts against the list the linter will really read. Every tree named
+    // in the glob must contribute at least one real file, so a tree silently
+    // dropped from the pattern fails here — which is the failure the sibling above
+    // was written to produce and could not.
+    const files = await scannedFiles()
+    for (const tree of ["core", "adapters", "fixtures", "scripts", "ablation"]) {
+      expect(files.some((file) => file.startsWith(`${tree}/`))).toBe(true)
+    }
+
+    // Named files, so "the tree is scanned" cannot be satisfied by some unrelated
+    // file that happens to sit under it. These three are the prompt builders the
+    // 2026-08-28 review widened the glob to reach.
+    expect(files).toContain("ablation/report.ts")
+    expect(files).toContain("fixtures/prompt-injection/change.ts")
+    expect(files).toContain("core/prompt/material.ts")
+
+    // NOT VACUOUS: the list is the real one, so it must also EXCLUDE what the
+    // glob excludes. A pattern widened to `**/*.ts` would pass every assertion
+    // above and this one catches it.
+    expect(files.some((file) => file.startsWith("node_modules/"))).toBe(false)
+    expect(files.every((file) => file.endsWith(".ts"))).toBe(true)
   })
 
   test("the real tree passes — one emitter", async () => {
