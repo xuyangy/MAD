@@ -272,6 +272,57 @@ export function frameForHostAgent(rendered: string): string {
   return material("review report", rendered)
 }
 
+/**
+ * AD-6 / `dial-clamped` — the dials the run did not honour as asked.
+ *
+ * Compares what the caller PASSED against what is IN FORCE on the record, after
+ * every clamp has run. Reading it off the record rather than re-deriving it is
+ * deliberate and is the same rule the ablation's "every dial is equal across
+ * arms" test follows: the literal is what was asked for, the record is what
+ * happened, and only the record can answer "did this move".
+ *
+ * A dial the caller did not pass is SKIPPED, never reported. Absence is the
+ * caller declining to set it, not a clamp — and a warning that fired on every
+ * default run would teach a reader to skip the block AD-6 needs them to read.
+ *
+ * `spendShares` is compared per share, so a run that asked for a valid discovery
+ * share and a rubbish debate share names only the one that moved.
+ */
+function clampedDials(deps: ReviewDeps, record: RunRecord, preset: Preset): Warning[] {
+  const moved: { dial: string; requested: unknown; inForce: unknown }[] = []
+  const note = (dial: string, requested: unknown, inForce: unknown) => {
+    if (requested !== undefined && !Object.is(requested, inForce)) {
+      moved.push({ dial, requested, inForce })
+    }
+  }
+
+  // `threshold` falls through to the preset when absent, so it is compared only
+  // when the CALLER named one — otherwise every preset run would report the
+  // preset's own value as a clamp of nothing.
+  note("threshold", deps.threshold, record.threshold)
+  note("maxRounds", deps.maxRounds, record.maxRounds)
+  note("tokenCap", deps.tokenCap, record.ledger.cap)
+  note("maxConcurrency", deps.maxConcurrency, record.ledger.maxConcurrency)
+  note("preset", deps.preset, preset)
+  for (const [share, value] of Object.entries(deps.spendShares ?? {})) {
+    note(`spendShares.${share}`, value, record.ledger.shares[share as keyof SpendShares])
+  }
+
+  if (moved.length === 0) return []
+  return [
+    {
+      code: "dial-clamped",
+      stage: "discover",
+      message:
+        `A DIAL WAS NOT HONOURED AS ASKED: ` +
+        moved.map((m) => `${m.dial} ${JSON.stringify(m.requested)} → ${JSON.stringify(m.inForce)}`).join("; ") +
+        `. The run was held to the value(s) on the right, and every number it reports is a ` +
+        `number about THAT run — not about the one that was requested.`,
+      detail: { dials: moved },
+    },
+  ]
+}
+
 export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const { roster, backend, clock, change } = deps
   // AD-11 amended — the pool's set comes from the registry, addressed by task
@@ -307,6 +358,9 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     // CAP-4 — clamped once, here, for exactly `threshold`'s reason: the record
     // carries the value debate actually used, not the one the caller asked for.
     maxRounds: clampMaxRounds(deps.maxRounds),
+    // `dial-clamped` is appended AFTER the record is built, below — it compares
+    // against the clamped values this object now carries, so it cannot be
+    // computed inside the literal that produces them.
     warnings: [...(deps.priorWarnings ?? [])],
     // AD-15 — the ceiling rides on the ledger, beside the spend it bounds, and
     // is CLAMPED once here for exactly `threshold`'s and `maxRounds`' reason. An
@@ -319,6 +373,11 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
       clampSpendShares(deps.spendShares),
     ),
   }
+
+  // AD-6 / `dial-clamped` (epic-1 retrospective) — raised HERE, once, because
+  // this is the first point at which both halves of the comparison exist: the
+  // caller's request in `deps`, and the clamped value on `record`.
+  record.warnings.push(...clampedDials(deps, record, preset))
 
   // AD-15 amended — ONE limiter, created once, from the number the record now
   // carries. Every stage's fan-out passes through this object, so "peak

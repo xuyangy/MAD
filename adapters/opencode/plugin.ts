@@ -17,6 +17,7 @@ import {
   PRESETS,
   SUGGESTED_BUDGET,
 } from "../../core/budget/ledger.ts"
+import type { Warning } from "../../core/domain/warning.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
 import { oneLine } from "../../core/prompt/material.ts"
@@ -165,6 +166,60 @@ export function clampLenses(lenses: readonly string[] | undefined): string[] {
     if (kept.length >= MAX_LENS_SLOTS) break
   }
   return kept
+}
+
+/**
+ * AD-6 / `dial-clamped` — what the two clamps above TRUNCATED, as a warning the
+ * core can carry (epic-1 retrospective ledger triage, entries 4 and 51).
+ *
+ * Both clamps bound a list arriving from a model call, and both had a real
+ * reason to: an unbounded list is an unbounded loop and an unbounded warning
+ * message. What neither had was a way to SAY SO. `clampPins`' own header states
+ * the problem — "This layer CANNOT raise a `Warning`: anything it silently
+ * discards is a request the user made and nobody ever answered" — and it was
+ * true only because no code existed to carry it and adding one was an `Ask
+ * First` three stories declined. The retrospective put that question to the
+ * human and the answer was yes, so the layer can now answer for itself: these
+ * go into `priorWarnings`, which the adapter already threads into `review()`.
+ *
+ * COUNTS ONLY THE OVERFLOW, never the ordinary drops. `clampLenses` also removes
+ * blanks and duplicates, and those are NOT truncation: a duplicate lens is a
+ * slot that cannot exist, which its own header calls deliberate rather than an
+ * inconsistency. Only a list longer than the ceiling loses something the caller
+ * asked for. That is why this compares against the ceiling and not against the
+ * input length.
+ *
+ * Reachable only by a direct adapter caller: both tool schemas carry `.max()`,
+ * so an over-long array is refused before `execute` runs. Reported anyway, for
+ * the reason the schema itself is not enough — the exported function is a seam,
+ * and TypeScript does not police a JavaScript caller.
+ */
+export function truncatedListWarnings(args: {
+  models?: readonly string[]
+  lenses?: readonly string[]
+}): Warning[] {
+  const moved: { dial: string; requested: unknown; inForce: unknown }[] = []
+  if (Array.isArray(args.models) && args.models.length > MAX_DISCOVERY_SLOTS) {
+    moved.push({ dial: "models", requested: args.models.length, inForce: MAX_DISCOVERY_SLOTS })
+  }
+  if (Array.isArray(args.lenses) && args.lenses.length > MAX_LENS_SLOTS) {
+    moved.push({ dial: "lenses", requested: args.lenses.length, inForce: MAX_LENS_SLOTS })
+  }
+  if (moved.length === 0) return []
+  return [
+    {
+      code: "dial-clamped",
+      stage: "roster",
+      message:
+        `A DIAL WAS NOT HONOURED AS ASKED: ` +
+        moved
+          .map((m) => `${m.dial} ${JSON.stringify(m.requested)} → ${JSON.stringify(m.inForce)}`)
+          .join("; ") +
+        `. The entries past that ceiling were never resolved and never reported by the core, ` +
+        `because they were dropped before it saw them.`,
+      detail: { dials: moved },
+    },
+  ]
 }
 
 export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
@@ -356,11 +411,22 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             backend: recorder ? recorder.wrap(backend) : backend,
             clock: systemClock(),
             change,
-            priorWarnings: resolved.warnings,
+            // AD-6 — the adapter's OWN truncations ride in beside the roster's.
+            // `review()` copies `priorWarnings` onto the record verbatim, so this
+            // is the supported way for this layer to be heard at all.
+            priorWarnings: [...truncatedListWarnings(args), ...resolved.warnings],
             // CAP-7 (story 8) — the two user-facing dials, and the only two on
-            // this surface. `tokenCap` is clamped again in `review()`; passing it
-            // through unclamped here would be fine, and it is clamped anyway for
-            // the reason `slots` is — the value arrives from a model call.
+            // this surface. `tokenCap` is passed through UNCLAMPED and `review()`
+            // clamps it; the tool schema's `.int().min(0)` is the only check on
+            // this side, and a schema check is not a clamp.
+            //
+            // This comment used to end "and it is clamped anyway for the reason
+            // `slots` is", which was false about the line directly beneath it
+            // (epic-1 retrospective ledger triage, entry 61). Passing it through
+            // is correct — one clamp, in the accountant that owns the dial, per
+            // AD-15 — but a comment claiming a guard that is not there is worse
+            // than no comment: it is the thing a later reader trusts instead of
+            // looking.
             preset: args.preset === undefined ? undefined : preset,
             tokenCap: args.budget,
             // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US

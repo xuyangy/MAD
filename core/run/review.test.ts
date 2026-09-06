@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
 import { DISCLOSURE_CODES } from "../domain/warning.ts"
+import type { RunRecord } from "../domain/run-record.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { selectRoster } from "../roster/select.ts"
@@ -1561,6 +1562,83 @@ describe("review — AD-18: what the framing must NOT touch", () => {
 // ---------------------------------------------------------------------------
 
 const TURN_COST = 30
+
+describe("review — AD-6 `dial-clamped`: a dial the run did not honour as asked", () => {
+  const base = () => {
+    const resolved = setup([
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ])
+    return {
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    }
+  }
+  const clamped = (record: RunRecord) =>
+    record.warnings.filter((w) => w.code === "dial-clamped")
+
+  test("PASSING NOTHING RAISES NOTHING — absence is not a clamp", async () => {
+    // The assertion that decides whether this code is usable at all. A warning
+    // that fires on every default run teaches the reader to skip the block AD-6
+    // needs them to read, which is worse than the silence it replaced.
+    const { record } = await review(base())
+    expect(clamped(record)).toHaveLength(0)
+  })
+
+  test("A VALUE THE CLAMP ACCEPTS RAISES NOTHING either", async () => {
+    // The non-vacuous sibling: without it, "passing nothing is quiet" could be
+    // true of a code that never fires at all.
+    const { record } = await review({ ...base(), threshold: 0.5, maxRounds: 2 })
+    expect(clamped(record)).toHaveLength(0)
+  })
+
+  test("`threshold: 4` is silently 1 no longer — it says so, with both numbers", async () => {
+    const { record } = await review({ ...base(), threshold: 4 })
+    const warnings = clamped(record)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]!.detail).toMatchObject({
+      dials: [{ dial: "threshold", requested: 4, inForce: 1 }],
+    })
+    // BOTH NUMBERS IN THE SENTENCE, not only the detail — the detail object is
+    // machine-read and the sentence is what a person acts on. Ledger triage
+    // entry 64 is the precedent: a split pinned in the detail and unpinned in
+    // the message let the message say the opposite of the truth.
+    expect(warnings[0]!.message).toContain("threshold 4 → 1")
+    expect(record.threshold).toBe(1)
+  })
+
+  test("NaN takes the DEFAULT and that is still a clamp", async () => {
+    const { record } = await review({ ...base(), threshold: Number.NaN })
+    expect(clamped(record)).toHaveLength(1)
+    expect(record.threshold).toBe(0.8)
+  })
+
+  test("every clamped dial lands in ONE warning, named individually", async () => {
+    const { record } = await review({
+      ...base(),
+      threshold: 4,
+      maxRounds: 0,
+      maxConcurrency: 999,
+    })
+    const warnings = clamped(record)
+    // ONE warning per run, not one per dial: three separate blocks saying the
+    // same kind of thing is the noise that gets a warning section ignored.
+    expect(warnings).toHaveLength(1)
+    const dials = (warnings[0]!.detail as { dials: { dial: string }[] }).dials
+    expect(dials.map((d) => d.dial).sort()).toEqual(["maxConcurrency", "maxRounds", "threshold"])
+  })
+
+  test("IT IS A DEGRADATION, so it reaches the rendered run", async () => {
+    // Being in the record is not being in front of the reader. `DISCLOSURE_CODES`
+    // does not carry it, so output must render it under degradation.
+    const { rendered } = await review({ ...base(), threshold: 4 })
+    expect(rendered).toContain("threshold 4 → 1")
+  })
+})
 
 describe("review — CAP-7: passing nothing is the run this repo already shipped", () => {
   test("omitting both new arguments changes no dial and no ceiling", async () => {

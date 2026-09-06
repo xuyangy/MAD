@@ -137,6 +137,46 @@ export const WARNING_CODES = [
    * supplied and at least one was not honoured.
    */
   "roster-pin-unhonoured",
+  /**
+   * AD-6 (epic-1 retrospective, ledger triage bucket D) — A DIAL THE RUN DID NOT
+   * HONOUR AS ASKED.
+   *
+   * The fifteenth code. Stories 2A, 3 and 4 each declined a new code here on the
+   * recorded ground that *a clamp is a decision rather than a partial run*, and
+   * the effect compounded: `clampThreshold(4)` silently became `1`,
+   * `clampMaxRounds(0)` silently became `3`, `clampPreset("thorough")` silently
+   * became `normal`. Three requests answered with a different number and nothing
+   * said. The retrospective put the question to the human once instead of a
+   * fourth decline, and the answer was yes.
+   *
+   * WHY IT MEETS THE BAR THE LAST THREE CODES SET. `run-cancelled`,
+   * `discovery-truncated` and `roster-pin-unhonoured` each argued the same two
+   * things, and both hold here. **No existing code can carry the fact without
+   * lying:** nothing else speaks about the dials, and bending `denominator-reduced`
+   * or `roster-underfilled` to say it would file a request MAD did not honour as
+   * a fact about the roster. **And it is a fact about WHAT WAS REVIEWED, not a
+   * decision MAD made:** the threshold decides which findings entered debate at
+   * all, so a run held to `1` when the caller asked for `4` examined a different
+   * set of findings than the caller asked for — and reported the clamped dial as
+   * though it were the requested one.
+   *
+   * The counter-argument, recorded: the caller here is a programmer, not an end
+   * user, and TypeScript rejects most of these at the call site. True, and it is
+   * why this took four stories to answer. `review()` is an EXPORTED seam and
+   * TypeScript does not police a JavaScript caller — the same reasoning
+   * `clampConcurrency`'s header already gives for why its own failure modes are
+   * reachable at all.
+   *
+   * NOT RAISED WHEN THE CALLER PASSED NOTHING. Absence is not a clamp: it is the
+   * caller declining to set a dial, and warning about it would fire on every
+   * default run and teach the reader to skip the warning block — which is the one
+   * outcome AD-6 cannot afford.
+   *
+   * Raised ONCE per run, by `core/run/review.ts`, which is the seam where a
+   * caller's request meets the clamp. It names every dial that moved, with what
+   * was asked for and what is in force.
+   */
+  "dial-clamped",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

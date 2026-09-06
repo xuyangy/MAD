@@ -18,10 +18,26 @@ describe("the warning vocabulary (AD-6)", () => {
     // envelope, the provider disclosure, the unresolved section, the untooled
     // fact-check, the unavailable judge, from story 7A the cancelled run, and
     // from story 8 the budget-truncated discovery, and from story 8A the pin the
-    // run could not honour. Adding a fifteenth is a deliberate act: AD-6's report
-    // set is an `Ask First` that three stories declined before 7A answered it,
-    // so it should not be possible to do it quietly.
-    expect(WARNING_CODES).toHaveLength(14)
+    // run could not honour, and from the epic-1 retrospective the dial the run
+    // did not honour as asked. Adding a sixteenth is a deliberate act: AD-6's
+    // report set is an `Ask First` that three stories declined before 7A
+    // answered it, so it should not be possible to do it quietly.
+    //
+    // THIS ASSERTION DID ITS JOB (2026-09-06). `dial-clamped` was added and the
+    // suite failed here, on exactly this line, forcing the classification below
+    // rather than letting a new code reach the renderer's disclosure/degradation
+    // split with nobody deciding which side it belonged on.
+    expect(WARNING_CODES).toHaveLength(15)
+  })
+
+  test("`dial-clamped` IS A DEGRADATION, not a disclosure (epic-1 retrospective)", () => {
+    // The classification the count pin above forced. A clamped dial is not a
+    // fact about how the run was configured — it is a run held to a value its
+    // caller did not ask for, and every number it reports is a number about
+    // THAT run. Unlisted is degradation, which is the safe default, and this
+    // asserts the default was the intended answer rather than an oversight.
+    expect(WARNING_CODES).toContain("dial-clamped")
+    expect(DISCLOSURE_CODES.has("dial-clamped")).toBe(false)
   })
 
   test("every code is unique", () => {

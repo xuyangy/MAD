@@ -8,6 +8,7 @@ import {
   DEFAULT_DISCOVERY_SLOTS,
   MAX_DISCOVERY_SLOTS,
   MAX_LENS_SLOTS,
+  truncatedListWarnings,
 } from "./plugin.ts"
 
 describe("discovery slot count (AD-3, CAP-1)", () => {
@@ -123,6 +124,53 @@ describe("discovery lenses (CAP-11, AD-3, AD-15 amended)", () => {
     expect(clampLenses("security" as never)).toEqual([])
     expect(clampLenses(42 as never)).toEqual([])
     expect(clampLenses({ 0: "security", length: 1 } as never)).toEqual([])
+  })
+})
+
+describe("truncatedListWarnings — the clamps can finally say what they dropped", () => {
+  // Entries 4 and 51 of the epic-1 ledger triage. Both clamps had a real reason
+  // to bound a list from a model call, and no way to say so — `clampPins`' own
+  // header said the layer "CANNOT raise a `Warning`". It can now, through
+  // `priorWarnings`, because `dial-clamped` exists.
+  test("A LIST WITHIN THE CEILING RAISES NOTHING", () => {
+    expect(truncatedListWarnings({})).toEqual([])
+    expect(truncatedListWarnings({ models: ["openai/gpt-5"], lenses: ["security"] })).toEqual([])
+    // AT the ceiling is not OVER it — nothing was dropped, so nothing is said.
+    expect(
+      truncatedListWarnings({ models: Array.from({ length: MAX_DISCOVERY_SLOTS }, () => "a/b") }),
+    ).toEqual([])
+  })
+
+  test("a 13th pin is REPORTED, not silently dropped", () => {
+    const warnings = truncatedListWarnings({
+      models: Array.from({ length: MAX_DISCOVERY_SLOTS + 1 }, () => "a/b"),
+    })
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]!.code).toBe("dial-clamped")
+    expect(warnings[0]!.detail).toMatchObject({
+      dials: [{ dial: "models", requested: MAX_DISCOVERY_SLOTS + 1, inForce: MAX_DISCOVERY_SLOTS }],
+    })
+    expect(warnings[0]!.message).toContain(`models ${MAX_DISCOVERY_SLOTS + 1} → ${MAX_DISCOVERY_SLOTS}`)
+  })
+
+  test("lens overflow too, and both in ONE warning", () => {
+    const warnings = truncatedListWarnings({
+      models: Array.from({ length: MAX_DISCOVERY_SLOTS + 2 }, () => "a/b"),
+      lenses: Array.from({ length: MAX_LENS_SLOTS + 3 }, (_, i) => `lens-${i}`),
+    })
+    expect(warnings).toHaveLength(1)
+    const dials = (warnings[0]!.detail as { dials: { dial: string }[] }).dials
+    expect(dials.map((d) => d.dial)).toEqual(["models", "lenses"])
+  })
+
+  test("DUPLICATES AND BLANKS ARE NOT TRUNCATION — they raise nothing", () => {
+    // The distinction that decides whether this warning is trustworthy. A
+    // duplicate lens is a slot that cannot exist, which `clampLenses` calls
+    // deliberate rather than an inconsistency; only a list longer than the
+    // CEILING loses something the caller asked for. Comparing against the input
+    // length instead of the ceiling would fire on every deduped list.
+    expect(truncatedListWarnings({ lenses: ["security", "security", "", "  "] })).toEqual([])
+    expect(clampLenses(["security", "security", "", "  "])).toEqual(["security"])
   })
 })
 
