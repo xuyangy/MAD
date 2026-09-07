@@ -329,7 +329,7 @@ describe("AD-6f — a run the user stopped", () => {
     }
   })
 
-  test("BUDGET FIRST, THEN STOPPED: the budget keeps the blame — one cause per finding", async () => {
+  test("AT `tokenCap: 1` NOTHING RUNS AT ALL — the state this test used to claim is unreachable", async () => {
     // The frozen matrix row "One cause per finding", which had no test. A finding
     // already stranded by the budget must KEEP the budget reason; cancellation
     // must never overwrite an existing `unresolved` (AD-7 is append-only). The
@@ -356,18 +356,22 @@ describe("AD-6f — a run the user stopped", () => {
       signal: controller.signal,
     })
 
-    const stranded = record.findings.filter((f) => f.unresolved)
-    for (const finding of stranded) {
-      // Whichever cause claimed it, it claimed it ONCE. The failure this guards
-      // is a reason string carrying both, or the later cause overwriting the
-      // earlier one.
-      const reason = finding.unresolved!.reason
-      const namesBudget = reason.includes("budget")
-      const namesStop = reason.includes("cancelled")
-      expect(namesBudget || namesStop).toBe(true)
-      expect(namesBudget && namesStop).toBe(false)
-    }
-    expect(rendered).toContain("UNRESOLVED — YOU DECIDE")
+    // THIS TEST COULD NOT FAIL, and now it says so (code review 2026-09-06). At
+    // `tokenCap: 1` discovery's ceiling is `floor(1 * 0.3) = 0`, so `mayISpend`
+    // refuses the very first turn: not one turn is issued, the abort hook armed
+    // on the fourth turn never fires, no finding exists to strand, and the loop
+    // below iterated an empty array while the name promised it was policing
+    // "one cause per finding". Asserting the real state is worth more than a
+    // green line about a state the fake cannot reach.
+    expect(turns).toBe(0)
+    expect(record.cancelled).toBeUndefined()
+    expect(record.findings).toHaveLength(0)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+
+    // The half of F8 that IS reachable — two causes never merging on one
+    // finding — is asserted at the seam story 8's AC names, in
+    // `core/run/review.test.ts`. The "budget latched first and kept it"
+    // ordering is filed in `deferred-work.md`.
   })
 
   test("STOPPED WHERE NO STAGE NEEDS A TURN: it still does not render as finished", async () => {

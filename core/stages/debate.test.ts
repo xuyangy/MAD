@@ -1984,9 +1984,11 @@ describe("debate's money sentence names DEBATE's ceiling, not the cap (code revi
   // it names 400000 over a run that has spent 260000, and the reader can check it
   // against the TOKENS line.
   test("THE STRAND REASON NAMES DEBATE'S SHARE AND THE CAP, and the reader can check both", async () => {
-    // cap 100 -> debate's ceiling is floor(100 * 0.65) = 65. Round 1 runs at
-    // spend 0; round 2 is refused at spend 60... so use a cap where the two
-    // numbers differ visibly and the gate still bites.
+    // cap 60 -> debate's ceiling is floor(60 * 0.65) = 39, which is BELOW the
+    // cap and below the run's own spend. That is the point: the two numbers must
+    // differ visibly, or a sentence naming the cap and a sentence naming the
+    // share read the same and the regression is invisible. Round 1 runs at spend
+    // 0; round 2 is refused once spend has passed 39.
     const ledger = emptyLedger(60) as BudgetLedger
     const findings = [contested({ id: "f-1" }), contested({ id: "f-2" })]
     const backend = new FakeBackend({

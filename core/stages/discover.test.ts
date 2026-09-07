@@ -1033,10 +1033,11 @@ describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
     // it for a turn nobody ran and overstate its unreliability in the one report
     // a reader uses to judge it.
     //
-    // cap 200 -> ceiling 60 = two turns. Slot 1 fails its first attempt (spend
-    // 30), asks for a retry at spend 30 < 60 and fails again... so instead:
-    // slot 1 fails at spend 30, retries at 30 (permitted, spend 60), and slot 2
-    // is refused. To refuse a RETRY, the ceiling must fall between the two.
+    // TO REFUSE A RETRY, THE CEILING MUST FALL BETWEEN THE TWO ATTEMPTS. cap 100
+    // -> discovery's ceiling is floor(100 * 0.3) = 30, which is exactly one
+    // turn: slot 1 fails its first attempt and bills 30, then the retry is asked
+    // for at spend 30 and refused. A wider ceiling would let the retry run and
+    // the warning under test would never be reached.
     const { result } = runCapped(
       rosterOf(1, [["anthropic", "claude-sonnet-4-5"]]),
       { "discovery-1": [{ kind: "fail", failure: "transport-error", message: "boom" }] },

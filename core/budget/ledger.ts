@@ -188,6 +188,26 @@ export function spentInStage(ledger: TokenLedger, stage: SpendStage): number {
 export interface StageSpend {
   stage: SpendStage
   spent: number
+  /**
+   * THE RUN'S TOTAL AS OF THE END OF THIS STAGE — the number `mayISpend`
+   * actually compared against `ceiling` (code review 2026-09-06).
+   *
+   * `spent` above is this stage ALONE and `ceiling` bounds the run's TOTAL, so
+   * the two do not compare and a renderer that flagged `spent > ceiling` was
+   * flagging a comparison the gate never made. It could only ever fire at
+   * `discover`, where the two coincide, and could never fire on the overshoot
+   * F9 exists to report. This field is the third number that makes the row
+   * readable, and it is computed here for the reason every other figure is: a
+   * renderer that added the buckets up itself would be a stage doing budget
+   * arithmetic, which AD-15 forbids.
+   *
+   * It is the running sum of the three stage buckets, in the order the stages
+   * run. `LedgerEntry.stage` is a bare string, so an entry written by anything
+   * other than the three billing stages lands in no bucket and therefore in no
+   * running total either — which is why the TOKENS line above still carries the
+   * true total and this field never claims to replace it.
+   */
+  total: number
   /** `null` when there is no cap — the row still carries the spend. */
   ceiling: number | null
 }
@@ -205,11 +225,12 @@ export interface StageSpend {
  */
 export function budgetReport(ledger: BudgetLedger): StageSpend[] {
   const stages: SpendStage[] = ["discover", "debate", "judge"]
-  return stages.map((stage) => ({
-    stage,
-    spent: spentInStage(ledger, stage),
-    ceiling: stageCeiling(ledger, stage),
-  }))
+  let running = 0
+  return stages.map((stage) => {
+    const spent = spentInStage(ledger, stage)
+    running += spent
+    return { stage, spent, total: running, ceiling: stageCeiling(ledger, stage) }
+  })
 }
 
 /**
@@ -225,6 +246,12 @@ export function budgetReport(ledger: BudgetLedger): StageSpend[] {
  * and every existing test.
  */
 export function ceilingClause(ledger: BudgetLedger, stage: SpendStage): string {
+  // NO CAP IS SPELLED IN WORDS, never as the literal `null` (code review
+  // 2026-09-06). Unreachable through the gate — an uncapped run never refuses a
+  // turn — but these are exported helpers, and `debateSummary`
+  // (`core/stages/output.ts:563`) already has to guard the null case with a
+  // separate branch precisely because this one used to interpolate it.
+  if (ledger.cap === null) return "the token budget (no cap) ran out"
   const ceiling = stageCeiling(ledger, stage)
   if (ceiling === null || ceiling === ledger.cap) {
     return `the token budget (${ledger.cap}) ran out`
@@ -243,6 +270,8 @@ export function ceilingClause(ledger: BudgetLedger, stage: SpendStage): string {
  * report.
  */
 export function ceilingNamed(ledger: BudgetLedger, stage: SpendStage): string {
+  // `ceilingClause`'s rule, for `ceilingClause`'s reason.
+  if (ledger.cap === null) return "no token cap"
   const ceiling = stageCeiling(ledger, stage)
   if (ceiling === null || ceiling === ledger.cap) {
     return `the token cap of ${ledger.cap}`

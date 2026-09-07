@@ -441,6 +441,24 @@ describe("mad_review.execute — CAP-7: the budget and the preset reach the core
     }
     expect(result.metadata!.requested! + result.metadata!.lensSlots!.length).toBe(6)
     expect(result.metadata?.maxConcurrency).toBe(6)
+
+    // AND SIX SLOTS WERE ACTUALLY ASKED (code review 2026-09-06). The line
+    // above is roster arithmetic — `3 + 3 === 6` is true by construction and
+    // stays true over a run that issued twelve turns, or none. The backend here
+    // is deliberately unreachable, so every asked slot drops out and NAMES
+    // ITSELF in the report; a slot that was never asked cannot appear. That
+    // makes the six a count of turns rather than of rows in a roster, which is
+    // what the AC asks for.
+    for (const slot of [
+      "discovery-1",
+      "discovery-2",
+      "discovery-3",
+      "discovery-lens-security",
+      "discovery-lens-reliability",
+      "discovery-lens-outsider",
+    ]) {
+      expect(result.output).toContain(slot)
+    }
   })
 
   test("AN EXPLICIT `lenses` BEATS THE PRESET — INCLUDING AN EXPLICIT EMPTY LIST", async () => {
@@ -529,5 +547,50 @@ describe("mad_review.execute — AD-3 amended: `models` pins the roster (story 8
 
     expect(unpinned.metadata?.warnings).toContain("roster-underfilled")
     expect(pinned.metadata?.warnings).toEqual(unpinned.metadata?.warnings)
+  })
+})
+
+describe("mad_review.execute — AD-6 `dial-clamped` actually reaches the caller", () => {
+  // `plugin.test.ts` tests `truncatedListWarnings` as a pure function: it calls
+  // it directly and checks the object it returns. Nothing asserted that
+  // `execute` USES it, and the over-long-list path was already being driven by a
+  // test that only counted `lensSlots` — so deleting the call from
+  // `priorWarnings` left the suite green while the adapter went back to
+  // discarding entries the caller asked for in silence (code review
+  // 2026-09-06). This file is the only place that fails.
+  test("AN OVER-LONG `lenses` LIST IS REPORTED at the tool surface, not just clamped", async () => {
+    const many = Array.from({ length: 22 }, (_, i) => `lens-${i}`)
+    const result = await executeWith({ lenses: many })
+
+    expect(result.metadata?.lensSlots).toHaveLength(MAX_LENS_SLOTS)
+    expect(result.metadata?.warnings).toContain("dial-clamped")
+    expect(result.output).toContain(`lenses 22 → ${MAX_LENS_SLOTS}`)
+  })
+
+  test("AN UNRECOGNISED PRESET IS REPORTED, not silently answered as `normal`", async () => {
+    // The third of the three defects `dial-clamped` was added to end —
+    // `clampPreset("thorough")` silently becoming `normal` — and the only one an
+    // LLM caller can realistically trip. It stayed silent because the adapter
+    // handed `review()` the already-clamped word, so the single clamp site
+    // compared `normal` against `normal` and found nothing moved.
+    const result = await executeWith({ preset: "thorough" })
+
+    expect(result.metadata?.preset).toBe("normal")
+    expect(result.metadata?.warnings).toContain("dial-clamped")
+    expect(result.output).toContain('preset "thorough" → "normal"')
+  })
+
+  test("ONE `dial-clamped` PER RUN even when the adapter and the core both clamped", async () => {
+    // `core/domain/warning.ts` documents the code as raised once per run. The
+    // adapter's list clamps are folded into `review()`'s single warning rather
+    // than riding beside it, so a caller who trips both gets one block naming
+    // both dials — not two blocks saying the same kind of thing.
+    const many = Array.from({ length: 22 }, (_, i) => `lens-${i}`)
+    const result = await executeWith({ lenses: many, preset: "thorough" })
+
+    const clamped = (result.metadata?.warnings ?? []).filter((code) => code === "dial-clamped")
+    expect(clamped).toHaveLength(1)
+    expect(result.output).toContain(`lenses 22 → ${MAX_LENS_SLOTS}`)
+    expect(result.output).toContain('preset "thorough" → "normal"')
   })
 })

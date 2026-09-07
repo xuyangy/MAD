@@ -987,3 +987,27 @@ describe("a pin never costs the roster a lineage it could have kept (code review
     expect(roster.distinctLineages).toBe(1)
   })
 })
+
+describe("roster-pin-unhonoured — the machine-readable detail is the caller's own halves", () => {
+  test("A SLASH IN THE PROVIDER HALF IS NOT RE-SPLIT into the wrong pair", () => {
+    // The regression (code review 2026-09-06): `detail.pins[]` was rebuilt by
+    // splitting `pinLabel`'s output on `/`, so a provider id containing a slash
+    // — reachable at the exported `review()` seam, where the adapter's
+    // `clampPins` never runs — was reported as a different provider and a
+    // different model than the caller passed. The rendered label may join the
+    // halves; the field a host agent branches on may not guess where to cut.
+    const resolved = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      lenses: [],
+      providerConfigKey: "provider",
+      pins: [{ providerId: "a/b", modelId: "c/d" }],
+    })
+
+    const warning = resolved.warnings.find((w) => w.code === "roster-pin-unhonoured")
+    expect(warning).toBeDefined()
+    expect((warning!.detail as { pins: { providerId: string; modelId: string }[] }).pins[0]).toMatchObject({
+      providerId: "a/b",
+      modelId: "c/d",
+    })
+  })
+})

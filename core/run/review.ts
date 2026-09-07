@@ -134,6 +134,14 @@ export interface ReviewDeps {
    * how many rounds) and it does not move the slot count (AD-3: the roster is
    * the host's configured models, not a word's decision). What it moves is
    * `threshold`, which lenses run, and `maxConcurrency`.
+   *
+   * AT THIS SEAM THE LENS HALF IS ALREADY SETTLED (code review 2026-09-06).
+   * Lens slots are resolved into the `Roster` before `review()` is called and
+   * `ReviewDeps` has no lens input, so a direct core caller — the ablation
+   * harness, a test — passing `preset: "paranoid"` gets the threshold and the
+   * concurrency and no lens slots at all. That is not a `paranoid` run. The
+   * adapter resolves the lens half before building the roster; a core caller
+   * that wants it must put the lens slots on the `Roster` itself.
    */
   preset?: Preset
   /**
@@ -288,8 +296,20 @@ export function frameForHostAgent(rendered: string): string {
  * `spendShares` is compared per share, so a run that asked for a valid discovery
  * share and a rubbish debate share names only the one that moved.
  */
-function clampedDials(deps: ReviewDeps, record: RunRecord, preset: Preset): Warning[] {
-  const moved: { dial: string; requested: unknown; inForce: unknown }[] = []
+function clampedDials(
+  deps: ReviewDeps,
+  record: RunRecord,
+  preset: Preset,
+  priorDials: readonly { dial: string; requested: unknown; inForce: unknown }[] = [],
+): Warning[] {
+  // ONE `dial-clamped` PER RUN, INCLUDING THE ADAPTER'S (code review
+  // 2026-09-06). A layer below this one can clamp a dial of its own — the
+  // opencode adapter bounds the `models` and `lenses` lists before the core
+  // sees them — and it hands those in through `priorWarnings`. Folding them
+  // into this one warning is what makes `core/domain/warning.ts`'s "Raised ONCE
+  // per run" true; two blocks saying the same kind of thing is the noise that
+  // gets a warning section skipped, which is the one outcome AD-6 cannot afford.
+  const moved: { dial: string; requested: unknown; inForce: unknown }[] = [...priorDials]
   const note = (dial: string, requested: unknown, inForce: unknown) => {
     if (requested !== undefined && !Object.is(requested, inForce)) {
       moved.push({ dial, requested, inForce })
@@ -304,8 +324,11 @@ function clampedDials(deps: ReviewDeps, record: RunRecord, preset: Preset): Warn
   note("tokenCap", deps.tokenCap, record.ledger.cap)
   note("maxConcurrency", deps.maxConcurrency, record.ledger.maxConcurrency)
   note("preset", deps.preset, preset)
-  for (const [share, value] of Object.entries(deps.spendShares ?? {})) {
-    note(`spendShares.${share}`, value, record.ledger.shares[share as keyof SpendShares])
+  // THE THREE NAMED SHARES, never `Object.entries` (code review 2026-09-06). A
+  // JavaScript caller passing `{ discovery: 0.5 }` would otherwise have the
+  // warning announce a dial that does not exist, clamped to `undefined`.
+  for (const share of ["discover", "debate", "judge"] as const) {
+    note(`spendShares.${share}`, deps.spendShares?.[share], record.ledger.shares[share])
   }
 
   if (moved.length === 0) return []
@@ -377,7 +400,15 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // AD-6 / `dial-clamped` (epic-1 retrospective) — raised HERE, once, because
   // this is the first point at which both halves of the comparison exist: the
   // caller's request in `deps`, and the clamped value on `record`.
-  record.warnings.push(...clampedDials(deps, record, preset))
+  //
+  // A `dial-clamped` that arrived in `priorWarnings` is LIFTED OUT and folded in
+  // rather than left to ride beside this one (code review 2026-09-06), so the
+  // code stays what its own header says it is: one per run.
+  const priorDials = record.warnings
+    .filter((warning) => warning.code === "dial-clamped")
+    .flatMap((warning) => (warning.detail?.dials ?? []) as { dial: string; requested: unknown; inForce: unknown }[])
+  record.warnings = record.warnings.filter((warning) => warning.code !== "dial-clamped")
+  record.warnings.push(...clampedDials(deps, record, preset, priorDials))
 
   // AD-15 amended — ONE limiter, created once, from the number the record now
   // carries. Every stage's fan-out passes through this object, so "peak

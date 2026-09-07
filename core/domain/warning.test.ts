@@ -14,7 +14,7 @@ import { DISCLOSURE_CODES, WARNING_CODES, type WarningCode } from "./warning.ts"
 
 describe("the warning vocabulary (AD-6)", () => {
   test("THE COUNT IS PINNED, so a new code forces somebody to classify it", () => {
-    // Thirteen: four roster reports, the drop-out, the denominator, the partial
+    // Fifteen: four roster reports, the drop-out, the denominator, the partial
     // envelope, the provider disclosure, the unresolved section, the untooled
     // fact-check, the unavailable judge, from story 7A the cancelled run, and
     // from story 8 the budget-truncated discovery, and from story 8A the pin the

@@ -194,9 +194,25 @@ const PIN_LABEL_MAX = 80
  * defence the one caller this story was written for does not have.
  */
 export function pinLabel(pin: Pin): string {
+  const { providerId, modelId } = pinParts(pin)
+  return `${providerId}/${modelId}`
+}
+
+/**
+ * THE SAME SANITIZED HALVES, SEPARATELY — for the machine-readable `detail`.
+ *
+ * The warning's `detail.pins[]` used to be rebuilt by re-splitting `pinLabel`'s
+ * output on `/` (code review 2026-09-06). A model id may legitimately contain a
+ * slash (`openrouter/anthropic/claude-sonnet-4-5` is a real shape) and so, at
+ * the exported `review()` seam where `clampPins` never ran, may a provider id —
+ * so the re-split handed a host agent a `providerId` the caller never passed, in
+ * the field it branches on. Sanitize once, per half, and build both the label
+ * and the detail from the result.
+ */
+export function pinParts(pin: Pin): { providerId: string; modelId: string } {
   const clip = (value: string): string =>
     oneLine(String(value ?? "")).replaceAll("`", "'").slice(0, PIN_LABEL_MAX)
-  return `${clip(pin.providerId)}/${clip(pin.modelId)}`
+  return { providerId: clip(pin.providerId), modelId: clip(pin.modelId) }
 }
 
 /**
@@ -558,8 +574,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         `config.`,
       detail: {
         pins: unhonoured.map((resolution) => ({
-          providerId: pinLabel(resolution.pin).split("/")[0] ?? "",
-          modelId: pinLabel(resolution.pin).split("/").slice(1).join("/"),
+          ...pinParts(resolution.pin),
           reason: resolution.outcome,
           ...(resolution.outcome === "dedupe-collapsed"
             ? {

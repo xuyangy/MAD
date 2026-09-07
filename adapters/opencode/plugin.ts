@@ -16,6 +16,7 @@ import {
   PRESET_DIALS,
   PRESETS,
   SUGGESTED_BUDGET,
+  type Preset,
 } from "../../core/budget/ledger.ts"
 import type { Warning } from "../../core/domain/warning.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
@@ -116,6 +117,10 @@ export const MAX_LENS_SLOTS = 8
  * discovery turns against the user's own credentials for nothing. The tool
  * schema rejects a non-array first; this is the same belt-and-braces the slot
  * clamp already applies, for the same reason.
+ *
+ * (This paragraph documents `clampLenses`, which is defined below `clampPins`.
+ * It is left here rather than moved so the diff stays readable; the two clamps
+ * differ deliberately and each header says how.)
  */
 /**
  * AD-3 amended (story 8A) — the caller's pinned models, bounded on the way in.
@@ -125,8 +130,11 @@ export const MAX_LENS_SLOTS = 8
  * may not.
  *
  * IT DEDUPES NOTHING AND DROPS NOTHING. Two pins naming one model, a pin the
- * host lacks, a string with no `/` at all — every one of them survives this
- * function and reaches `selectRoster`, which reports it. This layer CANNOT raise
+ * host lacks, a string with no `/` at all, a string that is only whitespace —
+ * every one of them survives this function and reaches `selectRoster`, which
+ * reports it. The blank one used to be dropped here, against matrix row P10 and
+ * against the paragraph you are reading, and a test pinned the drop as intended
+ * (code review 2026-09-06). This layer CANNOT raise
  * a `Warning`: anything it silently discards is a request the user made and
  * nobody ever answered. That is the opposite of `clampLenses`, which drops
  * duplicates because a duplicate lens is a slot that cannot exist, and it is
@@ -143,7 +151,6 @@ export function clampPins(models: readonly string[] | undefined): Pin[] {
   const kept: Pin[] = []
   for (const raw of models) {
     const value = typeof raw === "string" ? raw.trim() : ""
-    if (value.length === 0) continue
     const cut = value.indexOf("/")
     // No separator: kept as a MALFORMED pin rather than dropped, so the core
     // reports it. An empty `providerId` is what `resolvePins` reads as malformed.
@@ -316,6 +323,14 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // of a preset is a roster decision and `resolveRoster` is what turns a
           // lens list into slots.
           //
+          // THE WORD IS CLAMPED TWICE AND THAT IS NOT THE PROPERTY AT STAKE
+          // (code review 2026-09-06). `review()` clamps it again for the
+          // threshold and concurrency halves; `clampPreset` is a total function
+          // over the same input, so the two cannot disagree. What must not
+          // happen twice is the DIALS being derived — `dials` below is the only
+          // lens list, and `record.preset` is the only word that reaches a
+          // report.
+          //
           // `args.lenses !== undefined` and NOT `args.lenses?.length`: an
           // explicit `lenses: []` under `paranoid` is a caller declining the lens
           // pass, and a truthiness test would silently sell them three billed
@@ -427,7 +442,14 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // AD-15 — but a comment claiming a guard that is not there is worse
             // than no comment: it is the thing a later reader trusts instead of
             // looking.
-            preset: args.preset === undefined ? undefined : preset,
+            // PASSED RAW, for `tokenCap`'s reason exactly (code review
+            // 2026-09-06). Handing `review()` the already-clamped word made
+            // `clampedDials` compare `normal` against `normal` and find nothing
+            // moved — so `clampPreset("thorough")` silently becoming `normal`,
+            // one of the three defects `dial-clamped` was added to end, stayed
+            // silent at the only surface a model-supplied preset reaches. The
+            // clamp still runs, once, in the accountant that owns the dial.
+            preset: args.preset as Preset | undefined,
             tokenCap: args.budget,
             // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
             // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story

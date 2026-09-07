@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
+import { mayISpend } from "../budget/ledger.ts"
 import type { Finding, Severity } from "../domain/finding.ts"
 import {
   emptyLedger,
@@ -446,6 +447,25 @@ describe("lens-sourced findings render as lens-sourced (AD-17e, AD-9 amended)", 
 
     const shipped = record([], 1, ["security"])
     expect(output(shipped)).not.toContain("GENERATED at run time")
+  })
+
+  test("F4 — A LENS SLOT THE BUDGET REFUSED DOES NOT READ AS COVERAGE THAT RAN", () => {
+    // Matrix row F4: "the report must not imply the lens ran". The first half
+    // held — `lensInstructions` still records what was resolved — but the ROSTER
+    // block printed every lens slot as "additive coverage" with no marker, and
+    // the BUDGET block gave only a count, never the ids (code review
+    // 2026-09-06). A reader had no way to tell which vantage the run actually
+    // had.
+    const rec = record([], 1, ["security", "tests"])
+    rec.skippedForBudget = ["discovery-lens-tests"]
+
+    const rendered = output(rec)
+    expect(rendered).toContain("NEVER ASKED: the budget refused this slot")
+    expect(rendered).toContain("1 of them were NEVER ASKED, refused by the budget")
+    // The slot that DID run still reads as coverage, so the marker separates the
+    // two rather than tarring both.
+    expect(rendered).toContain("discovery-lens-security")
+    expect(rendered).toContain("additive coverage")
   })
 
   test("no lens slots, no lens lines at all", () => {
@@ -2286,11 +2306,14 @@ describe("AD-15 / CAP-7 — the BUDGET block (story 8)", () => {
     bill("judge", 30)
 
     const rendered = output(capped)
-    expect(rendered).toContain("  discover: 100 spent, cumulative ceiling 300")
-    expect(rendered).toContain("  debate: 200 spent, cumulative ceiling 650")
-    expect(rendered).toContain("  judge: 30 spent, cumulative ceiling 1000")
+    expect(rendered).toContain("  discover: 100 spent, total 100 of cumulative ceiling 300")
+    expect(rendered).toContain("  debate: 200 spent, total 300 of cumulative ceiling 650")
+    expect(rendered).toContain("  judge: 30 spent, total 330 of cumulative ceiling 1000")
     expect(rendered).toContain(" | spent: 330 of 1000")
     expect(100 + 200 + 30).toBe(330)
+    // The running total on the last row IS the TOKENS line's figure, which is
+    // what makes "the block cannot drift from it" a claim rather than a hope.
+    expect(rendered).not.toContain(" — OVER")
   })
 
   test("the block NAMES THE PRESET when one was asked for, and says so when none was", () => {
@@ -2301,7 +2324,7 @@ describe("AD-15 / CAP-7 — the BUDGET block (story 8)", () => {
     expect(output(capped)).toContain("BUDGET (preset paranoid, token cap 1000)")
   })
 
-  test("A STAGE OVER ITS CEILING IS MARKED — the overshoot is stated, never hidden", () => {
+  test("A RUN OVER A CEILING IS MARKED — the overshoot is stated, never hidden", () => {
     // `mayISpend` is a question about the total and not an estimate of the next
     // turn's cost, so a run CAN exceed a ceiling by the turns already in flight.
     // The honest thing is to print it.
@@ -2313,7 +2336,53 @@ describe("AD-15 / CAP-7 — the BUDGET block (story 8)", () => {
       attempt: 1,
       tokens: { input: 90, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
     })
-    expect(output(capped)).toContain("discover: 90 spent, cumulative ceiling 30 — OVER")
+    expect(output(capped)).toContain("discover: 90 spent, total 90 of cumulative ceiling 30 — OVER")
+  })
+
+  test("OVER IS FLAGGED ON THE TOTAL, not on the stage — the flag is the gate's own comparison", () => {
+    // The regression (code review 2026-09-06): the marker compared `row.spent`,
+    // one stage alone, against `row.ceiling`, a bound on the run's TOTAL. Debate
+    // here spends 100 against a ceiling of 65 — under it by the old comparison,
+    // while the RUN sits at 190 and `mayISpend("debate")` is already false. The
+    // block existed to make the report agree with the gate, and on this run it
+    // said the opposite.
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 100
+    const bill = (stage: string, input: number) =>
+      recordTurn(capped.ledger, {
+        slot: "discovery-1",
+        stage,
+        attempt: 1,
+        tokens: { input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      })
+    bill("discover", 90)
+    bill("debate", 100)
+
+    const rendered = output(capped)
+    expect(rendered).toContain("debate: 100 spent, total 190 of cumulative ceiling 65 — OVER")
+    expect(mayISpend(capped.ledger, "debate")).toBe(false)
+  })
+
+  test("F9 — THE BLOCK PRINTS THE CAUSE of an overshoot, not only the fact", () => {
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 100
+    recordTurn(capped.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: { input: 90, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    })
+    expect(output(capped)).toContain("the turns already in flight when it last said yes still land")
+  })
+
+  test("AN EMPTY `skippedForBudget` PRINTS NOTHING — `0 slot(s)` is not a degradation", () => {
+    // `review()` only sets the field when it is non-empty, but the field is a
+    // plain optional array and this renderer runs over records built elsewhere.
+    // The guard used to be `!== undefined` (code review 2026-09-06).
+    const capped = record([finding({ severity: "high", file: "src/a.ts" })], 1)
+    capped.ledger.cap = 1000
+    capped.skippedForBudget = []
+    expect(output(capped)).not.toContain("discovery slot(s) were never asked")
   })
 })
 

@@ -18,6 +18,7 @@ import {
   type SlotScript,
   type SlotStep,
 } from "../test-support/fakes.ts"
+import { SUGGESTED_BUDGET } from "../budget/ledger.ts"
 import { frameForHostAgent, review } from "./review.ts"
 
 const ENVELOPE = {
@@ -1890,7 +1891,11 @@ describe("review — CAP-7: the budget truncates discovery, and says so honestly
       change: fakeChange(),
       priorWarnings: resolved.warnings,
       preset: "normal",
-      tokenCap: 400_000,
+      // READ FROM THE TABLE, never restated (code review 2026-09-06). D1 says
+      // "`SUGGESTED_BUDGET` ... the acceptance test uses it"; a literal here
+      // desyncs silently the day the table moves, which is the one edit this
+      // assertion exists to survive.
+      tokenCap: SUGGESTED_BUDGET.normal,
     })
 
     expect(record.skippedForBudget).toBeUndefined()
@@ -1899,5 +1904,188 @@ describe("review — CAP-7: the budget truncates discovery, and says so honestly
     expect(codes).not.toContain("discovery-truncated")
     expect(codes).not.toContain("unresolved-findings")
     for (const finding of record.findings) expect(finding.unresolved).toBeUndefined()
+  })
+})
+
+describe("review — AD-15 / CAP-7: `spendShares` is a dial that actually governs the gate", () => {
+  // THE GAP THIS CLOSES (code review 2026-09-06). `spendShares` reached
+  // `emptyLedger` through `clampSpendShares(deps.spendShares)` and nothing
+  // anywhere passed it to `review()`: replacing the call with
+  // `clampSpendShares(undefined)` and deleting the per-share `dial-clamped` loop
+  // left the whole suite green. A documented seam that governs how the user's
+  // money is divided could have been inert for the life of the epic, and the
+  // BUDGET block would have printed the default ceilings as though they were the
+  // caller's.
+  const threeSlots = () =>
+    setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2-5-pro"],
+      ],
+      3,
+    )
+
+  const scripts = () =>
+    abstainingInDebate(
+      Object.fromEntries(
+        ["discovery-1", "discovery-2", "discovery-3"].map((slot) => [
+          slot,
+          [{ kind: "ok" as const, value: ENVELOPE }],
+        ]),
+      ),
+    )
+
+  test("THE CALLER'S SHARE IS THE ONE THE GATE USES — a wider discovery share asks more slots", async () => {
+    // The paired run below is the control: same cap, default shares. Discovery's
+    // 30% of 100 is one turn, so slots 2 and 3 are refused. Handed the whole cap,
+    // all three answer. Nothing but the share moved.
+    const tight = await review({
+      roster: threeSlots().roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 100,
+      maxConcurrency: 1,
+    })
+    expect(tight.record.answered).toBe(1)
+    expect(tight.record.skippedForBudget).toHaveLength(2)
+
+    const wide = await review({
+      roster: threeSlots().roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 100,
+      maxConcurrency: 1,
+      spendShares: { discover: 1 },
+    })
+    expect(wide.record.answered).toBe(3)
+    expect(wide.record.skippedForBudget).toBeUndefined()
+    expect(wide.record.ledger.shares.discover).toBe(1)
+  })
+
+  test("A SHARE THE CLAMP MOVED IS REPORTED, named as the share it is", async () => {
+    const { record } = await review({
+      roster: threeSlots().roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 100,
+      maxConcurrency: 1,
+      spendShares: { discover: 4 },
+    })
+
+    const clamped = record.warnings.find((w) => w.code === "dial-clamped")
+    expect(clamped).toBeDefined()
+    expect(clamped!.message).toContain("spendShares.discover")
+    expect(clamped!.detail).toMatchObject({
+      dials: [{ dial: "spendShares.discover", requested: 4, inForce: record.ledger.shares.discover }],
+    })
+  })
+
+  test("AN UNRECOGNISED SHARE KEY NAMES NO DIAL — the warning cannot invent one", async () => {
+    // `Object.entries(deps.spendShares)` used to drive this loop, so a JavaScript
+    // caller passing `{ discovery: 0.5 }` — the plausible typo — got a warning
+    // announcing `spendShares.discovery` clamped to `undefined`, a dial that does
+    // not exist, in the block AD-6 needs a reader to trust.
+    const { record } = await review({
+      roster: threeSlots().roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 100,
+      maxConcurrency: 1,
+      spendShares: { discovery: 0.5 } as never,
+    })
+
+    const clamped = record.warnings.find((w) => w.code === "dial-clamped")
+    expect(clamped?.message ?? "").not.toContain("discovery")
+    expect(clamped?.message ?? "").not.toContain("undefined")
+  })
+})
+
+describe("review — F8: budget-stranded AND cancelled, at the seam the AC names", () => {
+  // Story 8's AC names `review.test.ts` for this row and there was no test here
+  // (code review 2026-09-06). The sibling in `run-control.test.ts` — "BUDGET
+  // FIRST, THEN STOPPED" — is VACUOUS: at `tokenCap: 1` discovery's ceiling is
+  // `floor(1 * 0.3) = 0`, so not one turn is issued, the abort hook it installs
+  // on the fourth turn never fires, no finding is stranded, and its `for` loop
+  // over stranded findings iterates an empty array. It is the "test that could
+  // not fail" shape this epic keeps closing, and it is the only coverage F8 had.
+  //
+  // WHAT IS ACTUALLY REACHABLE, and what is not. With the current fakes a stop
+  // during debate always latches before the budget can strand anything: the
+  // caps that let discovery finish leave debate comfortably inside its 65%
+  // share, and the caps that squeeze debate truncate discovery first. So the
+  // half of F8 asserted here is the half that can be built — the two causes stay
+  // tellable apart and never merge on one finding. The "budget latched first and
+  // KEPT it" ordering is filed in `deferred-work.md`, because a test that cannot
+  // reach the state it claims to guard is worse than an admitted gap.
+  const threeSlots = () =>
+    setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2-5-pro"],
+      ],
+      3,
+    )
+
+  test("TWO CAUSES STAY TELLABLE APART — no finding is ever given both", async () => {
+    const controller = new AbortController()
+    let turns = 0
+    const disagree = { kind: "ok" as const, value: { turns: [{ position: "disagree", argument: "no", evidence: [] }] } }
+    // A second, DIFFERENT finding, so the pool holds something to contest.
+    const otherEnvelope = {
+      findings: [
+        {
+          claim: "The retry loop has no ceiling.",
+          reasoning: "A permanently failing slot spins forever.",
+          severity: "high",
+          file: "src/retry.ts",
+          startLine: 3,
+          endLine: 9,
+        },
+      ],
+    }
+    const backend = new FakeBackend(
+      {
+        "discovery-1": [{ kind: "ok", value: ENVELOPE }, disagree, disagree],
+        "discovery-2": [{ kind: "ok", value: otherEnvelope }, disagree, disagree],
+        "discovery-3": [{ kind: "ok", value: ENVELOPE }, disagree, disagree],
+      },
+      {},
+      {},
+      () => {
+        // Let all three discovery turns answer, then stop inside debate.
+        turns += 1
+        if (turns === 6) controller.abort()
+      },
+    )
+
+    const { record } = await review({
+      roster: threeSlots().roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: 240,
+      maxConcurrency: 1,
+      maxRounds: 3,
+      signal: controller.signal,
+    })
+
+    // AD-6f — the stop is reported as a stop, and where it happened.
+    expect(record.warnings.map((w) => w.code)).toContain("run-cancelled")
+    expect(record.cancelled).toEqual({ stage: "debate" })
+
+    // AD-7 is append-only: one cause per finding, never a reason carrying both.
+    const stranded = record.findings.filter((f) => f.unresolved)
+    expect(stranded.length).toBeGreaterThan(0)
+    for (const finding of stranded) {
+      const reason = finding.unresolved!.reason
+      expect(reason).toContain("cancelled")
+      expect(reason).not.toContain("budget")
+    }
   })
 })

@@ -75,7 +75,7 @@ export const WARNING_CODES = [
   /**
    * AD-6a / AD-15 (story 8) — THE BUDGET TRUNCATED DISCOVERY.
    *
-   * The seventh report, and a degradation for `run-cancelled`'s reason exactly:
+   * The thirteenth code, and a degradation for `run-cancelled`'s reason exactly:
    * a roster MAD chose not to finish asking is a PARTIAL run, which is what AD-6
    * governs. Stories 2A, 3 and 4 each declined a new code because a clamp or a
    * route is a decision rather than a partial run; this is not that.

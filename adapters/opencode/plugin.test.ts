@@ -206,9 +206,18 @@ describe("clampPins — bounded here, RESOLVED in the core (story 8A)", () => {
     expect(clampPins(["openai/gpt-5", "openai/gpt-5"])).toHaveLength(2)
   })
 
-  test("whitespace is trimmed on both halves, and an empty entry is dropped", () => {
+  test("whitespace is trimmed on both halves, and A BLANK ENTRY IS KEPT, not dropped", () => {
     expect(clampPins(["  openai / gpt-5  "])).toEqual([{ providerId: "openai", modelId: "gpt-5" }])
-    expect(clampPins(["", "   "])).toEqual([])
+    // Matrix row P10 names `[" "]` and says it "reaches the core as an empty
+    // half and is reported `{malformed}`, never dropped by the adapter". This
+    // test used to assert the opposite (code review 2026-09-06), which is worse
+    // than the bug: the drop contradicted the frozen row AND `clampPins`' own
+    // header, and the suite said both were fine. This layer cannot raise a
+    // `Warning`, so anything it swallows is a request nobody ever answered.
+    expect(clampPins(["", "   "])).toEqual([
+      { providerId: "", modelId: "" },
+      { providerId: "", modelId: "" },
+    ])
   })
 
   test("the list is capped — a pin can never fill more than a slot", () => {

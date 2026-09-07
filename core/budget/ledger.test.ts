@@ -253,21 +253,42 @@ describe("spentInStage and budgetReport — the report cannot drift from the gat
     expect(perStage).toBe(spent(ledger))
   })
 
-  test("`budgetReport` returns each stage's spend beside the ceiling it was held to", () => {
+  test("`budgetReport` returns each stage's spend, the RUNNING TOTAL, and the ceiling it was held to", () => {
+    // `total` is the number the gate compared (code review 2026-09-06). `spent`
+    // is one stage and `ceiling` bounds the run's total, so the two do not
+    // compare — the row needs the third figure or the renderer is left flagging
+    // a comparison `mayISpend` never made.
     expect(budgetReport(threeStages())).toEqual([
-      { stage: "discover", spent: 150, ceiling: 300 },
-      { stage: "debate", spent: 200, ceiling: 650 },
-      { stage: "judge", spent: 30, ceiling: 1000 },
+      { stage: "discover", spent: 150, total: 150, ceiling: 300 },
+      { stage: "debate", spent: 200, total: 350, ceiling: 650 },
+      { stage: "judge", spent: 30, total: 380, ceiling: 1000 },
     ])
+  })
+
+  test("THE RUNNING TOTAL IS WHAT THE GATE COMPARES, so the row and the refusal agree", () => {
+    // The regression this guards: a per-stage spend can never exceed a
+    // cumulative ceiling except at `discover`, so a report that flagged
+    // `spent > ceiling` could not fire on the one event F9 exists to report.
+    const ledger = emptyLedger(400) as BudgetLedger
+    recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(100, 0) })
+    recordTurn(ledger, { slot: "debate-1", stage: "debate", attempt: 1, tokens: tokens(100, 0) })
+    recordTurn(ledger, { slot: "debate-2", stage: "debate", attempt: 1, tokens: tokens(100, 0) })
+    const rows = budgetReport(ledger)
+    const debate = rows[1]!
+    // Debate alone is under its own ceiling; the RUN is over it, and the run is
+    // what `mayISpend` refuses on.
+    expect(debate.spent).toBeLessThan(debate.ceiling!)
+    expect(debate.total).toBe(300)
+    expect(mayISpend(ledger, "debate")).toBe(false)
   })
 
   test("an uncapped ledger still reports SPEND, with no ceiling to compare it to", () => {
     const ledger = emptyLedger(null) as BudgetLedger
     recordTurn(ledger, { slot: "discovery-1", stage: "debate", attempt: 1, tokens: tokens(7, 0) })
     expect(budgetReport(ledger)).toEqual([
-      { stage: "discover", spent: 0, ceiling: null },
-      { stage: "debate", spent: 7, ceiling: null },
-      { stage: "judge", spent: 0, ceiling: null },
+      { stage: "discover", spent: 0, total: 0, ceiling: null },
+      { stage: "debate", spent: 7, total: 7, ceiling: null },
+      { stage: "judge", spent: 0, total: 7, ceiling: null },
     ])
   })
 })
@@ -292,8 +313,15 @@ describe("ceilingClause / ceilingNamed — ONE phrasing, shared by both strandin
     expect(ceilingNamed(ledger, "debate")).toBe("debate's share of the token cap (260 of 400)")
   })
 
-  test("an uncapped ledger keeps the shipped wording", () => {
+  test("an uncapped ledger SAYS SO IN WORDS, never the literal `null`", () => {
+    // Code review 2026-09-06. The shipped wording here used to be "the token
+    // budget (null) ran out" — a sentence no reader can act on, pinned by this
+    // test as though it were intended. Unreachable through the gate, because an
+    // uncapped run never refuses a turn; reachable through these exported
+    // helpers, which is the whole reason `debateSummary` carries its own
+    // "no token cap" branch.
     const ledger = emptyLedger(null) as BudgetLedger
-    expect(ceilingClause(ledger, "debate")).toBe("the token budget (null) ran out")
+    expect(ceilingClause(ledger, "debate")).toBe("the token budget (no cap) ran out")
+    expect(ceilingNamed(ledger, "debate")).toBe("no token cap")
   })
 })

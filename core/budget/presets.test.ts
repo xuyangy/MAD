@@ -20,6 +20,12 @@ describe("`normal` is the IDENTITY preset (AD-3)", () => {
   // the failure this codebase has recorded against itself three times, so it is
   // paid for the one way that works without the import: these tests fail the day
   // either default moves and the table does not follow it.
+  //
+  // THESE TESTS DO NOT ENFORCE THE NO-IMPORT RULE THEY REST ON (code review
+  // 2026-09-06). They would pass unchanged the day somebody adds an import to
+  // `presets.ts`. The guard is the `MUST_NOT_IMPORT` entry in
+  // `scripts/lint-dependency-direction.ts`; this comment names it so a reader
+  // does not take the assertions below for the fence.
   test("its threshold IS `DEFAULT_CO_DISCOVERY_THRESHOLD`", () => {
     expect(PRESET_DIALS.normal.threshold).toBe(DEFAULT_CO_DISCOVERY_THRESHOLD)
   })

@@ -1123,9 +1123,24 @@ export function renderRunRecord(record: RunRecord): string {
   // Printing them inside the pool list above would put the one thing AD-4's
   // amendment separates back into one block for the reader, which is where the
   // "three personas over one Sonnet is three lineages" misreading starts.
+  // F4 — A LENS SLOT THE BUDGET REFUSED MUST NOT READ AS COVERAGE THAT RAN
+  // (code review 2026-09-06). The row is printed either way, because the slot
+  // WAS resolved and `lensInstructions` records what it would have carried —
+  // but "additive coverage" over a slot nobody asked is the report claiming a
+  // vantage the run never had, which is the class of false statement AD-6
+  // exists to remove. The ids come off `skippedForBudget`, the same list the
+  // BUDGET block counts, so the two cannot disagree.
+  const skipped = new Set(record.skippedForBudget ?? [])
   for (const lensSlot of record.roster.lensSlots) {
     const origin = record.lensInstructions.find((entry) => entry.lens === lensSlot.lens)?.origin
     const generated = origin === "generated" ? " [instruction GENERATED at run time, not shipped]" : ""
+    if (skipped.has(lensSlot.slot)) {
+      lines.push(
+        `  ${lensSlot.slot}: ${lensSlot.providerId}/${lensSlot.modelId} — lens \`${lensSlot.lens}\`, ` +
+          `NEVER ASKED: the budget refused this slot, so it contributed no coverage${generated}`,
+      )
+      continue
+    }
     lines.push(
       `  ${lensSlot.slot}: ${lensSlot.providerId}/${lensSlot.modelId} — lens \`${lensSlot.lens}\`, ` +
         `additive coverage; does NOT count toward distinct lineages${generated}`,
@@ -1136,10 +1151,16 @@ export function renderRunRecord(record: RunRecord): string {
       `answered: ${record.answered} | distinct verified lineages: ${record.roster.distinctLineages}`,
   )
   if (record.roster.lensSlots.length > 0) {
+    const asked = record.roster.lensSlots.filter((s) => !skipped.has(s.slot))
+    const unasked = record.roster.lensSlots.length - asked.length
+    // F4 again, in the summary line a reader skims instead of the rows.
+    const budgetNote =
+      unasked > 0 ? ` — ${unasked} of them were NEVER ASKED, refused by the budget` : ""
     lines.push(
       `  lens slots: ${record.roster.lensSlots.length} (${record.roster.lensSlots
         .map((s) => s.lens)
-        .join(", ")}) — coverage, not independence; they add nothing to the lineage count above.`,
+        .join(", ")})${budgetNote} — coverage, not independence; they add nothing to the lineage ` +
+        `count above.`,
     )
   }
   lines.push("")
@@ -1481,14 +1502,43 @@ function budgetBlock(record: RunRecord): string[] {
 
   const preset = record.preset === undefined ? "no preset" : `preset ${record.preset}`
   const lines = [`BUDGET (${preset}, token cap ${cap}) — each stage's share of that one cap:`]
+  let overshot = false
   for (const row of budgetReport(record.ledger)) {
     const ceiling = row.ceiling === null ? "no ceiling" : `${row.ceiling}`
     // The ceiling is CUMULATIVE, and saying so on every row is cheaper than a
     // reader deducing it from three numbers that do not add up to the cap.
-    const over = row.ceiling !== null && row.spent > row.ceiling ? " — OVER" : ""
-    lines.push(`  ${row.stage}: ${row.spent} spent, cumulative ceiling ${ceiling}${over}`)
+    //
+    // OVER IS FLAGGED ON THE TOTAL, NOT ON THE STAGE (code review 2026-09-06).
+    // `row.spent` is this stage alone and `row.ceiling` bounds the run's total,
+    // so the old `row.spent > row.ceiling` compared two numbers the gate never
+    // compared: it could fire only at `discover`, where they coincide, and
+    // could never fire on the F9 overshoot it existed to report. `row.total` is
+    // the figure `mayISpend` actually held against this ceiling, which is what
+    // keeps the printed flag and the gate from disagreeing.
+    const over = row.ceiling !== null && row.total > row.ceiling ? " — OVER" : ""
+    if (over !== "") overshot = true
+    lines.push(
+      `  ${row.stage}: ${row.spent} spent, total ${row.total} of cumulative ceiling ${ceiling}${over}`,
+    )
   }
-  if (record.skippedForBudget !== undefined) {
+  if (overshot) {
+    // F9 — the overshoot AND ITS CAUSE, which is the half the block used to
+    // leave to the ledger's source comments. The gate is checked before a turn
+    // and answers about the total so far, so every turn already in flight when
+    // it last said yes can still land: the overshoot is bounded by the peak
+    // concurrency, never estimated away and never hidden.
+    lines.push(
+      `  OVER is not an accounting error: the gate is asked BEFORE a turn and answers about the ` +
+        `run's total so far, so the turns already in flight when it last said yes still land. ` +
+        `The overshoot is bounded by the peak concurrency on the TOKENS line above.`,
+    )
+  }
+  if (record.skippedForBudget !== undefined && record.skippedForBudget.length > 0) {
+    // `.length > 0` and not `!== undefined` (code review 2026-09-06): `review()`
+    // only sets this field when it is non-empty, but `RunRecord.skippedForBudget`
+    // is a plain optional array and this renderer runs over records built
+    // elsewhere — an empty one printed "0 discovery slot(s) were never asked" as
+    // though it were a degradation.
     lines.push(
       `  ${record.skippedForBudget.length} discovery slot(s) were never asked, to stay inside ` +
         `discovery's share — those slots were not skipped because a model failed.`,
