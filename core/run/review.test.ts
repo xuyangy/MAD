@@ -1597,6 +1597,55 @@ describe("review — AD-6 `dial-clamped`: a dial the run did not honour as asked
     expect(clamped(record)).toHaveLength(0)
   })
 
+  test("A PRIOR `dial-clamped` CARRYING NO DIALS IS KEPT, not deleted (code review 2026-09-08)", async () => {
+    // Folding is not deleting. `review()` lifts `detail.dials` out of a prior
+    // `dial-clamped` and re-emits one warning; a prior one with no `dials` array
+    // surrenders nothing, and the filter removed it anyway — so the adapter's
+    // clamp warning vanished from the record and was never replaced. A junk
+    // `dials` value had the mirror failure, rendering `undefined undefined →
+    // undefined` in the block AD-6 needs a reader to trust.
+    for (const detail of [undefined, { dials: "not an array" }, { dials: [{ nope: 1 }] }]) {
+      const { record } = await review({
+        ...base(),
+        priorWarnings: [
+          {
+            code: "dial-clamped" as const,
+            stage: "roster" as const,
+            message: "A DIAL WAS NOT HONOURED AS ASKED: lenses 9 → 8.",
+            ...(detail === undefined ? {} : { detail }),
+          },
+        ],
+      })
+      const survivors = clamped(record)
+      expect(survivors).toHaveLength(1)
+      expect(survivors[0]!.message).toContain("lenses 9 → 8")
+      expect(survivors[0]!.message).not.toContain("undefined")
+    }
+  })
+
+  test("a prior `dial-clamped` THAT DOES carry dials is folded into the one warning", async () => {
+    // The non-vacuous sibling of the test above: keeping the prior warning must
+    // not become "keep every prior warning", which would break the one-per-run
+    // invariant the fold exists to hold.
+    const { record } = await review({
+      ...base(),
+      threshold: 4,
+      priorWarnings: [
+        {
+          code: "dial-clamped" as const,
+          stage: "roster" as const,
+          message: "A DIAL WAS NOT HONOURED AS ASKED: lenses 9 → 8.",
+          detail: { dials: [{ dial: "lenses", requested: 9, inForce: 8 }] },
+        },
+      ],
+    })
+    const survivors = clamped(record)
+    expect(survivors).toHaveLength(1)
+    expect(survivors[0]!.message).toContain("lenses")
+    expect(survivors[0]!.message).toContain("threshold")
+    expect(survivors[0]!.stage).toBe("discover")
+  })
+
   test("`threshold: 4` is silently 1 no longer — it says so, with both numbers", async () => {
     const { record } = await review({ ...base(), threshold: 4 })
     const warnings = clamped(record)
@@ -2002,6 +2051,29 @@ describe("review — AD-15 / CAP-7: `spendShares` is a dial that actually govern
     const clamped = record.warnings.find((w) => w.code === "dial-clamped")
     expect(clamped?.message ?? "").not.toContain("discovery")
     expect(clamped?.message ?? "").not.toContain("undefined")
+  })
+
+  test("`tokenCap` IS ONE OF THE DIALS — the line was never asserted (code review 2026-09-08)", async () => {
+    // `clampedDials` names five dials and the describe covered four: removing
+    // the `note("tokenCap", …)` line failed nothing. `clampTokenCap` reads a
+    // negative as no ceiling at all, which is the widest silent substitution any
+    // of these dials can make — a run asked to spend at most nothing, told
+    // nothing, spending without limit.
+    const { record } = await review({
+      roster: threeSlots().roster,
+      backend: new FakeBackend(scripts()),
+      clock: fakeClock(),
+      change: fakeChange(),
+      tokenCap: -1,
+      maxConcurrency: 1,
+    })
+
+    const clamped = record.warnings.find((w) => w.code === "dial-clamped")
+    expect(clamped).toBeDefined()
+    expect(clamped!.message).toContain("tokenCap")
+    expect(clamped!.detail).toMatchObject({
+      dials: [{ dial: "tokenCap", requested: -1, inForce: record.ledger.cap }],
+    })
   })
 })
 

@@ -91,7 +91,12 @@ export function renderAblation(report: AblationReport): string[] {
   lines.push("")
 
   // ---- Arms ----
-  lines.push("ARMS")
+  // `execution: sequential` is a DISCLOSURE the constraints require, not a
+  // setting (code review 2026-09-08). `runAblation` awaits each arm in turn, so
+  // the behaviour was always right; without the line a reader cannot tell a
+  // sequential run from an overlapped one, and overlap would put the arms in
+  // contention for the same host and make every token figure a shared number.
+  lines.push("ARMS (execution: sequential)")
   for (const arm of report.arms) {
     // Labelled whenever more than one repeat ran. Without it `--repeats 3` printed
     // three identical unlabelled blocks per arm (code review 2026-09-06).
@@ -237,6 +242,18 @@ export function renderAblation(report: AblationReport): string[] {
 
   // ---- What this run does and does not support ----
   lines.push("READ AS AN EXPERIMENT")
+  // ALL FOUR "CANNOTS" ARE PRINTED, none corrected for (code review 2026-09-08).
+  // Two of them — the noise floor and the matcher error — were already content
+  // above. The other two were only ever in the story's Design Notes, which is
+  // the one place a reader of the report cannot see: without them, the
+  // control-vs-pool delta reads as debate's effect, which is exactly the
+  // misreading this block exists to prevent.
+  lines.push(
+    "  DEBATE CANNOT BE ISOLATED. No arm turns debate off — the round cap floors at 1 — so no",
+    "  number here is a debate-on minus debate-off difference.",
+    "  LENSES CANNOT BE SEPARATED FROM FAN-OUT on a three-candidate host: the lens arm adds both",
+    "  personas and turns at once, so a delta cannot be attributed to either alone.",
+  )
   const anyDegraded = report.arms.some((arm) => arm.degradation.degraded)
   if (report.anyScripted) {
     lines.push(

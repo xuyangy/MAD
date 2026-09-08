@@ -102,27 +102,6 @@ export function clampDiscoverySlots(slots: number | undefined): number {
 export const MAX_LENS_SLOTS = 8
 
 /**
- * Normalize the `lenses` argument: drop blanks, dedupe, clamp.
- *
- * Deduped because two slots carrying one lens would share a slot id, which the
- * backend's per-slot map cannot represent and a finding's `author` cannot
- * disambiguate — and because paying twice for one persona is not what the caller
- * meant. UNKNOWN IDS ARE NOT REJECTED: they reach the registry's generated
- * fallback (AD-11 amended), and the run record says the instruction was
- * generated rather than shipped. Exported so the bound is tested, not trusted.
- *
- * The `Array.isArray` guard is not ceremony. The value arrives from a model
- * calling the tool, and a bare string would otherwise ITERATE BY CHARACTER —
- * `"security"` becoming eight one-letter lens slots, which is eight billed
- * discovery turns against the user's own credentials for nothing. The tool
- * schema rejects a non-array first; this is the same belt-and-braces the slot
- * clamp already applies, for the same reason.
- *
- * (This paragraph documents `clampLenses`, which is defined below `clampPins`.
- * It is left here rather than moved so the diff stays readable; the two clamps
- * differ deliberately and each header says how.)
- */
-/**
  * AD-3 amended (story 8A) — the caller's pinned models, bounded on the way in.
  *
  * `provider/model`, split at the FIRST `/` because a model id may contain one
@@ -146,7 +125,7 @@ export const MAX_LENS_SLOTS = 8
  * a slot, and an unbounded list arriving from a model is an unbounded loop and
  * an unbounded warning message.
  */
-export function clampPins(models: readonly string[] | undefined): Pin[] {
+function normalizePins(models: readonly string[] | undefined): Pin[] {
   if (!models || !Array.isArray(models)) return []
   const kept: Pin[] = []
   for (const raw of models) {
@@ -156,12 +135,15 @@ export function clampPins(models: readonly string[] | undefined): Pin[] {
     // reports it. An empty `providerId` is what `resolvePins` reads as malformed.
     if (cut < 0) kept.push({ providerId: "", modelId: value })
     else kept.push({ providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() })
-    if (kept.length >= MAX_DISCOVERY_SLOTS) break
   }
   return kept
 }
 
-export function clampLenses(lenses: readonly string[] | undefined): string[] {
+export function clampPins(models: readonly string[] | undefined): Pin[] {
+  return normalizePins(models).slice(0, MAX_DISCOVERY_SLOTS)
+}
+
+function normalizeLenses(lenses: readonly string[] | undefined): string[] {
   if (!lenses || !Array.isArray(lenses)) return []
   const seen = new Set<string>()
   const kept: string[] = []
@@ -170,9 +152,29 @@ export function clampLenses(lenses: readonly string[] | undefined): string[] {
     if (lens.length === 0 || seen.has(lens)) continue
     seen.add(lens)
     kept.push(lens)
-    if (kept.length >= MAX_LENS_SLOTS) break
   }
   return kept
+}
+
+/**
+ * Normalize the `lenses` argument: drop blanks, dedupe, clamp.
+ *
+ * Deduped because two slots carrying one lens would share a slot id, which the
+ * backend's per-slot map cannot represent and a finding's `author` cannot
+ * disambiguate — and because paying twice for one persona is not what the caller
+ * meant. UNKNOWN IDS ARE NOT REJECTED: they reach the registry's generated
+ * fallback (AD-11 amended), and the run record says the instruction was
+ * generated rather than shipped. Exported so the bound is tested, not trusted.
+ *
+ * The `Array.isArray` guard is not ceremony. The value arrives from a model
+ * calling the tool, and a bare string would otherwise ITERATE BY CHARACTER —
+ * `"security"` becoming eight one-letter lens slots, which is eight billed
+ * discovery turns against the user's own credentials for nothing. The tool
+ * schema rejects a non-array first; this is the same belt-and-braces the slot
+ * clamp already applies, for the same reason.
+ */
+export function clampLenses(lenses: readonly string[] | undefined): string[] {
+  return normalizeLenses(lenses).slice(0, MAX_LENS_SLOTS)
 }
 
 /**
@@ -193,8 +195,18 @@ export function clampLenses(lenses: readonly string[] | undefined): string[] {
  * blanks and duplicates, and those are NOT truncation: a duplicate lens is a
  * slot that cannot exist, which its own header calls deliberate rather than an
  * inconsistency. Only a list longer than the ceiling loses something the caller
- * asked for. That is why this compares against the ceiling and not against the
- * input length.
+ * asked for.
+ *
+ * It therefore compares the NORMALIZED length — what survived the drops — against
+ * the ceiling, and never `args.lenses.length`. Comparing the raw length was wrong
+ * in the direction that matters (code review 2026-09-08): twenty-two copies of
+ * `"security"` normalize to one lens, nothing is truncated, and the raw
+ * comparison still announced `lenses 22 → 8` — a dial reported as not honoured
+ * over a run that honoured every lens asked for, naming a ceiling never reached.
+ * `requested` is the normalized count for the same reason: it is the number of
+ * distinct things the caller actually asked for, which is the number `inForce`
+ * is a truncation of. The `models` arm went through the same seam rather than
+ * staying correct by the accident that `clampPins` drops nothing.
  *
  * Reachable only by a direct adapter caller: both tool schemas carry `.max()`,
  * so an over-long array is refused before `execute` runs. Reported anyway, for
@@ -206,11 +218,13 @@ export function truncatedListWarnings(args: {
   lenses?: readonly string[]
 }): Warning[] {
   const moved: { dial: string; requested: unknown; inForce: unknown }[] = []
-  if (Array.isArray(args.models) && args.models.length > MAX_DISCOVERY_SLOTS) {
-    moved.push({ dial: "models", requested: args.models.length, inForce: MAX_DISCOVERY_SLOTS })
+  const askedModels = normalizePins(args.models).length
+  if (askedModels > MAX_DISCOVERY_SLOTS) {
+    moved.push({ dial: "models", requested: askedModels, inForce: MAX_DISCOVERY_SLOTS })
   }
-  if (Array.isArray(args.lenses) && args.lenses.length > MAX_LENS_SLOTS) {
-    moved.push({ dial: "lenses", requested: args.lenses.length, inForce: MAX_LENS_SLOTS })
+  const askedLenses = normalizeLenses(args.lenses).length
+  if (askedLenses > MAX_LENS_SLOTS) {
+    moved.push({ dial: "lenses", requested: askedLenses, inForce: MAX_LENS_SLOTS })
   }
   if (moved.length === 0) return []
   return [
@@ -431,24 +445,25 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // is the supported way for this layer to be heard at all.
             priorWarnings: [...truncatedListWarnings(args), ...resolved.warnings],
             // CAP-7 (story 8) — the two user-facing dials, and the only two on
-            // this surface. `tokenCap` is passed through UNCLAMPED and `review()`
-            // clamps it; the tool schema's `.int().min(0)` is the only check on
-            // this side, and a schema check is not a clamp.
+            // this surface. BOTH ARE PASSED RAW. Neither is clamped here; the
+            // tool schema (`.int().min(0)` for the budget, `enum(PRESETS)` for
+            // the preset) is the only check on this side, and a schema check is
+            // not a clamp. The one clamp runs where AD-15 puts it, in the
+            // accountant that owns the dial.
             //
-            // This comment used to end "and it is clamped anyway for the reason
-            // `slots` is", which was false about the line directly beneath it
-            // (epic-1 retrospective ledger triage, entry 61). Passing it through
-            // is correct — one clamp, in the accountant that owns the dial, per
-            // AD-15 — but a comment claiming a guard that is not there is worse
-            // than no comment: it is the thing a later reader trusts instead of
-            // looking.
-            // PASSED RAW, for `tokenCap`'s reason exactly (code review
-            // 2026-09-06). Handing `review()` the already-clamped word made
-            // `clampedDials` compare `normal` against `normal` and find nothing
-            // moved — so `clampPreset("thorough")` silently becoming `normal`,
-            // one of the three defects `dial-clamped` was added to end, stayed
-            // silent at the only surface a model-supplied preset reaches. The
-            // clamp still runs, once, in the accountant that owns the dial.
+            // Raw is not laziness, it is what makes `dial-clamped` work. Handing
+            // `review()` an already-clamped value makes `clampedDials` compare a
+            // value against itself and find nothing moved — which is how
+            // `clampPreset("thorough")` silently becoming `normal` stayed silent,
+            // one of the three defects `dial-clamped` was added to end (code
+            // review 2026-09-06).
+            //
+            // The cast is a cast and not a check. The schema refuses an unknown
+            // preset before `execute` runs, so it is covered on the shipped path;
+            // the seam is reachable by a JavaScript caller invoking `execute`
+            // directly, which is the same gap `clampLenses`' own header names,
+            // and `clampPreset` downstream is what answers it (code review
+            // 2026-09-08).
             preset: args.preset as Preset | undefined,
             tokenCap: args.budget,
             // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US

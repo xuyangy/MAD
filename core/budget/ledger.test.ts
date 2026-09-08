@@ -313,15 +313,23 @@ describe("ceilingClause / ceilingNamed — ONE phrasing, shared by both strandin
     expect(ceilingNamed(ledger, "debate")).toBe("debate's share of the token cap (260 of 400)")
   })
 
-  test("an uncapped ledger SAYS SO IN WORDS, never the literal `null`", () => {
+  test("an uncapped ledger says so in words, and does not claim a budget with no ceiling ran out", () => {
     // Code review 2026-09-06. The shipped wording here used to be "the token
     // budget (null) ran out" — a sentence no reader can act on, pinned by this
     // test as though it were intended. Unreachable through the gate, because an
     // uncapped run never refuses a turn; reachable through these exported
-    // helpers, which is the whole reason `debateSummary` carries its own
-    // "no token cap" branch.
+    // helpers, which is why they are asserted at all.
+    //
+    // Code review 2026-09-08 replaced the first repair. "the token budget (no
+    // cap) ran out" fixed the unreadable half and kept the false half: a budget
+    // with no cap cannot run out, and a readable false sentence is worse than an
+    // obviously broken one because a reader acts on it. The two assertions below
+    // are the property, not the wording — neither string may claim a ceiling was
+    // reached, and `ceilingNamed` owns the uncapped noun for `debateSummary` too,
+    // which no longer carries a branch of its own.
     const ledger = emptyLedger(null) as BudgetLedger
-    expect(ceilingClause(ledger, "debate")).toBe("the token budget (no cap) ran out")
+    expect(ceilingClause(ledger, "debate")).toBe("the run was stopped, though no token cap was set")
+    expect(ceilingClause(ledger, "debate")).not.toContain("ran out")
     expect(ceilingNamed(ledger, "debate")).toBe("no token cap")
   })
 })

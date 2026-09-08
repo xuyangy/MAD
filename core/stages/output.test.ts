@@ -468,6 +468,44 @@ describe("lens-sourced findings render as lens-sourced (AD-17e, AD-9 amended)", 
     expect(rendered).toContain("additive coverage")
   })
 
+  test("F4 APPLIES TO POOL SLOTS TOO — a refused pool slot is marked (code review 2026-09-08)", () => {
+    // `skippedForBudget` holds both kinds of slot id, and only the lens rows
+    // were marked. A refused POOL slot printed as an ordinary roster line, which
+    // is the same false statement F4 was raised to remove — the report claiming
+    // a vantage the run never had — one list further up.
+    const rec = record([], 1, ["security"])
+    rec.skippedForBudget = ["discovery-1"]
+
+    const rendered = output(rec)
+    const roster = rendered.slice(rendered.indexOf("ROSTER"))
+    const refused = roster.split("\n").find((line) => line.includes("discovery-1:"))!
+    expect(refused).toContain("NEVER ASKED: the budget refused this slot")
+    // The LENS slot was not refused on this run, so it still reads as coverage —
+    // the marker separates the two lists rather than tarring both.
+    const lens = roster.split("\n").find((line) => line.includes("discovery-lens-security"))!
+    expect(lens).toContain("additive coverage")
+    expect(lens).not.toContain("NEVER ASKED")
+  })
+
+  test("POOL AND LENS SKIPS ARE COUNTED APART when both happen (code review 2026-09-08)", () => {
+    // One list holds both, and one number over both could not be lined up
+    // against the ROSTER block: "2 discovery slot(s)" beside one marked pool row
+    // and one marked lens row left the reader to guess which list the 2 came
+    // from.
+    const rec = record([], 1, ["security"])
+    rec.ledger.cap = 1000
+    rec.skippedForBudget = ["discovery-1", "discovery-lens-security"]
+    expect(output(rec)).toContain("2 discovery slot(s) (1 pool, 1 lens) were never asked")
+
+    // The split is stated only when there IS something to split — a lens-only
+    // run keeps the plain sentence rather than gaining "(0 pool, 1 lens)".
+    const lensOnly = record([], 1, ["security"])
+    lensOnly.ledger.cap = 1000
+    lensOnly.skippedForBudget = ["discovery-lens-security"]
+    expect(output(lensOnly)).toContain("1 discovery slot(s) were never asked")
+    expect(output(lensOnly)).not.toContain("(0 pool")
+  })
+
   test("no lens slots, no lens lines at all", () => {
     const rendered = output(record([finding({ severity: "high", file: "a.ts" })]))
     expect(rendered).not.toContain("lens slots:")

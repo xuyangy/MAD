@@ -24,14 +24,31 @@ import { renderAblation } from "../ablation/report.ts"
 import { scriptedAblation } from "../ablation/seeded-defects.ts"
 import type { Pin } from "../core/roster/select.ts"
 
+/**
+ * BOTH SPELLINGS OF A FLAG, because a CLI that recognises only one of them is a
+ * CLI that silently ignores the other (code review 2026-09-08).
+ *
+ * `--cap 400` and `--cap=400` are the same request, and `indexOf("--cap")` sees
+ * only the first. On `--cap` that miss is not cosmetic: an unseen `--cap` is an
+ * ABSENT `--cap`, absent means no ceiling, and under `--live` no ceiling is real
+ * credentials — the very failure the seam below exists to end, re-entering
+ * through the spelling rather than through the value.
+ */
+function flagIndex(argv: readonly string[], name: string): number {
+  return argv.findIndex((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`))
+}
+
 function flag(argv: readonly string[], name: string): string | undefined {
-  const index = argv.indexOf(`--${name}`)
+  const index = flagIndex(argv, name)
   if (index < 0) return undefined
+  const arg = argv[index]!
+  const eq = arg.indexOf("=")
+  if (eq >= 0) return arg.slice(eq + 1)
   return argv[index + 1]
 }
 
 function has(argv: readonly string[], name: string): boolean {
-  return argv.includes(`--${name}`)
+  return flagIndex(argv, name) >= 0
 }
 
 /**
@@ -75,8 +92,19 @@ export function numericFlag(argv: readonly string[], name: string, min: number):
   if (raw === undefined || raw.trim() === "" || raw.startsWith("--")) {
     return { ok: false, message: `--${name} needs a value. Nothing readable followed it.` }
   }
+  // DECIMAL DIGITS ONLY, checked on the STRING (code review 2026-09-08).
+  // `Number` is not the contract this message states: it reads `0x10` as 16,
+  // `1e3` as 1000 and `+5` as 5, all of which `Number.isInteger` then accepts —
+  // so a flag whose refusal says "must be a whole number" was quietly
+  // reinterpreting the digits the operator typed. On the flag that bounds spend,
+  // a ceiling that differs from what was typed is the same defect as no ceiling.
+  // The sign is allowed through so a negative is refused BY RANGE below, which
+  // names the floor, rather than by shape, which would not.
+  if (!/^-?\d+$/.test(raw.trim())) {
+    return { ok: false, message: `--${name} must be a whole number. It received \`${raw}\`.` }
+  }
   const value = Number(raw)
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+  if (!Number.isInteger(value)) {
     return { ok: false, message: `--${name} must be a whole number. It received \`${raw}\`.` }
   }
   if (value < min) {

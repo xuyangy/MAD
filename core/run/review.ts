@@ -404,10 +404,26 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // A `dial-clamped` that arrived in `priorWarnings` is LIFTED OUT and folded in
   // rather than left to ride beside this one (code review 2026-09-06), so the
   // code stays what its own header says it is: one per run.
+  //
+  // FOLDING IS NOT DELETING (code review 2026-09-08). A prior `dial-clamped`
+  // whose `detail.dials` is absent, or is not an array of dial entries, carries
+  // nothing this function can re-emit — so it is left standing where it is
+  // rather than filtered away. Dropping it lost the adapter's clamp warning
+  // outright, and folding its junk rendered `undefined undefined → undefined` in
+  // the block AD-6 needs a reader to trust. Only a warning that actually
+  // surrenders its dials is replaced.
+  const isDial = (value: unknown): value is { dial: string; requested: unknown; inForce: unknown } =>
+    typeof value === "object" && value !== null && typeof (value as { dial?: unknown }).dial === "string"
+  const dialsOf = (warning: { detail?: Record<string, unknown> }): { dial: string; requested: unknown; inForce: unknown }[] => {
+    const dials = warning.detail?.["dials"]
+    return Array.isArray(dials) ? dials.filter(isDial) : []
+  }
   const priorDials = record.warnings
     .filter((warning) => warning.code === "dial-clamped")
-    .flatMap((warning) => (warning.detail?.dials ?? []) as { dial: string; requested: unknown; inForce: unknown }[])
-  record.warnings = record.warnings.filter((warning) => warning.code !== "dial-clamped")
+    .flatMap(dialsOf)
+  record.warnings = record.warnings.filter(
+    (warning) => warning.code !== "dial-clamped" || dialsOf(warning).length === 0,
+  )
   record.warnings.push(...clampedDials(deps, record, preset, priorDials))
 
   // AD-15 amended — ONE limiter, created once, from the number the record now

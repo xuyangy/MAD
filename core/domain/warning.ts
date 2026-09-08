@@ -172,9 +172,18 @@ export const WARNING_CODES = [
    * default run and teach the reader to skip the warning block — which is the one
    * outcome AD-6 cannot afford.
    *
-   * Raised ONCE per run, by `core/run/review.ts`, which is the seam where a
+   * ONE PER RUN, EMITTED BY `core/run/review.ts`, which is the seam where a
    * caller's request meets the clamp. It names every dial that moved, with what
    * was asked for and what is in force.
+   *
+   * One per run is not one raise site (code review 2026-09-08).
+   * `truncatedListWarnings` in `adapters/opencode/plugin.ts` constructs this code
+   * too, for the list clamps that happen before the core sees the request at all;
+   * `review()` folds those dials into its own and emits the single warning. So
+   * the invariant this paragraph promises is enforced by the FOLD, not by there
+   * being only one constructor — and a reader chasing where a dial name came from
+   * should look at both. The fold also re-stages an adapter-origin clamp from
+   * `roster` to `discover`, which is the stage the surviving warning is about.
    */
   "dial-clamped",
 ] as const

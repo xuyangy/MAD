@@ -253,13 +253,84 @@ describe("the reporter", () => {
     // `--cap abc --live` would otherwise import `ablation/live.ts` and open an
     // opencode client. It returns 0 without touching the live path, which is what
     // "nothing was billed" has to mean.
+    //
+    // THE EXIT CODE ALONE ASSERTS NOTHING (code review 2026-09-08). `main`
+    // returns 0 on the SUCCESSFUL live path too, so `toBe(0)` passed here only
+    // because CI has no opencode server to reach — delete the guard and this
+    // test stays green on a machine that does, while real turns are billed. What
+    // separates the two outcomes is what was printed: the refusal names the flag,
+    // and a run that reached the arms would have printed the report banner.
     const log = console.log
-    console.log = () => {}
+    const printed: string[] = []
+    console.log = (...args: unknown[]) => {
+      printed.push(args.join(" "))
+    }
     try {
       expect(await main(["bun", "ablation", "--pin", "openai/gpt-5", "--live", "--cap", "abc"])).toBe(0)
     } finally {
       console.log = log
     }
+    const output = printed.join("\n")
+    expect(output).toContain("--cap must be a whole number")
+    expect(output).toContain("`abc`")
+    expect(output).not.toContain("CAP-9 — ABLATION")
+    expect(output).not.toContain("LIMITATIONS")
+  })
+
+  test("`--cap=400` is the SAME REQUEST as `--cap 400` (code review 2026-09-08)", () => {
+    // The equals form was invisible to `indexOf("--cap")`, so an unseen `--cap`
+    // was an ABSENT `--cap`, absent meant no ceiling, and under `--live` no
+    // ceiling is real credentials. The seam that refuses a mistyped value could
+    // not help: the value was never read.
+    expect(numericFlag(["--cap=400"], "cap", 0)).toEqual({ ok: true, value: 400 })
+    expect(numericFlag(["--repeats=3"], "repeats", 1)).toEqual({ ok: true, value: 3 })
+    // And the equals form is held to the SAME contract, not waved through.
+    expect(numericFlag(["--cap=abc"], "cap", 0).ok).toBe(false)
+    expect(numericFlag(["--cap="], "cap", 0).ok).toBe(false)
+    expect(numericFlag(["--repeats=0"], "repeats", 1).ok).toBe(false)
+  })
+
+  test("a number is DECIMAL DIGITS, not whatever `Number` accepts (code review 2026-09-08)", () => {
+    // `Number` reads `0x10` as 16, `1e3` as 1000 and `+5` as 5, and
+    // `Number.isInteger` then accepts all three — so a flag whose refusal says
+    // "must be a whole number" was quietly reinterpreting the digits typed. On
+    // the flag that bounds spend, a ceiling that differs from what was typed is
+    // the same defect as no ceiling.
+    for (const raw of ["0x10", "1e3", "+5", "0b11", "1_000"]) {
+      const result = numericFlag(["--cap", raw], "cap", 0)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.message).toContain(raw)
+    }
+    // A negative is still refused BY RANGE, which names the floor, rather than
+    // by shape, which would not.
+    const negative = numericFlag(["--cap", "-1"], "cap", 0)
+    expect(negative.ok).toBe(false)
+    if (!negative.ok) expect(negative.message).toContain("0 or more")
+  })
+
+  test("a VALID `--cap` actually reaches the run (code review 2026-09-08)", async () => {
+    // The suite pinned every refusal and none of the acceptances end to end, so
+    // deleting `...(tokenCap === undefined ? {} : { tokenCap })` from both call
+    // sites left it green — a test that could not fail, in a story that closed
+    // two others of that shape. The ceiling is observable: it is printed.
+    const log = console.log
+    const printed: string[] = []
+    console.log = (...args: unknown[]) => {
+      printed.push(args.join(" "))
+    }
+    let code: number
+    try {
+      code = await main(["bun", "ablation", "--pin", "openai/gpt-5", "--cap", "400"])
+    } finally {
+      console.log = log
+    }
+    expect(code).toBe(0)
+    const output = printed.join("\n")
+    expect(output).toContain("CAP-9 — ABLATION")
+    expect(output).toContain("400")
+    // The ceiling BIT: a run with no cap strands nothing, so the degradation the
+    // shared-ceiling test proves arm-caused has to be visible from the CLI too.
+    expect(output).toMatch(/cap 400|400\)/)
   })
 
   test("the rendered report carries the unsuppressable banner", async () => {
@@ -268,6 +339,30 @@ describe("the reporter", () => {
     expect(rendered).toContain("SCRIPTED BACKEND")
     expect(rendered).toContain("CAN ONLY BE ZERO")
     expect(rendered).toContain("NO conclusion about debate's value follows from it")
+  })
+
+  test("ALL FOUR `cannot`s ARE PRINTED, none corrected for (code review 2026-09-08)", async () => {
+    // The Design Notes name four things this harness cannot do and say all four
+    // are printed. Two were — the noise floor and the matcher error. The other
+    // two existed only in the story file, which is the one place a reader of the
+    // report cannot see, and without them the control-vs-pool delta reads as
+    // debate's effect. That is the exact misreading the block exists to prevent.
+    const report = await scriptedAblation({ pin: PIN })
+    const rendered = renderAblation(report).join("\n")
+    expect(rendered).toContain("NOISE FLOOR")
+    expect(rendered).toContain("CROSS-ARM MATCHING IS UNMEASURED")
+    expect(rendered).toContain("DEBATE CANNOT BE ISOLATED")
+    expect(rendered).toContain("LENSES CANNOT BE SEPARATED FROM FAN-OUT")
+  })
+
+  test("the report states `execution: sequential` (code review 2026-09-08)", async () => {
+    // A disclosure the constraints require, not a setting. `runAblation` awaits
+    // each arm in turn, so the behaviour was always right — but with the line
+    // absent a reader cannot tell a sequential run from an overlapped one, and
+    // overlap would put the arms in contention for one host and make every token
+    // figure a shared number.
+    const report = await scriptedAblation({ pin: PIN })
+    expect(renderAblation(report).join("\n")).toContain("execution: sequential")
   })
 
   test("A FRESH BACKEND PER ARM — one instance across three arms replays the wrong step", async () => {

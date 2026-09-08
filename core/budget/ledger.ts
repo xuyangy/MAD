@@ -247,11 +247,13 @@ export function budgetReport(ledger: BudgetLedger): StageSpend[] {
  */
 export function ceilingClause(ledger: BudgetLedger, stage: SpendStage): string {
   // NO CAP IS SPELLED IN WORDS, never as the literal `null` (code review
-  // 2026-09-06). Unreachable through the gate — an uncapped run never refuses a
-  // turn — but these are exported helpers, and `debateSummary`
-  // (`core/stages/output.ts:563`) already has to guard the null case with a
-  // separate branch precisely because this one used to interpolate it.
-  if (ledger.cap === null) return "the token budget (no cap) ran out"
+  // 2026-09-06), and the sentence does not claim a budget with no ceiling ran
+  // out — it cannot (code review 2026-09-08). The old wording, "the token budget
+  // (no cap) ran out", was readable and self-contradictory, which is the worse
+  // of the two failures: `(null)` at least announced itself as a bug.
+  // Unreachable through the gate — an uncapped run never refuses a turn — but
+  // these are exported helpers and an exported helper is a seam.
+  if (ledger.cap === null) return "the run was stopped, though no token cap was set"
   const ceiling = stageCeiling(ledger, stage)
   if (ceiling === null || ceiling === ledger.cap) {
     return `the token budget (${ledger.cap}) ran out`

@@ -172,6 +172,34 @@ describe("truncatedListWarnings — the clamps can finally say what they dropped
     expect(truncatedListWarnings({ lenses: ["security", "security", "", "  "] })).toEqual([])
     expect(clampLenses(["security", "security", "", "  "])).toEqual(["security"])
   })
+
+  test("a list OVER the ceiling that dedupes UNDER it raises nothing (code review 2026-09-08)", () => {
+    // The case the test above could not reach. Its input is four entries against
+    // a ceiling of eight, so it returns on `moved.length === 0` whether the
+    // comparison is against the ceiling or against the raw input length — the
+    // property it names was never actually exercised.
+    //
+    // Twenty-two copies of one lens is the shape that separates them. The raw
+    // length clears the ceiling; the number of lenses the caller asked for is
+    // ONE, and one is kept, so nothing was truncated. The raw comparison
+    // announced `lenses 22 → 8`: a dial reported as not honoured over a run that
+    // honoured every lens asked for, naming a ceiling never reached and a count
+    // of entries never lost. That is the fabricated number AD-6 cannot carry.
+    const duplicated = Array.from({ length: MAX_LENS_SLOTS + 14 }, () => "security")
+    expect(clampLenses(duplicated)).toEqual(["security"])
+    expect(truncatedListWarnings({ lenses: duplicated })).toEqual([])
+
+    // And the boundary either side of it, so the fix cannot be "return [] more
+    // often": nine DISTINCT lenses still truncate, and `requested` is the count
+    // that survived the drops rather than the raw input length.
+    const distinct = Array.from({ length: MAX_LENS_SLOTS + 1 }, (_, i) => `lens-${i}`)
+    const noisy = [...distinct, ...distinct, "", "   "]
+    const warnings = truncatedListWarnings({ lenses: noisy })
+    expect(warnings).toHaveLength(1)
+    expect(
+      (warnings[0]!.detail as { dials: { dial: string; requested: unknown; inForce: unknown }[] }).dials,
+    ).toEqual([{ dial: "lenses", requested: MAX_LENS_SLOTS + 1, inForce: MAX_LENS_SLOTS }])
+  })
 })
 
 describe("clampPins — bounded here, RESOLVED in the core (story 8A)", () => {

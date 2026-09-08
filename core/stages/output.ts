@@ -559,8 +559,10 @@ function debateSummary(record: RunRecord): string[] {
   // to, which with a share in force is not the cap. `ceilingNamed` owns both
   // phrasings so this line cannot disagree with the strand reason printed under
   // a finding, and it renders as `the token cap of N` whenever the two coincide.
-  const budget =
-    record.ledger.cap === null ? "no token cap" : ceilingNamed(record.ledger, "debate")
+  // It owns the uncapped phrasing too, so the null branch that used to sit here
+  // is gone: two copies of one wording rule is one copy that can drift unnoticed
+  // (code review 2026-09-08).
+  const budget = ceilingNamed(record.ledger, "debate")
 
   const lines = [
     `DEBATE (round cap ${record.maxRounds}, ${budget}): ${counts.debated} contested finding(s), ` +
@@ -1111,13 +1113,21 @@ export function renderRunRecord(record: RunRecord): string {
 
   // ---- roster, with the degradation facts attached ----
   lines.push("ROSTER")
+  // F4 applies to POOL SLOTS TOO (code review 2026-09-08). `skippedForBudget`
+  // holds both kinds of slot id, and marking only the lens rows left a refused
+  // pool slot reading as coverage that ran — the same false statement F4 was
+  // raised to remove, one list up.
+  const skipped = new Set(record.skippedForBudget ?? [])
   for (const slot of record.roster.slots) {
     const lineage = slot.lineage.verified ? slot.lineage.label : "lineage unverified"
     const also =
       slot.alsoAvailableVia.length > 0
         ? ` [also reachable via ${slot.alsoAvailableVia.join(", ")}; deduped, one slot only]`
         : ""
-    lines.push(`  ${slot.slot}: ${slot.providerId}/${slot.modelId} — ${lineage}${also}`)
+    const refused = skipped.has(slot.slot)
+      ? ` — NEVER ASKED: the budget refused this slot, so it contributed no coverage`
+      : ""
+    lines.push(`  ${slot.slot}: ${slot.providerId}/${slot.modelId} — ${lineage}${also}${refused}`)
   }
   // AD-17c/e — lens slots, on their own lines and outside the lineage count.
   // Printing them inside the pool list above would put the one thing AD-4's
@@ -1130,7 +1140,6 @@ export function renderRunRecord(record: RunRecord): string {
   // vantage the run never had, which is the class of false statement AD-6
   // exists to remove. The ids come off `skippedForBudget`, the same list the
   // BUDGET block counts, so the two cannot disagree.
-  const skipped = new Set(record.skippedForBudget ?? [])
   for (const lensSlot of record.roster.lensSlots) {
     const origin = record.lensInstructions.find((entry) => entry.lens === lensSlot.lens)?.origin
     const generated = origin === "generated" ? " [instruction GENERATED at run time, not shipped]" : ""
@@ -1539,8 +1548,21 @@ function budgetBlock(record: RunRecord): string[] {
     // is a plain optional array and this renderer runs over records built
     // elsewhere — an empty one printed "0 discovery slot(s) were never asked" as
     // though it were a degradation.
+    // POOL AND LENS SLOTS ARE COUNTED APART (code review 2026-09-08). One list
+    // holds both, and one number over both could not be lined up against the
+    // ROSTER block above: a run that refused one of each printed "2 discovery
+    // slot(s)" beside one marked pool row and one marked lens row, and left the
+    // reader to guess which list the 2 came from. The split is stated only when
+    // there is something to split.
+    const lensIds = new Set(record.roster.lensSlots.map((lensSlot) => lensSlot.slot))
+    const skippedLenses = record.skippedForBudget.filter((slot) => lensIds.has(slot)).length
+    const skippedPool = record.skippedForBudget.length - skippedLenses
+    const split =
+      skippedLenses > 0 && skippedPool > 0
+        ? ` (${skippedPool} pool, ${skippedLenses} lens)`
+        : ""
     lines.push(
-      `  ${record.skippedForBudget.length} discovery slot(s) were never asked, to stay inside ` +
+      `  ${record.skippedForBudget.length} discovery slot(s)${split} were never asked, to stay inside ` +
         `discovery's share — those slots were not skipped because a model failed.`,
     )
   }
