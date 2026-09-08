@@ -77,16 +77,34 @@ function has(argv: readonly string[], name: string): boolean {
  *   fraction, `Infinity` — is refused by NAME, so the message says which flag
  *   and what it received. Fractions are refused rather than floored: a CLI that
  *   silently rounds the number you typed is a CLI you cannot trust the report of.
- * - **Out of range** is refused against a floor the caller states, because the
- *   floor differs: a cap of 0 is a real, explicit ceiling of zero, and 0 repeats
- *   is not a run.
+ * - **Out of range** is refused against a floor AND a ceiling the caller states,
+ *   because both differ: a cap of 0 is a real, explicit ceiling of zero, and 0
+ *   repeats is not a run; a cap of two million tokens is a large budget and
+ *   twenty repeats is a long noise floor, while anything past either is a typo
+ *   that under `--live` spends real credentials.
  *
  * It REFUSES, it does not gate: like the missing-`--pin` path above, an invalid
  * invocation prints and `main` still returns 0. The tests are what fail CI.
  */
+/**
+ * The two ceilings, stated once (human decision, 2026-09-08).
+ *
+ * Neither is a budget policy — `--cap` IS the budget dial and the caller owns it.
+ * They are the distance between a large deliberate number and a slipped digit,
+ * placed well above any run this harness was built for: three arms over a
+ * seeded-defect fixture, or a live pass a person watches.
+ */
+export const MAX_TOKEN_CAP = 2_000_000
+export const MAX_REPEATS = 20
+
 type NumericFlag = { ok: true; value: number | undefined } | { ok: false; message: string }
 
-export function numericFlag(argv: readonly string[], name: string, min: number): NumericFlag {
+export function numericFlag(
+  argv: readonly string[],
+  name: string,
+  min: number,
+  max: number,
+): NumericFlag {
   if (!has(argv, name)) return { ok: true, value: undefined }
   const raw = flag(argv, name)
   if (raw === undefined || raw.trim() === "" || raw.startsWith("--")) {
@@ -110,6 +128,15 @@ export function numericFlag(argv: readonly string[], name: string, min: number):
   if (value < min) {
     return { ok: false, message: `--${name} must be ${min} or more. It received \`${raw}\`.` }
   }
+  // A CEILING AS WELL AS A FLOOR (human decision, 2026-09-08). The floor was
+  // stated and the ceiling was not, so `--repeats 1000000` validated — and under
+  // `--live` that is a million billed runs per arm from one mistyped digit. The
+  // number is refused BY NAME against a stated ceiling, the same shape the floor
+  // uses, so the message says which flag, what it received and what the limit is.
+  // The ceilings are deliberately generous: they are a typo guard, not a policy.
+  if (value > max) {
+    return { ok: false, message: `--${name} must be ${max} or less. It received \`${raw}\`.` }
+  }
   return { ok: true, value }
 }
 
@@ -127,9 +154,10 @@ function refuse(message: string): number {
       "\n" +
       "  bun run ablation --pin openai/gpt-5 --cap 400000 --repeats 3\n" +
       "\n" +
-      "--cap bounds the tokens a run may spend and is shared by all three arms;\n" +
-      "omit it for no ceiling. --repeats runs each arm N times to establish a noise\n" +
-      "floor; omit it for one pass. Nothing was run and nothing was billed.",
+      `--cap bounds the tokens a run may spend and is shared by all three arms;\n` +
+      `omit it for no ceiling, or give it 0 to ${MAX_TOKEN_CAP}. --repeats runs each arm\n` +
+      `N times to establish a noise floor; omit it for one pass, or give it 1 to\n` +
+      `${MAX_REPEATS}. Nothing was run and nothing was billed.`,
   )
   return 0
 }
@@ -159,9 +187,9 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
 
   // Both dials are read and checked BEFORE either path runs, so a mistyped flag
   // costs nothing — not a scripted run, and under `--live` not a billed turn.
-  const cap = numericFlag(argv, "cap", 0)
+  const cap = numericFlag(argv, "cap", 0, MAX_TOKEN_CAP)
   if (!cap.ok) return refuse(cap.message)
-  const repeats = numericFlag(argv, "repeats", 1)
+  const repeats = numericFlag(argv, "repeats", 1, MAX_REPEATS)
   if (!repeats.ok) return refuse(repeats.message)
   const tokenCap = cap.value
   const repeatCount = repeats.value ?? 1

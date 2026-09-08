@@ -4,7 +4,7 @@ import { alignArms } from "./align.ts"
 import { runAblation } from "./arms.ts"
 import { CONTROL, LENSED, POOL, scriptedAblation, scriptedArms } from "./seeded-defects.ts"
 import { renderAblation } from "./report.ts"
-import { main, numericFlag } from "../scripts/ablation.ts"
+import { main, MAX_REPEATS, MAX_TOKEN_CAP, numericFlag } from "../scripts/ablation.ts"
 import { abstainingInDebate, LENS_SCRIPTS, SCRIPTS, SEEDED_CANDIDATES } from "../fixtures/seeded-defects/arms.ts"
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/change.ts"
 import { fakeClock, FakeBackend } from "../core/test-support/fakes.ts"
@@ -243,10 +243,10 @@ describe("the reporter", () => {
     // Accepted, and the point of asserting it: `--cap 0` is a REAL explicit
     // ceiling of zero, not rubbish, so the floor for `--cap` is 0 and not 1.
     // Absent stays absent — no ceiling, which is the deliberate default.
-    expect(numericFlag(["--cap", "0"], "cap", 0)).toEqual({ ok: true, value: 0 })
-    expect(numericFlag(["--cap", "400"], "cap", 0)).toEqual({ ok: true, value: 400 })
-    expect(numericFlag([], "cap", 0)).toEqual({ ok: true, value: undefined })
-    expect(numericFlag(["--repeats", "3"], "repeats", 1)).toEqual({ ok: true, value: 3 })
+    expect(numericFlag(["--cap", "0"], "cap", 0, MAX_TOKEN_CAP)).toEqual({ ok: true, value: 0 })
+    expect(numericFlag(["--cap", "400"], "cap", 0, MAX_TOKEN_CAP)).toEqual({ ok: true, value: 400 })
+    expect(numericFlag([], "cap", 0, MAX_TOKEN_CAP)).toEqual({ ok: true, value: undefined })
+    expect(numericFlag(["--repeats", "3"], "repeats", 1, MAX_REPEATS)).toEqual({ ok: true, value: 3 })
   })
 
   test("a REFUSED run is refused BEFORE the arms run — structurally, not by promise", async () => {
@@ -282,12 +282,12 @@ describe("the reporter", () => {
     // was an ABSENT `--cap`, absent meant no ceiling, and under `--live` no
     // ceiling is real credentials. The seam that refuses a mistyped value could
     // not help: the value was never read.
-    expect(numericFlag(["--cap=400"], "cap", 0)).toEqual({ ok: true, value: 400 })
-    expect(numericFlag(["--repeats=3"], "repeats", 1)).toEqual({ ok: true, value: 3 })
+    expect(numericFlag(["--cap=400"], "cap", 0, MAX_TOKEN_CAP)).toEqual({ ok: true, value: 400 })
+    expect(numericFlag(["--repeats=3"], "repeats", 1, MAX_REPEATS)).toEqual({ ok: true, value: 3 })
     // And the equals form is held to the SAME contract, not waved through.
-    expect(numericFlag(["--cap=abc"], "cap", 0).ok).toBe(false)
-    expect(numericFlag(["--cap="], "cap", 0).ok).toBe(false)
-    expect(numericFlag(["--repeats=0"], "repeats", 1).ok).toBe(false)
+    expect(numericFlag(["--cap=abc"], "cap", 0, MAX_TOKEN_CAP).ok).toBe(false)
+    expect(numericFlag(["--cap="], "cap", 0, MAX_TOKEN_CAP).ok).toBe(false)
+    expect(numericFlag(["--repeats=0"], "repeats", 1, MAX_REPEATS).ok).toBe(false)
   })
 
   test("a number is DECIMAL DIGITS, not whatever `Number` accepts (code review 2026-09-08)", () => {
@@ -297,15 +297,59 @@ describe("the reporter", () => {
     // the flag that bounds spend, a ceiling that differs from what was typed is
     // the same defect as no ceiling.
     for (const raw of ["0x10", "1e3", "+5", "0b11", "1_000"]) {
-      const result = numericFlag(["--cap", raw], "cap", 0)
+      const result = numericFlag(["--cap", raw], "cap", 0, MAX_TOKEN_CAP)
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.message).toContain(raw)
     }
     // A negative is still refused BY RANGE, which names the floor, rather than
     // by shape, which would not.
-    const negative = numericFlag(["--cap", "-1"], "cap", 0)
+    const negative = numericFlag(["--cap", "-1"], "cap", 0, MAX_TOKEN_CAP)
     expect(negative.ok).toBe(false)
     if (!negative.ok) expect(negative.message).toContain("0 or more")
+  })
+
+  test("a numeric flag has a CEILING as well as a floor (human decision 2026-09-08)", async () => {
+    // The floor was stated and the ceiling was not, so `--repeats 1000000`
+    // validated — and under `--live` that is a million billed runs per arm from
+    // one slipped digit. Both ends are refused BY RANGE now, and the message
+    // names the limit so the operator can tell a typo from a policy.
+    const tooMany = numericFlag(["--repeats", "1000000"], "repeats", 1, MAX_REPEATS)
+    expect(tooMany.ok).toBe(false)
+    if (!tooMany.ok) {
+      expect(tooMany.message).toContain(`${MAX_REPEATS} or less`)
+      expect(tooMany.message).toContain("1000000")
+    }
+    const tooBig = numericFlag(["--cap", String(MAX_TOKEN_CAP + 1)], "cap", 0, MAX_TOKEN_CAP)
+    expect(tooBig.ok).toBe(false)
+    if (!tooBig.ok) expect(tooBig.message).toContain(`${MAX_TOKEN_CAP} or less`)
+    // The ceiling itself is INSIDE the range, not outside it: a stated limit the
+    // caller cannot actually use is a different limit.
+    expect(numericFlag(["--repeats", String(MAX_REPEATS)], "repeats", 1, MAX_REPEATS)).toEqual({
+      ok: true,
+      value: MAX_REPEATS,
+    })
+    expect(numericFlag(["--cap", String(MAX_TOKEN_CAP)], "cap", 0, MAX_TOKEN_CAP)).toEqual({
+      ok: true,
+      value: MAX_TOKEN_CAP,
+    })
+    // And the CLI refuses it before either arm path is reached, which is what
+    // "nothing was billed" has to mean — the same structural guarantee the other
+    // refusals get, checked over the flag this decision added.
+    const log = console.log
+    const printed: string[] = []
+    console.log = (...args: unknown[]) => {
+      printed.push(args.join(" "))
+    }
+    let code: number
+    try {
+      code = await main(["bun", "ablation", "--pin", "openai/gpt-5", "--repeats", "1000000", "--live"])
+    } finally {
+      console.log = log
+    }
+    expect(code).toBe(0)
+    const output = printed.join("\n")
+    expect(output).toContain("Nothing was run and nothing was billed")
+    expect(output).not.toContain("CAP-9 — ABLATION")
   })
 
   test("a VALID `--cap` actually reaches the run (code review 2026-09-08)", async () => {

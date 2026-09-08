@@ -143,10 +143,19 @@ export function renderAblation(report: AblationReport): string[] {
       `    undecided (either side unresolved or unjudged, in NEITHER half): ${d.undecided}`,
       `    only in ${pairing.a}: ${d.onlyIn.a} | only in ${pairing.b}: ${d.onlyIn.b}` +
         ` | ambiguous groups excluded: ${d.ambiguous}`,
-      `    alignment: ${pairing.alignment.comparisons} comparison(s), ` +
-        `${pairing.alignment.failures} failure(s), ${pairing.alignment.candidatePairs} cross-arm ` +
-        `pair(s) of which ${pairing.alignment.blockedPairs} were vetoed by the block key ` +
-        `before the matcher was asked.`,
+      // TWO COUNTS OVER TWO DIFFERENT SETS, said as two sentences (human
+      // decision, 2026-09-08). Run together they read as one fraction —
+      // `78 comparison(s) … 40 cross-arm pair(s)` looks like 78 out of 40 — and
+      // neither number is a part of the other: `comparisons` counts the
+      // similarity calls the engine billed over ALL pairs, within-arm included,
+      // while `candidatePairs` counts the cross-arm pairs that existed to be
+      // judged, vetoed ones included. Only `blockedPairs` is a subset, and it is
+      // a subset of the cross-arm count, which is the sentence it now sits in.
+      `    alignment: ${pairing.alignment.comparisons} similarity call(s) over all pairs, ` +
+        `${pairing.alignment.failures} failure(s).`,
+      `      cross-arm pairs, a DIFFERENT set and not a share of those calls: ` +
+        `${pairing.alignment.candidatePairs}, of which ${pairing.alignment.blockedPairs} ` +
+        `were vetoed by the block key before the matcher was asked.`,
     )
     for (const difference of d.differences) {
       lines.push(

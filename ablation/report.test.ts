@@ -108,7 +108,13 @@ describe("every rate renders with its denominator", () => {
 
   test("THE BLOCK KEY'S SILENT VETO IS PRINTED AS A NUMBER", () => {
     const rendered = text(report())
-    expect(rendered).toContain("40 cross-arm pair(s) of which 4 were vetoed by the block key")
+    // TWO SETS, TWO SENTENCES (human decision 2026-09-08). The counts used to run
+    // together as `78 comparison(s) … 40 cross-arm pair(s)`, which reads as 78 out
+    // of 40, and neither count is a share of the other.
+    expect(rendered).toContain("78 similarity call(s) over all pairs")
+    expect(rendered).toContain("a DIFFERENT set and not a share of those calls: 40")
+    expect(rendered).toContain("of which 4 were vetoed by the block key")
+    expect(rendered).not.toContain("78 comparison(s)")
     expect(rendered).toContain("never")
     expect(rendered).toContain("file-level")
   })
