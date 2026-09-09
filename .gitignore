@@ -35,6 +35,10 @@ _bmad
 !/_bmad-output/specs/spec-mad-orchestrator/pipeline-stages.md
 !/_bmad-output/specs/spec-mad-orchestrator/deferred-v2.md
 !/_bmad-output/specs/spec-mad-orchestrator/survey-grounding.md
+# Added 2026-09-09 (epic 2, story 2-1). SPEC.md's `companions:` names this file, so
+# leaving it ignored would recreate exactly the defect commit 7de62b7 fixed: a design
+# document the contract cites by name that no clone can resolve.
+!/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md
 
 node_modules
 *.tsbuildinfo

@@ -7,6 +7,7 @@ companions:
   - cost-model.md
   - survey-grounding.md
   - deferred-v2.md
+  - evaluation-protocol.md
 sources:
   - ../../brainstorming/brainstorm-mad-orchestrator-2026-08-13/brainstorm-intent.md
 ---
@@ -101,6 +102,37 @@ An opportunity to capture, realized as an open-source plugin for agent harnesses
 - MAD-owned model credentials, provider configuration, or a second consent gate on top of the host's.
 - Persona packs for non-code domains — legal, technical writing, and the rest. The instruction registry is *shaped* to hold them (AD-11) and nothing more. Outside code there is no repo for the Fact-Checker to open and no test to run, so there is no ground truth; without it, debate reverts to the rhetoric this design exists to replace. Shipping the shape is not shipping permission.
 - Lens-vs-lens debate, and any lens participation in judging.
+
+## Evaluation exception (dated 2026-09-09, epic 2)
+
+`evaluation-protocol.md` governs epic 2's live evaluation and is a companion of this SPEC.
+It introduces ONE exception to the shipped contract, scoped to the evaluation path and to
+nothing else:
+
+- **An evaluation-only debate-off policy.** A run executed under the protocol may skip
+  debate for every candidate, including critical severity, routing them to
+  `verify-independently`. Routing still runs once and still writes `route` and
+  `routeReason`; under this policy the recorded `routeReason` reads **experimental
+  intervention**, which is a distinct and honest claim from "threshold agreement",
+  "silence", "cap", or "exhausted budget". CAP-3's critical override is unchanged for
+  every ordinary run.
+- **A ledger entry gains provenance** — executed-here versus inherited-from-a-shared
+  prefix, with a reference to the original execution. This is an additive schema change and
+  a semantic amendment to AD-15, taken deliberately so a shared discovery prefix is billed
+  once in the actual cost while each branch still inherits it against its own logical cap.
+  Inherited unknown usage stays unknown.
+
+**The shipped `clampMaxRounds` floor, the co-discovery threshold clamp, and the presets are
+NOT changed by this exception.** Two mechanisms that would have changed them — `threshold: 0`
+and admitting `maxRounds: 0` — were examined and rejected; `evaluation-protocol.md` §2
+records why, and no story may reintroduce either.
+
+**What epic 2 will and will not deliver against the success signal below.** A dated human
+decision (2026-09-09) bought three paired blocks, descriptively, with no predeclared
+product-value threshold. Epic 2 therefore reports observed differences in the deployed
+debate pathway — precision, final recall, and cost — and assesses product value not at all.
+The success signal's question stands as written; what is narrowed, with a date, is what
+epic 2 delivers against it.
 
 ## Success signal
 
