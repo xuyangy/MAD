@@ -1101,6 +1101,21 @@ function pooledNotYetMerged(record: RunRecord): string[] {
     )
   }
 
+  // WHERE THE ROWS ARE, when the pool is split across the two sections (ledger
+  // triage 2026-09-09). The count above is POOL-SCOPED and deliberately so — the
+  // notice must not vanish when every finding is stranded — but this header sits
+  // above FINDINGS, and on a run where some pool findings resolved and others did
+  // not, the number names more rows than the section beneath it holds. Saying
+  // which section carries the remainder costs one line and stops a reader
+  // counting the difference as findings that went missing.
+  const stranded = pooled.filter((finding) => finding.unresolved).length
+  if (stranded > 0 && stranded < pooled.length) {
+    lines.push(
+      `  ${stranded} of those ${pooled.length} are in the UNRESOLVED section further down, not in`,
+      `  FINDINGS below — the count above is the whole pool, both sections together.`,
+    )
+  }
+
   lines.push("")
   return lines
 }

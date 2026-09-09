@@ -181,6 +181,16 @@ export interface PinnedStep {
 const PIN_LABEL_MAX = 80
 
 /**
+ * How many unhonoured pins may be NAMED in one warning sentence.
+ *
+ * The per-entry cap above bounds one id; this bounds the list. Twelve is
+ * `MAX_DISCOVERY_SLOTS`, the adapter's own list cap — a caller cannot usefully
+ * pin more models than there are slots, so naming more than that is noise even
+ * when it is not an attack.
+ */
+const PIN_LIST_MAX = 12
+
+/**
  * A caller's pin, rendered safely into a MAD-authored warning row (AD-18).
  *
  * The pin id is the only string in this module MAD did not write, and it lands
@@ -577,9 +587,23 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
           return "it is not a usable provider/model pair"
       }
     }
-    const listed = unhonoured
-      .map((resolution) => `\`${pinLabel(resolution.pin)}\` (${reasonOf(resolution)})`)
-      .join("; ")
+    // THE LIST IS BOUNDED TOO, not only each entry (ledger triage 2026-09-09).
+    // `pinLabel` caps one pin at `PIN_LABEL_MAX`; nothing capped how many pins
+    // reach the sentence. The adapter's `clampPins` bounds the list at
+    // `MAX_DISCOVERY_SLOTS` "because an unbounded list arriving from a model is
+    // an unbounded warning message" — but `review()` is exported and story 9's
+    // ablation calls it directly, which is the seam `pinLabel` already sanitizes
+    // in core for. Truncation is STATED, on `renderBlameCitation`'s rule; the
+    // machine-readable `detail.pins[]` below keeps every entry, because a
+    // structured field is not the unbounded prose this bounds.
+    const shownPins = unhonoured.slice(0, PIN_LIST_MAX)
+    const listed =
+      shownPins
+        .map((resolution) => `\`${pinLabel(resolution.pin)}\` (${reasonOf(resolution)})`)
+        .join("; ") +
+      (unhonoured.length > shownPins.length
+        ? `; … and ${unhonoured.length - shownPins.length} further pin(s) not listed here`
+        : "")
     warnings.push({
       code: "roster-pin-unhonoured",
       stage: "roster",

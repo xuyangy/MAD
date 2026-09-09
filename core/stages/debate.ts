@@ -1319,6 +1319,22 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     }
   }
 
+  // THE SUBSET RELATION IS ENFORCED, not only asserted in a test (ledger triage
+  // 2026-09-09). `convergedUncontested` and `convergedUnsure` are subsets of
+  // `converged`, and the types cannot say so — a future writer incrementing one
+  // without the other would produce counts that only a weaker `<= converged`
+  // assertion could catch, and only if that test ran the right shape. It holds
+  // structurally today because both live inside the `converged` case; this makes
+  // moving them out a loud failure rather than a quiet miscount, on
+  // `carriedClause`'s rule that MAD fails loudly rather than reporting a number
+  // it cannot back.
+  if (convergedUncontested + convergedUnsure > converged) {
+    throw new Error(
+      `debate counts: ${convergedUncontested} uncontested + ${convergedUnsure} unsure exceeds ` +
+        `${converged} converged — the two are SUBSETS of converged, not extra buckets`,
+    )
+  }
+
   return {
     findings,
     maxRounds,

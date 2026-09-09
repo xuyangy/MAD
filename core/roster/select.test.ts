@@ -1044,3 +1044,37 @@ describe("the two roster guards, probed rather than assumed (ledger triage 2026-
     expect(reported.startsWith(long)).toBe(false)
   })
 })
+
+describe("the unhonoured-pin sentence is BOUNDED as a list, not only per entry", () => {
+  test("a 40-pin list names twelve and says how many it did not", () => {
+    // `pinLabel` caps one id; nothing capped how many ids reached the sentence.
+    // `review()` is exported and story 9's ablation calls it directly, where the
+    // adapter's `clampPins` never runs.
+    const pins = Array.from({ length: 40 }, (_, i) => ({
+      providerId: `nope-${i}`,
+      modelId: `model-${i}`,
+    }))
+    const resolved = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      providerConfigKey: "provider",
+      pins,
+    })
+
+    const warning = resolved.warnings.find((w) => w.code === "roster-pin-unhonoured")!
+    expect(warning.message).toContain("and 28 further pin(s) not listed here")
+    expect(warning.message).toContain("nope-11/model-11")
+    expect(warning.message).not.toContain("nope-12/model-12")
+    // The MACHINE-READABLE half keeps every one — it is a field, not prose.
+    expect((warning.detail as { pins: unknown[] }).pins).toHaveLength(40)
+  })
+
+  test("a list within the cap says nothing about truncation", () => {
+    const resolved = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      providerConfigKey: "provider",
+      pins: [{ providerId: "nope", modelId: "model" }],
+    })
+    const warning = resolved.warnings.find((w) => w.code === "roster-pin-unhonoured")!
+    expect(warning.message).not.toContain("not listed here")
+  })
+})

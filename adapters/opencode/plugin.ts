@@ -352,7 +352,16 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // discovery turns they just refused.
           const preset = clampPreset(args.preset)
           const dials = PRESET_DIALS[preset]
-          const lenses = clampLenses(args.lenses !== undefined ? args.lenses : [...dials.lenses])
+          // NAMED, so the truncation warning can inspect the list that was
+          // ACTUALLY clamped (ledger triage 2026-09-09). `truncatedListWarnings`
+          // used to read `args.lenses`, which is `undefined` on the path where
+          // the PRESET supplies the list — so a preset naming more than
+          // `MAX_LENS_SLOTS` lenses would truncate with nothing said, in the one
+          // layer whose whole job is to say what it dropped. Latent while the
+          // largest preset list is `paranoid`'s three; a silent clamp on a
+          // billed dial should not wait for a preset table to grow.
+          const requestedLenses = args.lenses !== undefined ? args.lenses : [...dials.lenses]
+          const lenses = clampLenses(requestedLenses)
           // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
           // clamp deliberately discards nothing a user asked for.
           const pins = clampPins(args.models)
@@ -452,7 +461,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // AD-6 — the adapter's OWN truncations ride in beside the roster's.
             // `review()` copies `priorWarnings` onto the record verbatim, so this
             // is the supported way for this layer to be heard at all.
-            priorWarnings: [...truncatedListWarnings(args), ...resolved.warnings],
+            priorWarnings: [
+              ...truncatedListWarnings({ models: args.models, lenses: requestedLenses }),
+              ...resolved.warnings,
+            ],
             // CAP-7 (story 8) — the two user-facing dials, and the only two on
             // this surface. BOTH ARE PASSED RAW. Neither is clamped here; the
             // tool schema (`.int().min(0)` for the budget, `enum(PRESETS)` for

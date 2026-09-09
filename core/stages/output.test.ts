@@ -2613,6 +2613,36 @@ describe("the not-yet-merged notice is driven off the POOL (deferred-work 2026-0
     expect(rendered).toContain("ONE DEFECT MAY APPEAR ONCE PER MODEL")
   })
 
+  test("A SPLIT POOL SAYS WHERE THE MISSING ROWS ARE (ledger triage 2026-09-09)", () => {
+    // The header count is pool-scoped, which is right — it must not vanish when
+    // every finding is stranded. But it sits above FINDINGS, so on a run where
+    // some pool findings resolved and others did not, it names more rows than
+    // the section beneath it holds.
+    const split = record(
+      [
+        finding({ severity: "high", file: "src/a.ts", id: "f-1" }),
+        finding({ severity: "high", file: "src/b.ts", id: "f-2" }),
+        finding({ severity: "high", file: "src/c.ts", id: "f-3" }),
+      ],
+      2,
+    )
+    split.findings[2]!.unresolved = { diedAtStage: "debate", reason: "the token budget (10) ran out" }
+
+    const rendered = output(split)
+    expect(rendered).toContain("POOL — NOT YET MERGED: these 3 pool finding(s)")
+    expect(rendered).toContain("1 of those 3 are in the UNRESOLVED section further down")
+  })
+
+  test("AN UNSPLIT POOL SAYS NOTHING EXTRA — no line when every row is in one section", () => {
+    // The non-vacuous sibling: the line above must be conditional, not constant.
+    const whole = record([finding({ severity: "high", file: "src/a.ts", id: "f-1" })], 2)
+    expect(output(whole)).not.toContain("in the UNRESOLVED section further down")
+
+    const none = record([finding({ severity: "high", file: "src/a.ts", id: "f-1" })], 2)
+    none.findings[0]!.unresolved = { diedAtStage: "debate", reason: "the token budget (10) ran out" }
+    expect(output(none)).not.toContain("in the UNRESOLVED section further down")
+  })
+
   test("a CLUSTERED run still suppresses it — the notice is about an unmerged pool", () => {
     const clustered = record([finding({ severity: "high", file: "src/a.ts", clusterId: "c-1" })], 2)
     expect(output(clustered)).not.toContain("POOL — NOT YET MERGED")

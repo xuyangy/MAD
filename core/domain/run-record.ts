@@ -385,6 +385,21 @@ export function emptyLedger(
   return { entries: [], total: emptyTokenUsage(), cap, maxConcurrency, shares }
 }
 
+/**
+ * The same ledger with different stage shares — WITHOUT restating the dials the
+ * caller does not care about (ledger triage 2026-09-09).
+ *
+ * `shares` is `emptyLedger`'s THIRD positional parameter, so setting it meant
+ * naming a `maxConcurrency` as well, and the one caller that needed custom
+ * shares (`core/stages/debate.test.ts`) worked around that by MUTATING
+ * `ledger.shares` after construction — the very field
+ * `scripts/lint-dependency-direction.ts` forbids a stage to touch. A copy, not a
+ * mutation, so a ledger already handed to something else is unaffected.
+ */
+export function withShares(ledger: TokenLedger, shares: SpendShares): TokenLedger {
+  return { ...ledger, shares }
+}
+
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
   ledger.entries.push(entry)
   ledger.total = addTokens(ledger.total, entry.tokens)

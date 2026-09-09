@@ -5,7 +5,7 @@ import { z } from "zod"
 import { mayISpend, spent, type BudgetLedger } from "../budget/ledger.ts"
 import type { CoDiscovery, Entry, Finding, Severity } from "../domain/finding.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
-import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
+import { emptyLedger, withShares, type RunRecord } from "../domain/run-record.ts"
 import { CODING_DEBATE_GENERALIST } from "../instructions/coding/debate.ts"
 import { CODING_LENS_INSTRUCTIONS } from "../instructions/coding/lenses.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
@@ -2011,8 +2011,7 @@ describe("debate's money sentence names DEBATE's ceiling, not the cap (code revi
     // The non-vacuous sibling and the compatibility claim: when debate's ceiling
     // IS the cap, `ceilingClause` returns the pre-story-8 sentence character for
     // character. Every test written before the shares goes through this branch.
-    const ledger = emptyLedger(60) as BudgetLedger
-    ledger.shares = { discover: 1, debate: 1, judge: 1 }
+    const ledger = withShares(emptyLedger(60), { discover: 1, debate: 1, judge: 1 }) as BudgetLedger
     const findings = [contested({ id: "f-1" })]
     const backend = new FakeBackend({
       "discovery-1": [says({ findingId: "f-1", position: "upholds" })],

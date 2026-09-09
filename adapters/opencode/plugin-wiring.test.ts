@@ -652,3 +652,41 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     expect(literal).not.toMatch(/^\s*tools,\s*$/m)
   })
 })
+
+/**
+ * THE LENS TRUNCATION WARNING READS THE LIST THAT WAS ACTUALLY CLAMPED
+ * (ledger triage 2026-09-09).
+ *
+ * `truncatedListWarnings(args)` read `args.lenses`, which is `undefined` on the
+ * path where the PRESET supplies the list — so a preset naming more than
+ * `MAX_LENS_SLOTS` lenses would truncate with nothing said, in the one layer
+ * whose whole job is to say what it dropped.
+ *
+ * STRUCTURAL, and stated rather than hidden: the largest shipped preset list is
+ * `paranoid`'s three against a ceiling of eight, so no preset table in this repo
+ * can produce the overflow behaviourally, and inventing one would be a test that
+ * asserts against a fixture rather than against the code. What this catches is
+ * the exact regression: the argument going back to `args`.
+ */
+describe("mad_review.execute — the preset's own lens list is inside the clamp report", () => {
+  const pluginSource = () => Bun.file(new URL("./plugin.ts", import.meta.url)).text()
+
+  test("the warning is passed the RESOLVED list, not the raw argument", async () => {
+    const source = await pluginSource()
+    // The resolved list is named once and used twice — clamped, and reported.
+    expect(source).toContain("const requestedLenses = args.lenses !== undefined ? args.lenses : [...dials.lenses]")
+    expect(source).toContain("const lenses = clampLenses(requestedLenses)")
+    expect(source).toContain("truncatedListWarnings({ models: args.models, lenses: requestedLenses })")
+    // And the regression itself is gone.
+    expect(source).not.toContain("truncatedListWarnings(args)")
+  })
+
+  test("the assertion above can FAIL — the old shape does not satisfy it", async () => {
+    const reverted = (await pluginSource()).replace(
+      "truncatedListWarnings({ models: args.models, lenses: requestedLenses })",
+      "truncatedListWarnings(args)",
+    )
+    expect(reverted).not.toContain("truncatedListWarnings({ models: args.models, lenses: requestedLenses })")
+    expect(reverted).toContain("truncatedListWarnings(args)")
+  })
+})
