@@ -26,6 +26,7 @@ import {
   type JudgeRoleTag,
   type SlotScript,
 } from "../test-support/fakes.ts"
+import { MAX_BLAME_ROWS } from "../judge/blame.ts"
 import { judge, type JudgeInput } from "./judge.ts"
 
 // ---------------------------------------------------------------------------
@@ -1355,5 +1356,108 @@ describe("the per-role instruction seam (code review 2026-08-28)", () => {
     // That is the double's limit, not the stage's, and it is also the clearest
     // proof the caller's text is what reached the backend.
     expect(texts.filter((text) => text.startsWith("SUBSTITUTED-BY-CALLER"))).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-8 / AD-13 — the blame route MAD drives itself (ledger triage 2026-09-09)
+// ---------------------------------------------------------------------------
+
+/**
+ * The judge's `Tools` route had NO stage-level test at all. Every CAP-8
+ * assertion in the tree was either a source read in `plugin-wiring.test.ts` or a
+ * renderer test over a hand-written history entry, so nothing exercised what
+ * `judge()` actually asks git for — which is why both defects below could be
+ * filed against code that was fully green.
+ */
+describe("the blame call is BOUNDED in range and skipped after a stop", () => {
+  const PORCELAIN = [
+    "1111111111111111111111111111111111111111 1 12 1",
+    "author Ada",
+    "author-time 1700000000",
+    "author-tz +0000",
+    "summary the rounding line",
+    "\tconst total = fee * rate",
+  ].join("\n")
+
+  function withLocus(startLine: number, endLine: number): Finding {
+    const f = finding({ route: "judge" })
+    f.locus = { file: "src/pay.ts", startLine, endLine }
+    return f
+  }
+
+  test("A 20000-LINE LOCUS ASKS GIT FOR `MAX_BLAME_ROWS` LINES, not 20000", async () => {
+    // `MAX_BLAME_ROWS` trimmed the CITATION only, so the adapter still asked git
+    // for the whole range and `parseBlamePorcelain` still parsed all of it — to
+    // throw away all but forty rows.
+    const asked: { path: string; startLine: number; endLine: number }[] = []
+    const tools = {
+      blame: async (path: string, startLine: number, endLine: number) => {
+        asked.push({ path, startLine, endLine })
+        return PORCELAIN
+      },
+    } as never
+
+    await run([withLocus(1, 20000)], { tools })
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]!.startLine).toBe(1)
+    expect(asked[0]!.endLine).toBe(MAX_BLAME_ROWS)
+  })
+
+  test("A LOCUS INSIDE THE BOUND IS ASKED FOR EXACTLY, not widened or narrowed", async () => {
+    // The non-vacuous sibling: the bound is a ceiling, not a constant.
+    const asked: number[] = []
+    const tools = {
+      blame: async (_p: string, _s: number, endLine: number) => {
+        asked.push(endLine)
+        return PORCELAIN
+      },
+    } as never
+
+    await run([withLocus(12, 14)], { tools })
+
+    expect(asked).toEqual([14])
+  })
+
+  test("A RUN STOPPED BEFORE THE LOOP REACHES A FINDING SPAWNS NO GIT — the gate above already does that", async () => {
+    // THE ENTRY'S CLAIM, NARROWED BY MEASUREMENT. "A cancelled run keeps
+    // spawning git for every remaining finding" is not what happens: the
+    // per-finding gate at the TOP of the judge loop strands each remaining
+    // finding before the blame block is reached at all.
+    let calls = 0
+    const tools = { blame: async () => ((calls += 1), PORCELAIN) } as never
+    const controller = new AbortController()
+    controller.abort()
+
+    const findings = [withLocus(12, 14), withLocus(20, 22)]
+    await run(findings, { tools, signal: controller.signal })
+
+    expect(calls).toBe(0)
+    for (const f of findings) expect(f.history.map((e) => e.kind)).toContain("run-cancelled")
+  })
+
+  test("AN ARGUED FINDING'S STOP IS CAUGHT BEFORE THE BLAME BLOCK TOO", async () => {
+    // The only other window, closed by the gate one step up. On a DEBATED
+    // finding the evidence extractor's turn is awaited between the top gate and
+    // the blame call — so a stop arriving there could in principle reach the
+    // blame. It does not: the extractor's cancelled envelope strands the finding
+    // through `stoppedHere` first. A guard inside the blame block was written,
+    // probed from both directions, found unreachable and removed.
+    let calls = 0
+    const tools = { blame: async () => ((calls += 1), PORCELAIN) } as never
+    const controller = new AbortController()
+    const backend = new FakeBackend({}, {}, {}, () => {
+      controller.abort()
+    })
+
+    const argued = withLocus(12, 14)
+    argued.route = "debate"
+    argued.exit = "converged"
+    argued.history = [round("discovery-1", 1), round("discovery-2", 1)]
+    await run([argued], { tools, backend, signal: controller.signal })
+
+    expect(calls).toBe(0)
+    expect(argued.history.map((entry) => entry.kind)).toContain("run-cancelled")
   })
 })

@@ -95,7 +95,7 @@ import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { JudgeCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { anonymize, type AnonymizedTranscript } from "../judge/anonymize.ts"
-import { parseBlamePorcelain, renderBlameCitation } from "../judge/blame.ts"
+import { BLAME_KIND, MAX_BLAME_ROWS, parseBlamePorcelain, renderBlameCitation } from "../judge/blame.ts"
 import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "../judge/slots.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
@@ -1198,7 +1198,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         stage: "judge",
         actor: "mad",
         at: clock.now(),
-        kind: "judge-blame-no-port",
+        kind: BLAME_KIND.noPort,
         body:
           `MAD RAN NOTHING ITSELF: no repository tool port was available to this run, so the ` +
           `check below is whatever the checking model did with its own tools and reported ` +
@@ -1212,15 +1212,34 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         stage: "judge",
         actor: "mad",
         at: clock.now(),
-        kind: "judge-blame-no-locus",
+        kind: BLAME_KIND.noLocus,
         body:
           `NO LINES TO BLAME: this finding names no line range, so there was nothing for ` +
           `\`git blame\` to be run over. Nothing was checked against the repository's history ` +
           `and nothing was contradicted — those are different facts and this is the first.`,
       })
     } else {
+      // NO CANCELLATION CHECK HERE, and that is a measured answer rather than an
+      // omission (ledger triage 2026-09-09). The review filed "a cancelled run
+      // keeps spawning git for every remaining finding"; it does not. Two gates
+      // above already close it: the per-finding gate at the top of this loop
+      // strands every finding a stop arrives before, and on an argued finding
+      // the extractor turn between that gate and this block returns a cancelled
+      // envelope, which `stoppedHere` strands on. A guard added here was probed
+      // and could not be reached from either direction, so it was removed rather
+      // than left as a branch no run can enter.
       try {
-        const porcelain = await input.tools.blame(locus.file, locus.startLine, locus.endLine)
+        // THE RANGE ASKED OF GIT IS BOUNDED, not only the citation rendered from
+        // it (ledger triage 2026-09-09). `MAX_BLAME_ROWS` trimmed the OUTPUT, so
+        // a finding citing lines 1-20000 still asked git to blame twenty thousand
+        // lines and `parseBlamePorcelain` still parsed all of it, to throw away
+        // all but forty. No new dial: this is the existing constant applied one
+        // step earlier, where it is the same answer for the same reason — a
+        // finding whose locus spans more lines than this is not pointing at a
+        // line. The citation states the narrowing, because a head that names a
+        // range git was never asked about is a false sentence.
+        const askedEnd = Math.min(locus.endLine, locus.startLine + MAX_BLAME_ROWS - 1)
+        const porcelain = await input.tools.blame(locus.file, locus.startLine, askedEnd)
         const blamed = parseBlamePorcelain(porcelain)
         if (blamed.length === 0) {
           // GIT RAN AND SAID NOTHING USABLE, which is a failure and not an
@@ -1230,14 +1249,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
             stage: "judge",
             actor: "mad",
             at: clock.now(),
-            kind: "judge-blame-failed",
+            kind: BLAME_KIND.failed,
             body:
               `GIT BLAME PRODUCED NOTHING for ${blameAt()}: the command ran and returned no ` +
               `blamed lines. No citation was produced, so nothing here was contradicted OR ` +
               `confirmed by the repository's history.`,
           })
         } else {
-          blameCitation = renderBlameCitation(locus.file, locus.startLine, locus.endLine, blamed)
+          blameCitation = renderBlameCitation(locus.file, locus.startLine, askedEnd, blamed)
           madExecuted = true
           counts.factChecksMadExecuted += 1
           // A HISTORY ENTRY, not a `Finding` field. AD-8's judge ownership list
@@ -1251,7 +1270,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
             stage: "judge",
             actor: "mad",
             at: clock.now(),
-            kind: "judge-blame-executed",
+            kind: BLAME_KIND.executed,
             body: blameCitation,
           })
         }
@@ -1267,7 +1286,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           stage: "judge",
           actor: "mad",
           at: clock.now(),
-          kind: "judge-blame-failed",
+          kind: BLAME_KIND.failed,
           body:
             `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
             `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +

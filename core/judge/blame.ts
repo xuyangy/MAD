@@ -54,6 +54,28 @@ export interface BlameLine {
  */
 export const MAX_BLAME_ROWS = 40
 
+/**
+ * THE HISTORY `kind` STRINGS THIS ROUTE WRITES, named once (ledger triage
+ * 2026-09-09).
+ *
+ * `Entry.kind` is typed `string`, so these were written by hand in
+ * `core/stages/judge.ts` and matched by hand in `core/stages/output.ts` — a typo
+ * on either side failing silently rather than at build time, in the block whose
+ * whole content is that four outcomes must never render as each other. Story 10
+ * doubled the number of them, which is what made the convention worth breaking
+ * here first.
+ *
+ * SCOPED TO THE BLAME ROUTE. `judge-anonymized` and `judge-not-examined` are the
+ * same shape and are left alone: they belong to a tree-wide refactor of every
+ * `kind` in the judge, which is a bigger change than the one this fixes.
+ */
+export const BLAME_KIND = {
+  executed: "judge-blame-executed",
+  failed: "judge-blame-failed",
+  noLocus: "judge-blame-no-locus",
+  noPort: "judge-blame-no-port",
+} as const
+
 /** Length of the abbreviated sha in a rendered row. Git's own default. */
 const SHA_WIDTH = 8
 
@@ -153,6 +175,15 @@ export function renderBlameCitation(
   blamed: readonly BlameLine[],
 ): string {
   const head = `\`git blame\` over ${oneLine(path)} lines ${startLine}-${endLine}, run by MAD:`
+  // NOT REACHED FROM THE JUDGE, and that is settled rather than accidental
+  // (ledger triage 2026-09-09). `core/stages/judge.ts` treats zero blamed lines
+  // as `judge-blame-failed` — git ran and said nothing usable is a FAILURE to
+  // check, not a check that found nothing — so the stage never calls this with
+  // an empty list. The branch stays because this is an exported pure function
+  // and a total one: a caller that does pass an empty list must get a sentence
+  // that cannot be read as "the history is consistent with the claim". It is
+  // NOT a second opinion about what an empty blame means; the judge's is the
+  // one that ships.
   if (blamed.length === 0) {
     return `${head}\n  (git reported no blamed lines for that range)`
   }

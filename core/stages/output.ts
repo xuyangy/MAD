@@ -98,6 +98,7 @@
  */
 
 import { budgetReport, ceilingNamed, spentTokens } from "../budget/ledger.ts"
+import { BLAME_KIND } from "../judge/blame.ts"
 import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
@@ -166,7 +167,7 @@ function evidenceRank(finding: Finding): number {
   let seen = 0
   for (const entry of finding.history) {
     if (entry.stage !== "judge") continue
-    if (entry.kind === "judge-blame-executed") seen = Math.max(seen, 3)
+    if (entry.kind === BLAME_KIND.executed) seen = Math.max(seen, 3)
     else if (entry.kind === "judge-fact-check-verified") seen = Math.max(seen, 2)
     else if (entry.kind === "judge-fact-check-unverified" || entry.kind === "judge-evidence") {
       seen = Math.max(seen, 1)
@@ -976,10 +977,10 @@ function renderJudge(finding: Finding): string | undefined {
   // check MAD executed and a check a model reported having run produce the same
   // verdict shape, and a reader scanning one finding needs to be able to tell
   // them apart without going to the warnings block.
-  const blamed = entries.some((entry) => entry.kind === "judge-blame-executed")
-  const blameFailed = entries.some((entry) => entry.kind === "judge-blame-failed")
-  const blameNoLocus = entries.some((entry) => entry.kind === "judge-blame-no-locus")
-  const blameNoPort = entries.some((entry) => entry.kind === "judge-blame-no-port")
+  const blamed = entries.some((entry) => entry.kind === BLAME_KIND.executed)
+  const blameFailed = entries.some((entry) => entry.kind === BLAME_KIND.failed)
+  const blameNoLocus = entries.some((entry) => entry.kind === BLAME_KIND.noLocus)
+  const blameNoPort = entries.some((entry) => entry.kind === BLAME_KIND.noPort)
 
   const steps: string[] = []
   // AD-13 stated in the render, not only in the warning: a reader scanning one
@@ -1515,7 +1516,7 @@ export function renderRunRecord(record: RunRecord): string {
     // list and widening it is a spine-level argument; `history` is append-only
     // and already the judge's, and this renderer already reads its kinds.
     const blameEntry = finding.history.findLast(
-      (entry) => entry.stage === "judge" && entry.kind === "judge-blame-executed",
+      (entry) => entry.stage === "judge" && entry.kind === BLAME_KIND.executed,
     )
     if (blameEntry !== undefined) {
       lines.push("")
