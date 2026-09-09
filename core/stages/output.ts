@@ -158,11 +158,19 @@ function verdictRank(finding: Finding): number {
  * `VERIFIED`/`UNVERIFIED` prefix back out of prose, which is worse.
  */
 function evidenceRank(finding: Finding): number {
+  // THE MAX, NOT THE FIRST MATCH (story 10). This used to `return 2` on the
+  // first verified fact-check, which was correct while 2 was the top of the
+  // scale. It is not any more: a `git blame` MAD RAN ITSELF outranks a check a
+  // model reported running, and the blame entry is written BEFORE the
+  // fact-check entry, so an early return on the later kind could never see it.
   let seen = 0
   for (const entry of finding.history) {
     if (entry.stage !== "judge") continue
-    if (entry.kind === "judge-fact-check-verified") return 2
-    if (entry.kind === "judge-fact-check-unverified" || entry.kind === "judge-evidence") seen = 1
+    if (entry.kind === "judge-blame-executed") seen = Math.max(seen, 3)
+    else if (entry.kind === "judge-fact-check-verified") seen = Math.max(seen, 2)
+    else if (entry.kind === "judge-fact-check-unverified" || entry.kind === "judge-evidence") {
+      seen = Math.max(seen, 1)
+    }
   }
   return seen
 }
@@ -728,6 +736,45 @@ function judgeSummary(record: RunRecord): string[] {
     )
   }
 
+  // CAP-8 (story 10) — HOW MUCH OF THIS RUN MAD CHECKED ITSELF.
+  //
+  // It sits directly under the unverified line on purpose: those two numbers
+  // are the two ends of the same scale. `factChecksUnverified` says nothing was
+  // established; this says the evidence was EXECUTED BY MAD rather than reported
+  // by a model. Everything between the two is a check MAD took a model's word
+  // for, which is a valid route (AD-13) and is not proof.
+  if (counts.factChecksMadExecuted > 0) {
+    lines.push(
+      // "FINDING(S)", NOT "OF THE CHECKS" (code review 2026-09-09).
+      //
+      // The count is incremented when the blame RUNS, which is before the
+      // fact-check turn — and that turn can then drop out. "N of the checks
+      // carry a git blame" was therefore claimable on a run where no check
+      // completed at all, and the finding's own verdict line said nothing was
+      // established. Counting findings MAD ran a command over is the fact the
+      // number actually holds.
+      //
+      // The remainder clause is conditional for the same reason: with every
+      // finding blamed there is no rest, and a sentence about "the rest" is then
+      // a claim about an empty set.
+      `  ${counts.factChecksMadExecuted} finding(s) carry a \`git blame\` MAD RAN ITSELF over the`,
+      `  lines they cite. That part is executed evidence, not a check a model reported running.`,
+      ...(counts.factChecksMadExecuted < counts.judged
+        ? [`  The rest were checked by the model's own tools, on its own report.`]
+        : []),
+    )
+  } else {
+    // AD-6 — the ABSENCE is stated too. A run where MAD executed nothing looks
+    // exactly like one where it executed everything unless somebody says so, and
+    // "every check here is a model's own account of what it did" is the single
+    // most useful sentence a reader can be given about how far to trust them.
+    lines.push(
+      `  MAD ran no repository command itself in this run: every check above is the checking`,
+      `  model's own account of what it opened and ran (AD-13's second route). That is a valid`,
+      `  route and it is not proof.`,
+    )
+  }
+
   if (counts.unresolved > 0) {
     lines.push(
       `  ${counts.unresolved} finding(s) ran out of budget before a verdict and are in the`,
@@ -918,6 +965,14 @@ function renderJudge(finding: Finding): string | undefined {
   // Its entry is the only judge entry such a finding has, so without this branch
   // it fell through to `no step completed` — true, and silent about the cause.
   const notExamined = entries.find((entry) => entry.kind === "judge-not-examined")
+  // CAP-8 / AD-13 (story 10) — WHICH ROUTE RAN, on the finding's own row. A
+  // check MAD executed and a check a model reported having run produce the same
+  // verdict shape, and a reader scanning one finding needs to be able to tell
+  // them apart without going to the warnings block.
+  const blamed = entries.some((entry) => entry.kind === "judge-blame-executed")
+  const blameFailed = entries.some((entry) => entry.kind === "judge-blame-failed")
+  const blameNoLocus = entries.some((entry) => entry.kind === "judge-blame-no-locus")
+  const blameNoPort = entries.some((entry) => entry.kind === "judge-blame-no-port")
 
   const steps: string[] = []
   // AD-13 stated in the render, not only in the warning: a reader scanning one
@@ -925,6 +980,13 @@ function renderJudge(finding: Finding): string | undefined {
   if (checked) steps.push("checked against the code")
   else if (unverified) steps.push("CHECK NOT VERIFIED — nothing was opened or run")
   if (weighed) steps.push("argument quality weighed")
+  // APPENDED AFTER the existing steps, so the sentence a reader already knows
+  // how to read keeps its opening. AD-6: a failure gets shouty capitals and an
+  // absence does not, because they are not the same fact.
+  if (blamed) steps.push("`git blame` RUN BY MAD over the cited lines")
+  else if (blameFailed) steps.push("GIT BLAME FAILED — MAD produced no citation, and read nothing either way")
+  else if (blameNoLocus) steps.push("no line range to blame")
+  else if (blameNoPort) steps.push("MAD ran nothing itself — the checker's own tools only")
   if (notExamined) {
     steps.push("NEVER EXAMINED — no reviewer model was left to check, weigh or decide it")
   }
@@ -1083,6 +1145,30 @@ function indent(text: string, prefix = "    "): string {
  */
 function modelBlock(text: string): string {
   return indent(oneLine(text), "      ")
+}
+
+/**
+ * A MAD-BUILT block whose rows are already one line each (story 10).
+ *
+ * `modelBlock` above collapses its whole argument with `oneLine`, because model
+ * prose is one paragraph and any break in it could forge a second MAD-owned row.
+ * A blame citation is the other shape: MAD built the rows and
+ * `core/judge/blame.ts` already put every repository-authored cell through
+ * `oneLine`, so the line structure is MAD's own and collapsing it would throw
+ * away the only readable thing about the block. Each row is re-escaped here
+ * anyway — the cost is nothing and it keeps this function safe for a caller who
+ * has not read `blame.ts`.
+ */
+function repoBlock(text: string): string {
+  // Split on the SAME set `indent` splits on (`LINE_BREAK_SPLIT`), so a U+2028
+  // inside a cell cannot survive as a break this function did not see.
+  return indent(
+    text
+      .split(LINE_BREAK_SPLIT)
+      .map((line) => oneLine(line))
+      .join("\n"),
+    "      ",
+  )
 }
 
 /**
@@ -1372,6 +1458,28 @@ export function renderRunRecord(record: RunRecord): string {
       lines.push("")
       lines.push("      HOW WELL EACH SIDE ARGUED (advisory — the code outranks it)")
       lines.push(modelBlock(finding.logicEval))
+    }
+    // CAP-8's success clause, rendered (story 10). ITS OWN HEADING, beside the
+    // other three rather than fused into any of them: AD-9 keeps evidence, the
+    // check and the verdict as three separate fields, and a citation folded into
+    // the verdict's prose or into the evidence field would collapse the one
+    // artefact in the report MAD executed into one a model wrote.
+    //
+    // READ OFF HISTORY, not off a field. AD-8 gives the judge a fixed ownership
+    // list and widening it is a spine-level argument; `history` is append-only
+    // and already the judge's, and this renderer already reads its kinds.
+    const blameEntry = finding.history.findLast(
+      (entry) => entry.stage === "judge" && entry.kind === "judge-blame-executed",
+    )
+    if (blameEntry !== undefined) {
+      lines.push("")
+      lines.push("      GIT BLAME — RUN BY MAD, NOT REPORTED BY A MODEL")
+      // `repoBlock`, not `modelBlock`: the citation is already one row per
+      // blamed line with every repository cell escaped by
+      // `core/judge/blame.ts`, so collapsing it to a single line would destroy
+      // the only readable thing about it. The escaping is what makes indenting
+      // it safe — no commit subject can forge a row of MAD's own.
+      lines.push(repoBlock(blameEntry.body))
     }
   }
   lines.push("")

@@ -186,6 +186,33 @@ export const WARNING_CODES = [
    * `roster` to `discover`, which is the stage the surviving warning is about.
    */
   "dial-clamped",
+  /**
+   * AD-6 / AD-13 / CAP-8 (story 10) — MAD TRIED TO RUN `git blame` ITSELF AND
+   * COULD NOT.
+   *
+   * A bad path, a line past the end of the file, an uncommitted line, a shallow
+   * clone, or a worktree that is not a git repository. The citation the run
+   * would have carried does not exist, and the finding was decided without it.
+   *
+   * WHY IT MEETS THE BAR THE LAST FOUR CODES SET. **No existing code can carry
+   * the fact without lying:** `fact-check-untooled` asserts that no model could
+   * use tools, which would be a falsehood in MAD's own voice on a run where the
+   * checker's own agent had tools and used them — the failure was MAD's own
+   * execution, not the model's capability. **And it is a fact about what was
+   * reviewed, not a decision MAD made:** the run examined the finding with one
+   * class of evidence missing, and every verdict downstream of it is a verdict
+   * reached without the citation.
+   *
+   * IT MUST NEVER READ AS "NO CONTRADICTION FOUND". That is the whole of it. A
+   * blame that failed and a blame that ran and supported the claim are opposite
+   * facts, and `.nothrow()` in the adapter would have made them the same empty
+   * string. Raised by the judge, which is the only caller of the port.
+   *
+   * A DEGRADATION, NOT A DISCLOSURE — so it is deliberately absent from
+   * `DISCLOSURE_CODES` below, which is the safe default and, here, the intended
+   * answer (story 10, Decision 1, approved by the human 2026-09-08).
+   */
+  "blame-unavailable",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

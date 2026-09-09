@@ -14,12 +14,13 @@ import { DISCLOSURE_CODES, WARNING_CODES, type WarningCode } from "./warning.ts"
 
 describe("the warning vocabulary (AD-6)", () => {
   test("THE COUNT IS PINNED, so a new code forces somebody to classify it", () => {
-    // Fifteen: four roster reports, the drop-out, the denominator, the partial
+    // Sixteen: four roster reports, the drop-out, the denominator, the partial
     // envelope, the provider disclosure, the unresolved section, the untooled
     // fact-check, the unavailable judge, from story 7A the cancelled run, and
     // from story 8 the budget-truncated discovery, and from story 8A the pin the
     // run could not honour, and from the epic-1 retrospective the dial the run
-    // did not honour as asked. Adding a sixteenth is a deliberate act: AD-6's
+    // did not honour as asked, and from story 10 the `git blame` MAD tried to
+    // run itself and could not. Adding a seventeenth is a deliberate act: AD-6's
     // report set is an `Ask First` that three stories declined before 7A
     // answered it, so it should not be possible to do it quietly.
     //
@@ -27,7 +28,7 @@ describe("the warning vocabulary (AD-6)", () => {
     // suite failed here, on exactly this line, forcing the classification below
     // rather than letting a new code reach the renderer's disclosure/degradation
     // split with nobody deciding which side it belonged on.
-    expect(WARNING_CODES).toHaveLength(15)
+    expect(WARNING_CODES).toHaveLength(16)
   })
 
   test("`dial-clamped` IS A DEGRADATION, not a disclosure (epic-1 retrospective)", () => {
@@ -38,6 +39,16 @@ describe("the warning vocabulary (AD-6)", () => {
     // asserts the default was the intended answer rather than an oversight.
     expect(WARNING_CODES).toContain("dial-clamped")
     expect(DISCLOSURE_CODES.has("dial-clamped")).toBe(false)
+  })
+
+  test("`blame-unavailable` IS A DEGRADATION, not a disclosure (story 10)", () => {
+    // The classification the count pin above forced, and the one that matters
+    // most for this particular code: a blame MAD could not run leaves the run
+    // short of the one class of evidence MAD executes itself, and every verdict
+    // downstream was reached without it. Unlisted is degradation, which is the
+    // safe default, and this asserts the default was the intended answer.
+    expect(WARNING_CODES).toContain("blame-unavailable")
+    expect(DISCLOSURE_CODES.has("blame-unavailable")).toBe(false)
   })
 
   test("every code is unique", () => {

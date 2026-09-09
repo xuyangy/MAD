@@ -28,6 +28,7 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
+import type { Tools } from "../ports/tools.ts"
 import { fenceFor, listCell, material, oneLine } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
 import { clampMaxRounds, debate } from "../stages/debate.ts"
@@ -42,6 +43,19 @@ export interface ReviewDeps {
   clock: Clock
   /** The change under review, already read through the `Repo` port. */
   change: ChangeSet
+  /**
+   * CAP-8 / AD-13's FIRST route (story 10) — the OTHER repo-facing port, which
+   * is why it sits beside `change`.
+   *
+   * OPTIONAL, and its absence is not a degradation: without it the judge falls
+   * back to AD-13's second route, where the fact-checking backend's own agent
+   * has the tools, and the run record says which route ran. Every existing
+   * `ReviewDeps` construction site therefore keeps working unchanged.
+   *
+   * The core DRIVES it and never constructs one (AD-1) — `adapters/opencode/`
+   * builds the implementation and passes it in here.
+   */
+  tools?: Tools
   /** Warnings raised before the pipeline started — the roster's (AD-6c). */
   priorWarnings?: Warning[]
   /** AD-11 — versioned instruction set; defaulted, never inlined at a call site. */
@@ -622,6 +636,9 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     runId: record.runId,
     limiter,
     signal,
+    // CAP-8 (story 10) — the judge is the only stage that drives it, and this is
+    // the seam that hands it over. `undefined` is a supported value, not a hole.
+    tools: deps.tools,
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the
@@ -639,6 +656,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     unresolved: judged.unresolved,
     unresolvedByCancellation: judged.unresolvedByCancellation,
     factChecksUnverified: judged.factChecksUnverified,
+    factChecksMadExecuted: judged.factChecksMadExecuted,
     turns: judged.turns,
     attempts: judged.attempts,
   }

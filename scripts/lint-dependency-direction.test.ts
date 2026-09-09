@@ -180,6 +180,26 @@ describe("AD-1 dependency-direction rule", () => {
     expect(await main()).toBe(0)
   })
 
+  test("T7 — THE JUDGE MAY NOT REACH FOR THE `Tools` IMPLEMENTATION (story 10)", () => {
+    // The exact temptation story 10 creates. `core/stages/judge.ts` now DRIVES
+    // the `Tools` port, and the shortest way to make that work is to import the
+    // thing that implements it — which is in `adapters/`, and which AD-1 forbids
+    // absolutely. The port arrives through `JudgeInput.tools`, injected at the
+    // plugin boundary, or it does not arrive.
+    expect(
+      scanSource(
+        "core/stages/judge.ts",
+        `import { opencodeTools } from "../../adapters/opencode/tools.ts"\n`,
+      ),
+    ).toHaveLength(1)
+
+    // The non-vacuous sibling: taking the INTERFACE is exactly what the stage is
+    // supposed to do, and must not be collateral damage of the rule above.
+    expect(
+      scanSource("core/stages/judge.ts", `import type { Tools } from "../ports/tools.ts"\n`),
+    ).toHaveLength(0)
+  })
+
   // -------------------------------------------------------------------------
   // Story 8 — the presets module imports nothing, and no stage meters itself.
   // -------------------------------------------------------------------------

@@ -1,18 +1,34 @@
 /**
- * AD-13 / CAP-8 — the `Tools` port: repo and git-history evidence, executed by
- * the HOST (host-integration.md: tool execution is the host's).
+ * AD-13 / CAP-8 — the `Tools` port: repo and git-history evidence.
  *
- * Interfaces only (AD-1), and STILL UNDRIVEN after story 6 (code review
- * 2026-08-28). Story 6 shipped the fact-checker and took AD-13's SECOND route:
- * `adapters/opencode/model-backend.ts` is out-of-process and declares
- * `tools: true` to say it has its own, so nothing imports this port beyond
- * `hasTools` / `factCheckTooled`. The header used to point the reader at story 6
- * as the story that would drive it. The shape is still fixed here so no stage
- * invents its own tool surface, and the consequence of the route taken —
- * that MAD reads a declared capability rather than proving a check happened — is
- * filed in `deferred-work.md`, not hidden here.
+ * Interfaces only (AD-1). The core DRIVES this port; it never constructs one —
+ * an implementation lives in `adapters/opencode/`, which is where execution
+ * belongs (`host-integration.md`: tool execution is the host's).
+ *
+ * ## What is driven, as of story 10 (2026-09-08)
+ *
+ * - `blame` — DRIVEN. `adapters/opencode/tools.ts` implements it and
+ *   `core/stages/judge.ts` calls it itself, for a finding whose locus carries a
+ *   line range. That is AD-13's FIRST route, and it is what makes a check MAD
+ *   executed distinguishable in the record from a check a model reported.
+ * - `readFile`, `list`, `grep`, `runTest` — STILL UNDRIVEN. The shipped adapter
+ *   throws a named `NotDrivenError` for each, so an accidental call is loud
+ *   rather than silently wrong. `runTest` is the one with a real permission
+ *   surface and is deliberately last.
+ *
+ * ## AD-13's two routes are still two
+ *
+ * Story 6 took the SECOND route — an out-of-process backend relies on its own
+ * agent's tools, which is what `adapters/opencode/model-backend.ts` provides —
+ * and that route is not removed or deprecated by story 10. A slot whose backend
+ * brings its own tools is still a valid fact-check slot; a run with no `Tools`
+ * port injected still fact-checks, and the run record says which route ran.
+ *
+ * ## The shape does not change
+ *
+ * It has been fixed since story 1 so that no stage invents its own tool surface.
+ * Widening it is a spine-level argument, not a story.
  */
-
 export interface GrepHit {
   file: string
   line: number

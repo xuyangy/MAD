@@ -33,6 +33,7 @@ import {
 } from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
 import { opencodeRepo } from "./repo.ts"
+import { opencodeTools } from "./tools.ts"
 import { resolveRoster } from "./roster.ts"
 
 /**
@@ -376,6 +377,11 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           }
 
           const repo = opencodeRepo({ $, worktree })
+          // CAP-8 / AD-13's FIRST route (story 10) — the OTHER repo-facing port,
+          // built here beside `Repo` because they take the same two inputs and
+          // have the same read-only guarantee. `git blame` needs `$` and
+          // `worktree` and nothing else the plugin holds.
+          const tools = opencodeTools({ $, worktree })
           let change
           try {
             change = await repo.change(args.target)
@@ -440,6 +446,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             backend: recorder ? recorder.wrap(backend) : backend,
             clock: systemClock(),
             change,
+            // The core DRIVES it; the core never constructs one (AD-1). This is
+            // the only place in the tree a `Tools` implementation is built.
+            tools,
             // AD-6 — the adapter's OWN truncations ride in beside the roster's.
             // `review()` copies `priorWarnings` onto the record verbatim, so this
             // is the supported way for this layer to be heard at all.

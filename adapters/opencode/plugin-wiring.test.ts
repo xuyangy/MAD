@@ -594,3 +594,61 @@ describe("mad_review.execute — AD-6 `dial-clamped` actually reaches the caller
     expect(result.output).toContain('preset "thorough" → "normal"')
   })
 })
+
+/**
+ * Story 10 — the `Tools` port reaches `review()` on the PRODUCTION path.
+ *
+ * DEMONSTRATED, NOT THEORISED, exactly as this file's header describes for
+ * `clampDiscoverySlots`: deleting the `tools,` line from the `review({...})`
+ * literal in `plugin.ts` left typecheck clean and all 1146 tests green (code
+ * review 2026-09-09). `ReviewDeps.tools` is optional BY DESIGN — AD-13's second
+ * route must keep working without it — so its absence is a supported value and
+ * nothing downstream complains. Every existing CAP-8 test injects its own fake
+ * port directly into `review()`, so not one of them observes this file.
+ *
+ * The consequence of that gap is the whole story silently undone: MAD ships on
+ * route two forever, every real run reports "MAD ran no repository command
+ * itself in this run", `factChecksMadExecuted` is 0 — all supported values, so
+ * nothing looks wrong — and CAP-8's success clause is dead in production.
+ *
+ * WHY THIS IS STRUCTURAL AND NOT BEHAVIOURAL, stated rather than hidden: the
+ * runs in this file use an unreachable server URL, so every model drops out and
+ * no finding is ever raised — and the judge's blame block is only reached with a
+ * finding in hand. `plugin.ts` builds its `OpencodeModelBackend` inline with no
+ * injection seam, so there is no way from here to script a finding. A
+ * behavioural assertion needs that seam; it is filed in `deferred-work.md`
+ * rather than faked. What this test does catch is the exact deletion that was
+ * demonstrated, which is the regression that actually happened.
+ */
+describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)", () => {
+  const pluginSource = () => Bun.file(new URL("./plugin.ts", import.meta.url)).text()
+
+  test("THE PORT IS BUILT, and from the same two inputs `Repo` is built from", async () => {
+    const source = await pluginSource()
+    expect(source).toContain("opencodeTools({ $, worktree })")
+    // Beside `Repo`, not somewhere else: both ports describe the same worktree,
+    // and a run whose blame reads a different tree than its diff is nonsense.
+    expect(source).toContain("opencodeRepo({ $, worktree })")
+  })
+
+  test("AND IT REACHES `review()` — the line whose deletion nothing else notices", async () => {
+    const source = await pluginSource()
+    const call = source.slice(source.indexOf("await review({"))
+    expect(call.length).toBeGreaterThan(0)
+    const literal = call.slice(0, call.indexOf("\n          })"))
+
+    // The property, on its own line, inside the `review({...})` literal itself —
+    // not merely somewhere in the file, which a comment mentioning `tools` would
+    // satisfy.
+    expect(literal).toMatch(/^\s*tools,\s*$/m)
+  })
+
+  test("the assertion above can FAIL — it is not satisfied by any file with the word in it", async () => {
+    // The non-vacuous sibling. Without this, a rewrite of the check that always
+    // passed would look identical from the outside.
+    const withoutIt = (await pluginSource()).replace(/\n\s*tools,\n/, "\n")
+    const call = withoutIt.slice(withoutIt.indexOf("await review({"))
+    const literal = call.slice(0, call.indexOf("\n          })"))
+    expect(literal).not.toMatch(/^\s*tools,\s*$/m)
+  })
+})

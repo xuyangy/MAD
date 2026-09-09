@@ -504,6 +504,21 @@ export interface JudgeCounts {
    */
   factChecksUnverified: number
   /**
+   * CAP-8 / AD-13's FIRST route (story 10) — fact-checks where MAD RAN THE CHECK
+   * ITSELF.
+   *
+   * `factVerified` says a fact was established; this says MAD executed the
+   * evidence rather than being told about it. Two adjacent facts, two counters,
+   * on the `factChecksDroppedOut` vs `factChecksUnverified` precedent — a run
+   * where every check was self-reported and a run where MAD ran `git blame`
+   * itself both report verified checks, and without this number nothing
+   * separates them.
+   *
+   * Zero is the ordinary value for a run with no `Tools` port injected, which is
+   * AD-13's second route and not a degradation.
+   */
+  factChecksMadExecuted: number
+  /**
    * Turns REQUESTED — the AD-15 unit of allocation. The judge does NOT batch
    * across findings, so this is a per-finding count, unlike debate's.
    */

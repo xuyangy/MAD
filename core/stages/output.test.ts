@@ -1269,6 +1269,9 @@ function judged(
 }
 
 const JUDGE_COUNTS: JudgeCounts = {
+  // Story 10 — zero, which is the ordinary value for a hand-built record that
+  // never went near a `Tools` port.
+  factChecksMadExecuted: 0,
   judged: 3,
   adjudicated: 1,
   verifiedIndependently: 1,
@@ -1548,6 +1551,25 @@ describe("ranking reads the judge's own entry kinds (code review 2026-08-28)", (
       withJudgeKind("a.ts", "judge-fact-check-verified"),
     ])
     expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts"])
+  })
+
+  test("A BLAME MAD RAN OUTRANKS A CHECK A MODEL REPORTED (story 10's rung 3)", () => {
+    // THE SAME GAP AGAIN, in the rung this story added: knocking
+    // `judge-blame-executed`'s `Math.max(seen, 3)` back to `2` left all 1146
+    // tests passing (code review 2026-09-09). The fixture arms each render a
+    // single finding, so ordering is never exercised there — this block is the
+    // only place a rung is observable, and it had no case for the new one.
+    //
+    // The ordering is the point of the rung: evidence MAD executed is worth more
+    // than a check a model reported running, so it sorts first. Without this
+    // assertion the change silently stops working and the report puts the
+    // self-reported checks at the top.
+    const ranked = rankFindings([
+      withJudgeKind("c.ts", "judge-fact-check-unverified"),
+      withJudgeKind("b.ts", "judge-fact-check-verified"),
+      withJudgeKind("a.ts", "judge-blame-executed"),
+    ])
+    expect(ranked.map((f) => f.locus.file)).toEqual(["a.ts", "b.ts", "c.ts"])
   })
 
   test("an UNVERIFIED check ranks with an extraction, below a verified one", () => {

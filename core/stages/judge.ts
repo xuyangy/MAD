@@ -95,11 +95,13 @@ import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { JudgeCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { anonymize, type AnonymizedTranscript } from "../judge/anonymize.ts"
+import { parseBlamePorcelain, renderBlameCitation } from "../judge/blame.ts"
 import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "../judge/slots.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import type { Tools } from "../ports/tools.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
 
@@ -190,6 +192,16 @@ export interface JudgeInput {
    */
   answeredSlots: readonly string[]
   backend: ModelBackend
+  /**
+   * AD-13's FIRST route (CAP-8, story 10) — the repo-facing port the CORE
+   * drives. Optional, and its absence is not a degradation: a run with no
+   * `Tools` falls back to AD-13's SECOND route, where the backend's own agent
+   * has the tools, and the record says which route ran. `backend` is the other
+   * required port and this sits beside it for that reason.
+   *
+   * The core DRIVES it and never constructs one (AD-1). Only `blame` is called.
+   */
+  tools?: Tools
   /** The material under review — the same framed change every earlier stage saw. */
   input: string
   clock: Clock
@@ -509,12 +521,39 @@ function buildExtractPrompt(
   ].join("\n")
 }
 
+/**
+ * The `git blame` MAD ran itself, as its own labelled section (story 10).
+ *
+ * TWO PARTS AND THE SPLIT IS AD-18. The sentence saying MAD ran the command is
+ * MAD's, and it sits OUTSIDE the span — it is the only line in the section that
+ * is a fact about the RUN, and framing it as material would tell the model to
+ * weigh MAD's own attestation as somebody's evidence. The blame body is
+ * repository text written by whoever wrote those commits, so it goes INSIDE.
+ *
+ * Absent when MAD ran nothing, and an absent section is the honest render of
+ * that: an empty heading is a claim that something was withheld.
+ */
+function blameSection(blame: string | undefined): string[] {
+  if (blame === undefined) return []
+  return [
+    ``,
+    `# What \`git blame\` says about the lines this finding cites`,
+    ``,
+    `MAD ran this command itself. It is not a check any model reported having run: it is the ` +
+      `repository's own record of who last changed those lines, when, and under what commit ` +
+      `message. Where it contradicts the finding, it outranks the finding.`,
+    ``,
+    material("git blame output", blame),
+  ]
+}
+
 function buildFactCheckPrompt(
   input: JudgeInput,
   finding: Finding,
   transcript: AnonymizedTranscript,
   evidence: string | undefined,
   argued: boolean,
+  blame: string | undefined,
 ): string {
   return [
     ...preamble(
@@ -530,6 +569,9 @@ function buildFactCheckPrompt(
     ``,
     findingSpan(finding),
     ...evidenceSection(evidence),
+    // BEFORE the transcript fallback, so the executed evidence is read before the
+    // argument it is there to test.
+    ...blameSection(blame),
     // The raw transcript goes to the fact-checker ONLY when there is no extracted
     // evidence to give it instead — the extractor's turn dropped out. Sending
     // both would double the tokens for one argument and give the checker two
@@ -577,6 +619,8 @@ function buildAggregatePrompt(
   factCheck: string | undefined,
   factVerified: boolean,
   logicEval: string | undefined,
+  blame: string | undefined,
+  madExecuted: boolean,
 ): string {
   const lines = [
     ...preamble(finding, `# Decide it`, `Decide whether the defect is real.`),
@@ -595,14 +639,22 @@ function buildAggregatePrompt(
   } else {
     // MAD's OWN attestation, outside the span, because MAD computed it: the slot
     // reported no tool capability, or the checker reported opening nothing.
+    // THREE BRANCHES, not two (story 10). The third is the one that is not a
+    // claim: MAD ran `git blame` over the cited lines itself, so the evidence
+    // below the report was executed rather than reported. The other two are
+    // unchanged and AD-13's second route still reaches them.
     lines.push(
-      factVerified
-        ? `This check was VERIFIED: files were opened or commands were run.`
-        : `This check was UNVERIFIED: nothing was opened and nothing was run, so no fact has been established by it.`,
+      madExecuted
+        ? `This check was VERIFIED BY MAD: MAD ran \`git blame\` over the lines this finding cites, itself. That output is below, and it is executed evidence rather than a check a model reported having run.`
+        : factVerified
+          ? `This check was VERIFIED: files were opened or commands were run. MAD did not run any of them itself — this is the checker's own report of what it did.`
+          : `This check was UNVERIFIED: nothing was opened and nothing was run, so no fact has been established by it.`,
       ``,
       material("code check report", factCheck),
     )
   }
+
+  lines.push(...blameSection(blame))
 
   if (logicEval !== undefined) {
     lines.push(
@@ -622,9 +674,32 @@ function buildAggregatePrompt(
 // The stage
 // ---------------------------------------------------------------------------
 
+/**
+ * How many blame failures the warning MESSAGE names before it stops listing and
+ * starts counting. The full set is always in the warning's `detail`.
+ */
+const MAX_BLAME_FAILURES_SHOWN = 5
+
+function blameExamples(failures: readonly string[]): string {
+  const shown = failures.slice(0, MAX_BLAME_FAILURES_SHOWN)
+  const rest = failures.length - shown.length
+  return `${shown.join("; ")}${rest > 0 ? ` (+${rest} more, all of them in this warning's detail).` : "."}`
+}
+
 /** MAD's own words for what a check without tools is worth (AD-13). */
 const UNVERIFIED_PREFIX = "UNVERIFIED (no file was opened and no command was run) — "
-const VERIFIED_PREFIX = "VERIFIED — "
+const VERIFIED_PREFIX = "VERIFIED (self-reported: the checker says it opened files or ran commands) — "
+/**
+ * The THIRD prefix (story 10, CAP-8) — and the only one of the three that is not
+ * a claim about a model.
+ *
+ * `VERIFIED_PREFIX` above says a check happened because the slot declares tool
+ * capability and the checker reported using it; both halves are things a model
+ * asserts about itself. This one says a check happened because MAD ran the
+ * command. The two must be tellable apart on the finding's own row, which is why
+ * there are three strings rather than one string and a boolean nobody renders.
+ */
+const MAD_EXECUTED_PREFIX = "VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — "
 
 function instructionFor(input: JudgeInput, role: JudgeRole): InstructionSet {
   return input.instructions?.[role] ?? resolveInstructions({ taskType: "coding", role })
@@ -676,12 +751,34 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     // and the JUDGE summary all print.
     unresolvedByCancellation: 0,
     factChecksUnverified: 0,
+    /**
+     * CAP-8 (story 10) — fact-checks where MAD RAN THE CHECK ITSELF.
+     *
+     * Its own number beside `factChecksUnverified` rather than folded into it,
+     * on the `factChecksDroppedOut` vs `factChecksUnverified` precedent: two
+     * adjacent facts never share one counter. "Nothing was established" and
+     * "MAD executed the evidence rather than being told about it" are different
+     * facts about the same check, and a reader discounting a run needs both.
+     */
+    factChecksMadExecuted: 0,
     turns: 0,
     attempts: 0,
   }
 
   const droppedOut: string[] = []
   const untooled: string[] = []
+  /**
+   * AD-6 / T4 — every `git blame` MAD tried to run and could not, one entry per
+   * finding, folded into ONE `blame-unavailable` warning at the end of the stage.
+   *
+   * Accumulated rather than raised per finding for `untooled`'s and
+   * `droppedOut`'s reason exactly: a warning per finding over a run where the
+   * worktree is not a git repository would print the same fact fifty times and
+   * teach the reader to skip the warning block, which is the one outcome AD-6
+   * cannot afford. Each finding still carries its OWN history entry, so a reader
+   * scanning one row sees it there.
+   */
+  const blameFailures: string[] = []
 
   // AD-6b — the MODEL behind a slot id. ONE helper, in `core/domain/roster.ts`,
   // shared with `core/stages/debate.ts` rather than copied into it (story 7, code
@@ -1067,6 +1164,118 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       continue
     }
 
+    // ---- AD-13's FIRST route: MAD runs `git blame` itself (CAP-8, story 10) ----
+    //
+    // IT IS NOT A TURN. It costs wall-clock, not tokens, so it does not pass
+    // through `mayISpend`, does not increment `counts.turns` and does not
+    // increment `counts.attempts`. The No-new-dial constraint stands: if this
+    // ever needs bounding, AD-15's existing ledger is where it is bounded, not
+    // an eleventh dial. `scripts/lint-dependency-direction.ts`'s
+    // `STAGE_MUST_NOT_METER` tripwire is what fails the build if that is ever
+    // got wrong here.
+    //
+    // IT SITS BELOW THE BUDGET GATE ON PURPOSE. A finding the budget stranded
+    // gets no blame either — there is no fact-check left for the citation to
+    // reach, and running a command for a finding nobody will judge spends the
+    // user's wall-clock on nothing.
+    //
+    // FOUR OUTCOMES AND ALL FOUR ARE RECORDED, because T3 and T4 are the same
+    // requirement seen twice: the record must say which route ran, and a failure
+    // must never read as "blame found no contradiction".
+    let blameCitation: string | undefined
+    let madExecuted = false
+    const locus = finding.locus
+    const blameAt = (): string =>
+      locus === undefined
+        ? `(no locus)`
+        : `${oneLine(locus.file)}:${locus.startLine ?? "?"}-${locus.endLine ?? "?"}`
+
+    if (input.tools === undefined) {
+      // AD-13's SECOND route, unchanged and still valid — this is not a
+      // degradation and raises no warning. It is recorded because it is the ONLY
+      // place the record says which of the two routes ran.
+      appendEntry(finding, {
+        stage: "judge",
+        actor: "mad",
+        at: clock.now(),
+        kind: "judge-blame-no-port",
+        body:
+          `MAD RAN NOTHING ITSELF: no repository tool port was available to this run, so the ` +
+          `check below is whatever the checking model did with its own tools and reported ` +
+          `having done. That is a valid route and it is not proof.`,
+      })
+    } else if (locus === undefined || locus.startLine === undefined || locus.endLine === undefined) {
+      // A legal state, not an error: `core/domain/finding.ts` says a finding with
+      // no single site carries `file` only. Recorded distinguishably from "blame
+      // ran and found no contradiction", which is the whole point of the entry.
+      appendEntry(finding, {
+        stage: "judge",
+        actor: "mad",
+        at: clock.now(),
+        kind: "judge-blame-no-locus",
+        body:
+          `NO LINES TO BLAME: this finding names no line range, so there was nothing for ` +
+          `\`git blame\` to be run over. Nothing was checked against the repository's history ` +
+          `and nothing was contradicted — those are different facts and this is the first.`,
+      })
+    } else {
+      try {
+        const porcelain = await input.tools.blame(locus.file, locus.startLine, locus.endLine)
+        const blamed = parseBlamePorcelain(porcelain)
+        if (blamed.length === 0) {
+          // GIT RAN AND SAID NOTHING USABLE, which is a failure and not an
+          // absence of contradiction. Treated exactly as a throw is.
+          blameFailures.push(`${blameAt()} — git blame produced no blamed lines`)
+          appendEntry(finding, {
+            stage: "judge",
+            actor: "mad",
+            at: clock.now(),
+            kind: "judge-blame-failed",
+            body:
+              `GIT BLAME PRODUCED NOTHING for ${blameAt()}: the command ran and returned no ` +
+              `blamed lines. No citation was produced, so nothing here was contradicted OR ` +
+              `confirmed by the repository's history.`,
+          })
+        } else {
+          blameCitation = renderBlameCitation(locus.file, locus.startLine, locus.endLine, blamed)
+          madExecuted = true
+          counts.factChecksMadExecuted += 1
+          // A HISTORY ENTRY, not a `Finding` field. AD-8's judge ownership list
+          // is `evidence`, `factCheck`, `logicEval`, `verdict` plus history and
+          // `unresolved`; widening it is a spine-level argument, not a story.
+          // The judge already carries MAD-authored provenance this way three
+          // times (`judge-anonymized`, `judge-not-examined`, the fact-check
+          // pair), and `core/stages/output.ts` already reads history kinds, so
+          // the renderer's extension point exists.
+          appendEntry(finding, {
+            stage: "judge",
+            actor: "mad",
+            at: clock.now(),
+            kind: "judge-blame-executed",
+            body: blameCitation,
+          })
+        }
+      } catch (error) {
+        // A bad path, a line past end of file, an uncommitted line, a shallow
+        // clone, a worktree that is not a git repository. The adapter refuses to
+        // let a non-zero exit become empty output precisely so this branch is
+        // reachable — `.nothrow()` alone would have delivered "" here and "" is
+        // indistinguishable from "nothing contradicts the claim".
+        const why = error instanceof Error ? error.message : String(error)
+        blameFailures.push(`${blameAt()} — ${oneLine(why)}`)
+        appendEntry(finding, {
+          stage: "judge",
+          actor: "mad",
+          at: clock.now(),
+          kind: "judge-blame-failed",
+          body:
+            `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
+            `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
+            `from every verdict below.`,
+        })
+      }
+    }
+
     const factSlot = slots.byRole["fact-check"]
     counts.turns += 1
     const factPromise = withSlot(() =>
@@ -1074,7 +1283,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         input,
         factSlot,
         instructionFor(input, "fact-check").text,
-        buildFactCheckPrompt(input, finding, transcript, evidence, argued),
+        buildFactCheckPrompt(input, finding, transcript, evidence, argued, blameCitation),
         factCheckEnvelopeSchema,
       ),
     )
@@ -1119,7 +1328,17 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // report that opened nothing. AD-13's rule is that the checker reported
       // having used them; an empty string reports nothing.
       const usedTools = (value.checks ?? []).some((check) => check.trim().length > 0)
-      factVerified = slots.factCheckTooled && usedTools
+      // TWO BOOLEANS, NOT ONE WIDER ONE (story 10).
+      //
+      // `factVerified` keeps its meaning — A FACT WAS ESTABLISHED — and its four
+      // consumers. MAD executing `git blame` establishes one, so it satisfies
+      // that meaning on its own, without the slot's declared capability and
+      // without the checker's self-report. `madExecuted` above carries the
+      // DIFFERENT fact — WHICH ROUTE established it — because folding two facts
+      // into one bool is exactly what `factChecksDroppedOut` and
+      // `factChecksUnverified` were kept apart to avoid, and T3 needs the record
+      // to answer both questions.
+      factVerified = madExecuted || (slots.factCheckTooled && usedTools)
       if (!factVerified) {
         counts.factChecksUnverified += 1
         if (!untooled.includes(factSlot)) untooled.push(factSlot)
@@ -1150,7 +1369,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       factCheckMaterial = reported
       // The FIELD keeps the attestation, because `core/stages/output.ts` renders
       // it to a human who has no other line saying whether anything was opened.
-      factCheckProse = `${factVerified ? VERIFIED_PREFIX : UNVERIFIED_PREFIX}${reported}`
+      factCheckProse = `${madExecuted ? MAD_EXECUTED_PREFIX : factVerified ? VERIFIED_PREFIX : UNVERIFIED_PREFIX}${reported}`
       finding.factCheck = factCheckProse
       appendEntry(finding, {
         stage: "judge",
@@ -1195,8 +1414,20 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         recordVerdict(
           finding,
           "not-adjudicated",
-          `This finding was never argued, and the one check that would have decided it did not ` +
-            `complete. Nothing was established either way.`,
+          madExecuted
+            ? // MAD RAN THE COMMAND AND NO MODEL READ IT (code review 2026-09-09).
+              // This branch used to say "Nothing was established either way" while
+              // the run summary simultaneously reported a `git blame` MAD had run —
+              // MAD contradicting itself in one report, which is the exact failure
+              // this story exists to remove. The citation is real and it is in the
+              // record; what is missing is a model's reading of it, and MAD does not
+              // adjudicate a finding on its own (AD-10, AD-12).
+              `This finding was never argued, and the one check that would have weighed it did ` +
+              `not complete. MAD DID run \`git blame\` over the lines it cites and the citation ` +
+              `is recorded below — but no model read that output, so nothing has been concluded ` +
+              `from it. The evidence is here; the judgement is not.`
+            : `This finding was never argued, and the one check that would have decided it did not ` +
+              `complete. Nothing was established either way.`,
         )
         continue
       }
@@ -1235,7 +1466,16 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         input,
         aggregateSlot,
         instructionFor(input, "aggregate").text,
-        buildAggregatePrompt(input, finding, evidence, factCheckMaterial, factVerified, logicEvalProse),
+        buildAggregatePrompt(
+          input,
+          finding,
+          evidence,
+          factCheckMaterial,
+          factVerified,
+          logicEvalProse,
+          blameCitation,
+          madExecuted,
+        ),
         aggregateEnvelopeSchema,
       ),
     )
@@ -1316,6 +1556,34 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         `reasoning alone reads exactly like one that read the code, which is why this is reported ` +
         `rather than left for you to notice.`,
       detail: { slots: untooled, unverified: counts.factChecksUnverified },
+    })
+  }
+
+  // AD-6 / T4 (story 10) — ONE WARNING, NAMING EVERY BLAME THAT FAILED.
+  //
+  // Its own code rather than `fact-check-untooled`: that code asserts that no
+  // model could use tools, which on a run where the checker's own agent had
+  // tools and used them would be a falsehood in MAD's own voice. What failed
+  // here was MAD's OWN execution, and the fact a reader needs is that the run
+  // is short of the one class of evidence MAD does not take a model's word for.
+  if (blameFailures.length > 0) {
+    warnings.push({
+      code: "blame-unavailable",
+      stage: "judge",
+      message:
+        `MAD COULD NOT RUN \`git blame\`: ${blameFailures.length} attempt(s) failed, so those ` +
+        `findings were decided without the repository's own record of who last changed the lines ` +
+        `they cite. THIS IS NOT "the history contradicts nothing" — nothing was read either way. ` +
+        `A bad path, a line past the end of a file, an uncommitted line and a shallow clone all ` +
+        `land here. Failures: ${blameExamples(blameFailures)}`,
+      // THE FULL LIST LIVES HERE, and only here (code review 2026-09-09). The
+      // message used to join every failure into itself, so a run over a
+      // non-git worktree printed one line per finding inside a single warning
+      // and buried the sentence above it — the same "teach the reader to skip
+      // the block" failure this accumulation exists to avoid, reintroduced one
+      // level down. `detail` is the field for the whole set; the message shows
+      // enough to recognise the shape and says how many it did not show.
+      detail: { failures: [...blameFailures] },
     })
   }
 
