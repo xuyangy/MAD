@@ -2477,6 +2477,39 @@ describe("AD-6 — an empty finding list after a budget-truncated discovery (sto
     expect(rendered).not.toContain("the budget ran out before any model was asked")
   })
 
+  test("AN EMPTY RESULT OVER A TRUNCATED ROSTER IS NOT A CLEAN REVIEW, EVEN WHEN MODELS ANSWERED", () => {
+    // Recovered from the 2026-09-06 review's unverified residue and confirmed
+    // against the code on 2026-09-09. The `answered === 0` case already stated
+    // its budget clause and the `cancelled` case already bounded its own claim
+    // ("before you stopped the run"), for the reason its comment gives: nothing
+    // found over a roster cut short is not the claim that nothing was found
+    // over one that ran. The `answered > 0` cell was the one left unqualified,
+    // so two of three slots could go unasked and the report still read
+    // "No findings were raised by the 1 model(s) that answered." full stop.
+    const truncated = record([], 1)
+    truncated.ledger.cap = 100
+    truncated.skippedForBudget = ["discovery-2", "discovery-3"]
+
+    const rendered = output(truncated)
+    expect(rendered).toContain("No findings were raised by the 1 model(s) that answered")
+    expect(rendered).toContain("2 further slot(s) were never asked at all")
+    expect(rendered).toContain("not a clean review of the whole roster")
+    // The old branches stay theirs: this run had an answer, so it is not the
+    // NO MODEL ANSWERED case and not the budget-starved one.
+    expect(rendered).not.toContain("NO MODEL ANSWERED")
+    expect(rendered).not.toContain("NOTHING WAS EXAMINED")
+  })
+
+  test("AN UNTRUNCATED EMPTY RESULT KEEPS ITS PLAIN SENTENCE — the clause is not unconditional", () => {
+    const clean = record([], 2)
+    clean.ledger.cap = 1000
+
+    const rendered = output(clean)
+    expect(rendered).toContain("No findings were raised by the 2 model(s) that answered")
+    expect(rendered).not.toContain("never asked at all")
+    expect(rendered).not.toContain("not a clean review of the whole roster")
+  })
+
   test("A DROPPED-OUT ROSTER STILL SAYS SO — the new branch does not swallow the old one", () => {
     // The branch is entered only when the budget actually skipped something, so
     // a run whose models really did all fail keeps the report it always had.

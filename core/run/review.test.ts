@@ -1744,6 +1744,29 @@ describe("review — CAP-7: passing nothing is the run this repo already shipped
     expect(record.threshold).toBe(0.9)
   })
 
+  test("`threshold: 0` BEATS THE PRESET — `??` and not `||`", async () => {
+    // review.ts's comment calls the `??` load-bearing, and until now nothing
+    // held it: `||` passed the whole suite, because every threshold a test
+    // named was truthy. 0 is the one value the two operators disagree about,
+    // and it is a real request — "route everything", the opposite end of the
+    // paranoia dial from `paranoid`'s 1. Under `||` a caller asking for 0 gets
+    // the preset's 1 instead, which is the most wrong answer available.
+    // Recovered from the 2026-09-06 review's unverified residue and confirmed
+    // by mutation on 2026-09-09.
+    const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      preset: "paranoid",
+      threshold: 0,
+    })
+
+    expect(record.threshold).toBe(0)
+  })
+
   test("`preset: \"quick\"` moves the threshold, and `paranoid` moves it the other way", async () => {
     const run = async (preset: "quick" | "paranoid") => {
       const resolved = setup([["anthropic", "claude-sonnet-4-5"]])

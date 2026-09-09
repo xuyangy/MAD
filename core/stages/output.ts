@@ -1392,6 +1392,30 @@ export function renderRunRecord(record: RunRecord): string {
     } else {
       lines.push(`  No findings were raised by the ${record.answered} model(s) that answered.`)
     }
+    // THE BUDGET BOUNDS AN EMPTY RESULT THE SAME WAY CANCELLATION DOES, AND AS
+    // A SECOND CLAUSE RATHER THAN A BRANCH (code review 2026-09-06, recovered
+    // from the unverified residue and confirmed 2026-09-09).
+    //
+    // The `cancelled` branch above states the reason it exists: "nothing was
+    // found" over a roster that was cut short is not the same claim as
+    // "nothing was found" over one that ran to completion. A budget-refused
+    // slot cuts the roster short for a different reason and by the same
+    // amount, and the `answered === 0` branch already says so in its own case.
+    // The `answered > 0` cases were the one cell of that matrix left
+    // unqualified, so a run where two of three slots were never asked printed
+    // "No findings were raised by the 1 model(s) that answered." — true about
+    // the model, and read as a clean review of the whole roster.
+    //
+    // Additive, not a branch, for the reason discover.ts records: cancellation
+    // and budget truncation can both be true, and a branch would print one and
+    // silence the other. Not pushed in the `answered === 0` case, which states
+    // its own budget clause with the drop-out ordering a reader needs there.
+    if (skippedForBudget > 0 && record.answered > 0) {
+      lines.push(
+        `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
+          `token budget — so this is not a clean review of the whole roster.`,
+      )
+    }
   }
   for (const finding of resolved) {
     lines.push("")

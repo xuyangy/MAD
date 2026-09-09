@@ -154,6 +154,22 @@ describe("stageCeiling — the number the gate actually compares against", () =>
     expect(stageCeiling(emptyLedger(1000) as BudgetLedger, "discover")).toBe(300)
   })
 
+  test("A CAP THAT DOES NOT DIVIDE EVENLY IS FLOORED, NOT ROUNDED", () => {
+    // Every other ceiling test here uses cap 1000, which 0.3 and 0.65 both
+    // divide evenly — so `Math.ceil` passed all of them, and the flooring rule
+    // this block's first test NAMES was pinned only by an unrelated
+    // `tokenCap: 1` case in run-control.test.ts. 101 divides evenly by neither:
+    // floor(101 * 0.3) = 30 against ceil 31, floor(101 * 0.65) = 65 against 66.
+    // A rounded-up ceiling hands out a token nobody granted, which is the
+    // property the first test states and this one is what makes it fail.
+    // Recovered from the 2026-09-06 review's unverified residue; the mutation
+    // was re-run on 2026-09-09 and confirmed to survive at cap 1000.
+    const ledger = emptyLedger(101) as BudgetLedger
+    expect(stageCeiling(ledger, "discover")).toBe(30)
+    expect(stageCeiling(ledger, "debate")).toBe(65)
+    expect(stageCeiling(ledger, "judge")).toBe(101)
+  })
+
   test("the JUDGE's ceiling IS the cap — no part of a stated cap is unreachable", () => {
     expect(stageCeiling(emptyLedger(1000) as BudgetLedger, "judge")).toBe(1000)
   })
