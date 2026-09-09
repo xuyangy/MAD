@@ -5,7 +5,36 @@
 
 _bmad
 /.omo
-/_bmad-output
+# `_bmad-output` is ignored for NOISE, not for distribution (user, 2026-09-09) —
+# `stories/` alone is 620K of per-story churn and the ledgers are working files.
+#
+# THE SIX DESIGN DOCUMENTS THE CODE CITES BY NAME ARE THE EXCEPTION. Dozens of
+# comments across `core/` and `adapters/` cite them as the authority for a
+# decision — `cost-model.md` 29 times, `pipeline-stages.md` 27,
+# `host-integration.md` 16, `SPEC.md` 13 — and while the whole tree was ignored,
+# not one of those citations resolved in a fresh clone. A comment pointing at a
+# file nobody can open is worse than no comment: it reads as though the reasoning
+# is written down somewhere.
+#
+# RE-INCLUDED ONE FILE AT A TIME, down a re-excluded path. git cannot descend
+# into an excluded directory, so each level is opened (`!dir/`) and then its
+# contents closed again (`dir/*`) before the next level opens. Un-ignoring
+# `/_bmad-output/` alone exposes the whole tree — 41 files, ledgers and review
+# dumps included — which is what this shape exists to prevent.
+#
+# Grepped, not guessed: these are exactly the `.md` paths the code cites, minus
+# `deferred-work.md`, the working ledger, which stays local as local history.
+/_bmad-output/*
+!/_bmad-output/specs/
+/_bmad-output/specs/*
+!/_bmad-output/specs/spec-mad-orchestrator/
+/_bmad-output/specs/spec-mad-orchestrator/*
+!/_bmad-output/specs/spec-mad-orchestrator/SPEC.md
+!/_bmad-output/specs/spec-mad-orchestrator/cost-model.md
+!/_bmad-output/specs/spec-mad-orchestrator/host-integration.md
+!/_bmad-output/specs/spec-mad-orchestrator/pipeline-stages.md
+!/_bmad-output/specs/spec-mad-orchestrator/deferred-v2.md
+!/_bmad-output/specs/spec-mad-orchestrator/survey-grounding.md
 
 node_modules
 *.tsbuildinfo
