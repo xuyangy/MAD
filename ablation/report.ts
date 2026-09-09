@@ -283,6 +283,15 @@ export function renderAblation(report: AblationReport): string[] {
       `  decision, at the token costs listed above. This is the run's own number and not a verdict`,
       `  on the design: what it supports depends on the repeats, the sample and the matcher error`,
       `  stated at the top of this report.`,
+      // THE DENOMINATOR IS NOT A POPULATION, and the line above must not be read
+      // as one (ledger triage 2026-09-09). The pairings SHARE arms — three arms
+      // make three pairings, so one arm's findings are counted in two of them —
+      // and summing the pairings therefore counts the same finding more than
+      // once. It is still the honest total of what was compared; it is not a
+      // sample size, and a reader who takes it for one will read a rate off it.
+      `  THE PAIRINGS SHARE ARMS, so this total counts a finding once per pairing it appears in.`,
+      `  It is a sum over ${report.pairings.length} comparison(s), NOT a population — read the`,
+      `  per-pairing lines above for the rates.`,
     )
     if (total === 0) {
       lines.push(

@@ -357,3 +357,32 @@ describe("a zero or negative lens cost is not a price (code review 2026-09-06)",
     expect(rendered).not.toContain("THIS IS NOT A PRICE")
   })
 })
+
+describe("the headline total says it is NOT a population (ledger triage 2026-09-09)", () => {
+  test("the shared-arm caveat sits with the number it qualifies", () => {
+    // Three arms make three pairings and each arm appears in two of them, so
+    // summing the pairings counts one finding more than once. The sum is still
+    // the honest total of what was compared; it is not a sample size, and a
+    // reader who takes it for one reads a rate off it.
+    const three = report({
+      anyScripted: false,
+      arms: [baseArm("a"), baseArm("b"), baseArm("c")],
+      pairings: [
+        report().pairings[0]!,
+        { ...report().pairings[0]!, a: "a", b: "c" },
+        { ...report().pairings[0]!, a: "b", b: "c" },
+      ],
+    })
+    const rendered = text(three)
+
+    expect(rendered).toContain("Across every pairing,")
+    expect(rendered).toContain("THE PAIRINGS SHARE ARMS")
+    expect(rendered).toContain("It is a sum over 3 comparison(s), NOT a population")
+  })
+
+  test("the caveat rides with the headline and not with the scripted banner", () => {
+    // Non-vacuous: a scripted run prints no headline total, so it must print no
+    // caveat about one either.
+    expect(text(report({ anyScripted: true }))).not.toContain("THE PAIRINGS SHARE ARMS")
+  })
+})

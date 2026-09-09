@@ -58,6 +58,16 @@ export interface LiveOptions {
   providerConfigKey?: string
   /** Injected so a test can drive this without a shell. */
   shell?: Parameters<typeof opencodeRepo>[0]["$"]
+  /**
+   * Injected so a test can OBSERVE what the client is built from (ledger triage
+   * 2026-09-09).
+   *
+   * The `directory` line below is the whole of a fix that CI can never run —
+   * deleting it silently restores the original defect, a live roster enumerated
+   * from the wrong directory, with the full suite green. A seam is the only way
+   * that line can be asserted at all, so it is a seam.
+   */
+  createClient?: (init: { baseUrl: string; directory: string }) => unknown
 }
 
 export const LIVE_ARMS = (pin: Pin, lenses: readonly string[]): ArmSpec[] => [
@@ -84,7 +94,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   // asked the server about whatever directory it happened to consider current.
   // Unexercised by CI — the live path is the one module CI can never run — which
   // is why it survived to here rather than being caught by a test.
-  const client = createOpencodeClient({
+  const client = (options.createClient ?? createOpencodeClient)({
     baseUrl: options.serverUrl,
     directory: options.directory,
   })

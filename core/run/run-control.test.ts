@@ -371,7 +371,75 @@ describe("AD-6f — a run the user stopped", () => {
     // The half of F8 that IS reachable — two causes never merging on one
     // finding — is asserted at the seam story 8's AC names, in
     // `core/run/review.test.ts`. The "budget latched first and kept it"
-    // ordering is filed in `deferred-work.md`.
+    // ordering is the test below.
+  })
+
+  test("F8 — BUDGET FIRST, THEN STOPPED: the budget reason SURVIVES the stop", async () => {
+    // The row that had no executing test at any seam, filed twice
+    // (`deferred-work.md`, story 8 and the story-9 review). It was unreachable
+    // with the DEFAULT shares — a cap wide enough for discovery to finish left
+    // debate comfortably inside its 65% share, and a cap tight enough to squeeze
+    // debate truncated discovery first — so every reachable ordering had
+    // cancellation latch first. `ReviewDeps.spendShares` is the override the
+    // entry named as the way in.
+    //
+    // THE ARITHMETIC, stated so a later reader can see it is not a coincidence:
+    // every fake turn bills 30 tokens, and `mayISpend` is `spent < ceiling`.
+    // At `tokenCap: 120` with `discover` and `debate` both at 0.75, the discovery
+    // and debate ceilings are 90 and the judge's is the cap. All three discovery
+    // turns clear the gate (`spent` 0, 30, 60 against 90) and the stage finishes
+    // at exactly 90, so debate's first round is refused with no turn issued —
+    // the contested finding is stranded BY THE BUDGET. The judge still has
+    // headroom (90 < 120), which is what leaves a stage running for the stop to
+    // land in: without it the run simply ends and there is no ordering to test.
+    //
+    // `clampSpendShares` forces `debate >= discover` and pins `judge` at 1, so
+    // this is the only shape that strands debate while keeping a stage alive.
+    const resolved = roster(3)
+    const controller = new AbortController()
+    let turns = 0
+    const backend = new FakeBackend(scripts(ENVELOPE, OTHER_ENVELOPE, ENVELOPE), {}, {}, () => {
+      turns += 1
+      // The stop lands AFTER the budget has already stranded the findings, which
+      // is the ordering the row is about.
+      // The stop lands during the JUDGE, after the budget has already stranded
+      // the debated finding.
+      if (turns === 4) controller.abort()
+    })
+
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      threshold: 0.5,
+      tokenCap: 120,
+      spendShares: { discover: 0.75, debate: 0.75 },
+      maxConcurrency: 1,
+      signal: controller.signal,
+    })
+
+    // Discovery ran in full; debate was refused before it issued anything; the
+    // judge ran and was stopped.
+    expect(turns).toBeGreaterThan(3)
+    const budgeted = record.findings.filter((f) => f.unresolved?.diedAtStage === "debate")
+    expect(budgeted.length).toBeGreaterThan(0)
+
+    // THE PROPERTY: the cause that latched first is the cause that is reported,
+    // and the later stop does not overwrite it. AD-7 is append-only.
+    for (const finding of budgeted) {
+      expect(finding.unresolved!.reason).toContain("budget")
+      expect(finding.unresolved!.reason).not.toContain("cancelled")
+    }
+    expect(rendered).not.toContain("BUDGET EXHAUSTED — this review is incomplete because you stopped it")
+
+    // NOT VACUOUS: the stop really did land, so the assertion above is about an
+    // ordering and not about a run nothing ever cancelled.
+    expect(controller.signal.aborted).toBe(true)
+    expect(record.cancelled).toEqual({ stage: "judge" })
+    // And the two causes are BOTH on the page, told apart rather than merged.
+    expect(record.findings.some((f) => f.unresolved?.reason.includes("cancelled"))).toBe(true)
   })
 
   test("STOPPED WHERE NO STAGE NEEDS A TURN: it still does not render as finished", async () => {
