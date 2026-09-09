@@ -1630,6 +1630,20 @@ export function renderRunRecord(record: RunRecord): string {
     `PEAK — at most ${record.ledger.maxConcurrency} model turn(s) in flight at once ` +
       `(rate, not total; nothing was refused or dropped by this bound).`,
   )
+  // THE TOTAL IS A FLOOR ON A STOPPED RUN, and says so (ledger triage
+  // 2026-09-09). A turn MAD stopped waiting on — the user's stop, or the
+  // adapter's timeout — returns no usage, so tokens the provider still billed
+  // for that request never reach the ledger. MAD cannot know that number and
+  // will not invent one: `core/budget/ledger.ts` refuses a fabricated estimate
+  // on principle, and an estimate printed beside a real figure is worse than a
+  // stated gap. What it CAN do is not let the figure read as complete, which is
+  // AD-6's rule applied to the one number a reader takes for exact.
+  if (record.cancelled !== undefined) {
+    lines.push(
+      `  THAT TOTAL IS A FLOOR, not a full count: a turn MAD stopped waiting on returns no`,
+      `  usage, so anything the provider billed for it is missing here. MAD does not estimate it.`,
+    )
+  }
   lines.push(...budgetBlock(record))
 
   return lines.join("\n")

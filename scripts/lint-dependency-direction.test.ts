@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { main, scanSource } from "./lint-dependency-direction.ts"
+import { main, scanAdapterSource, scanSource } from "./lint-dependency-direction.ts"
 
 describe("AD-1 dependency-direction rule", () => {
   test("fails a core file importing from adapters/", () => {
@@ -274,5 +274,36 @@ const named = ceilingNamed(ledger, "debate")
       scanSource("core/stages/debate.ts", `const stageCeilingLabel = "x"
 `),
     ).toHaveLength(0)
+  })
+})
+
+describe("the SECOND direction: adapters/ must not reach into fixtures/ or ablation/ (ledger triage 2026-09-09)", () => {
+  // AD-1 as written governs `core/` only, and `package.json` ships
+  // `adapters/opencode/plugin.ts` — so fixture data reaching the adapter reaches
+  // the published entry point.
+  test("an adapter importing fixtures/ is a violation, in every spelling", () => {
+    for (const specifier of [
+      "../../fixtures/seeded-defects/change.ts",
+      "../../fixtures",
+      "../../ablation/report.ts",
+      "../../ablation",
+      "../clustering/../../fixtures/recall.ts",
+    ]) {
+      const found = scanAdapterSource("adapters/opencode/plugin.ts", `import x from "${specifier}"\n`)
+      expect(found).toHaveLength(1)
+      expect(found[0]!.why).toContain("adapters must not import")
+    }
+  })
+
+  test("the arrows that ARE allowed still pass", () => {
+    // Into core, and within adapters. A fixture DRIVING the real adapter is what
+    // an end-to-end fixture is for, so the reverse arrow is not forbidden.
+    expect(scanAdapterSource("adapters/opencode/plugin.ts", `import x from "../../core/run/review.ts"\n`)).toEqual([])
+    expect(scanAdapterSource("adapters/opencode/plugin.ts", `import x from "./repo.ts"\n`)).toEqual([])
+    expect(scanAdapterSource("fixtures/e2e/run.ts", `import x from "../../adapters/opencode/plugin.ts"\n`)).toEqual([])
+  })
+
+  test("THE REAL TREE PASSES — this is measured, not assumed", async () => {
+    expect(await main()).toBe(0)
   })
 })

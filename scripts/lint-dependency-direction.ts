@@ -217,6 +217,46 @@ export function scanSource(file: string, source: string): Violation[] {
   return violations
 }
 
+/**
+ * The SECOND direction, and it is not AD-1's (ledger triage 2026-09-09).
+ *
+ * AD-1 as written governs `core/` only, so nothing stopped `adapters/` reaching
+ * into `fixtures/` or `ablation/` — and `package.json`'s `main` and `exports`
+ * point at `adapters/opencode/plugin.ts`, so fixture data or a measurement
+ * harness could in principle reach the SHIPPED ENTRY POINT through the adapter.
+ * That is a worse failure than the one AD-1 names: a rule about layering broken
+ * inside the module that is actually published.
+ *
+ * `ablation/` is on the list for story 9's own reason — a measurement harness
+ * reachable from inside the thing it measures lets the experiment's scaffolding
+ * ship. The reverse arrows (`fixtures/ → adapters/`) are NOT forbidden: a
+ * fixture driving the real adapter is what an end-to-end fixture is for.
+ */
+const ADAPTER_MUST_NOT_REACH = [
+  { tree: "fixtures", why: "adapters must not import from fixtures/ — `package.json` ships adapters/" },
+  { tree: "ablation", why: "adapters must not import from ablation/ — `package.json` ships adapters/" },
+] as const
+
+/** Exported so the second rule is unit-tested rather than merely trusted. */
+export function scanAdapterSource(file: string, source: string): Violation[] {
+  const violations: Violation[] = []
+  const unix = file.replaceAll("\\", "/")
+  IMPORT_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = IMPORT_RE.exec(source)) !== null) {
+    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
+    if (!specifier || !specifier.startsWith(".")) continue
+    const resolved = join(dirname(unix), specifier).replaceAll("\\", "/")
+    for (const { tree, why } of ADAPTER_MUST_NOT_REACH) {
+      if (resolved === tree || resolved.startsWith(`${tree}/`)) {
+        violations.push({ file, specifier, why })
+        break
+      }
+    }
+  }
+  return violations
+}
+
 export async function main(): Promise<number> {
   const violations: Violation[] = []
   let checked = 0
@@ -229,6 +269,14 @@ export async function main(): Promise<number> {
     violations.push(...scanSource(relative(ROOT, absolute), source))
   }
 
+  const adapterGlob = new Glob("adapters/**/*.ts")
+  for await (const path of adapterGlob.scan({ cwd: ROOT })) {
+    const absolute = resolve(ROOT, path)
+    const source = await Bun.file(absolute).text()
+    checked += 1
+    violations.push(...scanAdapterSource(relative(ROOT, absolute), source))
+  }
+
   if (violations.length > 0) {
     console.error("AD-1 dependency-direction violations:\n")
     for (const violation of violations) {
@@ -239,7 +287,7 @@ export async function main(): Promise<number> {
   }
 
   console.log(
-    `AD-1 dependency direction OK — ${checked} file(s) under core/ checked ` +
+    `AD-1 dependency direction OK — ${checked} file(s) under core/ and adapters/ checked ` +
       `(${[...MUST_NOT_IMPORT].map((f) => `\`${f}\``).join(" and ")} import nothing; ` +
       `no stage builds a limiter or meters its own budget).`,
   )

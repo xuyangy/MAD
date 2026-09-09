@@ -442,6 +442,50 @@ describe("AD-6f — a run the user stopped", () => {
     expect(record.findings.some((f) => f.unresolved?.reason.includes("cancelled"))).toBe(true)
   })
 
+  test("A STOPPED RUN SAYS ITS TOKEN TOTAL IS A FLOOR (ledger triage 2026-09-09)", async () => {
+    // A turn MAD stopped waiting on returns no usage, so tokens the provider
+    // still billed for that request never reach the ledger. MAD cannot know the
+    // number and will not invent one; what it must not do is let the figure read
+    // as complete.
+    const resolved = roster(3)
+    const controller = new AbortController()
+    let turns = 0
+    const backend = new FakeBackend(scripts(ENVELOPE, OTHER_ENVELOPE, ENVELOPE), {}, {}, () => {
+      turns += 1
+      if (turns === 2) controller.abort()
+    })
+
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+      signal: controller.signal,
+    })
+
+    expect(record.cancelled).toBeDefined()
+    expect(rendered).toContain("THAT TOTAL IS A FLOOR, not a full count")
+  })
+
+  test("AN UNSTOPPED RUN SAYS NOTHING OF THE KIND — the note is conditional", async () => {
+    // The non-vacuous sibling. A clean run's total IS the total, and a caveat
+    // printed over it would be the same failure pointed the other way.
+    const resolved = roster(3)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend(scripts(ENVELOPE, OTHER_ENVELOPE, ENVELOPE)),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+    })
+
+    expect(record.cancelled).toBeUndefined()
+    expect(rendered).not.toContain("THAT TOTAL IS A FLOOR")
+  })
+
   test("STOPPED WHERE NO STAGE NEEDS A TURN: it still does not render as finished", async () => {
     // THE BACKSTOP, and the hole it closes (code review 2026-08-31). Until
     // `review()` read the signal itself, `record.cancelled` came only from a
