@@ -823,7 +823,14 @@ function renderVerdict(finding: Finding): string {
  * fallback list.
  */
 function column(text: string): string {
-  return text.length > 72 ? `${text.slice(0, 71)}…` : text
+  // CLIPPED ON CODE POINTS, not code units (ledger triage 2026-09-09).
+  // `String.prototype.slice` indexes UTF-16 code units, so a cut landing between
+  // the halves of a surrogate pair emitted a LONE SURROGATE into a string that
+  // now travels to a model inside an AD-18 span. Model-authored evidence prose
+  // has always been able to contain an emoji. Counting code points also makes
+  // the 72 mean what the comment above says it means.
+  const points = [...text]
+  return points.length > 72 ? `${points.slice(0, 71).join("")}…` : text
 }
 
 /**

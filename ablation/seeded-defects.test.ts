@@ -290,6 +290,19 @@ describe("the reporter", () => {
     expect(numericFlag(["--repeats=0"], "repeats", 1, MAX_REPEATS).ok).toBe(false)
   })
 
+  test("A REPEATED FLAG IS REFUSED, not resolved to the first one (ledger triage 2026-09-09)", () => {
+    // `--cap 400 --cap abc` used to run with a ceiling of 400 and never look at
+    // the second value — the shape this seam exists to refuse, re-entering
+    // through repetition rather than through the value.
+    const twice = numericFlag(["--cap", "400", "--cap", "abc"], "cap", 0, MAX_TOKEN_CAP)
+    expect(twice.ok).toBe(false)
+    if (!twice.ok) expect(twice.message).toContain("2 times")
+    // Both spellings count as the same dial.
+    expect(numericFlag(["--cap=400", "--cap", "5"], "cap", 0, MAX_TOKEN_CAP).ok).toBe(false)
+    // One occurrence is still fine.
+    expect(numericFlag(["--cap", "400"], "cap", 0, MAX_TOKEN_CAP)).toEqual({ ok: true, value: 400 })
+  })
+
   test("a number is DECIMAL DIGITS, not whatever `Number` accepts (code review 2026-09-08)", () => {
     // `Number` reads `0x10` as 16, `1e3` as 1000 and `+5` as 5, and
     // `Number.isInteger` then accepts all three — so a flag whose refusal says

@@ -1497,6 +1497,23 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
     expect(rendered).toContain("Participant B did not answer it.")
   })
 
+  test("the column clip never emits a LONE SURROGATE (ledger triage 2026-09-09)", () => {
+    // `slice` indexes UTF-16 code units, so a cut landing between the halves of
+    // an emoji's surrogate pair emitted an unpaired surrogate into a string that
+    // travels to a model inside an AD-18 span. The emoji is placed so the old
+    // 71-code-unit cut falls inside it.
+    const f = finding({ severity: "high", file: "a.ts", route: "judge", routeReason: "3/3" })
+    f.history = judged({ logic: false })
+    f.evidence = `${"a".repeat(70)}\u{1F600}${"b".repeat(40)}`
+
+    const rendered = output(record([f], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+
+    // No unpaired surrogate anywhere in the report.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(rendered)).toBe(false)
+    // And the clip still happened.
+    expect(rendered).toContain("…")
+  })
+
   test("evidence that is only whitespace reads as an assertion, not as a blank column", () => {
     const f = finding({ severity: "high", file: "a.ts", route: "judge", routeReason: "3/3" })
     f.history = judged({ logic: false })

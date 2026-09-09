@@ -106,6 +106,20 @@ export function numericFlag(
   max: number,
 ): NumericFlag {
   if (!has(argv, name)) return { ok: true, value: undefined }
+  // A REPEATED FLAG IS REFUSED, not silently resolved to the first one (ledger
+  // triage 2026-09-09). `flagIndex` finds the FIRST occurrence, so
+  // `--cap 400 --cap abc` used to run with a ceiling of 400 and never look at
+  // the second, unreadable value — the exact shape this seam exists to refuse,
+  // re-entering through repetition rather than through the value. Two spellings
+  // of one dial is an operator who is not sure which value is in force, and on
+  // the flag that bounds spend the honest answer is to say so.
+  const occurrences = argv.filter((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`)).length
+  if (occurrences > 1) {
+    return {
+      ok: false,
+      message: `--${name} was given ${occurrences} times. Pass it once; MAD will not guess which value is in force.`,
+    }
+  }
   const raw = flag(argv, name)
   if (raw === undefined || raw.trim() === "" || raw.startsWith("--")) {
     return { ok: false, message: `--${name} needs a value. Nothing readable followed it.` }

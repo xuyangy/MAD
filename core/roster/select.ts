@@ -210,8 +210,17 @@ export function pinLabel(pin: Pin): string {
  * and the detail from the result.
  */
 export function pinParts(pin: Pin): { providerId: string; modelId: string } {
-  const clip = (value: string): string =>
-    oneLine(String(value ?? "")).replaceAll("`", "'").slice(0, PIN_LABEL_MAX)
+  // A CLIPPED HALF SAYS SO (ledger triage 2026-09-09). The clip is a safety
+  // measure and it is not free: silently returning the first 80 characters puts
+  // a providerId the caller never passed into `detail.pins[]`, the field a host
+  // agent branches on, where it reads as a complete id. The ellipsis makes the
+  // truncation visible in both the label and the detail, so a reader comparing
+  // the warning against their own config sees a clipped id rather than a wrong
+  // one. Same reason `renderBlameCitation` states its own truncation.
+  const clip = (value: string): string => {
+    const safe = oneLine(String(value ?? "")).replaceAll("`", "'")
+    return safe.length > PIN_LABEL_MAX ? `${safe.slice(0, PIN_LABEL_MAX)}…` : safe
+  }
   return { providerId: clip(pin.providerId), modelId: clip(pin.modelId) }
 }
 
@@ -447,7 +456,15 @@ export function fillLensSlots(
 export function selectRoster(candidates: readonly Candidate[], options: SelectOptions): SelectResult {
   const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [], pins = [] } = options
   if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey)
-  if (slots < 1) throw new Error("selectRoster: slots must be at least 1")
+  // `Number.isFinite` FIRST, because `NaN < 1` is false (ledger triage
+  // 2026-09-09). A NaN `slots` passed this guard, and then `filled.length >=
+  // slots` in `resolvePins` never became true either — so every pin filled, the
+  // roster exceeded the requested size and `no-slot` was never reported.
+  // Probed: three pins against `slots: NaN` produced a three-slot roster and no
+  // warning. The adapter clamps, but `review()` is exported and story 9's
+  // ablation calls it directly, which is the seam this guard is for.
+  if (!Number.isFinite(slots) || slots < 1)
+    throw new Error("selectRoster: slots must be a finite number of at least 1")
 
   // AD-4 — DEDUPE FIRST, over the whole raw candidate list, and this is still
   // the only line in the module that touches `candidates`. Everything below

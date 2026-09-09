@@ -258,7 +258,7 @@ describe("LENS SLOTS CONTRIBUTE ZERO TO distinctLineages (AD-4 amended, AD-17c)"
     // "NO MODEL ANSWERED — this is not a clean review" path over a run that
     // worked. The lens invariant above is asserted without buying that.
     expect(() => selectRoster(THREE_LINEAGES, { ...OPTS, slots: 0, lenses: ["security"] })).toThrow(
-      "slots must be at least 1",
+      "slots must be a finite number of at least 1",
     )
   })
 })
@@ -1009,5 +1009,38 @@ describe("roster-pin-unhonoured — the machine-readable detail is the caller's 
       providerId: "a/b",
       modelId: "c/d",
     })
+  })
+})
+
+describe("the two roster guards, probed rather than assumed (ledger triage 2026-09-09)", () => {
+  test("A NaN `slots` IS REFUSED, because `NaN < 1` is false", () => {
+    // The defect this pins: `slots < 1` is false for NaN, and
+    // `filled.length >= slots` in `resolvePins` never becomes true either — so
+    // before this guard, three pins against `slots: NaN` filled a three-slot
+    // roster and `no-slot` was never reported. The adapter clamps; `review()`
+    // is exported and story 9's ablation calls it directly.
+    expect(() =>
+      selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+        slots: Number.NaN,
+        providerConfigKey: "provider",
+      }),
+    ).toThrow(/finite/)
+  })
+
+  test("A CLIPPED PIN HALF SAYS IT WAS CLIPPED", () => {
+    // An over-long half is clipped for safety, and the clip must not hand a
+    // host agent an id the caller never passed as though it were complete.
+    const long = "p".repeat(200)
+    const resolved = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      providerConfigKey: "provider",
+      pins: [{ providerId: long, modelId: "gpt-5" }],
+    })
+
+    const warning = resolved.warnings.find((w) => w.code === "roster-pin-unhonoured")
+    expect(warning).toBeDefined()
+    const reported = (warning!.detail as { pins: { providerId: string }[] }).pins[0]!.providerId
+    expect(reported.endsWith("…")).toBe(true)
+    expect(reported.startsWith(long)).toBe(false)
   })
 })
