@@ -21,10 +21,11 @@ This file is how a real number is produced. It is the procedure stories 1, 2 and
 3. **A worktree with a real diff.** `--directory` selects it; `--target` takes
    host git syntax (`main...HEAD`, a commit, or omitted for the working tree).
 4. **`MAD_ARTIFACTS` pointed OUTSIDE the repository under review**, or unset.
-   AD-16: nothing is written into the repo being reviewed. The ablation itself
-   writes nothing at all — it holds three `RunRecord`s in memory and reads them —
-   but the artifact dump is a separate feature and it is on if that variable is
-   set.
+   AD-16: nothing is written into the repo being reviewed. Without `--out` the
+   ablation itself writes nothing at all — it holds the `RunRecord`s in memory
+   and reads them — but the artifact dump is a separate feature and it is on if
+   that variable is set. **This rule is unchanged by `--out` below**, which is
+   checked against the same containment test and refused just as loudly.
 5. **State a token ceiling.** `--cap N` is passed to *every* arm from one value,
    so a shared ceiling stays shared. Three arms over one change is up to
    `1 + 3 + (3 + lenses)` discovery turns plus debate and judge turns for each,
@@ -46,6 +47,54 @@ bun run ablation --live \
 a pin committed in this repository would be the first model id checked into
 MAD's own tree — "the ablation's caller names it" stops being true when the
 caller is a file inside MAD. You name it.
+
+## Writing an evaluation bundle (`--out`, story 2.2)
+
+A live run is evidence only if someone can check it afterwards. `--out <dir>`
+writes an **evaluation bundle**: one AD-16 artifact dump per arm and repeat, each
+carrying a versioned `manifest.json` recording the code revision, the change by
+both its ref range and a content hash, the protocol and fixture versions, every
+resolved slot, every dial, per-stage spend against its ceiling, and how the run
+ended.
+
+```
+bun run ablation --live \
+  --pin anthropic/claude-sonnet-4-5 \
+  --directory /path/to/repo \
+  --cap 400000 \
+  --out /scratch/mad-eval-2026-09-10 \
+  --protocol-version 1 \
+  --protocol-hash sha256:<the frozen_hash from evaluation-protocol.md> \
+  --fixture-version <story 2.4's sealed fixture> \
+  --fixture-hash sha256:<its content hash>
+```
+
+Then read it back:
+
+```
+bun run eval-read --bundle /scratch/mad-eval-2026-09-10
+```
+
+Four things worth knowing before you use it:
+
+- **`--out` must be absolute and outside the repository under review.** It goes
+  through the same `refusalFor` check the artifact dump uses. A relative path is
+  refused because it would resolve against the project directory.
+- **`--out` only works with `--live`.** A scripted ablation compares records in
+  memory and writes nothing, and that is story 9's A20 rather than an oversight.
+- **The identity flags are optional and their absence is RECORDED.** A protocol
+  hash you do not pass is written as an explicit unknown with the reason. It is
+  not a default and not an empty string — and the reader treats an unknown as
+  *not comparable*, so arms missing one are segregated rather than silently
+  compared.
+- **The code revision is established, not assumed.** It comes from
+  `git rev-parse HEAD` plus `git status --porcelain`; if either fails, the
+  manifest records an unknown carrying git's own words.
+
+`bun run eval-read` prints segregated, missing and unreadable arms ABOVE the
+comparison table, with the reason for each, and prints an explicit incompleteness
+banner when there are any. It computes no fused score: the arms go side by side
+and the reader values them.
 
 ## Reading the result
 

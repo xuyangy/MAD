@@ -277,6 +277,22 @@ export interface DumpInput {
    * not what it said.
    */
   turns?: readonly TurnArtifact[]
+  /**
+   * FR1 (story 2.2) — the evaluation's run manifest, serialized beside the debug
+   * files as `manifest.json`.
+   *
+   * TYPED `unknown` DELIBERATELY. The manifest's shape is declared in
+   * `ablation/manifest.ts`, and `scripts/lint-dependency-direction.ts` keeps the
+   * arrow between those trees pointing one way: `ablation/` may reach into
+   * `adapters/`, never the reverse. This module's job here is to serialize a
+   * value the caller already built, not to understand it — so it takes the value
+   * and nothing about its type.
+   *
+   * ABSENT IS THE ORDINARY RUN. A review that is not part of an evaluation
+   * supplies none, and the dump is then byte-for-byte what it was before this
+   * field existed (AD-16: persistence stays optional and ADDITIVE).
+   */
+  manifest?: unknown
   worktree: string
   /** Injected so a test needs no environment. Defaults to the real one. */
   env?: Record<string, string | undefined>
@@ -354,6 +370,15 @@ async function writeArtifacts(input: DumpInput, directory: string): Promise<Arti
     ["record.json", json(record)],
   ]
 
+  // FR1 (story 2.2) — the manifest, when this run is part of an evaluation.
+  // PUSHED AFTER the six debug files rather than replacing any of them: the
+  // manifest is the durable, versioned record and those six remain the DEBUG
+  // dump this module's header refuses to let become one. A reader of an
+  // evaluation bundle depends on `manifest.json` and on nothing else here.
+  if (input.manifest !== undefined) {
+    files.push(["manifest.json", json(input.manifest)])
+  }
+
   // AD-16 amended — ONE FILE PER TURN, named by issue order and slot, rather
   // than one array. A person debugging a run opens the turn they are asking
   // about; a single `turns.json` holding twenty prompts is a file nobody reads
@@ -403,7 +428,12 @@ function json(value: unknown): string {
  * a pinned model id — story 8A pins models by id, which is a user-supplied
  * string. Anything outside the safe set becomes `_`; there is no path separator
  * and no `..` that can survive it.
+ *
+ * EXPORTED as of story 2.2, because `ablation/bundle.ts` builds directory names
+ * out of an arm id and must apply the SAME rule. Two copies of a
+ * path-safety rule is two places it can drift, and the drifting copy is the one
+ * nobody reads.
  */
-function safeName(value: string): string {
+export function safeName(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "slot"
 }

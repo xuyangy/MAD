@@ -455,3 +455,88 @@ describe("createTurnRecorder — AD-16's per-turn envelopes", () => {
     expect(files.filter((f) => f.startsWith("turn-"))).toEqual([])
   })
 })
+
+/**
+ * FR1 (story 2.2) — the manifest rides in the dump, ADDITIVELY.
+ *
+ * The first test here is the AD-16 one and the reason the field is optional at
+ * all: a review that is not part of an evaluation must produce the dump it
+ * produced before this field existed, file for file.
+ */
+describe("the run manifest (story 2.2)", () => {
+  test("NO MANIFEST SUPPLIED WRITES THE SAME SIX FILES AS BEFORE (AD-16, additive)", async () => {
+    const root = await tempDir("mad-manifest-off-")
+    const outcome = await dumpRunArtifacts(
+      dumpInput({ env: { [ARTIFACTS_ENV]: root } }),
+    )
+    expect(outcome.kind).toBe("written")
+    const written = (await readdir(join(root, "run-7a-1"))).sort()
+    expect(written).toEqual([
+      "input.json",
+      "ledger.json",
+      "record.json",
+      "report.txt",
+      "roster.json",
+      "warnings.json",
+    ])
+  })
+
+  test("a manifest adds EXACTLY ONE file and changes no other", async () => {
+    const root = await tempDir("mad-manifest-on-")
+    const outcome = await dumpRunArtifacts(
+      dumpInput({
+        env: { [ARTIFACTS_ENV]: root },
+        manifest: { schemaVersion: 1, identity: { armId: "on", repeatId: 0 } },
+      }),
+    )
+    expect(outcome).toMatchObject({ kind: "written", files: 7 })
+    const written = (await readdir(join(root, "run-7a-1"))).sort()
+    expect(written).toContain("manifest.json")
+    expect(written).toHaveLength(7)
+
+    const body = await readFile(join(root, "run-7a-1", "manifest.json"), "utf8")
+    expect(JSON.parse(body)).toEqual({ schemaVersion: 1, identity: { armId: "on", repeatId: 0 } })
+  })
+
+  test("the manifest is written 0o600, like every other file in the dump", async () => {
+    const root = await tempDir("mad-manifest-mode-")
+    await dumpRunArtifacts(
+      dumpInput({ env: { [ARTIFACTS_ENV]: root }, manifest: { schemaVersion: 1 } }),
+    )
+    const mode = (await stat(join(root, "run-7a-1", "manifest.json"))).mode & 0o777
+    expect(mode).toBe(0o600)
+  })
+
+  test("AD-16 IS NOT WEAKENED BY THE MANIFEST — a root inside the repo is still refused", async () => {
+    const worktree = await tempDir("mad-manifest-repo-")
+    const outcome = await dumpRunArtifacts(
+      dumpInput({
+        worktree,
+        env: { [ARTIFACTS_ENV]: join(worktree, "out") },
+        manifest: { schemaVersion: 1 },
+      }),
+    )
+    expect(outcome.kind).toBe("refused")
+    expect(await readdir(worktree)).toEqual([])
+  })
+
+  test("THE FLAG OFF STILL WRITES NOTHING, manifest or no manifest", async () => {
+    const outcome = await dumpRunArtifacts(dumpInput({ env: {}, manifest: { schemaVersion: 1 } }))
+    expect(outcome).toEqual({ kind: "off" })
+  })
+
+  test("a manifest that cannot be serialized fails the DUMP, never the review", async () => {
+    const root = await tempDir("mad-manifest-throw-")
+    const outcome = await dumpRunArtifacts(
+      dumpInput({
+        env: { [ARTIFACTS_ENV]: root },
+        manifest: {
+          get boom() {
+            throw new Error("a throwing getter")
+          },
+        },
+      }),
+    )
+    expect(outcome.kind).toBe("failed")
+  })
+})

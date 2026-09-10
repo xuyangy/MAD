@@ -20,10 +20,15 @@
  *
  * It needs a running opencode server, at least one provider configured in the
  * HOST (MAD supplies no credential — AD-3), and a worktree with a real diff. It
- * is therefore the one module in this tree that imports `adapters/`, kept behind
- * a dynamic import in `scripts/ablation.ts` so the scripted path — the one the
- * tests gate — never constructs an opencode client. Read it as an unexercised
+ * is therefore the one module in this tree that imports the opencode SDK, kept
+ * behind a dynamic import in `scripts/ablation.ts` so the scripted path — the one
+ * the tests gate — never constructs an opencode client. Read it as an unexercised
  * path and change it with that in mind.
+ *
+ * (Story 2.2 added a SECOND module reaching into `adapters/`: `ablation/bundle.ts`
+ * imports `adapters/opencode/artifacts.ts`. That file pulls in only `node:` and
+ * `core/` types and no SDK, so the sentence that matters here — the scripted path
+ * constructs no opencode client — is unchanged.)
  *
  * ## It bills real money against the caller's own credentials
  *
@@ -40,9 +45,12 @@ import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { opencodeRepo } from "../adapters/opencode/repo.ts"
 import { selectRoster, type Pin } from "../core/roster/select.ts"
 import { systemClock } from "../core/ports/clock.ts"
+import { createTurnRecorder, type TurnArtifact } from "../adapters/opencode/artifacts.ts"
 import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
+import { writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
 import { buildReport, lensTokenCost, type AblationReport } from "./compare.ts"
+import type { EvaluationIdentity } from "./manifest.ts"
 
 export interface LiveOptions {
   pin: Pin
@@ -68,7 +76,28 @@ export interface LiveOptions {
    * that line can be asserted at all, so it is a seam.
    */
   createClient?: (init: { baseUrl: string; directory: string }) => unknown
+  /**
+   * FR1 / FR2 (story 2.2) — write this evaluation as a bundle on disk.
+   *
+   * ABSENT IS TODAY'S BEHAVIOUR EXACTLY: nothing is written, no turn is kept in
+   * memory, and story 9's A20 ("the worktree is byte-identical before and after")
+   * holds unchanged. The scripted path never sets it.
+   */
+  bundle?: {
+    /** Absolute, and outside the repository under review — checked, not trusted. */
+    root: string
+    identity: Omit<EvaluationIdentity, "armId" | "repeatId">
+    /** Supplied so the index does not depend on a clock this module does not own. */
+    createdAt: string
+  }
+  /** Where bundle write outcomes go. The CLI prints them; a test collects them. */
+  onBundleEvent?: (event: BundleEvent) => void
 }
+
+/** What the bundle writer did, reported rather than thrown. */
+export type BundleEvent =
+  | { kind: "index"; ok: boolean; detail: string }
+  | { kind: "arm"; armId: string; repeatId: number; outcome: string; detail: string }
 
 export const LIVE_ARMS = (pin: Pin, lenses: readonly string[]): ArmSpec[] => [
   { id: "control", label: "single pinned model", provenance: "live", slots: 1, pins: [pin] },
@@ -109,6 +138,44 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   })
   const change = await repo.change(options.target)
 
+  // ONE RECORDER PER ARM RUN, in CALL ORDER, and the pairing below depends on
+  // `runAblation` being sequential — it awaits each `runArm` before starting the
+  // next, and `backendFor` is called at the top of each one, so the Nth recorder
+  // belongs to the Nth run. The length check after the loop is what makes that
+  // dependency loud rather than silent if the harness ever runs arms in parallel;
+  // `ablation/bundle.test.ts` pins the ordering itself against `runAblation`.
+  //
+  // BUILT ONLY WHEN A BUNDLE IS ASKED FOR, exactly as `plugin.ts` builds its
+  // recorder only when the flag is on: with no bundle, no transcript is held in
+  // memory at all.
+  const recorders: { turns: readonly TurnArtifact[] }[] = []
+
+  if (options.bundle !== undefined) {
+    const declared: BundleArm[] = []
+    for (let repeat = 0; repeat < (options.repeats ?? 1); repeat += 1) {
+      for (const spec of specs) declared.push({ armId: spec.id, repeatId: repeat })
+    }
+    const index = await writeBundleIndex({
+      bundleRoot: options.bundle.root,
+      worktree: options.worktree ?? options.directory,
+      arms: declared,
+      createdAt: options.bundle.createdAt,
+    })
+    options.onBundleEvent?.({
+      kind: "index",
+      ok: index.ok,
+      detail: index.ok ? index.file : index.reason,
+    })
+    // A REFUSED INDEX STOPS THE EVALUATION BEFORE IT BILLS. The index is the only
+    // thing that can name a missing arm afterwards, so an evaluation that ran
+    // without one would spend real credentials on a bundle nobody can check —
+    // which is the whole of FR1's "a published number is traceable or it is not
+    // published".
+    if (!index.ok) {
+      throw new Error(`the evaluation bundle could not be declared: ${index.reason}`)
+    }
+  }
+
   const runs = await runAblation(
     specs,
     {
@@ -126,11 +193,15 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
           pins: spec.pins ?? [],
           providerConfigKey,
         })
-        return new OpencodeModelBackend({
+        const backend = new OpencodeModelBackend({
           serverUrl: options.serverUrl,
           directory: options.directory,
           slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
         })
+        if (options.bundle === undefined) return backend
+        const recorder = createTurnRecorder()
+        recorders.push(recorder)
+        return recorder.wrap(backend)
       },
       backend: undefined as never,
       clock: systemClock(),
@@ -141,6 +212,39 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     },
     options.repeats ?? 1,
   )
+
+  if (options.bundle !== undefined) {
+    if (recorders.length !== runs.length) {
+      throw new Error(
+        `the bundle writer kept ${recorders.length} turn recorder(s) for ${runs.length} run(s); ` +
+          `the recorder-to-run pairing assumes runAblation runs arms sequentially and it no longer does.`,
+      )
+    }
+    for (const [index, run] of runs.entries()) {
+      const outcome = await writeArmDump({
+        bundleRoot: options.bundle.root,
+        run,
+        change,
+        identity: options.bundle.identity,
+        turns: recorders[index]!.turns,
+        worktree: options.worktree ?? options.directory,
+      })
+      options.onBundleEvent?.({
+        kind: "arm",
+        armId: run.spec.id,
+        repeatId: run.repeat,
+        outcome: outcome.kind,
+        detail:
+          outcome.kind === "written"
+            ? `${outcome.files} file(s) in ${outcome.directory}`
+            : outcome.kind === "refused"
+              ? outcome.reason
+              : outcome.kind === "failed"
+                ? outcome.error
+                : "the artifact flag resolved to off",
+      })
+    }
+  }
 
   const first = (id: string) => runs.find((run) => run.spec.id === id)
   const control = first("control")!

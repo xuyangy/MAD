@@ -1,0 +1,333 @@
+import { describe, expect, test } from "bun:test"
+
+import { CUMULATIVE_SHARE } from "../core/budget/presets.ts"
+import type { Finding } from "../core/domain/finding.ts"
+import type { RunRecord } from "../core/domain/run-record.ts"
+import { emptyTokenUsage } from "../core/domain/run-record.ts"
+import type { ChangeSet } from "../core/ports/repo.ts"
+import {
+  MANIFEST_FILE,
+  MANIFEST_SCHEMA_VERSION,
+  buildManifest,
+  fromPersistedFindings,
+  known,
+  toPersistedFindings,
+  unknownValue,
+  type EvaluationIdentity,
+  type UsageCompleteness,
+} from "./manifest.ts"
+
+function finding(id: string, over: Partial<Finding> = {}): Finding {
+  return {
+    id,
+    claim: `claim ${id}`,
+    reasoning: `reasoning ${id}`,
+    locus: { file: "src/a.ts", startLine: 1, endLine: 2 },
+    severity: "medium",
+    author: "discovery-1",
+    source: "pool",
+    history: [],
+    ...over,
+  } as Finding
+}
+
+function record(over: Partial<RunRecord> = {}): RunRecord {
+  const canonical = finding("f1", { clusterId: "c1", mergedIds: ["f2"] })
+  const absorbed = finding("f2")
+  return {
+    runId: "run-0001",
+    startedAt: "2026-09-10T00:00:00.000Z",
+    finishedAt: "2026-09-10T00:01:00.000Z",
+    roster: {
+      slots: [
+        {
+          slot: "discovery-1",
+          providerId: "anthropic",
+          modelId: "claude-sonnet-4-5",
+          identity: "claude-sonnet-4",
+          lineage: { family: "claude", verified: true } as never,
+          toolcall: true,
+          alsoAvailableVia: [],
+        },
+      ],
+      lensSlots: [],
+      requested: 3,
+      distinctLineages: 1,
+      providers: ["anthropic"],
+    },
+    answered: 1,
+    findings: [canonical],
+    pool: [canonical, absorbed],
+    lensInstructions: [],
+    threshold: 0.5,
+    maxRounds: 2,
+    warnings: [],
+    ledger: {
+      entries: [
+        { slot: "discovery-1", stage: "discover", attempt: 1, tokens: { ...emptyTokenUsage(), input: 10, output: 20 } },
+      ],
+      total: { ...emptyTokenUsage(), input: 10, output: 20 },
+      cap: 1000,
+      maxConcurrency: 4,
+      shares: CUMULATIVE_SHARE,
+    },
+    ...over,
+  } as RunRecord
+}
+
+const change: ChangeSet = {
+  description: "HEAD~1..HEAD",
+  files: ["src/a.ts"],
+  diff: "--- a/src/a.ts\n+++ b/src/a.ts\n@@\n-old\n+new\n",
+}
+
+const identity: EvaluationIdentity = {
+  protocolVersion: known(1),
+  protocolHash: known("sha256:aaa"),
+  fixtureVersion: unknownValue("story 2.4 has not sealed a fixture yet"),
+  fixtureHash: unknownValue("story 2.4 has not sealed a fixture yet"),
+  codeRevision: known({ commit: "13eadc6", dirty: false }),
+  armId: "on",
+  repeatId: 0,
+}
+
+describe("the manifest is versioned and named", () => {
+  test("schema version and filename are constants the reader can rely on", () => {
+    expect(MANIFEST_SCHEMA_VERSION).toBe(1)
+    expect(MANIFEST_FILE).toBe("manifest.json")
+  })
+})
+
+describe("AC1 — every field group FR1 names is present", () => {
+  const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(3) })
+
+  test("code revision, protocol and fixture versions, arm and repeat id", () => {
+    expect(manifest.identity.codeRevision).toEqual(known({ commit: "13eadc6", dirty: false }))
+    expect(manifest.identity.protocolVersion).toEqual(known(1))
+    expect(manifest.identity.fixtureVersion.kind).toBe("unknown")
+    expect(manifest.identity.armId).toBe("on")
+    expect(manifest.identity.repeatId).toBe(0)
+  })
+
+  test("the change carries BOTH the base/target identifier and a content hash", () => {
+    expect(manifest.identity.changeId.description).toBe("HEAD~1..HEAD")
+    expect(manifest.identity.changeId.diffHash).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(manifest.identity.changeId.files).toEqual(["src/a.ts"])
+  })
+
+  test("every slot's resolved provider and model identity", () => {
+    expect(manifest.roster.slots[0]).toMatchObject({
+      slot: "discovery-1",
+      providerId: "anthropic",
+      modelId: "claude-sonnet-4-5",
+    })
+  })
+
+  test("the roster degradation state", () => {
+    expect(manifest.roster.requested).toBe(3)
+    expect(manifest.roster.filled).toBe(1)
+    expect(manifest.roster.answered).toBe(1)
+    expect(manifest.roster.distinctLineages).toBe(1)
+    expect(manifest.roster.skippedForBudget).toEqual([])
+  })
+
+  test("every dial in force, as the RECORD stamped it", () => {
+    expect(manifest.dials).toMatchObject({
+      threshold: 0.5,
+      maxRounds: 2,
+      maxConcurrency: 4,
+      cap: 1000,
+    })
+    expect(manifest.dials.shares).toEqual(CUMULATIVE_SHARE)
+    expect(manifest.dials.preset.kind).toBe("unknown")
+  })
+
+  test("per-stage token spend against its ceiling", () => {
+    expect(manifest.spend.perStage.map((row) => row.stage)).toEqual(["discover", "debate", "judge"])
+    expect(manifest.spend.perStage[0]).toMatchObject({ spent: 30, ceiling: 300 })
+    expect(manifest.spend.total).toMatchObject({ input: 10, output: 20 })
+  })
+
+  test("the run's completion status", () => {
+    expect(manifest.status.completion).toBe("completed")
+    expect(manifest.status.cancelledAt.kind).toBe("unknown")
+  })
+
+  test("the raw stage outputs are pointed at, not duplicated", () => {
+    expect(manifest.stageOutputs.recordFile).toBe("record.json")
+    expect(manifest.stageOutputs.turnFiles).toEqual(known(3))
+  })
+})
+
+describe("AC4 — nothing is inferred; an unknown says so", () => {
+  test("a preset the caller never named is an explicit unknown, not `normal`", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0) })
+    expect(manifest.dials.preset).toEqual(unknownValue("the caller named no preset"))
+  })
+
+  test("a run with no finishedAt is unfinished, never back-dated", () => {
+    const manifest = buildManifest({
+      record: record({ finishedAt: undefined }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(manifest.run.finishedAt.kind).toBe("unknown")
+    expect(manifest.status.completion).toBe("unfinished")
+  })
+
+  test("a stage that never ran is `did-not-run`, never all-zero counts", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0) })
+    expect(manifest.status.routeCounts).toEqual({ kind: "did-not-run" })
+    expect(manifest.status.debateCounts).toEqual({ kind: "did-not-run" })
+    expect(manifest.status.judgeCounts).toEqual({ kind: "did-not-run" })
+  })
+
+  test("a stage that ran carries its own counts", () => {
+    const counts = { toDebate: 1, toJudge: 2, toJudgeAtThreshold: 2, toJudgeNoPrior: 0 }
+    const manifest = buildManifest({
+      record: record({ routeCounts: counts }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(manifest.status.routeCounts).toEqual({ kind: "ran", counts })
+  })
+
+  test("a cancelled run names the stage it stopped at, and reads `cancelled`", () => {
+    const manifest = buildManifest({
+      record: record({ cancelled: { stage: "debate" } }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(manifest.status.completion).toBe("cancelled")
+    expect(manifest.status.cancelledAt).toEqual(known("debate"))
+  })
+
+  test("a degradation warning makes the run `degraded`; a disclosure does not", () => {
+    const degraded = buildManifest({
+      record: record({
+        warnings: [{ code: "model-dropped-out", stage: "discover", message: "a model dropped out" }],
+      }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(degraded.status.completion).toBe("degraded")
+    expect(degraded.status.warnings[0]).toMatchObject({ code: "model-dropped-out", disclosure: false })
+
+    const disclosed = buildManifest({
+      record: record({
+        warnings: [{ code: "provider-fan-out", stage: "roster", message: "code goes to anthropic" }],
+      }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(disclosed.status.completion).toBe("completed")
+    expect(disclosed.status.warnings[0]).toMatchObject({ code: "provider-fan-out", disclosure: true })
+  })
+})
+
+describe("AC5 — usage completeness is never claimed", () => {
+  test("the only v1 value is `unaudited`", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0) })
+    expect(manifest.spend.usageCompleteness).toBe("unaudited")
+  })
+
+  test("no run shape can talk the field into claiming complete usage", () => {
+    const shapes: Partial<RunRecord>[] = [
+      {},
+      { finishedAt: undefined },
+      { cancelled: { stage: "judge" } },
+      { warnings: [{ code: "model-dropped-out", stage: "discover", message: "dropped" }] },
+      { ledger: { ...record().ledger, cap: null } },
+    ]
+    for (const shape of shapes) {
+      const manifest = buildManifest({ record: record(shape), change, identity, turnFiles: known(0) })
+      expect(manifest.spend.usageCompleteness).toBe("unaudited")
+    }
+  })
+
+  test("the union is the guard: `complete` is not assignable to the field", () => {
+    // @ts-expect-error — AC5. If this line ever type-checks, story 2.3's schema
+    // landed without anyone deciding what `complete` is allowed to mean.
+    const claimed: UsageCompleteness = "complete"
+    expect(String(claimed)).toBe("complete")
+  })
+})
+
+describe("the manifest is the identity a reader compares on", () => {
+  test("two builds over the same inputs are byte-identical", () => {
+    const a = JSON.stringify(buildManifest({ record: record(), change, identity, turnFiles: known(1) }))
+    const b = JSON.stringify(buildManifest({ record: record(), change, identity, turnFiles: known(1) }))
+    expect(a).toBe(b)
+  })
+
+  test("a different diff is a different hash", () => {
+    const a = buildManifest({ record: record(), change, identity, turnFiles: known(1) })
+    const b = buildManifest({
+      record: record(),
+      change: { ...change, diff: `${change.diff}+one more line\n` },
+      identity,
+      turnFiles: known(1),
+    })
+    expect(a.identity.changeId.diffHash).not.toBe(b.identity.changeId.diffHash)
+  })
+})
+
+describe("AC6 — the persisted finding form round-trips", () => {
+  test("the pool is the union and canonicalIds is the ordered canonical subset", () => {
+    const persisted = toPersistedFindings(record())
+    expect(persisted.pool).toHaveLength(2)
+    expect(persisted.canonicalIds).toEqual(["f1"])
+  })
+
+  test("reconstructed findings are THE SAME OBJECTS as their pool entries", () => {
+    const persisted = JSON.parse(JSON.stringify(toPersistedFindings(record())))
+    const back = fromPersistedFindings(persisted)
+    if (!back.ok) throw new Error(back.reason)
+    expect(back.findings[0]).toBe(back.pool[0])
+  })
+
+  test("canonical order is preserved and never re-derived", () => {
+    const a = finding("a", { clusterId: "c" })
+    const b = finding("b", { clusterId: "c" })
+    const c = finding("c")
+    const back = fromPersistedFindings({ pool: [c, b, a], canonicalIds: ["b", "a"] })
+    if (!back.ok) throw new Error(back.reason)
+    expect(back.findings.map((f) => f.id)).toEqual(["b", "a"])
+  })
+
+  test("a canonical finding does NOT alias its absorbed members", () => {
+    const persisted = JSON.parse(JSON.stringify(toPersistedFindings(record())))
+    const back = fromPersistedFindings(persisted)
+    if (!back.ok) throw new Error(back.reason)
+    expect(back.findings[0]!.mergedIds).toEqual(["f2"])
+    expect(back.findings).not.toContain(back.pool[1])
+  })
+
+  test("duplicate pool ids are refused rather than silently deduped", () => {
+    const back = fromPersistedFindings({ pool: [finding("x"), finding("x")], canonicalIds: ["x"] })
+    expect(back.ok).toBe(false)
+  })
+
+  test("a dangling canonical id is refused", () => {
+    const back = fromPersistedFindings({ pool: [finding("x")], canonicalIds: ["y"] })
+    expect(back.ok).toBe(false)
+  })
+
+  test("a repeated canonical id is refused", () => {
+    const back = fromPersistedFindings({ pool: [finding("x")], canonicalIds: ["x", "x"] })
+    expect(back.ok).toBe(false)
+  })
+
+  test("a dangling membership reference is refused", () => {
+    const back = fromPersistedFindings({
+      pool: [finding("x", { mergedIds: ["gone"] })],
+      canonicalIds: ["x"],
+    })
+    expect(back.ok).toBe(false)
+  })
+})

@@ -155,6 +155,32 @@ export function numericFlag(
 }
 
 /**
+ * A STRING flag, with the same repeated-flag refusal `numericFlag` applies.
+ *
+ * `--out` names a directory MAD will write to, so the reasoning that made a
+ * repeated `--cap` a refusal applies unchanged: two spellings of one destination
+ * is an operator who is not sure where their evidence is going, and picking the
+ * first silently is the wrong answer on a flag with a filesystem behind it.
+ */
+export type StringFlag = { ok: true; value: string | undefined } | { ok: false; message: string }
+
+export function stringFlag(argv: readonly string[], name: string): StringFlag {
+  if (!has(argv, name)) return { ok: true, value: undefined }
+  const occurrences = argv.filter((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`)).length
+  if (occurrences > 1) {
+    return {
+      ok: false,
+      message: `--${name} was given ${occurrences} times. Pass it once; MAD will not guess which value is in force.`,
+    }
+  }
+  const raw = flag(argv, name)
+  if (raw === undefined || raw.trim() === "" || raw.startsWith("--")) {
+    return { ok: false, message: `--${name} needs a value. Nothing readable followed it.` }
+  }
+  return { ok: true, value: raw.trim() }
+}
+
+/**
  * Print why the invocation was refused, and return the module's one exit code.
  *
  * Refusing is not gating: this is the same shape the missing-`--pin` path uses,
@@ -208,12 +234,75 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
   const tokenCap = cap.value
   const repeatCount = repeats.value ?? 1
 
+  // FR1 (story 2.2) — `--out` writes the evaluation bundle. Read and checked
+  // here, before either path runs, for the reason the dials above are.
+  const out = stringFlag(argv, "out")
+  if (!out.ok) return refuse(out.message)
+  const protocolVersion = numericFlag(argv, "protocol-version", 1, 1000)
+  if (!protocolVersion.ok) return refuse(protocolVersion.message)
+  const protocolHash = stringFlag(argv, "protocol-hash")
+  if (!protocolHash.ok) return refuse(protocolHash.message)
+  const fixtureVersion = stringFlag(argv, "fixture-version")
+  if (!fixtureVersion.ok) return refuse(fixtureVersion.message)
+  const fixtureHash = stringFlag(argv, "fixture-hash")
+  if (!fixtureHash.ok) return refuse(fixtureHash.message)
+
+  // A SCRIPTED RUN WRITES NOTHING, and that is story 9's A20 rather than a
+  // preference: the worktree is byte-identical before and after a scripted
+  // ablation, and a `--out` that quietly started writing files would end that
+  // guarantee on the path CI actually exercises.
+  if (out.value !== undefined && !has(argv, "live")) {
+    return refuse(
+      "--out writes an evaluation bundle and only the --live path produces one. A scripted " +
+        "ablation compares records in memory and writes nothing, deliberately.",
+    )
+  }
+
   if (has(argv, "live")) {
     // The live path deliberately lives in `ablation/live.ts` and is not inlined
     // here: it is the one module in this tree that imports `adapters/`, and CI
     // can never exercise it. Keeping it behind one import keeps the scripted
     // path — the one the tests gate — free of an opencode client.
     const { runLiveAblation } = await import("../ablation/live.ts")
+    const { codeRevisionFrom } = await import("../ablation/bundle.ts")
+    const { known, unknownValue } = await import("../ablation/manifest.ts")
+
+    const bundle =
+      out.value === undefined
+        ? undefined
+        : {
+            root: out.value,
+            createdAt: new Date().toISOString(),
+            identity: {
+              protocolVersion:
+                protocolVersion.value === undefined
+                  ? unknownValue("--protocol-version was not given")
+                  : known(protocolVersion.value),
+              protocolHash:
+                protocolHash.value === undefined
+                  ? unknownValue("--protocol-hash was not given")
+                  : known(protocolHash.value),
+              fixtureVersion:
+                fixtureVersion.value === undefined
+                  ? unknownValue("--fixture-version was not given")
+                  : known(fixtureVersion.value),
+              fixtureHash:
+                fixtureHash.value === undefined
+                  ? unknownValue("--fixture-hash was not given")
+                  : known(fixtureHash.value),
+              // ESTABLISHED, NOT ASSUMED. Every failure below comes back as an
+              // explicit unknown carrying git's own words (AC4).
+              codeRevision: await codeRevisionFrom(async (command, args) => {
+                const spawned = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "pipe" })
+                const [stdout, stderr] = await Promise.all([
+                  new Response(spawned.stdout).text(),
+                  new Response(spawned.stderr).text(),
+                ])
+                return { exitCode: await spawned.exited, stdout, stderr }
+              }),
+            },
+          }
+
     const report = await runLiveAblation({
       pin,
       serverUrl: flag(argv, "server") ?? "http://localhost:4096",
@@ -228,6 +317,18 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
         ? {}
         : { lenses: flag(argv, "lenses")!.split(",").map((lens) => lens.trim()).filter(Boolean) }),
       repeats: repeatCount,
+      ...(bundle === undefined
+        ? {}
+        : {
+            bundle,
+            onBundleEvent: (event) => {
+              console.log(
+                event.kind === "index"
+                  ? `bundle index ${event.ok ? "written" : "REFUSED"} — ${event.detail}`
+                  : `bundle arm ${event.armId} repeat ${event.repeatId} — ${event.outcome}: ${event.detail}`,
+              )
+            },
+          }),
     })
     for (const line of renderAblation(report)) console.log(line)
     return 0
