@@ -138,6 +138,24 @@ export async function writeBundleIndex(input: WriteBundleIndexInput): Promise<In
   const refusal = await realRefusalFor(input.bundleRoot, input.worktree)
   if (refusal !== undefined) return { ok: false, reason: refusal }
 
+  // REFUSED AT THE WRITER TOO (recheck of 7bf0558). The reader refuses a bundle
+  // index that declares one slot twice, and an evaluation that could WRITE one
+  // would bill a full run and only then discover its own index is unreadable.
+  // Two guards on one rule, at the two ends that can each be reached alone.
+  const slots = new Set<string>()
+  for (const arm of input.arms) {
+    const slot = `${arm.armId}/${arm.repeatId}`
+    if (slots.has(slot)) {
+      return {
+        ok: false,
+        reason:
+          `the evaluation declares arm \`${arm.armId}\` repeat ${arm.repeatId} more than once. ` +
+          `One slot is one run; two declarations would write one dump and count it twice.`,
+      }
+    }
+    slots.add(slot)
+  }
+
   const root = resolve(input.bundleRoot)
   const index: BundleIndex = {
     schemaVersion: BUNDLE_SCHEMA_VERSION,

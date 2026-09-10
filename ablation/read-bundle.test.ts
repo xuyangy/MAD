@@ -847,3 +847,58 @@ describe("recheck — spend shares are dials too", () => {
     expect(text).not.toContain("dials equal across every comparable arm")
   })
 })
+
+/**
+ * NEW-1 from the recheck of `7bf0558`: one run counted as two observations.
+ *
+ * Accepting a duplicate index entry predates that commit; ASSERTING a within-arm
+ * spread from the duplicate rows was new in it, because the observation count
+ * became a count of rows. Both ends are guarded now.
+ */
+describe("a duplicate index slot is a corrupt roster, not a repeated measurement", () => {
+  test("the bundle is refused, and the reason names the slot", async () => {
+    const root = await bundle(
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 0 },
+      ],
+      [{ armId: "control", repeatId: 0 }],
+    )
+    const result = await readBundle(root)
+    expect("error" in result).toBe(true)
+    if (!("error" in result)) throw new Error("unreachable")
+    expect(result.error).toContain("`control/0` more than once")
+  })
+
+  test("it is NOT silently deduped — a healthy sibling does not rescue it", async () => {
+    const root = await bundle(
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 0 },
+        { armId: "pool", repeatId: 0 },
+      ],
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "pool", repeatId: 0 },
+      ],
+    )
+    const result = await readBundle(root)
+    expect("error" in result).toBe(true)
+  })
+
+  test("the same arm at DIFFERENT repeats is fine — that is what repeats are", async () => {
+    const root = await bundle(
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 1 },
+      ],
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 1 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(renderBundle(result)).toContain("OBSERVATIONS PER ARM: control 2")
+  })
+})

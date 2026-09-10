@@ -412,3 +412,36 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
     expect(revision.kind).toBe("unknown")
   })
 })
+
+describe("the writer refuses a duplicate slot too", () => {
+  test("one arm/repeat declared twice is refused before anything is written", async () => {
+    const root = await tempDir("mad-bundle-dup-")
+    const written = await writeBundleIndex({
+      bundleRoot: root,
+      worktree: "/Users/somebody/project",
+      arms: [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 0 },
+      ],
+      createdAt: "2026-09-10T00:00:00.000Z",
+    })
+    expect(written.ok).toBe(false)
+    if (written.ok) throw new Error("unreachable")
+    expect(written.reason).toContain("more than once")
+    expect(await readdir(root)).toEqual([])
+  })
+
+  test("the same arm at different repeats is written normally", async () => {
+    const root = await tempDir("mad-bundle-repeats-")
+    const written = await writeBundleIndex({
+      bundleRoot: root,
+      worktree: "/Users/somebody/project",
+      arms: [
+        { armId: "control", repeatId: 0 },
+        { armId: "control", repeatId: 1 },
+      ],
+      createdAt: "2026-09-10T00:00:00.000Z",
+    })
+    expect(written.ok).toBe(true)
+  })
+})

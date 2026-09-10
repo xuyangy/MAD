@@ -179,6 +179,7 @@ function parseIndex(value: unknown): Parsed<BundleIndex> {
   if (!isRecord(value)) return { ok: false, reason: "it is not a JSON object" }
   if (!Array.isArray(value.arms)) return { ok: false, reason: "it carries no `arms` list" }
   const arms: BundleArm[] = []
+  const slots = new Set<string>()
   for (const [position, entry] of value.arms.entries()) {
     if (!isRecord(entry) || typeof entry.armId !== "string" || typeof entry.repeatId !== "number") {
       return {
@@ -186,6 +187,23 @@ function parseIndex(value: unknown): Parsed<BundleIndex> {
         reason: `arms[${position}] is not \`{ armId: string, repeatId: number }\``,
       }
     }
+    // A DUPLICATE SLOT IS A CORRUPT ROSTER, NOT A REPEATED MEASUREMENT (recheck of
+    // 7bf0558). One declared twice loads ONE directory twice, and the per-arm
+    // observation count then reported two observations of one run and told the
+    // reader to compare a within-arm spread between a run and itself. Deduping
+    // silently would be worse than refusing: it would make a bundle whose index
+    // disagrees with its own contents look healthy. The count downstream is a
+    // count of rows, and this is what makes rows and slots the same thing.
+    const slot = `${entry.armId}/${entry.repeatId}`
+    if (slots.has(slot)) {
+      return {
+        ok: false,
+        reason:
+          `it declares \`${slot}\` more than once. One slot is one run, so a repeated ` +
+          `declaration would count a single measurement as several.`,
+      }
+    }
+    slots.add(slot)
     arms.push({ armId: entry.armId, repeatId: entry.repeatId })
   }
   return {
