@@ -49,7 +49,7 @@ import { createTurnRecorder, type TurnArtifact } from "../adapters/opencode/arti
 import type { ModelBackend } from "../core/ports/model-backend.ts"
 import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
-import { writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
+import { EvaluationBundleError, writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
 import { buildReport, lensTokenCost, type AblationReport } from "./compare.ts"
 import type { EvaluationIdentity } from "./manifest.ts"
 
@@ -175,7 +175,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     // which is the whole of FR1's "a published number is traceable or it is not
     // published".
     if (!index.ok) {
-      throw new Error(`the evaluation bundle could not be declared: ${index.reason}`)
+      throw new EvaluationBundleError(`the evaluation bundle could not be declared: ${index.reason}`)
     }
   }
 
@@ -251,7 +251,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
               // arms whose evidence cannot be written either.
               if (outcome.kind !== "written") {
                 dumpFailures.push(`${run.spec.id} repeat ${run.repeat}: ${outcome.kind}`)
-                throw new Error(
+                throw new EvaluationBundleError(
                   `the evaluation bundle could not record arm \`${run.spec.id}\` repeat ${run.repeat} ` +
                     `(${outcome.kind}). FR1: a published number is traceable to the run that produced it, ` +
                     `or it is not published. Nothing further was billed.`,
@@ -268,7 +268,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   // evidence exists" is the property FR1 asks for, and a property worth having is
   // worth asserting at the point it is relied on.
   if (options.bundle !== undefined && dumpFailures.length > 0) {
-    throw new Error(
+    throw new EvaluationBundleError(
       `the evaluation bundle is incomplete (${dumpFailures.join("; ")}), so no report is returned.`,
     )
   }

@@ -292,12 +292,20 @@ async function loadArm(root: string, arm: BundleArm): Promise<LoadOutcome> {
 }
 
 /**
- * A manifest, validated field by field.
+ * A manifest, validated field by field — INCLUDING INSIDE ITS ARRAYS.
  *
- * It checks SHAPE, not plausibility: the fields the reader and the renderer
- * actually touch must be present and of the right type, and every `Maybe` wrapper
- * must be a well-formed one. A `known` with no `value` is rejected here rather
- * than becoming the comparison key `undefined` further down.
+ * The first version of this function checked only the top level, and a recheck
+ * showed that was finding 2 moved one level down rather than fixed: an array
+ * whose ELEMENTS were junk passed, and then `renderBundle` threw on
+ * `stage.stage`, the new disclosures code threw on `warning.disclosure`, and a
+ * `mergedIds` that was an object threw *inside* the reconstructor. A `known`
+ * carrying `null` was accepted as a comparison key, so two equally malformed arms
+ * agreed all over again.
+ *
+ * THE RULE IS: EVERY VALUE THIS READER OR ITS RENDERER TOUCHES IS CHECKED HERE.
+ * A cast at the end is only honest if the checked set is the touched set, and
+ * that is what the length of this function buys. Failures stay per-arm, so one
+ * malformed file still cannot cost its healthy siblings their report.
  */
 export function parseManifest(value: unknown): Parsed<RunManifest> {
   if (!isRecord(value)) return { ok: false, reason: "is not a JSON object" }
@@ -305,82 +313,201 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     return { ok: false, reason: "carries no numeric `schemaVersion`" }
   }
 
+  const fail = (reason: string): Parsed<RunManifest> => ({ ok: false, reason })
+
+  // ---- identity ----
   const identity = value.identity
-  if (!isRecord(identity)) return { ok: false, reason: "carries no `identity` object" }
-  if (typeof identity.armId !== "string" || typeof identity.repeatId !== "number") {
-    return { ok: false, reason: "carries no `identity.armId` / `identity.repeatId`" }
+  if (!isRecord(identity)) return fail("carries no `identity` object")
+  if (!isText(identity.armId) || !isCount(identity.repeatId)) {
+    return fail("carries no `identity.armId` / `identity.repeatId`")
   }
   const changeId = identity.changeId
-  if (!isRecord(changeId) || typeof changeId.diffHash !== "string") {
-    return { ok: false, reason: "carries no `identity.changeId.diffHash`" }
+  if (!isRecord(changeId) || !isText(changeId.diffHash) || typeof changeId.description !== "string") {
+    return fail("carries no readable `identity.changeId`")
   }
-  for (const field of ["protocolHash", "fixtureHash", "codeRevision"] as const) {
-    const wrapper = wellFormedMaybe(identity[field])
-    if (wrapper !== undefined) {
-      return { ok: false, reason: `has a malformed \`identity.${field}\`: ${wrapper}` }
-    }
+  if (!isStringArray(changeId.files)) return fail("has a non-string `identity.changeId.files` entry")
+  for (const field of ["protocolHash", "fixtureHash"] as const) {
+    const problem = maybeOf(identity[field], isText, "a non-empty string")
+    if (problem !== undefined) return fail(`has a malformed \`identity.${field}\`: ${problem}`)
   }
+  const revision = maybeOf(
+    identity.codeRevision,
+    (payload) => isRecord(payload) && isText(payload.commit) && typeof payload.dirty === "boolean",
+    "`{ commit: string, dirty: boolean }`",
+  )
+  if (revision !== undefined) return fail(`has a malformed \`identity.codeRevision\`: ${revision}`)
 
+  // ---- run ----
+  const run = value.run
+  if (!isRecord(run) || !isText(run.runId) || typeof run.startedAt !== "string") {
+    return fail("carries no readable `run`")
+  }
+  const finished = maybeOf(run.finishedAt, (payload) => typeof payload === "string", "a string")
+  if (finished !== undefined) return fail(`has a malformed \`run.finishedAt\`: ${finished}`)
+
+  // ---- roster ----
   const roster = value.roster
   if (
     !isRecord(roster) ||
-    typeof roster.requested !== "number" ||
-    typeof roster.filled !== "number" ||
-    typeof roster.answered !== "number" ||
-    !Array.isArray(roster.skippedForBudget)
+    !isCount(roster.requested) ||
+    !isCount(roster.filled) ||
+    !isCount(roster.answered) ||
+    !isCount(roster.distinctLineages)
   ) {
-    return { ok: false, reason: "carries no readable `roster`" }
+    return fail("carries no readable `roster` counts")
+  }
+  if (!isStringArray(roster.skippedForBudget)) {
+    return fail("has a non-string `roster.skippedForBudget` entry")
+  }
+  if (!isStringArray(roster.providers)) return fail("has a non-string `roster.providers` entry")
+  if (!Array.isArray(roster.slots) || !Array.isArray(roster.lensSlots)) {
+    return fail("carries no `roster.slots` / `roster.lensSlots` lists")
   }
 
+  // ---- dials ----
   const dials = value.dials
   if (
     !isRecord(dials) ||
-    typeof dials.threshold !== "number" ||
-    typeof dials.maxRounds !== "number" ||
-    typeof dials.maxConcurrency !== "number"
+    !isFinite_(dials.threshold) ||
+    !isCount(dials.maxRounds) ||
+    !isCount(dials.maxConcurrency) ||
+    !(dials.cap === null || isCount(dials.cap))
   ) {
-    return { ok: false, reason: "carries no readable `dials`" }
+    return fail("carries no readable `dials`")
   }
+  const shares = dials.shares
+  if (
+    !isRecord(shares) ||
+    !isFinite_(shares.discover) ||
+    !isFinite_(shares.debate) ||
+    !isFinite_(shares.judge)
+  ) {
+    return fail("carries no readable `dials.shares`")
+  }
+  const preset = maybeOf(dials.preset, isText, "a non-empty string")
+  if (preset !== undefined) return fail(`has a malformed \`dials.preset\`: ${preset}`)
 
+  // ---- spend ----
   const spend = value.spend
-  if (!isRecord(spend) || !Array.isArray(spend.perStage) || !isRecord(spend.total)) {
-    return { ok: false, reason: "carries no readable `spend`" }
+  if (!isRecord(spend) || !Array.isArray(spend.perStage)) {
+    return fail("carries no readable `spend`")
+  }
+  for (const [position, stage] of spend.perStage.entries()) {
+    if (
+      !isRecord(stage) ||
+      !isText(stage.stage) ||
+      !isFinite_(stage.spent) ||
+      !isFinite_(stage.total) ||
+      !(stage.ceiling === null || isFinite_(stage.ceiling))
+    ) {
+      return fail(`has an unreadable \`spend.perStage[${position}]\``)
+    }
+  }
+  const total = spend.total
+  if (
+    !isRecord(total) ||
+    !isFinite_(total.input) ||
+    !isFinite_(total.output) ||
+    !isFinite_(total.reasoning) ||
+    !isFinite_(total.cacheRead) ||
+    !isFinite_(total.cacheWrite)
+  ) {
+    // NOT A TOLERATED GAP. `{}` here used to reach the table and print `NaN`
+    // tokens, which is a number-shaped hole in the one column a reader most
+    // wants to trust.
+    return fail("carries no readable `spend.total`")
+  }
+  if (typeof spend.usageCompleteness !== "string") {
+    return fail("carries no `spend.usageCompleteness`")
   }
 
+  // ---- status ----
   const status = value.status
-  if (!isRecord(status) || typeof status.completion !== "string" || !Array.isArray(status.warnings)) {
-    return { ok: false, reason: "carries no readable `status`" }
+  if (!isRecord(status) || !isText(status.completion) || !Array.isArray(status.warnings)) {
+    return fail("carries no readable `status`")
   }
+  for (const [position, warning] of status.warnings.entries()) {
+    if (
+      !isRecord(warning) ||
+      !isText(warning.code) ||
+      typeof warning.disclosure !== "boolean" ||
+      typeof warning.message !== "string"
+    ) {
+      return fail(`has an unreadable \`status.warnings[${position}]\``)
+    }
+  }
+  const cancelled = maybeOf(status.cancelledAt, (payload) => typeof payload === "string", "a string")
+  if (cancelled !== undefined) return fail(`has a malformed \`status.cancelledAt\`: ${cancelled}`)
 
+  // ---- findings ----
   const findings = value.findings
   if (!isRecord(findings) || !Array.isArray(findings.pool) || !Array.isArray(findings.canonicalIds)) {
-    return { ok: false, reason: "carries no `findings.pool` / `findings.canonicalIds`" }
+    return fail("carries no `findings.pool` / `findings.canonicalIds`")
   }
   for (const [position, entry] of findings.pool.entries()) {
-    if (!isRecord(entry) || typeof entry.id !== "string") {
-      return { ok: false, reason: `has a pool entry at [${position}] with no string \`id\`` }
+    if (!isRecord(entry) || !isText(entry.id)) {
+      return fail(`has a pool entry at [${position}] with no string \`id\``)
+    }
+    // `mergedIds` IS ITERATED BY THE RECONSTRUCTOR. An object here threw
+    // "`{}` is not iterable" out of `fromPersistedFindings` — inside `readBundle`,
+    // where nothing caught it.
+    if (entry.mergedIds !== undefined && !isStringArray(entry.mergedIds)) {
+      return fail(`has a pool entry at [${position}] whose \`mergedIds\` is not a list of strings`)
     }
   }
-  for (const [position, id] of findings.canonicalIds.entries()) {
-    if (typeof id !== "string") {
-      return { ok: false, reason: `has a non-string \`canonicalIds[${position}]\`` }
-    }
+  if (!isStringArray(findings.canonicalIds)) {
+    return fail("has a non-string `canonicalIds` entry")
   }
+
+  // ---- stage outputs ----
+  const outputs = value.stageOutputs
+  if (!isRecord(outputs) || typeof outputs.recordFile !== "string") {
+    return fail("carries no readable `stageOutputs`")
+  }
+  const turnFiles = maybeOf(outputs.turnFiles, isCount, "a whole number")
+  if (turnFiles !== undefined) return fail(`has a malformed \`stageOutputs.turnFiles\`: ${turnFiles}`)
 
   return { ok: true, value: value as unknown as RunManifest }
 }
 
-/** Returns the reason a `Maybe` wrapper is malformed, or `undefined` when it is fine. */
-function wellFormedMaybe(value: unknown): string | undefined {
+function isText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function isFinite_(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+}
+
+function isCount(value: unknown): value is number {
+  return isFinite_(value) && Number.isInteger(value)
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+}
+
+/**
+ * Returns the reason a `Maybe` wrapper is malformed, or `undefined` when it is
+ * fine — INCLUDING the type of what a `known` carries.
+ *
+ * The first version checked only `value !== undefined`, so
+ * `{kind:"known", value:null}` was accepted and became the comparison key
+ * `"null"`. Two arms carrying it then AGREED — the exact defect the
+ * unknown-is-not-agreement rule exists to prevent, re-entering through a
+ * malformed payload instead of through an honest unknown.
+ */
+function maybeOf(
+  value: unknown,
+  ok: (payload: unknown) => boolean,
+  expected: string,
+): string | undefined {
   if (!isRecord(value)) return "it is not a `{ kind }` wrapper"
   if (value.kind === "unknown") {
     return typeof value.why === "string" ? undefined : "an `unknown` with no string `why`"
   }
   if (value.kind === "known") {
-    // A `known` WITH NO `value` IS THE DANGEROUS ONE. It used to serialize to the
-    // comparison key `undefined`, which two malformed arms then shared — so they
-    // agreed, formed a cohort, and were reported as comparable.
-    return value.value === undefined ? "a `known` carrying no `value`" : undefined
+    if (!("value" in value)) return "a `known` carrying no `value`"
+    return ok(value.value) ? undefined : `a \`known\` whose value is not ${expected}`
   }
   return `an unrecognised kind \`${String(value.kind)}\``
 }
@@ -640,9 +767,15 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
   const dialSets = new Map<string, string[]>()
   for (const row of comparable) {
     const dials = row.manifest.dials
+    // THE SHARES ARE PART OF THE KEY (recheck, 2026-09-10). They were left out,
+    // so two arms whose discovery share differed — 30% of the cap against 60% —
+    // printed "dials equal across every comparable arm". A stage ceiling is a
+    // dial: `core/budget/ledger.ts` derives every per-stage gate from it, so it
+    // decides which findings can reach judgement at all.
     const key =
       `threshold ${dials.threshold}; round cap ${dials.maxRounds}; ` +
-      `token cap ${dials.cap === null ? "none" : dials.cap}; peak ${dials.maxConcurrency}`
+      `token cap ${dials.cap === null ? "none" : dials.cap}; peak ${dials.maxConcurrency}; ` +
+      `shares ${dials.shares.discover}/${dials.shares.debate}/${dials.shares.judge}`
     const holders = dialSets.get(key) ?? []
     holders.push(`${row.armId}/${row.repeatId}`)
     dialSets.set(key, holders)
@@ -657,14 +790,31 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
     lines.push(`    dials equal across every comparable arm (${[...dialSets.keys()][0]}).`)
   }
 
-  const repeats = new Set(comparable.map((row) => row.repeatId)).size
+  // OBSERVATIONS PER ARM, NOT DISTINCT REPEAT IDS (recheck, 2026-09-10). The
+  // union of `repeatId` across arms counted `control/0` plus `pool/1` as two
+  // repeats and told the reader to compare within-arm spread, when each arm had
+  // exactly one observation and no spread exists. A noise floor is a per-arm
+  // fact, so it is reported per arm.
+  const perArm = new Map<string, number>()
+  for (const row of comparable) perArm.set(row.armId, (perArm.get(row.armId) ?? 0) + 1)
+  const withSpread = [...perArm].filter(([, count]) => count > 1).map(([armId]) => armId)
+  const withoutSpread = [...perArm].filter(([, count]) => count === 1).map(([armId]) => armId)
+
   lines.push(
-    `    REPEATS: ${repeats}. NOISE FLOOR: ${
-      repeats > 1
-        ? "compare the spread between repeats of the SAME arm against the difference between arms"
-        : "NOT MEASURED — one run per arm cannot tell a real arm difference from run-to-run variation"
-    }.`,
+    `    OBSERVATIONS PER ARM: ${[...perArm].map(([armId, count]) => `${armId} ${count}`).join(", ")}.`,
   )
+  if (withSpread.length > 0) {
+    lines.push(
+      `    NOISE FLOOR: for ${withSpread.join(", ")}, compare the spread between repeats of the SAME`,
+      `    arm against the difference between arms.`,
+    )
+  }
+  if (withoutSpread.length > 0) {
+    lines.push(
+      `    NOISE FLOOR: NOT MEASURED for ${withoutSpread.join(", ")} — one run of an arm cannot tell a`,
+      `    real arm difference from run-to-run variation.`,
+    )
+  }
 
   for (const row of comparable) {
     const degradations = row.manifest.status.warnings.filter((warning) => !warning.disclosure)
@@ -681,10 +831,16 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
       )
     }
     if (row.manifest.roster.skippedForBudget.length > 0) {
+      // SCOPED TO THOSE SLOTS (recheck, 2026-09-10). This used to add "no model
+      // failed and nobody cancelled", which is a claim about the WHOLE RUN and is
+      // simply false beside a `model-dropped-out` warning or a cancelled status —
+      // both of which can hold at the same time. The true, narrow statement is
+      // about the named slots and nothing else.
       lines.push(
         `    ${row.armId}/${row.repeatId} the BUDGET refused ${row.manifest.roster.skippedForBudget.length} ` +
-          `discovery slot(s) (${row.manifest.roster.skippedForBudget.join(", ")}) — no model failed and ` +
-          `nobody cancelled; \`answered\` is smaller than the roster for that reason`,
+          `discovery slot(s) (${row.manifest.roster.skippedForBudget.join(", ")}): those slots were not ` +
+          `attempted, and no model is blamed for them. It does not follow that nothing else reduced ` +
+          `this run — read the warnings and the completion status beside it.`,
       )
     }
     if (row.manifest.roster.filled < row.manifest.roster.requested) {

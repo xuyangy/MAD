@@ -34,6 +34,9 @@ interface Fake {
   warnings?: unknown[]
   skippedForBudget?: string[]
   findings?: unknown
+  perStage?: unknown
+  total?: unknown
+  shares?: unknown
 }
 
 function manifestFor(fake: Fake): unknown {
@@ -69,12 +72,12 @@ function manifestFor(fake: Fake): unknown {
       maxRounds: 2,
       maxConcurrency: 4,
       cap: 1000,
-      shares: { discover: 0.3, debate: 0.65, judge: 1 },
+      shares: fake.shares ?? { discover: 0.3, debate: 0.65, judge: 1 },
       preset: unknownValue("the caller named no preset"),
     },
     spend: {
-      perStage: [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
-      total: { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      perStage: fake.perStage ?? [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
+      total: fake.total ?? { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
       usageCompleteness: "unaudited",
     },
     status: {
@@ -621,7 +624,7 @@ describe("finding 7 — AC7 disclosures reach the table", () => {
     expect(text).toContain("disclosures: provider-fan-out")
   })
 
-  test("budget-skipped slots are named, and blamed on the budget rather than a model", async () => {
+  test("budget-skipped slots are named, and the claim stays SCOPED TO THOSE SLOTS", async () => {
     const root = await bundle(
       [{ armId: "on", repeatId: 0 }],
       [{ armId: "on", repeatId: 0, skippedForBudget: ["discovery-3"] }],
@@ -630,7 +633,33 @@ describe("finding 7 — AC7 disclosures reach the table", () => {
     if ("error" in result) throw new Error(result.error)
     const text = renderBundle(result)
     expect(text).toContain("the BUDGET refused 1 discovery slot(s) (discovery-3)")
-    expect(text).toContain("no model failed and nobody cancelled")
+    expect(text).toContain("no model is blamed for them")
+    // The recheck's finding: this used to claim nothing else reduced the run,
+    // which is false beside a drop-out warning or a cancellation.
+    expect(text).not.toContain("no model failed and nobody cancelled")
+  })
+
+  test("A BUDGET SKIP BESIDE A DROP-OUT AND A CANCELLATION CONTRADICTS NOTHING", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          completion: "cancelled",
+          skippedForBudget: ["discovery-3"],
+          warnings: [
+            { code: "model-dropped-out", stage: "discover", message: "gone", disclosure: false },
+          ],
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("DEGRADED — 1 warning(s): model-dropped-out")
+    expect(text).toContain("the BUDGET refused 1 discovery slot(s)")
+    expect(text).toContain("read the warnings and the completion status beside it")
   })
 
   test("the report says plainly that it compared no findings", async () => {
@@ -638,5 +667,183 @@ describe("finding 7 — AC7 disclosures reach the table", () => {
     const result = await readBundle(root)
     if ("error" in result) throw new Error(result.error)
     expect(renderBundle(result)).toContain("NO FINDING WAS COMPARED ACROSS ARMS")
+  })
+})
+
+/**
+ * The recheck of `bf78a8a` (2026-09-10). Each test below is a defect the FIXES
+ * introduced or left standing — a reviewer found them, this suite did not.
+ */
+describe("recheck — validation reaches inside the arrays", () => {
+  const malformed: [string, unknown][] = [
+    ["a junk per-stage row", { spendPerStage: [null] }],
+    ["a junk warning", { warnings: [null] }],
+  ]
+
+  test("a junk `spend.perStage` row is unreadable, not a crash in the renderer", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, perStage: [null] }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("spend.perStage[0]")
+  })
+
+  test("a junk `status.warnings` entry is unreadable, not a crash in the disclosures", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, warnings: [null] }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("status.warnings[0]")
+  })
+
+  test("a `mergedIds` that is not a list is unreadable, not `{} is not iterable`", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          findings: { pool: [{ id: "x", mergedIds: {} }], canonicalIds: ["x"], lensInstructions: [] },
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("`mergedIds` is not a list of strings")
+  })
+
+  test("AN EMPTY `spend.total` IS UNREADABLE — never a table printing NaN tokens", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, total: {} }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable[0]!.reason).toContain("`spend.total`")
+    expect(renderBundle(result)).not.toContain("NaN")
+  })
+
+  test("A `known` CARRYING `null` IS NOT A COMPARISON KEY", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, protocolHash: { kind: "known", value: null } },
+        { armId: "off", repeatId: 0, protocolHash: { kind: "known", value: null } },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable).toHaveLength(2)
+    for (const row of result.unreadable) {
+      expect(row.reason).toContain("not a non-empty string")
+    }
+  })
+
+  test("a `codeRevision` known value of the wrong shape is malformed", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, codeRevision: { kind: "known", value: {} } }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("{ commit: string, dirty: boolean }")
+  })
+
+  test("the malformed shapes above are still PER-ARM", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0, total: {} },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable.map((row) => row.armId)).toEqual(["on"])
+    expect(result.unreadable).toHaveLength(1)
+  })
+
+  test("the malformed list is not vacuous — the same shapes minus the defect load fine", async () => {
+    for (const [, _shape] of malformed) {
+      const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+      const result = await readBundle(root)
+      if ("error" in result) throw new Error(result.error)
+      expect(result.comparable).toHaveLength(1)
+    }
+  })
+})
+
+describe("recheck — the noise floor is a PER-ARM fact", () => {
+  test("two arms with one observation each are NOT two repeats", async () => {
+    const root = await bundle(
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "pool", repeatId: 1 },
+      ],
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "pool", repeatId: 1 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("OBSERVATIONS PER ARM: control 1, pool 1")
+    expect(text).toContain("NOT MEASURED for control, pool")
+    expect(text).not.toContain("compare the spread between repeats")
+  })
+
+  test("a mixed bundle names which arms have a spread and which do not", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "on", repeatId: 1 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "on", repeatId: 1 },
+        { armId: "off", repeatId: 0 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("OBSERVATIONS PER ARM: on 2, off 1")
+    expect(text).toContain("for on, compare the spread")
+    expect(text).toContain("NOT MEASURED for off")
+  })
+})
+
+describe("recheck — spend shares are dials too", () => {
+  test("arms whose SHARES differ are not called equal", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0, shares: { discover: 0.6, debate: 0.65, judge: 1 } },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("DIFFER IN MORE THAN THE INTERVENTION")
+    expect(text).toContain("shares 0.6/0.65/1")
+    expect(text).not.toContain("dials equal across every comparable arm")
   })
 })

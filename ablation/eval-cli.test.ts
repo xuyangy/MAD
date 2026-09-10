@@ -15,7 +15,7 @@ import { join } from "node:path"
 
 import { main as ablationMain, stringFlag } from "../scripts/ablation.ts"
 import { main as evalReadMain } from "../scripts/eval-read.ts"
-import { BUNDLE_FILE, BUNDLE_SCHEMA_VERSION } from "./bundle.ts"
+import { BUNDLE_FILE, BUNDLE_SCHEMA_VERSION, EvaluationBundleError } from "./bundle.ts"
 import { MANIFEST_FILE, MANIFEST_SCHEMA_VERSION, known, unknownValue } from "./manifest.ts"
 
 const scratch: string[] = []
@@ -178,5 +178,72 @@ describe("the evaluation reader CLI", () => {
     expect(text).toContain("COMPARABLE ARMS")
     expect(text).toContain("ceiling none")
     expect(text).toContain("USAGE COMPLETENESS is `unaudited`")
+  })
+})
+
+/**
+ * The recheck's CLI regression (2026-09-10).
+ *
+ * Making a failed mandatory dump stop the evaluation (finding 6) was right, and
+ * it broke this file's own "main always returns 0" contract on the way: the
+ * deliberate refusal propagated out of `runLiveAblation`, past an uncaught
+ * boundary, and the executable exited 1 with a stack trace. A refusal that looks
+ * like a crash teaches the operator to distrust the wrong thing.
+ */
+describe("a deliberate bundle stop is a refusal, not a crash", () => {
+  const liveArgv = (out: string) => [
+    "bun",
+    "ablation",
+    "--pin",
+    "anthropic/claude-sonnet-4-5",
+    "--live",
+    "--out",
+    out,
+  ]
+
+  test("it prints, says no report follows, and STILL RETURNS 0", async () => {
+    const { code, text } = await captured(() =>
+      ablationMain(liveArgv("/scratch/mad-eval"), {
+        runLive: () => {
+          throw new EvaluationBundleError(
+            "the evaluation bundle could not record arm `pool` repeat 0 (failed)",
+          )
+        },
+      }),
+    )
+    expect(code).toBe(0)
+    expect(text).toContain("the evaluation STOPPED and NO REPORT IS PRINTED")
+    expect(text).toContain("could not record arm `pool` repeat 0")
+    expect(text).toContain("This is a refusal, not a crash")
+    expect(text).toContain("KEPT their")
+  })
+
+  test("ANY OTHER ERROR STILL PROPAGATES — the catch is narrow, not a blanket", async () => {
+    await expect(
+      captured(() =>
+        ablationMain(liveArgv("/scratch/mad-eval"), {
+          runLive: () => {
+            throw new Error("the provider hung up")
+          },
+        }),
+      ),
+    ).rejects.toThrow("the provider hung up")
+  })
+
+  test("a live run that succeeds still prints its report", async () => {
+    const { code, text } = await captured(() =>
+      ablationMain(liveArgv("/scratch/mad-eval"), {
+        runLive: async () => ({
+          arms: [],
+          pairings: [],
+          matcherCalibration: { overMerge: { merged: 0, of: 0 }, underMerge: { unmerged: 0, of: 0 } },
+          anyScripted: false,
+          repeats: 1,
+        }),
+      }),
+    )
+    expect(code).toBe(0)
+    expect(text).toContain("CAP-9")
+    expect(text).not.toContain("the evaluation STOPPED")
   })
 })

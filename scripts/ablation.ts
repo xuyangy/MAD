@@ -209,7 +209,26 @@ export function parsePin(value: string): Pin | undefined {
   return { providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() }
 }
 
-export async function main(argv: readonly string[] = Bun.argv): Promise<number> {
+/**
+ * Injected so the live path's REFUSALS can be asserted without a provider
+ * (story 2.2 recheck, 2026-09-10).
+ *
+ * It is the same shape `ablation/live.ts` already uses for `createClient` and
+ * `shell`, and for the reason recorded there: the live path is the one thing CI
+ * can never drive, so the only way a line on it is testable at all is a seam.
+ * What this one makes testable is the catch below — that a deliberate stop
+ * prints and returns 0 rather than exiting 1 with a stack trace.
+ */
+export interface AblationOverrides {
+  runLive?: (
+    options: Parameters<typeof import("../ablation/live.ts").runLiveAblation>[0],
+  ) => Promise<Awaited<ReturnType<typeof import("../ablation/live.ts").runLiveAblation>>>
+}
+
+export async function main(
+  argv: readonly string[] = Bun.argv,
+  overrides: AblationOverrides = {},
+): Promise<number> {
   const raw = flag(argv, "pin")
   const pin = raw === undefined ? undefined : parsePin(raw)
   if (!pin) {
@@ -264,7 +283,7 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
     // can never exercise it. Keeping it behind one import keeps the scripted
     // path — the one the tests gate — free of an opencode client.
     const { runLiveAblation } = await import("../ablation/live.ts")
-    const { codeRevisionFrom } = await import("../ablation/bundle.ts")
+    const { codeRevisionFrom, EvaluationBundleError } = await import("../ablation/bundle.ts")
     const { known, unknownValue } = await import("../ablation/manifest.ts")
 
     const bundle =
@@ -303,33 +322,56 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
             },
           }
 
-    const report = await runLiveAblation({
-      pin,
-      serverUrl: flag(argv, "server") ?? "http://localhost:4096",
-      directory: flag(argv, "directory") ?? process.cwd(),
-      ...(flag(argv, "target") === undefined ? {} : { target: flag(argv, "target")! }),
-      ...(tokenCap === undefined ? {} : { tokenCap }),
-      // The lens arm is the third arm, and without this flag the live path could
-      // only ever run two — while `LIVE-RUN.md` documented three and story 9's
-      // whole third-arm thesis (do lenses earn their tokens?) had no live path at
-      // all (code review 2026-09-06).
-      ...(flag(argv, "lenses") === undefined
-        ? {}
-        : { lenses: flag(argv, "lenses")!.split(",").map((lens) => lens.trim()).filter(Boolean) }),
-      repeats: repeatCount,
-      ...(bundle === undefined
-        ? {}
-        : {
-            bundle,
-            onBundleEvent: (event) => {
-              console.log(
-                event.kind === "index"
-                  ? `bundle index ${event.ok ? "written" : "REFUSED"} — ${event.detail}`
-                  : `bundle arm ${event.armId} repeat ${event.repeatId} — ${event.outcome}: ${event.detail}`,
-              )
-            },
-          }),
-    })
+    // THE BUNDLE'S DELIBERATE STOP IS CAUGHT HERE (recheck finding, 2026-09-10).
+    // A mandatory dump that could not be written stops the evaluation on purpose —
+    // FR1: a published number is traceable to the run that produced it, or it is
+    // not published — and that refusal reaching the operator as an unhandled stack
+    // trace, with the process exiting 1, reads as a crash in MAD rather than as
+    // the refusal it is. It also broke this file's own "main always returns 0"
+    // contract. Only `EvaluationBundleError` is caught; anything else still
+    // propagates exactly as it did before this story.
+    let report: Awaited<ReturnType<typeof runLiveAblation>>
+    try {
+      report = await (overrides.runLive ?? runLiveAblation)({
+        pin,
+        serverUrl: flag(argv, "server") ?? "http://localhost:4096",
+        directory: flag(argv, "directory") ?? process.cwd(),
+        ...(flag(argv, "target") === undefined ? {} : { target: flag(argv, "target")! }),
+        ...(tokenCap === undefined ? {} : { tokenCap }),
+        // The lens arm is the third arm, and without this flag the live path could
+        // only ever run two — while `LIVE-RUN.md` documented three and story 9's
+        // whole third-arm thesis (do lenses earn their tokens?) had no live path at
+        // all (code review 2026-09-06).
+        ...(flag(argv, "lenses") === undefined
+          ? {}
+          : { lenses: flag(argv, "lenses")!.split(",").map((lens) => lens.trim()).filter(Boolean) }),
+        repeats: repeatCount,
+        ...(bundle === undefined
+          ? {}
+          : {
+              bundle,
+              onBundleEvent: (event) => {
+                console.log(
+                  event.kind === "index"
+                    ? `bundle index ${event.ok ? "written" : "REFUSED"} — ${event.detail}`
+                    : `bundle arm ${event.armId} repeat ${event.repeatId} — ${event.outcome}: ${event.detail}`,
+                )
+              },
+            }),
+      })
+    } catch (error) {
+      if (!(error instanceof EvaluationBundleError)) throw error
+      console.log(
+        `CAP-9 ablation — the evaluation STOPPED and NO REPORT IS PRINTED.\n` +
+          `\n` +
+          `  ${error.message}\n` +
+          `\n` +
+          `This is a refusal, not a crash. FR1: a published number is traceable to the run that\n` +
+          `produced it, or it is not published. Arms that completed before this point KEPT their\n` +
+          `dumps and are readable with \`bun run eval-read\`; no arm after it was billed.`,
+      )
+      return 0
+    }
     for (const line of renderAblation(report)) console.log(line)
     return 0
   }

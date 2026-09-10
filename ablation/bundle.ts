@@ -59,6 +59,24 @@ import {
   type Maybe,
 } from "./manifest.ts"
 
+/**
+ * The evaluation could not record what it was doing, so it stopped.
+ *
+ * A NAMED CLASS, because the CLI has to tell this apart from a crash. FR1's stop
+ * is a DELIBERATE outcome — the evidence could not be written, so nothing further
+ * is billed and no number is published — and a deliberate outcome that reaches
+ * the user as an unhandled stack trace reads as a bug in MAD rather than as the
+ * refusal it is. `scripts/ablation.ts` catches this one and keeps its "main
+ * always returns 0" contract; anything else still propagates, exactly as it did
+ * before story 2.2 (recheck finding, 2026-09-10).
+ */
+export class EvaluationBundleError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "EvaluationBundleError"
+  }
+}
+
 /** The bundle index's filename, at the bundle root. */
 export const BUNDLE_FILE = "bundle.json"
 
