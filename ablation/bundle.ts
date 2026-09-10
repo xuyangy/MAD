@@ -42,6 +42,7 @@ import { join, resolve } from "node:path"
 import {
   ARTIFACTS_ENV,
   dumpRunArtifacts,
+  realRefusalFor,
   refusalFor,
   safeName,
   type ArtifactOutcome,
@@ -98,9 +99,25 @@ export interface WriteBundleIndexInput {
   createdAt: string
 }
 
-/** Declare the evaluation's arms. NEVER THROWS. */
+/**
+ * Declare the evaluation's arms. NEVER THROWS.
+ *
+ * THE REAL-PATH GUARD, NOT THE LEXICAL ONE (review finding 1, 2026-09-10). This
+ * first reached for `refusalFor`, which compares resolved-but-not-symlink-followed
+ * strings — so a bundle root that was a symlink into the worktree passed the check
+ * and the index was written inside the repository under review. `realRefusalFor`
+ * runs the same containment test on paths resolved through their nearest existing
+ * ancestor, which is the check `dumpRunArtifacts` has always made before writing.
+ * BOTH CHECKS RUN, IN THIS ORDER, exactly as `dumpRunArtifacts` runs them. The
+ * lexical one is not redundant: `realRefusalFor` starts by `resolve`-ing its
+ * argument, which turns a RELATIVE root into an absolute one against the current
+ * working directory — so on its own it would silently accept `--out out` instead
+ * of refusing it by name.
+ */
 export async function writeBundleIndex(input: WriteBundleIndexInput): Promise<IndexWritten> {
-  const refusal = refusalFor(input.bundleRoot, input.worktree)
+  const lexical = refusalFor(input.bundleRoot, input.worktree)
+  if (lexical !== undefined) return { ok: false, reason: lexical }
+  const refusal = await realRefusalFor(input.bundleRoot, input.worktree)
   if (refusal !== undefined) return { ok: false, reason: refusal }
 
   const root = resolve(input.bundleRoot)

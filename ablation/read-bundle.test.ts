@@ -30,6 +30,10 @@ interface Fake {
   diffHash?: string
   schemaVersion?: number
   completion?: string
+  threshold?: number
+  warnings?: unknown[]
+  skippedForBudget?: string[]
+  findings?: unknown
 }
 
 function manifestFor(fake: Fake): unknown {
@@ -58,10 +62,10 @@ function manifestFor(fake: Fake): unknown {
       providers: ["anthropic"],
       slots: [],
       lensSlots: [],
-      skippedForBudget: [],
+      skippedForBudget: fake.skippedForBudget ?? [],
     },
     dials: {
-      threshold: 0.5,
+      threshold: fake.threshold ?? 0.5,
       maxRounds: 2,
       maxConcurrency: 4,
       cap: 1000,
@@ -76,12 +80,12 @@ function manifestFor(fake: Fake): unknown {
     status: {
       completion: fake.completion ?? "completed",
       cancelledAt: unknownValue("the run was never cancelled"),
-      warnings: [],
+      warnings: fake.warnings ?? [],
       routeCounts: { kind: "did-not-run" },
       debateCounts: { kind: "did-not-run" },
       judgeCounts: { kind: "did-not-run" },
     },
-    findings: { pool: [], canonicalIds: [], lensInstructions: [] },
+    findings: fake.findings ?? { pool: [], canonicalIds: [], lensInstructions: [] },
     stageOutputs: { recordFile: "record.json", turnFiles: known(2) },
   }
 }
@@ -207,7 +211,7 @@ describe("AC2 — arms that do not match are segregated, with the reason", () =>
     }
   })
 
-  test("a two-versus-two split has no majority and segregates EVERYTHING", async () => {
+  test("a two-versus-two split has no plurality and segregates EVERYTHING", async () => {
     const root = await bundle(
       [
         { armId: "a", repeatId: 0 },
@@ -226,7 +230,7 @@ describe("AC2 — arms that do not match are segregated, with the reason", () =>
     if ("error" in result) throw new Error(result.error)
     expect(result.comparable).toEqual([])
     expect(result.segregated).toHaveLength(4)
-    expect(result.segregated[0]!.reason).toContain("no majority")
+    expect(result.segregated[0]!.reason).toContain("no plurality")
   })
 })
 
@@ -343,5 +347,296 @@ describe("AC7 — the reader states its own limits", () => {
     const result = await readBundle(root)
     if ("error" in result) throw new Error(result.error)
     expect(renderBundle(result)).toContain("degraded")
+  })
+})
+
+/**
+ * Review findings 2, 3, 5 and 7 (2026-09-10). Each test below is a defect that
+ * shipped in 51023b6 and was found by a reviewer, not by this suite.
+ */
+
+async function withRawManifest(armId: string, repeatId: number, body: string): Promise<string> {
+  const root = await tempDir("mad-read-bundle-raw-")
+  await writeFile(
+    join(root, BUNDLE_FILE),
+    JSON.stringify({
+      schemaVersion: BUNDLE_SCHEMA_VERSION,
+      createdAt: "2026-09-10T00:00:00.000Z",
+      arms: [{ armId, repeatId }],
+    }),
+  )
+  const dir = join(root, armId, String(repeatId), `run-${armId}-${repeatId}`)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, MANIFEST_FILE), body)
+  return root
+}
+
+describe("finding 2 — a malformed manifest is unreadable, and takes nothing else down", () => {
+  test("a `null` manifest does not throw", async () => {
+    const result = await readBundle(await withRawManifest("on", 0, "null"))
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable).toHaveLength(1)
+    expect(result.unreadable[0]!.reason).toContain("not a JSON object")
+  })
+
+  test("a manifest with only a schemaVersion does not throw", async () => {
+    const result = await readBundle(await withRawManifest("on", 0, '{"schemaVersion":1}'))
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("`identity`")
+  })
+
+  test("ONE BAD FILE DOES NOT COST ITS HEALTHY SIBLINGS THEIR REPORT", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [{ armId: "on", repeatId: 0 }],
+    )
+    const dir = join(root, "off", "0", "run-off-0")
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, MANIFEST_FILE), "null")
+
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable).toHaveLength(1)
+    expect(result.comparable.map((row) => row.armId)).toEqual(["on"])
+  })
+
+  test("A `known` WITH NO `value` IS NOT AGREEMENT — it is malformed", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, protocolHash: { kind: "known" } },
+        { armId: "off", repeatId: 0, protocolHash: { kind: "known" } },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable).toHaveLength(2)
+    for (const row of result.unreadable) {
+      expect(row.reason).toContain("carrying no `value`")
+    }
+  })
+
+  test("an unrecognised wrapper kind is malformed, not silently unknown", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, codeRevision: { kind: "maybe", value: "x" } }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("unrecognised kind")
+  })
+
+  test("an index that is not a bundle index is an error naming why", async () => {
+    const root = await tempDir("mad-read-bundle-badindex-")
+    await writeFile(join(root, BUNDLE_FILE), '{"arms":[{"armId":"on"}]}')
+    const result = await readBundle(root)
+    expect("error" in result).toBe(true)
+    if (!("error" in result)) throw new Error("unreachable")
+    expect(result.error).toContain("arms[0]")
+  })
+})
+
+describe("finding 3 — AC6 is enforced on an ACTUAL load, not only in a helper test", () => {
+  test("duplicate pool ids make the arm unreadable, never a printed count", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          findings: {
+            pool: [{ id: "f1" }, { id: "f1" }],
+            canonicalIds: ["f1"],
+            lensInstructions: [],
+          },
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable[0]!.reason).toContain("two findings with id")
+  })
+
+  test("a dangling canonical id makes the arm unreadable", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          findings: { pool: [], canonicalIds: ["missing", "missing"], lensInstructions: [] },
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable).toHaveLength(1)
+  })
+
+  test("a valid arm carries its reconstructed canonical findings on the row", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          findings: {
+            pool: [{ id: "a" }, { id: "b" }],
+            canonicalIds: ["b"],
+            lensInstructions: [],
+          },
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable[0]!.findings.map((finding) => finding.id)).toEqual(["b"])
+    // THE SAME OBJECT as its pool entry — the property the whole persisted form exists for.
+    expect(result.comparable[0]!.findings[0]).toBe(result.comparable[0]!.manifest.findings.pool[1])
+  })
+})
+
+describe("finding 5 — the manifest must agree with the slot it was filed under", () => {
+  test("one arm's dump copied into another arm's slot is UNREADABLE, not relabelled", async () => {
+    const root = await bundle(
+      [
+        { armId: "control", repeatId: 0 },
+        { armId: "pool", repeatId: 0 },
+      ],
+      [{ armId: "control", repeatId: 0 }],
+    )
+    const dir = join(root, "pool", "0", "run-pool-0")
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, MANIFEST_FILE),
+      JSON.stringify(manifestFor({ armId: "control", repeatId: 0 })),
+    )
+
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable.map((row) => row.armId)).toEqual(["control"])
+    expect(result.unreadable).toHaveLength(1)
+    expect(result.unreadable[0]!.armId).toBe("pool")
+    expect(result.unreadable[0]!.reason).toContain("says it is arm `control`")
+  })
+
+  test("a repeat id that disagrees with its slot is unreadable too", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 1 }], [])
+    const dir = join(root, "on", "1", "run-on-1")
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, MANIFEST_FILE), JSON.stringify(manifestFor({ armId: "on", repeatId: 0 })))
+
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable[0]!.reason).toContain("repeat 0")
+  })
+})
+
+describe("finding 7 — AC7 disclosures reach the table", () => {
+  test("arms whose DIALS differ say so, and say it is not the intervention", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, threshold: 0.5 },
+        { armId: "off", repeatId: 0, threshold: 0.9 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("DIFFER IN MORE THAN THE INTERVENTION")
+    expect(text).toContain("threshold 0.9")
+  })
+
+  test("equal dials are stated, not left to inference", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(renderBundle(result)).toContain("dials equal across every comparable arm")
+  })
+
+  test("ONE REPEAT PRINTS `NOT MEASURED` for the noise floor", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(renderBundle(result)).toContain("NOISE FLOOR: NOT MEASURED")
+  })
+
+  test("two repeats say what the noise floor is for", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "on", repeatId: 1 },
+      ],
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "on", repeatId: 1 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(renderBundle(result)).toContain("compare the spread between repeats")
+  })
+
+  test("a degraded arm NAMES its warning codes, not just the word `degraded`", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          completion: "degraded",
+          warnings: [
+            { code: "model-dropped-out", stage: "discover", message: "gone", disclosure: false },
+            { code: "provider-fan-out", stage: "roster", message: "sent", disclosure: true },
+          ],
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("DEGRADED — 1 warning(s): model-dropped-out")
+    expect(text).toContain("disclosures: provider-fan-out")
+  })
+
+  test("budget-skipped slots are named, and blamed on the budget rather than a model", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, skippedForBudget: ["discovery-3"] }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("the BUDGET refused 1 discovery slot(s) (discovery-3)")
+    expect(text).toContain("no model failed and nobody cancelled")
+  })
+
+  test("the report says plainly that it compared no findings", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(renderBundle(result)).toContain("NO FINDING WAS COMPARED ACROSS ARMS")
   })
 })

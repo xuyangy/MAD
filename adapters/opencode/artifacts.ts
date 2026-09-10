@@ -137,8 +137,16 @@ export function refusalFor(root: string, worktree: string): string | undefined {
  * containment test on the result. A path that does not resolve is left as-is:
  * `MAD_ARTIFACTS` naming a directory that has yet to be created is the ordinary
  * first run, not an attack, and refusing it would break the feature's default.
+ *
+ * EXPORTED as of story 2.2 (review finding 1). `ablation/bundle.ts` writes a
+ * bundle index at a caller-named root, and it reached for the SYNCHRONOUS
+ * `refusalFor` because that was the exported one — so a symlinked root pointing
+ * into the worktree passed, and the index was written inside the repository
+ * under review. A guarantee with no acceptable failure rate must not be
+ * reachable only in its weaker form; both are exported now, and the async one is
+ * what any caller that can await must use.
  */
-async function realRefusalFor(root: string, worktree: string): Promise<string | undefined> {
+export async function realRefusalFor(root: string, worktree: string): Promise<string | undefined> {
   const [realRoot, realRepo] = await Promise.all([realOrSelf(resolve(root)), realOrSelf(resolve(worktree))])
   return refusalFor(realRoot, realRepo)
 }

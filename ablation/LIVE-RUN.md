@@ -90,6 +90,10 @@ Four things worth knowing before you use it:
 - **The code revision is established, not assumed.** It comes from
   `git rev-parse HEAD` plus `git status --porcelain`; if either fails, the
   manifest records an unknown carrying git's own words.
+- **Each arm is written as it finishes, and a failed write STOPS the run.** If a
+  dump cannot be written — no space, a refused path — the evaluation raises and
+  no report is printed, so nothing further bills and no untraceable number is
+  published (FR1). Arms that already completed keep their dumps.
 
 `bun run eval-read` prints segregated, missing and unreadable arms ABOVE the
 comparison table, with the reason for each, and prints an explicit incompleteness

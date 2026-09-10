@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, stat, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -57,6 +57,7 @@ function armRun(id: string, repeat: number, runId: string): ArmRun {
     repeat,
     record: fakeRecord(runId),
     rendered: `MAD review — run ${runId}\n`,
+    backend: new FakeBackend({}),
   }
 }
 
@@ -116,6 +117,25 @@ describe("the bundle index declares what the evaluation MEANT to produce", () =>
     const worktree = await tempDir("mad-bundle-repo-")
     const written = await writeBundleIndex({
       bundleRoot: join(worktree, "bundle"),
+      worktree,
+      arms: [{ armId: "on", repeatId: 0 }],
+      createdAt: "2026-09-10T00:00:00.000Z",
+    })
+    expect(written.ok).toBe(false)
+    expect(await readdir(worktree)).toEqual([])
+  })
+
+  test("A SYMLINK INTO THE REPOSITORY IS REFUSED (review finding 1, 2026-09-10)", async () => {
+    // The whole of the defect: `refusalFor` compares resolved-but-not-followed
+    // paths, so an alias pointing at the worktree looked like an unrelated tree
+    // and the index landed inside the repository AD-16 says MAD never writes to.
+    const worktree = await tempDir("mad-bundle-symlink-repo-")
+    const outside = await tempDir("mad-bundle-symlink-alias-")
+    const alias = join(outside, "alias")
+    await symlink(worktree, alias)
+
+    const written = await writeBundleIndex({
+      bundleRoot: join(alias, "output"),
       worktree,
       arms: [{ armId: "on", repeatId: 0 }],
       createdAt: "2026-09-10T00:00:00.000Z",
@@ -226,42 +246,117 @@ describe("one arm's dump", () => {
 })
 
 /**
- * The pairing `ablation/live.ts` depends on, pinned where it can actually be
- * exercised.
+ * The recorder-to-run pairing, after review finding a/4 (2026-09-10).
  *
- * The bundle writer keeps one turn recorder per `backendFor` call and matches
- * the Nth recorder to the Nth run. That is only true while `runAblation` awaits
- * each arm before starting the next. If a later story makes the harness run arms
- * in parallel, this test fails HERE — in a file CI runs — rather than in the live
- * path, which CI can never run, and where the symptom would be one arm's
- * transcript filed under another arm's manifest.
+ * It used to be an array index into `runs`, which is correct only while
+ * `runAblation` is sequential and which fails SILENTLY under concurrency: equal
+ * counts, swapped contents, one arm's transcript filed under another arm's
+ * manifest. `ArmRun.backend` makes it a link. These tests pin the link and the
+ * per-arm callback, both in a file CI actually runs — the live path never is.
  */
-describe("backendFor call order matches the order runAblation returns runs", () => {
-  test("sequential arms, one recorder each, in the same order", async () => {
-    const calls: string[] = []
-    const specs = [
-      { id: "a", label: "arm a", provenance: "scripted" as const, slots: 1 },
-      { id: "b", label: "arm b", provenance: "scripted" as const, slots: 1 },
-    ]
-    const runs = await runAblation(
-      specs,
-      {
-        backendFor: (spec) => {
-          calls.push(spec.id)
-          return new FakeBackend({})
-        },
-        backend: undefined as never,
-        clock: fakeClock(),
-        change: fakeChange(),
-        candidates: [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")],
-        providerConfigKey: "provider",
-      },
-      2,
-    )
+describe("each arm carries the backend it ran against, and is offered as it finishes", () => {
+  const deps = (backends: Map<string, FakeBackend>) => ({
+    backendFor: (spec: { id: string }) => {
+      const backend = new FakeBackend({})
+      backends.set(spec.id, backend)
+      return backend
+    },
+    backend: undefined as never,
+    clock: fakeClock(),
+    change: fakeChange(),
+    candidates: [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")],
+    providerConfigKey: "provider",
+  })
 
-    expect(calls).toHaveLength(runs.length)
-    expect(calls).toEqual(runs.map((run) => run.spec.id))
-    expect(runs.map((run) => `${run.spec.id}:${run.repeat}`)).toEqual(["a:0", "b:0", "a:1", "b:1"])
+  test("ArmRun.backend IS the object backendFor returned for that arm", async () => {
+    const backends = new Map<string, FakeBackend>()
+    const runs = await runAblation(
+      [
+        { id: "a", label: "arm a", provenance: "scripted" as const, slots: 1 },
+        { id: "b", label: "arm b", provenance: "scripted" as const, slots: 1 },
+      ],
+      deps(backends),
+    )
+    // Identity, not equality. Two FakeBackends are deeply equal and are not the
+    // same object, which is the whole distinction this field exists to carry.
+    for (const run of runs) {
+      expect(run.backend).toBe(backends.get(run.spec.id)!)
+    }
+  })
+
+  test("onArmComplete fires once per arm, BEFORE the next arm starts", async () => {
+    const order: string[] = []
+    const backends = new Map<string, FakeBackend>()
+    await runAblation(
+      [
+        { id: "a", label: "arm a", provenance: "scripted" as const, slots: 1 },
+        { id: "b", label: "arm b", provenance: "scripted" as const, slots: 1 },
+      ],
+      {
+        ...deps(backends),
+        backendFor: (spec) => {
+          order.push(`start:${spec.id}`)
+          const backend = new FakeBackend({})
+          backends.set(spec.id, backend)
+          return backend
+        },
+        onArmComplete: (run) => {
+          order.push(`done:${run.spec.id}`)
+        },
+      },
+    )
+    expect(order).toEqual(["start:a", "done:a", "start:b", "done:b"])
+  })
+
+  test("A THROW FROM onArmComplete STOPS THE RUN — no further arm is billed", async () => {
+    const started: string[] = []
+    const backends = new Map<string, FakeBackend>()
+    await expect(
+      runAblation(
+        [
+          { id: "a", label: "arm a", provenance: "scripted" as const, slots: 1 },
+          { id: "b", label: "arm b", provenance: "scripted" as const, slots: 1 },
+        ],
+        {
+          ...deps(backends),
+          backendFor: (spec) => {
+            started.push(spec.id)
+            const backend = new FakeBackend({})
+            backends.set(spec.id, backend)
+            return backend
+          },
+          onArmComplete: () => {
+            throw new Error("the dump could not be written")
+          },
+        },
+      ),
+    ).rejects.toThrow("the dump could not be written")
+    expect(started).toEqual(["a"])
+  })
+
+  test("an awaited onArmComplete really is awaited", async () => {
+    const events: string[] = []
+    const backends = new Map<string, FakeBackend>()
+    await runAblation(
+      [
+        { id: "a", label: "arm a", provenance: "scripted" as const, slots: 1 },
+        { id: "b", label: "arm b", provenance: "scripted" as const, slots: 1 },
+      ],
+      {
+        ...deps(backends),
+        backendFor: (spec) => {
+          events.push(`start:${spec.id}`)
+          const backend = new FakeBackend({})
+          backends.set(spec.id, backend)
+          return backend
+        },
+        onArmComplete: async (run) => {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          events.push(`written:${run.spec.id}`)
+        },
+      },
+    )
+    expect(events).toEqual(["start:a", "written:a", "start:b", "written:b"])
   })
 })
 

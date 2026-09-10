@@ -4,7 +4,7 @@ import { measurePairs } from "../core/clustering/fixtures/rates.ts"
 import type { Finding, Verdict } from "../core/domain/finding.ts"
 import { emptyLedger, recordTurn, type RunRecord } from "../core/domain/run-record.ts"
 import { selectRoster } from "../core/roster/select.ts"
-import { candidate, tokens } from "../core/test-support/fakes.ts"
+import { FakeBackend, candidate, tokens } from "../core/test-support/fakes.ts"
 import { alignArms } from "./align.ts"
 import type { ArmRun } from "./arms.ts"
 import {
@@ -57,6 +57,7 @@ function armRun(id: string, rec: RunRecord): ArmRun {
     repeat: 0,
     record: rec,
   rendered: "",
+    backend: new FakeBackend({}),
   }
 }
 

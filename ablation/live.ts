@@ -46,6 +46,7 @@ import { opencodeRepo } from "../adapters/opencode/repo.ts"
 import { selectRoster, type Pin } from "../core/roster/select.ts"
 import { systemClock } from "../core/ports/clock.ts"
 import { createTurnRecorder, type TurnArtifact } from "../adapters/opencode/artifacts.ts"
+import type { ModelBackend } from "../core/ports/model-backend.ts"
 import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
 import { writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
@@ -138,17 +139,19 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   })
   const change = await repo.change(options.target)
 
-  // ONE RECORDER PER ARM RUN, in CALL ORDER, and the pairing below depends on
-  // `runAblation` being sequential — it awaits each `runArm` before starting the
-  // next, and `backendFor` is called at the top of each one, so the Nth recorder
-  // belongs to the Nth run. The length check after the loop is what makes that
-  // dependency loud rather than silent if the harness ever runs arms in parallel;
-  // `ablation/bundle.test.ts` pins the ordering itself against `runAblation`.
+  // ONE RECORDER PER ARM RUN, KEYED BY THE BACKEND OBJECT ITSELF (review finding
+  // a/4, 2026-09-10). This was an array matched to `runs` by index, which is
+  // correct only while `runAblation` is sequential and which would fail SILENTLY
+  // under concurrency — equal counts, swapped contents, one arm's transcript
+  // filed under another arm's manifest. `ArmRun.backend` is the object
+  // `backendFor` returned for that arm, so the lookup below is a link rather than
+  // a position and cannot be wrong however the arms are scheduled.
   //
   // BUILT ONLY WHEN A BUNDLE IS ASKED FOR, exactly as `plugin.ts` builds its
   // recorder only when the flag is on: with no bundle, no transcript is held in
   // memory at all.
-  const recorders: { turns: readonly TurnArtifact[] }[] = []
+  const recorders = new Map<ModelBackend, { turns: readonly TurnArtifact[] }>()
+  const dumpFailures: string[] = []
 
   if (options.bundle !== undefined) {
     const declared: BundleArm[] = []
@@ -200,8 +203,9 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
         })
         if (options.bundle === undefined) return backend
         const recorder = createTurnRecorder()
-        recorders.push(recorder)
-        return recorder.wrap(backend)
+        const wrapped = recorder.wrap(backend)
+        recorders.set(wrapped, recorder)
+        return wrapped
       },
       backend: undefined as never,
       clock: systemClock(),
@@ -209,41 +213,64 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
       candidates,
       providerConfigKey,
       ...(options.tokenCap === undefined ? {} : { dials: { tokenCap: options.tokenCap } }),
+      // EACH ARM IS PERSISTED AS IT FINISHES (review finding 4, 2026-09-10).
+      // Writing every dump after the whole loop meant an evaluation that died in
+      // its third arm lost the first two — arms that had completed and had
+      // already billed — and the reader called them missing. Evidence that
+      // exists is written down when it exists.
+      ...(options.bundle === undefined
+        ? {}
+        : {
+            onArmComplete: async (run) => {
+              const recorder = recorders.get(run.backend)
+              const outcome = await writeArmDump({
+                bundleRoot: options.bundle!.root,
+                run,
+                change,
+                identity: options.bundle!.identity,
+                ...(recorder === undefined ? {} : { turns: recorder.turns }),
+                worktree: options.worktree ?? options.directory,
+              })
+              options.onBundleEvent?.({
+                kind: "arm",
+                armId: run.spec.id,
+                repeatId: run.repeat,
+                outcome: outcome.kind,
+                detail:
+                  outcome.kind === "written"
+                    ? `${outcome.files} file(s) in ${outcome.directory}`
+                    : outcome.kind === "refused"
+                      ? outcome.reason
+                      : outcome.kind === "failed"
+                        ? outcome.error
+                        : "the artifact flag resolved to off",
+              })
+              // A MANDATORY DUMP THAT FAILED STOPS THE EVALUATION (review finding
+              // 6). FR1 is that a published number is traceable to the run that
+              // produced it or it is not published; continuing would bill further
+              // arms whose evidence cannot be written either.
+              if (outcome.kind !== "written") {
+                dumpFailures.push(`${run.spec.id} repeat ${run.repeat}: ${outcome.kind}`)
+                throw new Error(
+                  `the evaluation bundle could not record arm \`${run.spec.id}\` repeat ${run.repeat} ` +
+                    `(${outcome.kind}). FR1: a published number is traceable to the run that produced it, ` +
+                    `or it is not published. Nothing further was billed.`,
+                )
+              }
+            },
+          }),
     },
     options.repeats ?? 1,
   )
 
-  if (options.bundle !== undefined) {
-    if (recorders.length !== runs.length) {
-      throw new Error(
-        `the bundle writer kept ${recorders.length} turn recorder(s) for ${runs.length} run(s); ` +
-          `the recorder-to-run pairing assumes runAblation runs arms sequentially and it no longer does.`,
-      )
-    }
-    for (const [index, run] of runs.entries()) {
-      const outcome = await writeArmDump({
-        bundleRoot: options.bundle.root,
-        run,
-        change,
-        identity: options.bundle.identity,
-        turns: recorders[index]!.turns,
-        worktree: options.worktree ?? options.directory,
-      })
-      options.onBundleEvent?.({
-        kind: "arm",
-        armId: run.spec.id,
-        repeatId: run.repeat,
-        outcome: outcome.kind,
-        detail:
-          outcome.kind === "written"
-            ? `${outcome.files} file(s) in ${outcome.directory}`
-            : outcome.kind === "refused"
-              ? outcome.reason
-              : outcome.kind === "failed"
-                ? outcome.error
-                : "the artifact flag resolved to off",
-      })
-    }
+  // The loop above throws on the first failure, so reaching here means every arm
+  // was recorded. The check is kept because "the report is only returned when the
+  // evidence exists" is the property FR1 asks for, and a property worth having is
+  // worth asserting at the point it is relied on.
+  if (options.bundle !== undefined && dumpFailures.length > 0) {
+    throw new Error(
+      `the evaluation bundle is incomplete (${dumpFailures.join("; ")}), so no report is returned.`,
+    )
   }
 
   const first = (id: string) => runs.find((run) => run.spec.id === id)

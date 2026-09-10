@@ -70,6 +70,22 @@ export interface ArmRun {
   repeat: number
   record: RunRecord
   rendered: string
+  /**
+   * The backend object this arm actually ran against (story 2.2, review finding
+   * a/4).
+   *
+   * IT IS A LINK, AND THAT IS THE WHOLE REASON IT EXISTS. The evaluation's bundle
+   * writer keeps one turn recorder per `backendFor` call and has to know which
+   * recorder belongs to which run. It first did that BY ARRAY INDEX, which is
+   * correct only while `runAblation` is sequential and which would fail silently
+   * — matching counts, swapped contents, one arm's transcript filed under
+   * another arm's manifest — the moment anything ran two arms at once. A caller
+   * that keyed its recorders by the object it handed back cannot be wrong about
+   * the pairing however the arms are scheduled.
+   *
+   * Nothing in the report reads it; it is identity, not data.
+   */
+  backend: ModelBackend
 }
 
 /**
@@ -95,6 +111,21 @@ export interface ArmDeps {
   providerConfigKey: string
   dials?: Dials
   /**
+   * Called as each arm FINISHES, before the next one starts (story 2.2, review
+   * finding 4).
+   *
+   * The evaluation writes each arm's dump here rather than after every arm has
+   * run. Without it, a three-arm evaluation that died during the third arm lost
+   * the first two — arms that had already completed and already billed — and the
+   * bundle reader called them missing. Evidence that exists is written down when
+   * it exists.
+   *
+   * IT IS AWAITED, so a slow write delays the next arm rather than racing it, and
+   * a throw here stops the evaluation rather than being swallowed: a mandatory
+   * dump that failed must not be followed by more billing.
+   */
+  onArmComplete?: (run: ArmRun) => Promise<void> | void
+  /**
    * A fresh backend per arm, when the caller needs one. `FakeBackend` counts
    * attempts per (slot, role) and replays a script's last step once it runs out,
    * so one scripted instance shared across three arms hands arm 2 the step arm 1
@@ -111,15 +142,19 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     pins: spec.pins ?? [],
     providerConfigKey: deps.providerConfigKey,
   })
+  // RESOLVED ONCE INTO A CONST, so the object handed to `review()` is the same
+  // object handed back on the `ArmRun`. Calling `backendFor` twice would build a
+  // second backend and return an identity that names nothing.
+  const backend = deps.backendFor ? deps.backendFor(spec) : deps.backend
   const { record, rendered } = await review({
     roster: resolved.roster,
-    backend: deps.backendFor ? deps.backendFor(spec) : deps.backend,
+    backend,
     clock: deps.clock,
     change: deps.change,
     priorWarnings: resolved.warnings,
     ...(deps.dials ?? {}),
   })
-  return { spec, repeat, record, rendered }
+  return { spec, repeat, record, rendered, backend }
 }
 
 /**
@@ -140,7 +175,13 @@ export async function runAblation(
   const runs: ArmRun[] = []
   for (let repeat = 0; repeat < repeats; repeat += 1) {
     for (const spec of specs) {
-      runs.push(await runArm(spec, deps, repeat))
+      const run = await runArm(spec, deps, repeat)
+      runs.push(run)
+      // AWAITED, AND NOT GUARDED. A caller that needs each arm persisted before
+      // the next one bills gets exactly that, and a throw from here stops the
+      // loop — which is the point: continuing to bill after a mandatory dump
+      // failed would produce arms nothing can trace.
+      await deps.onArmComplete?.(run)
     }
   }
   return runs
