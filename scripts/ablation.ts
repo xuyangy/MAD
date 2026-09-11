@@ -20,8 +20,19 @@
  * not an error, so exiting non-zero on it would be actively wrong.
  */
 
+import { resolve } from "node:path"
+
+import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { renderAblation } from "../ablation/report.ts"
 import { scriptedAblation } from "../ablation/seeded-defects.ts"
+// `material.ts` and `seal.ts` DIRECTLY, never `seeded-defects/change.ts`. Both
+// are plain data and neither touches the SDK, so the scripted path still
+// constructs no opencode client. The door module would reach `labels.ts`, and
+// while this file is not the materializer, naming the narrow import is what keeps
+// the habit — story 2.4's whole structural claim is that the import list says
+// which side of the split a module is on.
+import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
+import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import type { Pin } from "../core/roster/select.ts"
 
 /**
@@ -197,7 +208,20 @@ function refuse(message: string): number {
       `--cap bounds the tokens a run may spend and is shared by all three arms;\n` +
       `omit it for no ceiling, or give it 0 to ${MAX_TOKEN_CAP}. --repeats runs each arm\n` +
       `N times to establish a noise floor; omit it for one pass, or give it 1 to\n` +
-      `${MAX_REPEATS}. Nothing was run and nothing was billed.`,
+      `${MAX_REPEATS}.\n` +
+      `\n` +
+      `--labelled-change reviews the sealed labelled change instead of reading one from\n` +
+      `--directory, and fills the manifest's fixture version and hash from the seal. It\n` +
+      `needs --live and --out (AC4: no --out is no manifest, so the identity would be\n` +
+      `recorded nowhere), it refuses an explicit --fixture-version or --fixture-hash and a\n` +
+      `--target beside it, and it REFUSES a --directory that is this repository, is inside\n` +
+      `it, or CONTAINS it: a live model's session opens files under the directory it is\n` +
+      `given, and this repository holds the answer key. Materialize a worktree elsewhere\n` +
+      `first:\n` +
+      `\n` +
+      `  bun run materialize-change --out /scratch/mad-labelled-change\n` +
+      `\n` +
+      `Nothing was run and nothing was billed.`,
   )
   return 0
 }
@@ -277,6 +301,148 @@ export async function main(
     )
   }
 
+  // FR5 / AC1-AC2-AC4 (story 2.4) — `--labelled-change`. Every refusal below runs
+  // BEFORE the live path is imported, so "nothing was billed" stays a structural
+  // fact rather than a promise, exactly as the dials above are checked first.
+  // `--directory` GOES THROUGH `stringFlag`, not bare `flag()` (review finding P8,
+  // 2026-09-11). Since this story it is one of the two flags that decide WHAT IS
+  // REVIEWED and where a live model's session may open files, which is the same
+  // class of flag as `--out` and `--cap`: `--directory /a --directory /b` used to
+  // take the first silently, and `--directory --out /x` used to yield the literal
+  // string `"--out"` as a directory — a path that then failed containment for the
+  // wrong reason, or on another machine passed it.
+  const directoryFlag = stringFlag(argv, "directory")
+  if (!directoryFlag.ok) return refuse(directoryFlag.message)
+  const directory = directoryFlag.value ?? process.cwd()
+
+  // `--labelled-change` IS A BOOLEAN AND TAKES NO VALUE, and a value spelling is
+  // refused rather than ignored (review finding P8). `has()` matches
+  // `--labelled-change=<anything>` as well as the bare flag, so
+  // `--labelled-change=false` turned the labelled path ON — the opposite of what
+  // was typed, on the flag that decides whether the sealed identity is stamped
+  // into the manifest.
+  const labelledValue = argv.filter((arg) => arg.startsWith("--labelled-change="))
+  if (labelledValue.length > 0) {
+    return refuse(
+      `--labelled-change takes no value; it received \`${labelledValue[0]}\`. It is a switch, ` +
+        "and MAD will not read `=false` as OFF while the flag is present — pass the bare " +
+        "`--labelled-change` to review the sealed labelled change, or omit it entirely.",
+    )
+  }
+  const labelled = has(argv, "labelled-change")
+
+  if (labelled && !has(argv, "live")) {
+    return refuse(
+      "--labelled-change points a LIVE roster at the sealed labelled change, and only the " +
+        "--live path has a roster. The scripted ablation already reviews this exact change " +
+        "through `ablation/seeded-defects.ts`, against a backend that bills a constant and " +
+        "upholds everything — so the flag would claim a labelled evaluation and deliver the " +
+        "scripted one.",
+    )
+  }
+
+  // `--target` BESIDE `--labelled-change` IS TWO AUTHORITIES ON WHAT IS REVIEWED,
+  // and this file refuses every other one of those by name (review finding P7,
+  // 2026-09-11). `--target` is host git syntax handed to `repo.change()`, and a
+  // labelled run never calls `repo.change()` — the change is handed in
+  // (`ablation/live.ts`). Forwarding it meant the operator's ref range was read
+  // by nothing while the report and the manifest said the sealed set was
+  // reviewed, which is the same silent disagreement the `--fixture-version`
+  // refusal below exists to prevent.
+  if (labelled && flag(argv, "target") !== undefined) {
+    return refuse(
+      "--labelled-change reviews the sealed labelled change itself, so nothing reads a " +
+        "worktree and --target has nothing to select. Drop --target, or drop " +
+        "--labelled-change and review the range you named.",
+    )
+  }
+
+  // TWO AUTHORITIES ON THE FIXTURE IDENTITY IS HOW A MANIFEST COMES TO NAME A SET
+  // THAT WAS NOT REVIEWED. `--labelled-change` fills both fields from the seal;
+  // an operator's typed value beside it can only agree redundantly or disagree
+  // silently, and the second is unrecoverable after the run — the bundle would
+  // carry a hash nobody can match to the bytes the models actually saw.
+  if (labelled && (fixtureVersion.value !== undefined || fixtureHash.value !== undefined)) {
+    return refuse(
+      "--labelled-change fills --fixture-version and --fixture-hash from the sealed fixture " +
+        `itself (\`${LABELLED_CHANGE_SEAL.version}\`, \`${LABELLED_CHANGE_SEAL.materialHash}\`), ` +
+        "so passing either by hand gives the manifest two authorities on what was reviewed. " +
+        "Drop the flag you typed; the seal is the one that cannot be wrong.",
+    )
+  }
+
+  // THE LOAD-BEARING HALF OF AC2, AND IT CANNOT BE LEFT TO THE OPERATOR.
+  //
+  // A live model's session is created with `directory: --directory`
+  // (`adapters/opencode/model-backend.ts:574`) and the host's default tools are
+  // left ON: `ablation/live.ts`'s `backendFor` builds `OpencodeModelBackend` with
+  // `serverUrl`, `directory`, `slots` and `lateUsage` and NO `tools` key at all —
+  // the word does not appear in that file — and `model-backend.ts:134-140` is
+  // where that default stands ("A spawned session gets host tools by default").
+  // The Fact-Checker instruction then TELLS the model to open files
+  // (`core/instructions/coding/judge.ts:83` — "USE YOUR TOOLS. Open the file.").
+  // Pointed at this repository, a model can open
+  // `fixtures/seeded-defects/labels.ts` and read the answer key. That channel is
+  // invisible to `core/` and is exercised by no CI test, which is exactly why it
+  // is refused here rather than documented.
+  //
+  // The CHECK is `refusalFor`/`realRefusalFor`, imported rather than
+  // reimplemented for the reason `ablation/bundle.ts` records — a second
+  // containment test is a second thing that can be subtly weaker than the first.
+  // Only the MESSAGE is written here: their wording is about where MAD WRITES,
+  // and this refusal is about what a model can READ.
+  //
+  // BOTH DIRECTIONS, AND BOTH FORMS (review finding P1, 2026-09-11). The check
+  // asks "is A inside B", and the first version asked it only one way round — so
+  // a `--directory` that IS this repository or sits INSIDE it was refused, while
+  // one that CONTAINS it (`/Users/me/src`, or `/`) was accepted and a model with
+  // the host's default tools could simply walk down into
+  // `fixtures/seeded-defects/labels.ts`. The mirror call is the same imported
+  // check with its arguments swapped. The lexical form runs first so a relative
+  // `--directory` is refused BY NAME — containment cannot be decided on a path
+  // that has not been resolved — and the real form follows symlinks, so a link
+  // pointing at this repository, or one whose target contains it, cannot slip
+  // past the lexical test.
+  if (labelled) {
+    const repoRoot = resolve(import.meta.dir, "..")
+    const contained =
+      refusalFor(directory, repoRoot) !== undefined ||
+      refusalFor(repoRoot, directory) !== undefined ||
+      (await realRefusalFor(directory, repoRoot)) !== undefined ||
+      (await realRefusalFor(repoRoot, directory)) !== undefined
+    if (contained) {
+      return refuse(
+        `--labelled-change refuses \`--directory ${directory}\`: it is this repository, is ` +
+          "inside it, CONTAINS it, or is not an absolute path that can be checked against it. " +
+          "A live model's session can open any file under the directory it is given, and this " +
+          "repository holds `fixtures/seeded-defects/labels.ts` — the ids, loci, summaries and " +
+          "markers of all thirteen planted defects. A model that can read the answer key " +
+          "measures nothing.",
+      )
+    }
+  }
+
+  // A LABELLED RUN WITH NO `--out` IS REFUSED (review finding P4, 2026-09-11).
+  //
+  // This shipped as a NOTE, on the reasoning that refusing would be a stronger
+  // rule than the story gave. It is not stronger — it is AC4: "its version and
+  // content hash are recorded in the manifest of every run that reviews it". A
+  // run with no `--out` writes no manifest, so it is a run that reviews the
+  // sealed set and records the identity NOWHERE, which is the one thing AC4 says
+  // must not happen. A warning leaves the operator free to bill a live roster
+  // against the labelled change and end with numbers that trace to nothing
+  // (FR1), which is exactly the untraceable published number FR1 exists to stop.
+  // It is refused here, in the same block as every other cross-flag refusal, and
+  // before anything is imported or billed.
+  if (labelled && out.value === undefined) {
+    return refuse(
+      "--labelled-change needs --out. AC4 records the fixture's version and content hash in " +
+        "the manifest of every run that reviews it, and without --out no manifest is written " +
+        "at all — the run would bill a live roster and leave numbers that trace to nothing " +
+        "(FR1). Add --out <a bundle directory outside every repository>.",
+    )
+  }
+
   if (has(argv, "live")) {
     // The live path deliberately lives in `ablation/live.ts` and is not inlined
     // here: it is the one module in this tree that imports `adapters/`, and CI
@@ -301,12 +467,26 @@ export async function main(
                 protocolHash.value === undefined
                   ? unknownValue("--protocol-hash was not given")
                   : known(protocolHash.value),
-              fixtureVersion:
-                fixtureVersion.value === undefined
+              // AC4 (story 2.4) — THE SEAL IS THE FIRST AUTHORITY, and the
+              // refusal above guarantees it is the only one: `--labelled-change`
+              // cannot be given beside an explicit `--fixture-version` or
+              // `--fixture-hash`, so these two branches can never both be live.
+              // Without the flag nothing changes — an unlabelled run still
+              // records an explicit unknown with its reason, and
+              // `read-bundle.ts:90` still segregates it rather than treating it
+              // as agreement.
+              fixtureVersion: labelled
+                ? known(LABELLED_CHANGE_SEAL.version)
+                : fixtureVersion.value === undefined
                   ? unknownValue("--fixture-version was not given")
                   : known(fixtureVersion.value),
-              fixtureHash:
-                fixtureHash.value === undefined
+              // The MATERIAL hash, not the labels hash. This field answers "which
+              // bytes did the models see", and the models saw the material. The
+              // labels hash seals the answer key, which no arm read and which
+              // therefore has no place in a manifest of what was reviewed.
+              fixtureHash: labelled
+                ? known(LABELLED_CHANGE_SEAL.materialHash)
+                : fixtureHash.value === undefined
                   ? unknownValue("--fixture-hash was not given")
                   : known(fixtureHash.value),
               // ESTABLISHED, NOT ASSUMED. Every failure below comes back as an
@@ -335,8 +515,14 @@ export async function main(
       report = await (overrides.runLive ?? runLiveAblation)({
         pin,
         serverUrl: flag(argv, "server") ?? "http://localhost:4096",
-        directory: flag(argv, "directory") ?? process.cwd(),
+        directory,
         ...(flag(argv, "target") === undefined ? {} : { target: flag(argv, "target")! }),
+        // FR5 — the labelled change is handed in, so `repo.change()` is not
+        // called and `--target` has nothing to read. `--directory` still matters
+        // and is still checked: it is the worktree the model's own session opens
+        // files in, which is why it must be the materialized tree and not this
+        // repository.
+        ...(labelled ? { change: SEEDED_CHANGE } : {}),
         ...(tokenCap === undefined ? {} : { tokenCap }),
         // The lens arm is the third arm, and without this flag the live path could
         // only ever run two — while `LIVE-RUN.md` documented three and story 9's

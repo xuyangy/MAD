@@ -64,10 +64,22 @@ bun run ablation --live \
   --cap 400000 \
   --out /scratch/mad-eval-2026-09-10 \
   --protocol-version 1 \
-  --protocol-hash sha256:<the frozen_hash from evaluation-protocol.md> \
-  --fixture-version <story 2.4's sealed fixture> \
-  --fixture-hash sha256:<its content hash>
+  --protocol-hash sha256:<the frozen_hash from evaluation-protocol.md>
 ```
+
+**No `--fixture-version` or `--fixture-hash` here, and that is deliberate.** This command
+reviews whatever is in `--directory`, which is an unlabelled change. Pasting the sealed
+labelled change's identity onto it would produce a manifest naming a fixture that was not
+reviewed — the exact failure `--labelled-change`'s own refusal exists to prevent, arriving
+by copy-and-paste instead. The two fields are recorded as explicit unknowns with their
+reasons, and `bun run eval-read` segregates them rather than treating an unknown as
+agreement. The sealed identity belongs to the labelled procedure below, which fills it
+from the seal itself.
+
+The two flags themselves stay available and stay legitimate: if `--directory` holds a change
+**you** have sealed elsewhere, pass its version and hash and the manifest records them. What
+must never happen is an identity naming a set this run did not review — which is why
+`--labelled-change` fills both itself and refuses a hand-typed one beside it.
 
 Then read it back:
 
@@ -125,9 +137,121 @@ defect, and an under-merge hides a real pair in `only in`. Read `only in` and
 **A degraded arm is not a measurement.** If any arm reports `DEGRADED`, the
 report draws no experimental line from it. Fix the roster and run again.
 
-**Recall is not available on a live change.** Recall is measured against a known
-defect set and a real change has none — nobody labelled its bugs. The report
-prints "not applicable", never `0`.
+**Recall is not available on an UNLABELLED live change.** Recall is measured against a
+known defect set and a real change has none — nobody labelled its bugs. The report prints
+"not applicable", never `0`. That limitation is true and it stays true: every run that
+reads its change out of a real worktree is a run with no recall number, and the sentence
+above is about those runs. What story 2.4 added is a second option beside it, not a
+replacement for it.
+
+## A labelled run (`--labelled-change`, story 2.4)
+
+A labelled run reviews the sealed seeded-defect change instead of reading one from the
+worktree. That is what makes recall computable AT ALL — there is now a fixed reference set
+to measure against, never an asserted exhaustive set of every defect in the change
+(`evaluation-protocol.md:73-79`).
+
+**It is not computed yet, and the report says so.** A labelled run's report still prints
+`not applicable — no seeded defect set for this change` for lens recall gain, because
+`ablation/live.ts` passes `gain: undefined` on both paths. Matching a live arm's findings
+against the thirteen labels is story 2.6; story 2.4 built the labelled change and the
+withheld answer key, and deliberately took no measurement. Read that line as *not measured
+yet*, not as *zero* and not as *impossible* — what changed is that the number now HAS a
+reference set to be measured against, and the wording in the report will change with 2.6
+rather than before it.
+
+**It is still LIVE evidence.** The labels are scripted; the backend is not. "Scripted"
+versus "live" is a property of the **backend and the evidence provenance**, not of the
+change under review (FR7). A labelled run bills real providers, and `report.ts`'s scripted
+banner is unchanged — it fires on a scripted BACKEND, which a labelled live run does not
+have. A scripted ablation over the same change still prints the banner, and should.
+
+### Step 1 — materialize the worktree
+
+```
+bun run materialize-change --out /scratch/mad-labelled-change
+```
+
+This writes a real git worktree: the base tree in one commit, then the change applied and
+left **uncommitted**, so `git diff HEAD` plus the untracked files is exactly the change
+under review. It prints the fixture version and hash on success.
+
+`--out` must be **absolute and outside this repository**, through the same AD-16
+containment check `MAD_ARTIFACTS` and `--out` go through. A non-empty destination is
+refused rather than merged into.
+
+### Step 2 — point the run at it
+
+```
+bun run ablation --live --labelled-change \
+  --pin anthropic/claude-sonnet-4-5 \
+  --directory /scratch/mad-labelled-change \
+  --cap 400000 \
+  --out /scratch/mad-eval-labelled
+```
+
+`--labelled-change` hands the change to the run and fills `--fixture-version` and
+`--fixture-hash` from the seal, so the manifest names what was reviewed and no one types
+an identity from memory (FR1).
+
+### Checking a bundle afterwards
+
+Every manifest a labelled run writes carries this identity, and this is the only place in
+this file where it appears — it is for CHECKING a bundle you already have, never for
+pasting onto a command:
+
+```
+fixture version: labelled-change-1
+fixture hash:    sha256:76523deb36aee41eb6ce9aaf1f9a51efbde5b404f839b1b20483016968fd848d
+```
+
+That is `LABELLED_CHANGE_SEAL.version` and `LABELLED_CHANGE_SEAL.materialHash` from
+`fixtures/seeded-defects/seal.ts`, and `ablation/live-run-doc.test.ts` asserts these two
+lines still equal it. `fixtures/seeded-defects/seal.test.ts` is designed to force a
+deliberate version bump when the fixture changes; without that assertion the bump would
+leave these lines stale with CI green, which is the same untraceable-identity failure from
+the other end. The hash is the MATERIAL hash — what the models saw. The labels hash seals
+the answer key, which no arm read, and it has no place in a manifest of what was reviewed.
+
+### The containment refusal, and why it is not left to you
+
+**`--labelled-change` refuses a `--directory` that is this repository, is inside it, or
+CONTAINS it** — `/Users/you/src` and `/` are refused for the same reason `/Users/you/src/MAD`
+is. This is not tidiness. A live model's session is created in `--directory` with the host's default
+tool set, which MAD does not restrict, and the Fact-Checker is *told* to open files. Pointed
+at this repository, a model can open `fixtures/seeded-defects/labels.ts` and read the ids,
+loci, summaries and markers of all thirteen planted defects. A model that can read the answer
+key measures nothing, and the run would look perfectly fine.
+
+That channel is invisible to `core/` and is exercised by no CI test, which is why it is a
+refusal in the CLI rather than a paragraph here. A relative `--directory` is refused too:
+containment cannot be decided on a path that has not been resolved.
+
+Three more refusals, all of them before anything bills:
+
+- **`--labelled-change` needs `--live`.** The scripted ablation already reviews this exact
+  change against a backend that bills a constant and upholds everything; the flag would
+  claim a labelled evaluation and deliver the scripted one.
+- **It refuses an explicit `--fixture-version` or `--fixture-hash` beside it.** Two
+  authorities on the fixture identity is how a manifest comes to name a set that was not
+  reviewed.
+- **It refuses a `--target` beside it.** A labelled run never reads a worktree, so a ref
+  range would be read by nothing while the manifest said the sealed set was reviewed.
+- **It needs `--out`.** AC4 records the fixture's version and hash in the manifest of every
+  run that reviews the set, and without `--out` no manifest is written at all — the run
+  would bill a live roster and leave numbers that trace to nothing (FR1). This is a
+  refusal, not a warning.
+
+### What a labelled run does NOT give you
+
+- **No precision, no false-positive count, no rate.** A finding no planted label covers is
+  recorded as **unlabelled** and adjudicated by a human in
+  `fixtures/seeded-defects/ADJUDICATION.md` — never counted as a false positive by default,
+  which would score the thirteen-defect label set rather than the model
+  (`evaluation-protocol.md:130`). Story 2.8 owns precision, under the protocol's bound
+  arithmetic.
+- **No cross-arm calibration.** The aligner's own error is still unmeasured on a cross-arm
+  set; the paragraph above about `only in` and `ambiguous` is unchanged.
 
 ## What would falsify the design
 

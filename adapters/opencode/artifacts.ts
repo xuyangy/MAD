@@ -120,7 +120,15 @@ export function refusalFor(root: string, worktree: string): string | undefined {
   }
   const target = fold(resolve(root))
   const repo = fold(resolve(worktree))
-  if (target === repo || target.startsWith(repo + sep)) {
+  // The prefix is built rather than concatenated blindly, because a worktree that
+  // IS a filesystem root already ends in the separator (review finding P1,
+  // 2026-09-11). `resolve("/")` is `"/"`, so `repo + sep` was `"//"` and nothing
+  // was ever inside it — the one directory that contains everything tested as
+  // containing nothing. Reached through `realRefusalFor(repoRoot, directory)`,
+  // which `scripts/ablation.ts` uses to refuse a `--directory` that CONTAINS this
+  // repository; `/` is exactly the argument that made it matter.
+  const prefix = repo.endsWith(sep) ? repo : repo + sep
+  if (target === repo || target.startsWith(prefix)) {
     return (
       `\`${ARTIFACTS_ENV}\` points inside the repository under review (\`${repo}\`). MAD never ` +
       `writes there — the change under review is read-only by construction (AD-16). Point it at ` +

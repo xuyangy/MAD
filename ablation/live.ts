@@ -8,13 +8,21 @@
  * module is where a real number comes from, and `ablation/LIVE-RUN.md` is the
  * procedure for driving it safely.
  *
- * ## The live and scripted paths differ in THREE injected values and nothing else
+ * ## The live and scripted paths differ in FOUR injected values and nothing else
  *
- * The backend, the clock and the candidate list. Both call the same
- * `runAblation`, which calls the same exported `review()`. There is no live
- * pipeline and no live mode — a second code path would make the scripted run a
- * test of something the live run does not do, which is the failure story 1's
- * "no second code path" note exists to prevent.
+ * The backend, the clock, the candidate list — and, since story 2.4, optionally
+ * the change itself. Both call the same `runAblation`, which calls the same
+ * exported `review()`. There is no live pipeline and no live mode — a second
+ * code path would make the scripted run a test of something the live run does
+ * not do, which is the failure story 1's "no second code path" note exists to
+ * prevent.
+ *
+ * The fourth is `options.change`, and it stays one injected value for the same
+ * reason: a labelled evaluation needs a change whose bugs are written down, and
+ * `repo.change()` can only read whatever is in the worktree. Handing the
+ * `ChangeSet` in is three lines; a parallel "labelled run" pipeline would be the
+ * second code path. It is the same shape `shell` and `createClient` already
+ * have — absent means today's behaviour exactly.
  *
  * ## CI CAN NEVER EXERCISE THIS
  *
@@ -57,6 +65,7 @@ import { selectRoster, type Pin } from "../core/roster/select.ts"
 import { systemClock } from "../core/ports/clock.ts"
 import { createTurnRecorder, type TurnArtifact } from "../adapters/opencode/artifacts.ts"
 import type { ModelBackend } from "../core/ports/model-backend.ts"
+import type { ChangeSet } from "../core/ports/repo.ts"
 import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
 import { EvaluationBundleError, writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
@@ -71,6 +80,24 @@ export interface LiveOptions {
   worktree?: string
   /** Host git syntax: a ref range, a commit, or omitted for the working tree. */
   target?: string
+  /**
+   * FR5 (story 2.4) — review THIS change instead of reading one from the
+   * worktree.
+   *
+   * ABSENT IS TODAY'S BEHAVIOUR EXACTLY: `repo.change(options.target)` is called
+   * and nothing else moves. Present, it is used verbatim and `repo.change` is not
+   * called at all, so `--target` has nothing to read and is ignored.
+   *
+   * This is sufficient for the material under review, and that is a fact about
+   * the pipeline rather than a convenience: only `change.diff`, `description` and
+   * `files` reach a discovery prompt (`core/run/review.ts:269-317` frames those
+   * three and nothing else), so no file body, no directory listing and no
+   * `readFile` result reaches any prompt through `core/`. A labelled run
+   * therefore needs the `ChangeSet` here and a materialized worktree for the
+   * model's OWN tool channel — which is the channel `scripts/ablation.ts`'s
+   * `--labelled-change` containment refusal exists to protect.
+   */
+  change?: ChangeSet
   /** ONE ceiling, spread into every arm. See the module header. */
   tokenCap?: number
   repeats?: number
@@ -144,11 +171,22 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   const lenses = options.lenses ?? []
   const specs = LIVE_ARMS(options.pin, lenses)
 
+  // THE REPO READER IS STILL CONSTRUCTED WHEN A CHANGE WAS HANDED IN, and that
+  // is deliberate rather than an oversight for a later reader to tidy away
+  // (story 2.4, Task 9). Constructing it is cheap — `opencodeRepo` binds a shell
+  // and returns two closures, it runs no git — and `worktree` is still what
+  // anchors the bundle containment baseline below (`:211` and `:308`, the two
+  // `worktree:` arguments to `writeBundleIndex` and `writeArmDump`), which is the
+  // AD-16 check that keeps an evaluation bundle out of the repository under
+  // review. Removing the construction would take that baseline with it.
+  //
+  // What is skipped is the CALL: `repo.change` reads the worktree, and a run
+  // given its change already knows what it is reviewing.
   const repo = opencodeRepo({
     $: options.shell ?? (Bun.$ as never),
     worktree: options.worktree ?? options.directory,
   })
-  const change = await repo.change(options.target)
+  const change = options.change ?? (await repo.change(options.target))
 
   // ONE RECORDER PER ARM RUN, KEYED BY THE BACKEND OBJECT ITSELF (review finding
   // a/4, 2026-09-10). This was an array matched to `runs` by index, which is
@@ -333,10 +371,25 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     })
   }
 
-  // NO LENS RECALL GAIN ON A LIVE RUN, and its absence is a fact rather than a
-  // gap. Recall is measured against a KNOWN defect set, and a real change has
-  // none — nobody has labelled its bugs. The report renders "not applicable"
-  // rather than `0`, because an unknown recall is not a recall of zero.
+  // NO LENS RECALL GAIN ON A LIVE RUN — ON EITHER PATH, AND FOR TWO DIFFERENT
+  // REASONS (review finding P5, 2026-09-11).
+  //
+  // On an UNLABELLED run its absence is a fact rather than a gap: recall is
+  // measured against a KNOWN defect set, and a change read out of a real worktree
+  // has none — nobody has labelled its bugs.
+  //
+  // On a LABELLED run (`options.change`, story 2.4) that sentence is FALSE — the
+  // set is `SEEDED_DEFECTS` and its thirteen loci are written down. `gain` is
+  // still `undefined` here, so `report.ts` still prints "not applicable — no
+  // seeded defect set for this change", and on that path the words are wrong
+  // while the NUMBER is honest. Measuring live recall is story 2.6: it needs the
+  // arm's findings matched against the labels through `recall()`, which is a
+  // measurement this story was told not to take. Until 2.6 wires it, a labelled
+  // run reports no recall either, and `LIVE-RUN.md` says so in those words rather
+  // than promising one.
+  //
+  // Either way the report renders "not applicable" rather than `0`, because an
+  // unknown recall is not a recall of zero.
   return buildReport(runs, {
     pairings: pairs,
     ...(lensed === undefined

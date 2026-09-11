@@ -91,8 +91,8 @@ const change: ChangeSet = {
 const identity: EvaluationIdentity = {
   protocolVersion: known(1),
   protocolHash: known("sha256:aaa"),
-  fixtureVersion: unknownValue("story 2.4 has not sealed a fixture yet"),
-  fixtureHash: unknownValue("story 2.4 has not sealed a fixture yet"),
+  fixtureVersion: unknownValue("--fixture-version was not given"),
+  fixtureHash: unknownValue("--fixture-hash was not given"),
   codeRevision: known({ commit: "13eadc6", dirty: false }),
   armId: "on",
   repeatId: 0,

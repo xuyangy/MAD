@@ -16,6 +16,7 @@
     "test": "bun test",
     "clustering-rates": "bun run scripts/clustering-rates.ts",
     "ablation": "bun run scripts/ablation.ts",
+    "materialize-change": "bun run scripts/materialize-labelled-change.ts",
     "eval-read": "bun run scripts/eval-read.ts"
   },
   "dependencies": {
