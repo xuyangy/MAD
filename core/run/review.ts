@@ -21,7 +21,13 @@ import {
   type SpendShares,
 } from "../budget/ledger.ts"
 import type { Stage } from "../domain/finding.ts"
-import { emptyLedger, reconcileLateUsage, type RunRecord } from "../domain/run-record.ts"
+import {
+  emptyLedger,
+  reconcileLateUsage,
+  ROUTING_POLICIES,
+  type RoutingPolicy,
+  type RunRecord,
+} from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
@@ -413,7 +419,98 @@ function clampedDials(
   ]
 }
 
-export async function review(deps: ReviewDeps): Promise<ReviewResult> {
+/**
+ * AD-6f — the ONE place a run records that the user stopped it.
+ *
+ * FIRST STAGE WINS. Every stage after the stop also sees an aborted signal and
+ * would report itself, so a last-write-wins field would say the run stopped in
+ * `judge` when it stopped in `discover` and every stage since had done nothing.
+ * The warning is raised here rather than by the stage for the same reason: a
+ * stage can only say "I stopped", and three stages each saying so truthfully
+ * is three warnings for one stop.
+ *
+ * The findings themselves are marked by the STAGES, not here — `unresolved` is
+ * a field they own (AD-8), and only they know which of their findings had been
+ * decided before the stop landed.
+ */
+function recordCancellation(record: RunRecord, stage: Stage): void {
+  if (record.cancelled) return
+  record.cancelled = { stage }
+  record.warnings.push({
+    code: "run-cancelled",
+    stage,
+    message:
+      `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
+      `review — the findings below are what MAD had at that moment, and anything left undecided ` +
+      `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
+      `was retried after you stopped.`,
+    detail: { stage },
+  })
+}
+
+/**
+ * A run carried through clustering and not yet routed — the PREPARE half of
+ * `review()` (story 2.5A, `evaluation-protocol.md` §8 "Seam shape").
+ *
+ * IT OWNS EVERY INPUT THE CONTINUATION DECIDES WITH. The resolved roster sits on
+ * `record.roster`, the clamped dials on `record` and `record.ledger`, the
+ * cancellation on `record.cancelled`. The change reaches the continuation only
+ * as `framedChange`, and discovery eligibility only as `answeredSlots`. A
+ * continuation cannot be handed a second roster, change, instruction set or
+ * dial, so findings prepared against one change cannot be judged against
+ * another while the record still describes the first.
+ *
+ * IT CARRIES NO RUNTIME SERVICE. The backend, clock, limiter, `Tools`, signal
+ * and late-usage sink stay with the caller and arrive through `ContinueDeps`.
+ * Opaque evidence is kept exactly as it came: a caller's `warning.detail` may
+ * hold anything, and nothing here strips or rejects it. Cloning, persisting and
+ * forking this value are not supported yet, and a value `structuredClone`
+ * cannot copy is refused at that boundary, not here.
+ *
+ * SINGLE-USE. `continueReview` mutates `record` and the findings in place
+ * (AD-7), so a second continuation of the same value would route findings that
+ * already carry a route and would double their history. It is refused.
+ */
+export interface PreparedReview {
+  record: RunRecord
+  /** AD-11 — the pool's instruction set discovery used. Recorded, not re-read. */
+  instructions: InstructionSet
+  /** `buildInput(change)`, built once: the same span discovery saw. */
+  framedChange: string
+  /**
+   * Slots still able to be seated or asked after discovery — neither dropped
+   * out nor refused by the budget. Derived from discovery's own lists, because
+   * discovery is the only stage that knows who answered.
+   */
+  answeredSlots: string[]
+  /**
+   * The caller's signal had fired by the time preparation returned.
+   *
+   * NOT THE SAME FACT AS `record.cancelled`. Discovery records a stop only when
+   * one of its own turns was refused or cancelled, so a stop that lands after
+   * its last turn answered leaves `record.cancelled` unset; in an uninterrupted
+   * `review()` the next stage to see the aborted signal names itself. This flag
+   * carries that stop across the seam, so a continuation handed no signal, or a
+   * fresh one, still issues nothing.
+   */
+  stopRequested: boolean
+}
+
+/**
+ * What a continuation needs from its caller: runtime ports only. See
+ * `PreparedReview` for why nothing that decides the review is in this list.
+ */
+export type ContinueDeps = Pick<ReviewDeps, "backend" | "clock" | "tools" | "signal" | "lateUsage">
+
+/**
+ * Records already continued. Keyed on the RECORD rather than the prepared
+ * wrapper, because the record is what a continuation mutates: a shallow copy of
+ * the wrapper shares it and must be refused too. A WeakSet, so a finished run
+ * is not kept alive.
+ */
+const continued = new WeakSet<RunRecord>()
+
+export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   const { roster, backend, clock, change } = deps
   // AD-11 amended — the pool's set comes from the registry, addressed by task
   // type + role. The lens sets are resolved inside `discover`, per lens slot.
@@ -511,41 +608,18 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const limiter = createLimiter(record.ledger.maxConcurrency)
   const { signal } = deps
 
-  /**
-   * AD-6f — the ONE place a run records that the user stopped it.
-   *
-   * FIRST STAGE WINS. Every stage after the stop also sees an aborted signal and
-   * would report itself, so a last-write-wins field would say the run stopped in
-   * `judge` when it stopped in `discover` and every stage since had done nothing.
-   * The warning is raised here rather than by the stage for the same reason: a
-   * stage can only say "I stopped", and three stages each saying so truthfully
-   * is three warnings for one stop.
-   *
-   * The findings themselves are marked by the STAGES, not here — `unresolved` is
-   * a field they own (AD-8), and only they know which of their findings had been
-   * decided before the stop landed.
-   */
-  const noteCancelled = (stage: Stage): void => {
-    if (record.cancelled) return
-    record.cancelled = { stage }
-    record.warnings.push({
-      code: "run-cancelled",
-      stage,
-      message:
-        `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
-        `review — the findings below are what MAD had at that moment, and anything left undecided ` +
-        `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
-        `was retried after you stopped.`,
-      detail: { stage },
-    })
-  }
+  // ONE BUILD (code review 2026-08-28). The framed change span is the largest
+  // string in the pipeline, and discovery, debate and the judge all need the
+  // same one. `buildInput` is pure, so building it once here is the same span
+  // every stage saw before, and the continuation can only ever see this one.
+  const framedChange = buildInput(change)
 
   // ---- stage 1: discover ----
   const discovered = await discover({
     roster,
     backend,
     instructions,
-    input: buildInput(change),
+    input: framedChange,
     clock,
     ledger: record.ledger,
     limiter,
@@ -566,7 +640,7 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // lens instruction from one generated at run time.
   record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
-  if (discovered.cancelled) noteCancelled("discover")
+  if (discovered.cancelled) recordCancellation(record, "discover")
 
   // ---- stage 2: cluster ----
   //
@@ -583,32 +657,6 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const clustered = await cluster({ findings: record.pool, answered: discovered.answered, clock })
   record.findings = clustered.findings
 
-  // ---- stage 3: route ----
-  //
-  // The CANONICAL set, never `record.pool`: an absorbed member is not a finding
-  // the pipeline decides about, and routing one would produce a decision nothing
-  // downstream ever reads.
-  const routed = route({ findings: record.findings, threshold: record.threshold, clock })
-  // The record reports what the STAGE did, not what the caller asked for and not
-  // what the renderer can reconstruct. Re-stamping `threshold` from the return
-  // value costs nothing (both sides call `clampThreshold`, so it is already a
-  // fixpoint) and removes the class of bug where the two derivations drift; the
-  // counts come across for the reason `RunRecord.routeCounts` documents.
-  record.threshold = routed.threshold
-  record.routeCounts = {
-    toDebate: routed.toDebate,
-    toJudge: routed.toJudge,
-    toJudgeAtThreshold: routed.toJudgeAtThreshold,
-    toJudgeNoPrior: routed.toJudgeNoPrior,
-  }
-
-  // ---- stage 4: debate ----
-  //
-  // The CANONICAL set again, and the whole of it: `debate()` picks out its own
-  // `route: "debate"` partition rather than being handed a filtered array, so
-  // the one place that decides what is contested stays `route`, and the stage
-  // returns the same array it was given (it never filters).
-  //
   // `answeredSlots` is derived HERE from discovery's own drop-out list, because
   // discovery is the only stage that knows who answered. The non-author seat in
   // a debate room exists to produce a contest; offering it to a model that
@@ -629,12 +677,100 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
         !discovered.droppedOut.includes(slot) && !discovered.skippedForBudget.includes(slot),
     )
 
-  // ONE BUILD (code review 2026-08-28). The framed change span is the largest
-  // string in the pipeline and both remaining stages need the same one. Building
-  // it twice cost a second copy for nothing and left two call sites that could
-  // drift apart if `buildInput` ever stopped being pure.
-  const framedChange = buildInput(change)
+  return {
+    record,
+    instructions,
+    framedChange,
+    answeredSlots,
+    stopRequested: deps.signal?.aborted === true,
+  }
+}
 
+/**
+ * The CONTINUE half of `review()`: route once under `policy`, then the same
+ * shipped debate, judge and output assembly.
+ *
+ * `policy` is an argument here and deliberately not a `ReviewDeps` field, so no
+ * existing entry point (the `mad_review` tool, `scripts/ablation.ts`,
+ * `ablation/live.ts`) can select `debate-off`. That is a statement about those
+ * entry points only: this function bills whatever backend it is handed.
+ *
+ * A STOP SEEN IN PREPARATION IS TERMINAL, whether discovery recorded it
+ * (`record.cancelled`) or it landed after discovery's last turn
+ * (`stopRequested`). The stages stop issuing turns on an aborted signal, so they
+ * are handed one in either case, whatever signal the caller passed. That is the
+ * signal an in-process run already had at this point, so the stranding and its
+ * reasons are the ones an uninterrupted `review()` produces.
+ *
+ * Throws, before consuming anything, on a policy that is not a known
+ * `RoutingPolicy`.
+ *
+ * The limiter is built again from `record.ledger.maxConcurrency`. The two
+ * halves run one after the other, so the peak is unchanged. Rebuilding it says
+ * nothing about whether a turn that timed out in discovery has stopped at the
+ * provider.
+ *
+ * Throws if `prepared` was already continued (see `PreparedReview`).
+ */
+export async function continueReview(
+  prepared: PreparedReview,
+  deps: ContinueDeps,
+  policy: RoutingPolicy = "shipped",
+): Promise<ReviewResult> {
+  // CHECKED BEFORE ANYTHING IS CONSUMED. `route()` treats anything but
+  // `debate-off` as shipped, so an unrecognised value from a JavaScript caller
+  // would otherwise run and bill the opposite pathway and record it as shipped.
+  if (!ROUTING_POLICIES.includes(policy)) {
+    throw new Error(
+      `unknown routing policy ${JSON.stringify(policy)} (expected one of ${ROUTING_POLICIES.join(", ")}). ` +
+        `Nothing was routed and the prepared review is still unused.`,
+    )
+  }
+  if (continued.has(prepared.record)) {
+    throw new Error(
+      "this prepared review was already continued. A continuation mutates the record and its " +
+        "findings in place, so a second one would route findings that are already routed.",
+    )
+  }
+  continued.add(prepared.record)
+
+  const { record, framedChange, answeredSlots } = prepared
+  const { roster } = record
+  const { backend, clock } = deps
+  const limiter = createLimiter(record.ledger.maxConcurrency)
+  const signal = record.cancelled || prepared.stopRequested ? AbortSignal.abort() : deps.signal
+  const noteCancelled = (stage: Stage): void => recordCancellation(record, stage)
+
+  // ---- stage 3: route ----
+  //
+  // The CANONICAL set, never `record.pool`: an absorbed member is not a finding
+  // the pipeline decides about, and routing one would produce a decision nothing
+  // downstream ever reads.
+  const routed = route({ findings: record.findings, threshold: record.threshold, clock, policy })
+  if (policy === "debate-off") record.routingPolicy = policy
+  // The record reports what the STAGE did, not what the caller asked for and not
+  // what the renderer can reconstruct. Re-stamping `threshold` from the return
+  // value costs nothing (both sides call `clampThreshold`, so it is already a
+  // fixpoint) and removes the class of bug where the two derivations drift; the
+  // counts come across for the reason `RunRecord.routeCounts` documents.
+  record.threshold = routed.threshold
+  record.routeCounts = {
+    toDebate: routed.toDebate,
+    toJudge: routed.toJudge,
+    toJudgeAtThreshold: routed.toJudgeAtThreshold,
+    toJudgeNoPrior: routed.toJudgeNoPrior,
+    ...(routed.intervention === undefined ? {} : { intervention: routed.intervention }),
+  }
+
+  // ---- stage 4: debate ----
+  //
+  // The CANONICAL set again, and the whole of it: `debate()` picks out its own
+  // `route: "debate"` partition rather than being handed a filtered array, so
+  // the one place that decides what is contested stays `route`, and the stage
+  // returns the same array it was given (it never filters).
+  //
+  // `answeredSlots` and `framedChange` come from `prepared`: discovery decided
+  // who is still eligible, and the span is the one discovery saw.
   const debated = await debate({
     findings: record.findings,
     // The pre-cluster union, so a cluster's CO-FINDERS are resolvable from
@@ -827,4 +963,13 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   const rendered = output(record)
 
   return { record, rendered }
+}
+
+/**
+ * The whole review: prepare, then continue under the shipped policy, with the
+ * caller's own ports. One run identity and one late-usage sink across both
+ * halves, drained once as the record closes.
+ */
+export async function review(deps: ReviewDeps): Promise<ReviewResult> {
+  return continueReview(await prepareReview(deps), deps)
 }

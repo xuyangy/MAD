@@ -40,10 +40,27 @@
  * The mode is DERIVED from `route` — a `judgeMode` field would be a third field
  * for this stage (AD-8 gives it two) and a second source of truth one rename away
  * from disagreeing with the first.
+ *
+ * ## The debate-off policy (SPEC.md "Evaluation exception", dated 2026-09-09)
+ *
+ * An evaluation can continue a run under `policy: "debate-off"`, which sends
+ * EVERY finding to the judge — criticals, lens findings and findings with a
+ * missing or zero-denominator prior included. It is the one sanctioned way to
+ * switch debate off. `threshold: 0` cannot do it, because rule 1 below still
+ * debates a model-claimed critical. `maxRounds: 0` cannot either, because
+ * debate would stamp untouched rooms `exit=cap`. Both are rejected in
+ * `evaluation-protocol.md` §2.
+ *
+ * The stage still runs once and still writes only `route` and `routeReason`.
+ * The reason names the experimental intervention and never the threshold,
+ * silence, a cap or a budget, because none of those decided anything. The
+ * shipped decision is still computed for each finding, so the run can report
+ * how many findings debate would have had (the protocol's treatment
+ * opportunity).
  */
 
 import { appendEntry, effectiveSeverity, type Finding } from "../domain/finding.ts"
-import { formatThreshold, type RouteCounts } from "../domain/run-record.ts"
+import { formatThreshold, type RouteCounts, type RoutingPolicy } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 
 /**
@@ -86,7 +103,16 @@ export interface RouteInput {
    * as `ClusterInput.clock`.
    */
   clock: Clock
+  /** Absent is `shipped`. See the module header for `debate-off`. */
+  policy?: RoutingPolicy
 }
+
+/**
+ * The reason every finding carries under the debate-off policy. Exported so a
+ * test pins the one spelling instead of a paraphrase of it.
+ */
+export const INTERVENTION_ROUTE_REASON =
+  "experimental intervention (evaluation-only debate-off policy) — debate not run, judged verify-independently"
 
 /**
  * `RouteCounts` verbatim, plus what was routed and the dial it was routed
@@ -202,6 +228,34 @@ export function route(input: RouteInput): RouteStageResult {
   const { findings, clock } = input
   const threshold = clampThreshold(input.threshold)
   const at = clock.now()
+
+  if (input.policy === "debate-off") {
+    let wouldHaveDebated = 0
+    for (const finding of findings) {
+      // The shipped decision is COMPUTED and not applied: `decide` writes
+      // nothing, so the count is the counterfactual and the finding keeps only
+      // the intervention's route and reason.
+      if (decide(finding, threshold).route === "debate") wouldHaveDebated += 1
+      finding.route = "judge"
+      finding.routeReason = INTERVENTION_ROUTE_REASON
+      appendEntry(finding, {
+        stage: "route",
+        actor: "mad",
+        at,
+        kind: "routed",
+        body: INTERVENTION_ROUTE_REASON,
+      })
+    }
+    return {
+      findings,
+      threshold,
+      toDebate: 0,
+      toJudge: findings.length,
+      toJudgeAtThreshold: 0,
+      toJudgeNoPrior: 0,
+      intervention: { toJudge: findings.length, wouldHaveDebated },
+    }
+  }
 
   let toDebate = 0
   let toJudgeAtThreshold = 0

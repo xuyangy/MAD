@@ -21,7 +21,7 @@ import {
 } from "../test-support/fakes.ts"
 import { SUGGESTED_BUDGET, usageIsComplete } from "../budget/ledger.ts"
 import { createLateUsageSink, type LateUsageReport } from "../ports/late-usage.ts"
-import { frameForHostAgent, review } from "./review.ts"
+import { continueReview, frameForHostAgent, prepareReview, review } from "./review.ts"
 
 const ENVELOPE = {
   findings: [
@@ -2330,5 +2330,385 @@ describe("review — late usage is recovered before `finishedAt` (story 2.3, AC2
     )
     expect(conflict).toBeDefined()
     expect(conflict!.detail).toMatchObject({ conflicts: 1 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.5A — the prepare/continue seam and the evaluation-only debate-off policy
+// ---------------------------------------------------------------------------
+
+const RETRY_CRITICAL = {
+  claim: "The retry loop has no ceiling and can spin forever.",
+  reasoning: "A transient failure becomes an infinite loop.",
+  severity: "critical",
+  file: "src/retry.ts",
+  startLine: 30,
+}
+
+/**
+ * Three pool slots and one lens. Under the shipped policy the pay.ts cluster
+ * (2/3, below 0.8) and the critical retry.ts finding (1/3) are debated, and the
+ * lens finding goes to the judge with no prior.
+ */
+function mixedRun() {
+  const resolved = setup(
+    [
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ],
+    3,
+    ["security"],
+  )
+  const backend = new FakeBackend(
+    abstainingInDebate({
+      "discovery-1": [{ kind: "ok", value: { findings: [ENVELOPE.findings[0]!, RETRY_CRITICAL] } }],
+      "discovery-2": [{ kind: "ok", value: ENVELOPE }],
+      "discovery-3": [{ kind: "ok", value: { findings: [] } }],
+      "discovery-lens-security": [
+        {
+          kind: "ok",
+          value: { findings: [{ ...ENVELOPE.findings[0]!, claim: "Tokens are compared with ==.", file: "src/auth.ts" }] },
+        },
+      ],
+    }),
+  )
+  return {
+    backend,
+    deps: {
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    },
+  }
+}
+
+/** One slot raising one critical finding. */
+function criticalRun(extra: { tokenCap?: number } = {}) {
+  const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+  const backend = new FakeBackend({ "discovery-1": [{ kind: "ok", value: { findings: [RETRY_CRITICAL] } }] })
+  return {
+    backend,
+    deps: {
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      ...extra,
+    },
+  }
+}
+
+/** Stopped while the second of three discovery turns is in flight: one finding survives. */
+function stoppedInDiscovery() {
+  const resolved = setup(
+    [
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ],
+    3,
+  )
+  const controller = new AbortController()
+  let started = 0
+  const scripts = abstainingInDebate(
+    Object.fromEntries(
+      ["discovery-1", "discovery-2", "discovery-3"].map((slot) => [slot, [{ kind: "ok" as const, value: ENVELOPE }]]),
+    ),
+  )
+  const backend = new FakeBackend(scripts, {}, {}, () => {
+    started += 1
+    if (started === 2) controller.abort()
+  })
+  return {
+    scripts,
+    deps: {
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+      signal: controller.signal,
+    },
+  }
+}
+
+describe("review — the debate-off continuation runs the shipped judge and output (story 2.5A)", () => {
+  test("EVERY finding is judged verify-independently, and no debate request is issued", async () => {
+    const { backend, deps } = mixedRun()
+    const prepared = await prepareReview(deps)
+    const { record, rendered } = await continueReview(prepared, deps, "debate-off")
+
+    expect(record.findings).toHaveLength(3)
+    expect(record.findings.some((f) => f.severity === "critical")).toBe(true)
+    expect(record.findings.some((f) => f.source === "lens")).toBe(true)
+    for (const f of record.findings) {
+      expect(f.route, f.claim).toBe("judge")
+      expect(f.routeReason, f.claim).toContain("experimental intervention")
+    }
+    expect(record.routingPolicy).toBe("debate-off")
+    expect(record.routeCounts).toEqual({
+      toDebate: 0,
+      toJudge: 3,
+      toJudgeAtThreshold: 0,
+      toJudgeNoPrior: 0,
+      intervention: { toJudge: 3, wouldHaveDebated: 2 },
+    })
+
+    // Zero debate requests: every call without a judge role is a discovery turn.
+    expect(backend.calls.filter((call) => call.role === undefined)).toHaveLength(4)
+    expect(record.ledger.entries.filter((entry) => entry.stage === "debate")).toEqual([])
+    expect(record.debateCounts).toMatchObject({ debated: 0, turns: 0 })
+    // Healthy judge, budget available, no stop: all three decided without an argument.
+    expect(record.judgeCounts).toMatchObject({ verifiedIndependently: 3, adjudicated: 0 })
+
+    expect(rendered).toContain("DEBATE WAS SWITCHED OFF BY AN EXPERIMENTAL INTERVENTION")
+    expect(rendered).toContain("The shipped policy would have debated 2 of them.")
+    expect(rendered).not.toContain("Critical severity is debated at any threshold.")
+  })
+
+  test("the same inputs under the shipped policy debate the two the intervention counted", async () => {
+    const { record } = await review(mixedRun().deps)
+    expect(record.routingPolicy).toBeUndefined()
+    expect(record.routeCounts?.toDebate).toBe(2)
+    expect(record.routeCounts?.intervention).toBeUndefined()
+  })
+
+  test("A JUDGE BUDGET THAT RUNS OUT keeps its budget reason — the intervention does not erase it", async () => {
+    // Discovery's ceiling is 30% of 30 = 9, so its one turn runs (0 < 9) and
+    // spends 30; the judge's ceiling is 30, and 30 < 30 refuses.
+    const { deps } = criticalRun({ tokenCap: TURN_COST })
+    const { record } = await continueReview(await prepareReview(deps), deps, "debate-off")
+
+    const [f] = record.findings
+    expect(f!.routeReason).toContain("experimental intervention")
+    expect(f!.unresolved?.diedAtStage).toBe("judge")
+    expect(f!.unresolved?.reason).toContain("budget")
+    expect(record.ledger.entries.filter((entry) => entry.stage === "debate")).toEqual([])
+  })
+
+  test("NOTHING FOUND still renders, with an all-zero intervention", async () => {
+    const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+    const backend = new FakeBackend({ "discovery-1": [{ kind: "ok", value: { findings: [] } }] })
+    const deps = {
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    }
+    const { record, rendered } = await continueReview(await prepareReview(deps), deps, "debate-off")
+
+    expect(record.routeCounts?.intervention).toEqual({ toJudge: 0, wouldHaveDebated: 0 })
+    expect(rendered).toContain("DEBATE WAS SWITCHED OFF BY AN EXPERIMENTAL INTERVENTION")
+    expect(backend.calls).toHaveLength(1)
+  })
+})
+
+describe("review — an ordinary run is the baseline run (story 2.5A)", () => {
+  test("a fixed scripted run issues the SAME requests and renders the SAME report as before the seam", async () => {
+    // The literals below were captured by running this exact scenario through
+    // `review()` at commit ee33ae8, before `review()` was split into prepare and
+    // continue. Asserting `review()` against its own composition would prove
+    // nothing once one delegates to the other; a behaviour captured from the
+    // unsplit code does. Discovery-3 drops out, so debate and judge eligibility
+    // both go through `answeredSlots`.
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const abstain: SlotStep = { kind: "ok", value: { turns: [] } }
+    const backend = new FakeBackend({
+      "discovery-1": [{ kind: "ok", value: { findings: [ENVELOPE.findings[0]!, RETRY_CRITICAL] } }, abstain],
+      "discovery-2": [
+        { kind: "ok", value: { findings: [{ ...ENVELOPE.findings[0]!, claim: "The fee uses an unvalidated rate." }] } },
+        abstain,
+      ],
+      "discovery-3": [{ kind: "fail", failure: "model-error", message: "provider down" }],
+    })
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+    })
+
+    const sha = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex")
+    expect(backend.calls).toEqual([
+      { slot: "discovery-1", attempt: 1 },
+      { slot: "discovery-2", attempt: 1 },
+      { slot: "discovery-3", attempt: 1 },
+      { slot: "discovery-3", attempt: 2 },
+      { slot: "discovery-1", attempt: 2 },
+      { slot: "discovery-2", attempt: 2 },
+      { slot: "discovery-2", attempt: 1, role: "fact-check" },
+      { slot: "discovery-2", attempt: 2, role: "fact-check" },
+    ])
+    expect(sha(rendered)).toBe("dfbf5414489b30b7d39e7714d38d3fa1200a990106aaafedbf5229346f448d93")
+    expect(sha(JSON.stringify(record))).toBe("3c8e82676a8838f661bb457596224cb5ffa8a6242f7eaa5f0885948e8bc9ecec")
+  })
+})
+
+describe("review — the prepared value and who owns it (story 2.5A)", () => {
+  test("A STOP IN PREPARATION IS TERMINAL: no signal, or a fresh one, issues no request", async () => {
+    for (const signal of [undefined, new AbortController().signal]) {
+      const { deps, scripts } = stoppedInDiscovery()
+      const prepared = await prepareReview(deps)
+      expect(prepared.record.cancelled).toEqual({ stage: "discover" })
+      expect(prepared.record.findings).toHaveLength(1)
+
+      const fresh = new FakeBackend(scripts)
+      const { record } = await continueReview(
+        prepared,
+        { backend: fresh, clock: fakeClock(), ...(signal === undefined ? {} : { signal }) },
+        "debate-off",
+      )
+
+      expect(fresh.calls, String(signal)).toEqual([])
+      expect(record.cancelled).toEqual({ stage: "discover" })
+      expect(record.warnings.filter((w) => w.code === "run-cancelled")).toHaveLength(1)
+      const [f] = record.findings
+      expect(f!.unresolved?.reason).toContain("cancelled")
+      expect(f!.unresolved?.reason).not.toContain("budget")
+    }
+  })
+
+  test("IT CARRIES NO RUNTIME SERVICE, and keeps a caller's opaque evidence as it came", async () => {
+    const { deps } = criticalRun()
+    const probe = () => "caller evidence"
+    const prepared = await prepareReview({
+      ...deps,
+      priorWarnings: [
+        ...deps.priorWarnings,
+        { code: "session-cleanup-unresolved", stage: "discover", message: "caller evidence", detail: { probe } },
+      ],
+    })
+
+    expect(Object.keys(prepared).sort()).toEqual([
+      "answeredSlots",
+      "framedChange",
+      "instructions",
+      "record",
+      "stopRequested",
+    ])
+
+    const offenders: string[] = []
+    const seen = new Set<unknown>()
+    const walk = (value: unknown, path: string): void => {
+      if (typeof value === "function") offenders.push(path)
+      if (value === null || typeof value !== "object" || seen.has(value)) return
+      seen.add(value)
+      if (value === deps.backend || value === deps.clock) offenders.push(path)
+      for (const [key, child] of Object.entries(value)) {
+        // A caller's warning detail is opaque evidence, not an assembly service.
+        if (key === "detail" && path.includes(".warnings.")) continue
+        walk(child, `${path}.${key}`)
+      }
+    }
+    walk(prepared, "prepared")
+    expect(offenders).toEqual([])
+
+    const kept = prepared.record.warnings.find((w) => w.message === "caller evidence")
+    expect(kept?.detail?.["probe"]).toBe(probe)
+  })
+
+  test("IT IS SINGLE-USE: a second continuation is refused", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview(deps)
+    await continueReview(prepared, deps)
+    await expect(continueReview(prepared, deps)).rejects.toThrow("already continued")
+  })
+
+  test("A SHALLOW COPY of a continued value shares its record, and is refused too", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview(deps)
+    await continueReview(prepared, deps)
+    await expect(continueReview({ ...prepared }, deps)).rejects.toThrow("already continued")
+  })
+
+  test("AN UNKNOWN POLICY is refused before anything is consumed or mutated", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview(deps)
+    await expect(continueReview(prepared, deps, "debate-lite" as never)).rejects.toThrow("routing policy")
+
+    // Still usable, and routed exactly once.
+    const { record } = await continueReview(prepared, deps)
+    expect(record.routingPolicy).toBeUndefined()
+    for (const f of record.findings) {
+      expect(f.history.filter((entry) => entry.kind === "routed")).toHaveLength(1)
+    }
+  })
+
+  test("A STOP AFTER DISCOVERY'S LAST ANSWER, which discovery does not record, is still terminal", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const scripts = abstainingInDebate(
+      Object.fromEntries(
+        ["discovery-1", "discovery-2", "discovery-3"].map((slot) => [slot, [{ kind: "ok" as const, value: ENVELOPE }]]),
+      ),
+    )
+    const controller = new AbortController()
+    const inner = new FakeBackend(scripts)
+    const answer = inner.runTurn.bind(inner)
+    // Abort AFTER the third discovery turn has produced its answer, so no
+    // discovery turn is cancelled and discovery records no stop.
+    inner.runTurn = (async (...args: Parameters<typeof answer>) => {
+      const envelope = await answer(...args)
+      if (inner.calls.length === 3) controller.abort()
+      return envelope
+    }) as typeof inner.runTurn
+
+    const deps = {
+      roster: resolved.roster,
+      backend: inner,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+      signal: controller.signal,
+    }
+    const prepared = await prepareReview(deps)
+    expect(prepared.record.cancelled).toBeUndefined()
+    expect(prepared.stopRequested).toBe(true)
+
+    const fresh = new FakeBackend(scripts)
+    const { record } = await continueReview(prepared, { backend: fresh, clock: fakeClock() }, "debate-off")
+
+    expect(fresh.calls).toEqual([])
+    expect(record.cancelled).toBeDefined()
+    expect(record.cancelled!.stage).not.toBe("discover")
+    for (const f of record.findings) expect(f.unresolved?.reason).toContain("cancelled")
+  })
+
+  test("A CONTINUATION CANNOT REPLACE A PREPARED INPUT — extra fields are ignored", async () => {
+    const { deps } = mixedRun()
+    const prepared = await prepareReview(deps)
+    const other = setup([["openai", "gpt-5"]])
+    const { record } = await continueReview(prepared, {
+      ...deps,
+      roster: other.roster,
+      threshold: 0.1,
+      change: { description: "another change", files: ["src/other.ts"], diff: "" },
+    } as never)
+
+    expect(record.roster).toBe(prepared.record.roster)
+    expect(record.threshold).toBe(0.8)
+    expect(record.routeCounts?.toDebate).toBe(2)
   })
 })

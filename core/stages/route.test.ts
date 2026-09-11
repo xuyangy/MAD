@@ -365,3 +365,72 @@ describe("source is the discriminator, not the presence of a pair (AD-17d, AD-9 
     expect(f.routeReason).not.toContain("3/3")
   })
 })
+
+describe("route — the evaluation-only debate-off policy (story 2.5A)", () => {
+  const off = (findings: Finding[], threshold = 0.8) =>
+    route({ findings, threshold, clock: fakeClock(), policy: "debate-off" })
+
+  // Every shape the shipped policy sends to debate, plus both judge shapes.
+  const mixed = () => [
+    pool({ id: "critical", severity: "critical", coDiscovery: { raised: 3, answered: 3 } }),
+    pool({ id: "contested", coDiscovery: { raised: 1, answered: 3 } }),
+    pool({ id: "settled", coDiscovery: { raised: 3, answered: 3 } }),
+    lens({ id: "lens", lens: "security" }),
+    { ...pool({ id: "no-prior" }), coDiscovery: undefined },
+    pool({ id: "zero-denominator", coDiscovery: { raised: 0, answered: 0 } }),
+  ]
+
+  test("EVERY finding goes to the judge — criticals, lens and missing priors included", () => {
+    const findings = mixed()
+    const result = off(findings)
+
+    for (const f of findings) {
+      expect(f.route, f.id).toBe("judge")
+      expect(f.routeReason, f.id).toContain("experimental intervention")
+    }
+    expect(result.toDebate).toBe(0)
+    expect(result.toJudge).toBe(6)
+  })
+
+  test("the reason names no threshold, silence, cap or budget", () => {
+    const findings = mixed()
+    off(findings)
+    for (const f of findings) {
+      for (const word of ["threshold", "silence", "cap", "budget"]) {
+        expect(f.routeReason!.toLowerCase(), `${f.id}: ${word}`).not.toContain(word)
+      }
+    }
+  })
+
+  test("routing still writes ONE `routed` entry per finding, carrying the same reason", () => {
+    const findings = mixed()
+    off(findings)
+    for (const f of findings) {
+      const routed = f.history.filter((entry) => entry.kind === "routed")
+      expect(routed, f.id).toHaveLength(1)
+      expect(routed[0]!.body).toBe(f.routeReason!)
+    }
+  })
+
+  test("THE TREATMENT OPPORTUNITY is the shipped decision, counted and not applied", () => {
+    const findings = mixed()
+    const shipped = run(mixed(), 0.8)
+    const result = off(findings, 0.8)
+
+    // critical, contested, no-prior, zero-denominator — the four the shipped rule debates.
+    expect(shipped.toDebate).toBe(4)
+    expect(result.intervention).toEqual({ toJudge: 6, wouldHaveDebated: 4 })
+    // Neither older judge bucket is claimed: nothing was placed against the dial.
+    expect(result.toJudgeAtThreshold).toBe(0)
+    expect(result.toJudgeNoPrior).toBe(0)
+  })
+
+  test("nothing to route is all zeros, not an absent intervention", () => {
+    expect(off([]).intervention).toEqual({ toJudge: 0, wouldHaveDebated: 0 })
+  })
+
+  test("the shipped policy carries no intervention count", () => {
+    expect(run(mixed()).intervention).toBeUndefined()
+    expect(route({ findings: mixed(), clock: fakeClock(), policy: "shipped" }).intervention).toBeUndefined()
+  })
+})

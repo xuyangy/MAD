@@ -49,6 +49,7 @@ import type {
   JudgeCounts,
   LensInstructionRecord,
   RouteCounts,
+  RoutingPolicy,
   RunRecord,
   TokenLedger,
   TokenUsage,
@@ -280,6 +281,18 @@ export interface RunManifest {
     cap: number | null
     shares: SpendShares
     preset: Maybe<Preset>
+    /**
+     * SPEC.md "Evaluation exception" — the routing policy the run continued
+     * under. ALWAYS WRITTEN, `shipped` included, because the debate-pathway
+     * contrast is exactly this dial and a reader must not have to infer it.
+     *
+     * A manifest written before story 2.5A has no such field. The reader reads
+     * that absence as `shipped` under a compatibility interpretation: no code
+     * path before that story could route any other way. It is not evidence
+     * that the artifact is authentic or complete, and it says nothing about
+     * usage.
+     */
+    routingPolicy: RoutingPolicy
   }
   spend: {
     /** From `budgetReport` — the accountant's own arithmetic, never a second copy. */
@@ -389,6 +402,9 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
       shares: record.ledger.shares,
       preset:
         record.preset === undefined ? unknownValue("the caller named no preset") : known(record.preset),
+      // Absent on the record IS the shipped policy (`RunRecord.routingPolicy`);
+      // the manifest spells it out either way.
+      routingPolicy: record.routingPolicy ?? "shipped",
     },
     spend: {
       perStage: budgetReport(record.ledger),

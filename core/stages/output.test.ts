@@ -2854,3 +2854,48 @@ describe("story 2.3 — the two new codes render on the side their membership di
     expect(rendered).toContain("DISCLOSURE: [debate/session-cleanup-unresolved] SESSION NOT DELETED: 2 sessions")
   })
 })
+
+describe("routing summary under the debate-off policy (story 2.5A)", () => {
+  const offRecord = () =>
+    record(
+      [
+        finding({ severity: "critical", file: "a.ts", route: "judge", routeReason: "experimental intervention" }),
+        finding({ severity: "low", file: "b.ts", route: "judge", routeReason: "experimental intervention" }),
+      ],
+      3,
+      [],
+      0.8,
+      {
+        toDebate: 0,
+        toJudge: 2,
+        toJudgeAtThreshold: 0,
+        toJudgeNoPrior: 0,
+        intervention: { toJudge: 2, wouldHaveDebated: 1 },
+      },
+    )
+
+  test("names the intervention, both counts, and that criticals were included", () => {
+    const rendered = output(offRecord())
+    expect(rendered).toContain("ROUTING (co-discovery threshold 80%): 0 to debate, 2 straight to the judge.")
+    expect(rendered).toContain("DEBATE WAS SWITCHED OFF BY AN EXPERIMENTAL INTERVENTION")
+    expect(rendered).toContain("criticals")
+    expect(rendered).toContain("The shipped policy would have debated 1 of them.")
+  })
+
+  test("drops the critical-override sentence, which is false under this policy", () => {
+    expect(output(offRecord())).not.toContain("Critical severity is debated at any threshold.")
+  })
+
+  test("an ordinary summary is untouched — the sentence is still there", () => {
+    const rendered = output(
+      record([finding({ severity: "low", file: "c.ts", route: "judge", routeReason: "settled" })], 3, [], 0.5, {
+        toDebate: 0,
+        toJudge: 1,
+        toJudgeAtThreshold: 1,
+        toJudgeNoPrior: 0,
+      }),
+    )
+    expect(rendered).toContain("Critical severity is debated at any threshold.")
+    expect(rendered).not.toContain("EXPERIMENTAL INTERVENTION")
+  })
+})

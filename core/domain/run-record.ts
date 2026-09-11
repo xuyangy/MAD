@@ -366,6 +366,18 @@ export interface RunRecord {
    */
   routeCounts?: RouteCounts
   /**
+   * SPEC.md "Evaluation exception" (story 2.5A) — the routing policy this run
+   * was continued under, when it was NOT the shipped one.
+   *
+   * OPTIONAL, AND ITS ABSENCE IS THE SHIPPED POLICY. Only `continueReview` can
+   * set it, and no ordinary entry point passes anything but the shipped policy,
+   * so an ordinary run's record keeps exactly the shape it had. Present, it says
+   * debate was switched off by an experimental intervention for every finding —
+   * a fact about the run that `routeCounts.intervention` counts and
+   * `routeReason` states per finding.
+   */
+  routingPolicy?: Exclude<RoutingPolicy, "shipped">
+  /**
    * CAP-4 — the round cap this run actually debated under, already clamped.
    * Required and never optional, for exactly the reason `threshold` is: a debate
    * summary without its cap is a count nobody can interpret, and CAP-4's `cap`
@@ -457,7 +469,9 @@ export interface RunRecord {
  * the first — the exact conflation AD-9's amendment forbids, said in the summary
  * line instead of in the comparator.
  *
- * `toJudge === toJudgeAtThreshold + toJudgeNoPrior`, always.
+ * `toJudge === toJudgeAtThreshold + toJudgeNoPrior + (intervention?.toJudge ?? 0)`,
+ * always. Under the debate-off policy both older judge buckets are 0, because no
+ * finding was placed against the threshold and none was judged for lacking a prior.
  */
 export interface RouteCounts {
   toDebate: number
@@ -466,7 +480,29 @@ export interface RouteCounts {
   toJudgeAtThreshold: number
   /** Judged because there was no prior to compare — lens-sourced (AD-17d). */
   toJudgeNoPrior: number
+  /**
+   * Present only under the evaluation-only debate-off policy.
+   *
+   * `toJudge` counts the findings sent to the judge by the intervention, which
+   * is all of them. `wouldHaveDebated` is the treatment opportunity
+   * (`evaluation-protocol.md` §6): how many of those the shipped policy would
+   * have debated, decided by the same rule and not re-derived by a reader.
+   */
+  intervention?: { toJudge: number; wouldHaveDebated: number }
 }
+
+/**
+ * How routing decides — the one variable the debate-pathway contrast moves.
+ *
+ * `shipped` is CAP-3 exactly. `debate-off` is SPEC.md's dated evaluation
+ * exception: every finding goes to the judge's verify-independently mode, with
+ * a reason naming the intervention. It is selected only through
+ * `continueReview`, never through `ReviewDeps` or the tool surface.
+ */
+export type RoutingPolicy = "shipped" | "debate-off"
+
+/** Every policy a record or manifest may carry, for readers that validate one. */
+export const ROUTING_POLICIES: readonly RoutingPolicy[] = ["shipped", "debate-off"]
 
 /**
  * CAP-4 — the debated partition, counted once by the stage that decided it.

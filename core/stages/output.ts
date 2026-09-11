@@ -519,6 +519,20 @@ function routingSummary(record: RunRecord): string[] {
       `${counts.toDebate} to debate, ${counts.toJudge} straight to the judge.`,
   ]
 
+  // SPEC.md "Evaluation exception" — the debate-off policy. Neither the
+  // threshold nor a missing prior decided anything, so neither judge bucket is
+  // described, and the critical-override sentence below would be false: under
+  // this policy a critical finding is not debated.
+  if (counts.intervention) {
+    lines.push(
+      `  DEBATE WAS SWITCHED OFF BY AN EXPERIMENTAL INTERVENTION (evaluation-only debate-off`,
+      `  policy): all ${counts.intervention.toJudge} went to the judge verify-independently, criticals`,
+      `  included. The shipped policy would have debated ${counts.intervention.wouldHaveDebated} of them.`,
+      "",
+    )
+    return lines
+  }
+
   // THE TWO JUDGE BUCKETS ARE NOT ONE CLAIM. A lens finding reached the judge
   // because it never had a fraction to place against the dial (AD-17d) — saying
   // "at or above the threshold" over a total that includes it would announce an

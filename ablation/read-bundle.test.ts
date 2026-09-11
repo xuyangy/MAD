@@ -54,6 +54,9 @@ interface Fake {
   unknownUsage?: unknown
   unknownUsageCount?: unknown
   exposure?: unknown
+  /** Story 2.5A — absent writes the field ABSENT, the pre-2.5A shape. */
+  routingPolicy?: unknown
+  cap?: number
 }
 
 function manifestFor(fake: Fake): unknown {
@@ -88,9 +91,11 @@ function manifestFor(fake: Fake): unknown {
       threshold: fake.threshold ?? 0.5,
       maxRounds: 2,
       maxConcurrency: 4,
-      cap: 1000,
+      cap: fake.cap ?? 1000,
       shares: fake.shares ?? { discover: 0.3, debate: 0.65, judge: 1 },
       preset: unknownValue("the caller named no preset"),
+      // `in` for `usageCompleteness`' reason: absent must be writable as absent.
+      ...("routingPolicy" in fake ? { routingPolicy: fake.routingPolicy } : { routingPolicy: "shipped" }),
     },
     spend: {
       perStage: fake.perStage ?? [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
@@ -1046,5 +1051,102 @@ describe("AC5 — the usage verdict is per arm, and the union is checked", () =>
       expect(result.comparable, name).toEqual([])
       expect(result.unreadable[0]!.reason, name).toContain(expected)
     }
+  })
+})
+
+describe("story 2.5A — the routing policy is the intervention, not a confound", () => {
+  const onOff = [
+    { armId: "on", repeatId: 0 },
+    { armId: "off", repeatId: 0 },
+  ]
+
+  test("POLICY ONLY: named as the intervention, and neither 'equal' nor 'more than the intervention'", async () => {
+    const root = await bundle(onOff, [
+      { armId: "on", repeatId: 0, routingPolicy: "shipped" },
+      { armId: "off", repeatId: 0, routingPolicy: "debate-off" },
+    ])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("ROUTING POLICY DIFFERS, and that is the intervention")
+    expect(text).toContain("on/0: routing policy shipped")
+    expect(text).toContain("off/0: routing policy debate-off")
+    expect(text).toContain("every other dial is the same on every comparable arm")
+    expect(text).not.toContain("dials equal across every comparable arm")
+    expect(text).not.toContain("DIFFER IN MORE THAN THE INTERVENTION")
+  })
+
+  test("POLICY AND CAP: the policy is the intervention, and the cap is STILL a confound", async () => {
+    const root = await bundle(onOff, [
+      { armId: "on", repeatId: 0, routingPolicy: "shipped" },
+      { armId: "off", repeatId: 0, routingPolicy: "debate-off", cap: 500 },
+    ])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("ROUTING POLICY DIFFERS, and that is the intervention")
+    expect(text).toContain("DIFFER IN MORE THAN THE INTERVENTION")
+    expect(text).toContain("token cap 500")
+    expect(text).not.toContain("dials equal across every comparable arm")
+  })
+
+  test("ONE POLICY EVERYWHERE prints exactly what it printed before the field existed", async () => {
+    const root = await bundle(onOff, [
+      { armId: "on", repeatId: 0 },
+      { armId: "off", repeatId: 0 },
+    ])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("dials equal across every comparable arm")
+    expect(text).not.toContain("ROUTING POLICY")
+  })
+
+  test("a LEGACY manifest with no policy is read as `shipped`, a compatibility interpretation", async () => {
+    const root = await bundle(onOff, [
+      { armId: "on", repeatId: 0, routingPolicy: undefined },
+      { armId: "off", repeatId: 0, routingPolicy: "shipped" },
+    ])
+    // `undefined` is dropped by JSON.stringify, so the "on" manifest really has no field.
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+
+    expect(result.comparable).toHaveLength(2)
+    expect(result.comparable.map((row) => row.manifest.dials.routingPolicy)).toEqual(["shipped", "shipped"])
+    expect(renderBundle(result)).toContain("dials equal across every comparable arm")
+  })
+
+  test("an UNKNOWN policy is refused, never guessed", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0, routingPolicy: "debate-lite" }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable[0]!.reason).toContain("dials.routingPolicy")
+  })
+
+  test("MIXED POLICIES WITHIN ONE ARM are neither the intervention nor a noise floor", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+        { armId: "off", repeatId: 1 },
+      ],
+      [
+        { armId: "on", repeatId: 0, routingPolicy: "shipped" },
+        { armId: "off", repeatId: 0, routingPolicy: "debate-off" },
+        { armId: "off", repeatId: 1, routingPolicy: "shipped" },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("ROUTING POLICY IS MIXED WITHIN ARM(S) off")
+    expect(text).not.toContain("that is the intervention")
+    expect(text).not.toContain("NOISE FLOOR: for off")
   })
 })

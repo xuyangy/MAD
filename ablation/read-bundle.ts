@@ -60,6 +60,7 @@ import { readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import type { Finding } from "../core/domain/finding.ts"
+import { ROUTING_POLICIES, type RoutingPolicy } from "../core/domain/run-record.ts"
 import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
 import {
   MANIFEST_FILE,
@@ -421,6 +422,21 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   }
   const preset = maybeOf(dials.preset, isText, "a non-empty string")
   if (preset !== undefined) return fail(`has a malformed \`dials.preset\`: ${preset}`)
+  // SPEC.md "Evaluation exception" (story 2.5A). ABSENT is a manifest written
+  // before the field existed, and is read as `shipped` under a COMPATIBILITY
+  // INTERPRETATION: no code path before that story could route any other way.
+  // That is a fact about the code, not proof the artifact is authentic or
+  // complete, and it is never extended to usage. A PRESENT value that is not a
+  // known policy is refused — guessing which pathway an arm ran is guessing the
+  // intervention.
+  if (!("routingPolicy" in dials)) {
+    dials.routingPolicy = "shipped"
+  } else if (!ROUTING_POLICIES.includes(dials.routingPolicy as RoutingPolicy)) {
+    return fail(
+      `has an unknown \`dials.routingPolicy\` ${JSON.stringify(dials.routingPolicy)} ` +
+        `(expected one of ${ROUTING_POLICIES.join(", ")})`,
+    )
+  }
 
   // ---- spend ----
   const spend = value.spend
@@ -842,6 +858,42 @@ export function renderBundle(result: BundleReadResult): string {
 function disclosures(comparable: readonly ArmRow[]): string[] {
   const lines: string[] = ["  DISCLOSURES"]
 
+  // THE ROUTING POLICY IS KEPT OUT OF THE DIAL KEY (story 2.5A). It is the
+  // debate-pathway intervention itself, so an ON arm and an OFF arm differing in
+  // it are the design, not a confound. Folded into the key, that intended
+  // difference printed "THESE ARMS DIFFER IN MORE THAN THE INTERVENTION". It is
+  // named on its own line instead, and every OTHER dial is still compared.
+  const policies = new Map<string, string[]>()
+  const armPolicies = new Map<string, Set<string>>()
+  for (const row of comparable) {
+    const policy = row.manifest.dials.routingPolicy
+    const holders = policies.get(policy) ?? []
+    holders.push(`${row.armId}/${row.repeatId}`)
+    policies.set(policy, holders)
+    const seen = armPolicies.get(row.armId) ?? new Set<string>()
+    seen.add(policy)
+    armPolicies.set(row.armId, seen)
+  }
+  // AN ARM WHOSE REPEATS RAN DIFFERENT POLICIES IS NOT ONE ARM. Its rows are
+  // observations of two pathways filed under one name, so neither the
+  // intervention nor a within-arm spread can be read from them.
+  const mixedArms = [...armPolicies].filter(([, seen]) => seen.size > 1).map(([armId]) => armId)
+  if (mixedArms.length > 0) {
+    lines.push(
+      `    ROUTING POLICY IS MIXED WITHIN ARM(S) ${mixedArms.join(", ")}: their repeats ran different`,
+      `    pathways, so they are NOT repeats of one arm, and neither the intervention nor a noise floor`,
+      `    is read from them:`,
+    )
+    for (const [policy, holders] of policies) {
+      lines.push(`      ${holders.join(", ")}: routing policy ${policy}`)
+    }
+  } else if (policies.size > 1) {
+    lines.push("    ROUTING POLICY DIFFERS, and that is the intervention (SPEC.md evaluation exception):")
+    for (const [policy, holders] of policies) {
+      lines.push(`      ${holders.join(", ")}: routing policy ${policy}`)
+    }
+  }
+
   const dialSets = new Map<string, string[]>()
   for (const row of comparable) {
     const dials = row.manifest.dials
@@ -864,6 +916,8 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
     for (const [key, holders] of dialSets) {
       lines.push(`      ${holders.join(", ")}: ${key}`)
     }
+  } else if (policies.size > 1) {
+    lines.push(`    every other dial is the same on every comparable arm (${[...dialSets.keys()][0]}).`)
   } else {
     lines.push(`    dials equal across every comparable arm (${[...dialSets.keys()][0]}).`)
   }
@@ -875,7 +929,10 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
   // fact, so it is reported per arm.
   const perArm = new Map<string, number>()
   for (const row of comparable) perArm.set(row.armId, (perArm.get(row.armId) ?? 0) + 1)
-  const withSpread = [...perArm].filter(([, count]) => count > 1).map(([armId]) => armId)
+  // A mixed-policy arm is disclosed above and gets no noise-floor line either way.
+  const withSpread = [...perArm]
+    .filter(([armId, count]) => count > 1 && !mixedArms.includes(armId))
+    .map(([armId]) => armId)
   const withoutSpread = [...perArm].filter(([, count]) => count === 1).map(([armId]) => armId)
 
   lines.push(

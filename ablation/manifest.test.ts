@@ -414,3 +414,20 @@ describe("AC6 — the persisted finding form round-trips", () => {
     expect(back.ok).toBe(false)
   })
 })
+
+describe("story 2.5A — the routing policy is a dial the manifest always states", () => {
+  test("an ordinary record, which carries no policy, is written as `shipped`", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(3) })
+    expect(manifest.dials.routingPolicy).toBe("shipped")
+  })
+
+  test("a debate-off record is written as `debate-off`", () => {
+    const manifest = buildManifest({
+      record: record({ routingPolicy: "debate-off" }),
+      change,
+      identity,
+      turnFiles: known(3),
+    })
+    expect(manifest.dials.routingPolicy).toBe("debate-off")
+  })
+})
