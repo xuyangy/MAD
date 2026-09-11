@@ -386,3 +386,27 @@ describe("the headline total says it is NOT a population (ledger triage 2026-09-
     expect(text(report({ anyScripted: true }))).not.toContain("THE PAIRINGS SHARE ARMS")
   })
 })
+
+/**
+ * AC5 (story 2.3) — the ablation report's token figures are OBSERVED spend, and
+ * they say so.
+ *
+ * `ArmCost.tokens` is `ledger.total` and `ArmCost.billedTurns` is
+ * `ledger.entries.length`, and since story 2.3 neither of those counts a turn
+ * whose usage MAD could not establish — those live in `ledger.unknownUsage`, a
+ * second collection, precisely so that no unknown can reach a total as a zero.
+ * `evaluation-protocol.md:511-517` is explicit that the label is required at the
+ * human-facing end: *"both need explicit labels … or the human-facing bill is
+ * misleading while the JSON is correct"*, and *"a missing tag is not evidence of
+ * complete usage"* is why the label is unconditional rather than printed only
+ * when something is known to be missing.
+ */
+describe("AC5 — the token figures are labelled OBSERVED spend", () => {
+  test("the per-arm line and the token-cost block both say observed", () => {
+    const rendered = text(report())
+    expect(rendered).toContain("tokens (observed)")
+    expect(rendered).toContain("2. TOKEN COST — OBSERVED spend")
+    // Not divided by anything, still (AD-9). Labelling the figure does not fuse it.
+    expect(rendered).not.toContain("per token")
+  })
+})

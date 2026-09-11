@@ -123,8 +123,31 @@ export function verdictDifference(alignment: Alignment): VerdictDifference {
 }
 
 export interface ArmCost {
-  /** From the accountant's own total. This module never re-sums a ledger. */
+  /**
+   * OBSERVED SPEND, and the word is load-bearing since story 2.3.
+   *
+   * It is `ledger.total` through the accountant's own `spentTokens` — this module
+   * re-sums nothing — and `ledger.total` counts only the turns whose usage MAD
+   * ESTABLISHED. A turn that was cancelled in flight, timed out, or settled with
+   * the host reporting no `tokens` field is recorded in `ledger.unknownUsage`, a
+   * separate collection, and contributes NOTHING here. That is the property the
+   * second collection exists to buy: an unknown has no number, so it cannot enter
+   * this one as a zero.
+   *
+   * So this figure is a FLOOR on what the arm cost, never the bill, and
+   * `ablation/report.ts` prints it under that label. `evaluation-protocol.md:511-517`
+   * requires exactly that — "a missing tag is not evidence of complete usage" —
+   * which is also why no completeness flag rides on this interface: the label is
+   * unconditional, and the run's own verdict lives on the manifest
+   * (`ablation/manifest.ts`'s `spend.usageCompleteness`) where a reader can see
+   * the identities beside it.
+   */
   tokens: number
+  /**
+   * `ledger.entries.length` — TURNS MAD COULD COUNT, for the reason above, and
+   * not "turns this arm issued". An uncounted turn was still issued and may still
+   * have billed; it is one row in `ledger.unknownUsage` and no row here.
+   */
   billedTurns: number
   /** The five components, carried individually — a total is not a breakdown. */
   input: number
@@ -160,6 +183,15 @@ export function armCost(record: RunRecord): ArmCost {
  * are worth sixty thousand tokens is the reader's call.
  */
 export interface LensTokenCost {
+  /**
+   * A DIFFERENCE OF TWO OBSERVED SPENDS (story 2.3), which is weaker than either
+   * of them and is worth saying out loud: `ArmCost.tokens` is a floor on what an
+   * arm cost, and the difference of two floors is not a floor on the difference.
+   * An uncounted turn in the lensed arm makes this read LOW; one in the plain arm
+   * makes it read HIGH. Each arm's own manifest carries the verdict and the
+   * identities (`ablation/manifest.ts`'s `spend`), and this number is read beside
+   * them rather than in place of them.
+   */
   tokens: number
   billedTurns: number
 }

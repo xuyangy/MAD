@@ -82,7 +82,14 @@
 
 import { z } from "zod"
 
-import { ceilingClause, mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import {
+  ceilingClause,
+  mayISpend,
+  recordTurn,
+  recordUnknownTurn,
+  unknownUsageCount,
+  type BudgetLedger,
+} from "../budget/ledger.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
@@ -260,6 +267,14 @@ async function runJudgeTurn<T>(
   instructions: string,
   prompt: string,
   schema: z.ZodType<T>,
+  /**
+   * AC3 (story 2.3) — where a session MAD could not delete is written down.
+   * `core/stages/discover.ts`'s `runWithOneRetry` carries the argument for why
+   * it is a parameter and not a field on the returned envelope: the retry
+   * discards the first attempt's envelope, and a session still on the host must
+   * not be discarded with it.
+   */
+  cleanups: { slot: string; why: string }[],
 ): Promise<TurnOutcome<T>> {
   let last: Envelope<T> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -287,9 +302,25 @@ async function runJudgeTurn<T>(
         message: error instanceof Error ? error.message : "backend threw a non-Error value",
       }
     }
-    if (envelope.tokens) {
+    // FR10 / AC1 (story 2.3) — THE ORDERED RECORD: unknown marker first, else
+    // `tokens`, else nothing. `core/stages/discover.ts` carries the full
+    // argument — the fabricated `emptyTokenUsage()` this replaces, why the
+    // marker wins when a backend sends both, and why it is `else` and not two
+    // `if`s. The rule is the same here, and the retry loop is untouched:
+    // unquantified usage never authorizes a retry
+    // (`evaluation-protocol.md:311-327`).
+    if (envelope.usageUnknown) {
+      recordUnknownTurn(input.ledger, {
+        slot,
+        stage: "judge",
+        attempt,
+        executionId: envelope.usageUnknown.executionId,
+        why: envelope.usageUnknown.why,
+      })
+    } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "judge", attempt, tokens: envelope.tokens })
     }
+    if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { envelope, attempts: attempt }
     if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
     last = envelope
@@ -735,6 +766,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   const runId = input.runId ?? "run"
   const warnings: Warning[] = []
 
+  // Story 2.3 — the two facts a judge turn carries that are not a verdict.
+  // `core/stages/discover.ts` carries the argument for both: the unknowns live
+  // on the LEDGER, which is the run's one record of money, and this marks its
+  // high-water point so the tail is exactly what judging recorded; cleanups have
+  // no home on the record, so the stage carries them to the warning it raises.
+  const unknownBefore = unknownUsageCount(ledger)
+  const cleanups: { slot: string; why: string }[] = []
+
   const counts = {
     judged: 0,
     adjudicated: 0,
@@ -1136,6 +1175,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           instructionFor(input, "evidence-extract").text,
           buildExtractPrompt(input, finding, transcript),
           evidenceEnvelopeSchema,
+          cleanups,
         ),
       )
       counts.attempts += outcome.attempts
@@ -1304,6 +1344,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         instructionFor(input, "fact-check").text,
         buildFactCheckPrompt(input, finding, transcript, evidence, argued, blameCitation),
         factCheckEnvelopeSchema,
+        cleanups,
       ),
     )
 
@@ -1329,6 +1370,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           instructionFor(input, "logic-eval").text,
           buildLogicEvalPrompt(finding, transcript, evidence),
           logicEvalEnvelopeSchema,
+          cleanups,
         ),
       )
     }
@@ -1496,6 +1538,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           madExecuted,
         ),
         aggregateEnvelopeSchema,
+        cleanups,
       ),
     )
     counts.attempts += aggregateOutcome.attempts
@@ -1634,6 +1677,57 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         `stopped the run. They are reported in the UNRESOLVED section with whatever earlier steps ` +
         `produced for them — nothing was dropped, and no model was asked again.`,
       detail: { cause: "cancelled", unresolved: counts.unresolvedByCancellation },
+    })
+  }
+
+  // FR10 / AC1 (story 2.3) — WHAT JUDGING BILLED AND COULD NOT COUNT.
+  //
+  // ONE WARNING FOR THE STAGE, not one per turn: the judge issues up to four
+  // roles per finding, so a host that stopped reporting usage would otherwise
+  // raise a warning per role per finding and teach the reader to skip the block
+  // — the accumulation rule the `blame-unavailable` warning above states.
+  const unquantified = ledger.unknownUsage.slice(unknownBefore)
+  if (unquantified.length > 0) {
+    const why = [...new Set(unquantified.map((entry) => entry.why))]
+    warnings.push({
+      code: "usage-unquantified",
+      stage: "judge",
+      // No model, no provider, and no number on the gap — `discover.ts` gives
+      // the reasoning for all three.
+      message:
+        `USAGE UNQUANTIFIED: ${unquantified.length} judge turn(s) billed an amount MAD cannot ` +
+        `count (${why.join("; ")}). Those turns were NOT free: the TOKENS total for this run is ` +
+        `OBSERVED spend and is short by whatever they cost, and MAD does not fill the gap in.`,
+      detail: {
+        turns: unquantified.length,
+        executions: unquantified.map((entry) => ({
+          slot: entry.slot,
+          attempt: entry.attempt,
+          executionId: entry.executionId,
+          why: entry.why,
+        })),
+      },
+    })
+  }
+
+  // AC3 (story 2.3) — sessions still on the host. A DISCLOSURE, in a
+  // disclosure's voice: no model named, no turn called failed, and every verdict
+  // reported above stands exactly as it was reached.
+  if (cleanups.length > 0) {
+    const why = [...new Set(cleanups.map((cleanup) => cleanup.why))]
+    warnings.push({
+      code: "session-cleanup-unresolved",
+      stage: "judge",
+      message:
+        `SESSION NOT DELETED: ${cleanups.length} session(s) MAD opened during judging could not ` +
+        `be deleted (${why.join("; ")}). Nothing about the verdicts ` +
+        `changed — the same checks ran and the same rulings were recorded — but those sessions ` +
+        `may still be on the host.`,
+      detail: {
+        sessions: cleanups.length,
+        slots: [...new Set(cleanups.map((cleanup) => cleanup.slot))],
+        reasons: why,
+      },
     })
   }
 

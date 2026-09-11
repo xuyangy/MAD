@@ -5,6 +5,7 @@ import type { Finding, Severity } from "../domain/finding.ts"
 import {
   emptyLedger,
   recordTurn,
+  recordUnknownTurn,
   type DebateCounts,
   type JudgeCounts,
   type RouteCounts,
@@ -2041,16 +2042,18 @@ describe("AD-6 — the warning's STAGE is rendered and disclosures are classifie
   })
 
   test("EVERY CODE IN THE VOCABULARY RENDERS ON THE SIDE ITS MEMBERSHIP DICTATES", () => {
-    // WHAT THIS CANNOT DO TODAY, said plainly: `DISCLOSURE_CODES` has ONE member,
-    // so `!DISCLOSURE_CODES.has(code)` and `code !== "provider-fan-out"` are
-    // behaviourally identical and no test can separate them. An auditor reverted
-    // the renderer to the denylist and got a full green suite (2026-08-30).
+    // WHAT THIS COULD NOT DO UNTIL STORY 2.3, said plainly: `DISCLOSURE_CODES`
+    // had ONE member, so `!DISCLOSURE_CODES.has(code)` and
+    // `code !== "provider-fan-out"` were behaviourally identical and no test
+    // could separate them. An auditor reverted the renderer to the denylist and
+    // got a full green suite (2026-08-30).
     //
-    // WHAT IT DOES DO: it covers every code that EXISTS, so the moment a second
-    // disclosure code is added this test separates the two forms without anybody
-    // remembering to come back — and a new code added to `WARNING_CODES` is
-    // asserted to render on the side its membership says, rather than on the side
-    // a renderer's hardcoded string happens to put it.
+    // IT CAN NOW, and that is the payoff this comment promised rather than a new
+    // claim: story 2.3 added `session-cleanup-unresolved` as a second disclosure,
+    // so a renderer that went back to the hardcoded string files it under
+    // "this run is degraded" and fails HERE, with nobody having remembered to
+    // come back. A new code added to `WARNING_CODES` is still asserted to render
+    // on the side its membership says.
     for (const code of WARNING_CODES) {
       const rec = record([finding({ severity: "high", file: "a.ts" })])
       rec.warnings = [{ code, stage: "debate", message: `the message for ${code}` }]
@@ -2646,5 +2649,208 @@ describe("the not-yet-merged notice is driven off the POOL (deferred-work 2026-0
   test("a CLUSTERED run still suppresses it — the notice is about an unmerged pool", () => {
     const clustered = record([finding({ severity: "high", file: "src/a.ts", clusterId: "c-1" })], 2)
     expect(output(clustered)).not.toContain("POOL — NOT YET MERGED")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.3, task 13 — the incompleteness, RENDERED. A ledger that knows it
+// could not count a turn is worth nothing if the one page a human reads prints
+// the short total as though it were the bill.
+// ---------------------------------------------------------------------------
+
+/** One turn MAD billed and could not count, with its reason stated. */
+function billedUncounted(rec: RunRecord, why = "the host reported no usage", n = 1): void {
+  recordUnknownTurn(rec.ledger, {
+    slot: "discovery-1",
+    stage: "discover",
+    attempt: 1,
+    executionId: `exec-${n}`,
+    why,
+  })
+}
+
+/** One turn MAD billed and DID count, so the TOKENS line has a real figure. */
+function billedCounted(rec: RunRecord, input = 100): void {
+  recordTurn(rec.ledger, {
+    slot: "discovery-1",
+    stage: "discover",
+    attempt: 1,
+    tokens: { input, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+  })
+}
+
+describe("story 2.3 — the TOKENS line says OBSERVED when the ledger holds an unknown (AC1)", () => {
+  test("the line is MARKED, and the accountant's count rides under it", () => {
+    // The failure this pins: three counted turns and one uncounted one render as
+    // a healthy four-figure total, because `entries.length` and `total` are both
+    // perfectly true about the turns MAD could count and say nothing about the
+    // one it could not.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedCounted(rec)
+    billedUncounted(rec)
+
+    const rendered = output(rec)
+    const lines = rendered.split("\n")
+    const tokensLine = lines.find((l) => l.startsWith("TOKENS"))!
+
+    expect(tokensLine).toContain("TOKENS (OBSERVED) — turns: 1 | in: 100")
+    expect(rendered).toContain("1 turn in this run has UNKNOWN usage")
+    expect(rendered).toContain("OBSERVED spend and not a full count")
+  })
+
+  test("NO NUMBER IS PUT ON THE GAP — the uncounted turn moves not one figure", () => {
+    // AC1's "no unknown value is ever estimated or interpolated", asserted where
+    // a reader would see the invention: the five figures, the turn count and the
+    // spend clause are all over the turns MAD could count, and the uncounted one
+    // contributes a sentence rather than a zero.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedUncounted(rec)
+
+    const rendered = output(rec)
+    expect(rendered).toContain("turns: 0 | in: 0 | out: 0 | reasoning: 0 | cache r/w: 0/0")
+    expect(rec.ledger.entries).toHaveLength(0)
+    // The page SAYS it does not estimate, and does not then estimate anyway.
+    expect(rendered).toContain("MAD does not estimate it")
+    expect(rendered).not.toContain("estimated")
+    expect(rendered).not.toContain("approximately")
+    expect(rendered).not.toContain("~")
+  })
+
+  test("the count is PLURALISED, because a reader counts what the sentence says", () => {
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedUncounted(rec, "cancelled in flight", 1)
+    billedUncounted(rec, "the host reported no usage", 2)
+    expect(output(rec)).toContain("2 turns in this run have UNKNOWN usage")
+  })
+
+  test("A FULLY COUNTED RUN RENDERS AS IT DID BEFORE THIS STORY — the non-vacuous sibling", () => {
+    // The marker and the sentence are CONDITIONAL. A run whose every turn was
+    // counted must not be told its total might be short, which is AD-6's honesty
+    // rule pointed the other way — and is the only thing that keeps the
+    // assertions above from passing over a renderer that prints the caveat
+    // always.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedCounted(rec)
+
+    const rendered = output(rec)
+    expect(rendered).toContain("TOKENS — turns: 1 | in: 100")
+    expect(rendered).not.toContain("OBSERVED")
+    expect(rendered).not.toContain("UNKNOWN usage")
+  })
+
+  test("the PEAK line still follows the TOKENS line, unknown or not (story 7A)", () => {
+    // Story 7A's invariant, re-asserted over the state this story adds: the
+    // disclosure goes BELOW the peak rather than between the two lines it was
+    // deliberately placed beside.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.ledger.maxConcurrency = 3
+    billedUncounted(rec)
+
+    const lines = output(rec).split("\n")
+    const tokensAt = lines.findIndex((l) => l.startsWith("TOKENS"))
+    expect(tokensAt).toBeGreaterThan(0)
+    expect(lines[tokensAt + 1]).toContain("PEAK — at most 3 model turn(s) in flight at once")
+  })
+})
+
+describe("story 2.3 — the FLOOR caveat covers BOTH causes, and names neither wrongly (AC1)", () => {
+  test("an UNCANCELLED run with an unknown gets the caveat", () => {
+    // The gate was `record.cancelled !== undefined`, so a settled turn whose host
+    // reported no usage printed a total with no caveat at all — the quieter half
+    // of this story's failure, and the half a user cannot see.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedCounted(rec)
+    billedUncounted(rec)
+
+    expect(rec.cancelled).toBeUndefined()
+    expect(output(rec)).toContain("THAT TOTAL IS A FLOOR, not a full count")
+  })
+
+  test("a CANCELLED run with complete usage still gets it, unchanged", () => {
+    // `core/run/run-control.test.ts:469`'s unit-level sibling: widening the gate
+    // must not narrow it.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.cancelled = { stage: "judge" }
+    billedCounted(rec)
+
+    const rendered = output(rec)
+    expect(rendered).toContain("THAT TOTAL IS A FLOOR, not a full count")
+    // ...and it says nothing about an unknown, because there is none to name.
+    expect(rendered).not.toContain("UNKNOWN usage")
+  })
+
+  test("THE WORDING NO LONGER BLAMES THE STOP ALONE", () => {
+    // "a turn MAD stopped waiting on returns no usage" is accurate for a
+    // cancellation and FALSE for a turn that settled successfully with the host
+    // reporting no `tokens` field — the sentence would tell a reader MAD stopped
+    // waiting on a turn that finished normally.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedUncounted(rec)
+
+    const rendered = output(rec)
+    expect(rendered).not.toContain("a turn MAD stopped waiting on returns no")
+    expect(rendered).toContain("MAD does not estimate it")
+  })
+
+  test("ONE SENTENCE COVERS BOTH — the cancelled and the uncounted read the same caveat", () => {
+    // The caveat describes the GAP and never the cause; the cause rides on each
+    // `UnknownUsageEntry.why` and on the stage's warning. Two wordings here would
+    // be two places to keep true.
+    const stopped = record([finding({ severity: "high", file: "a.ts" })])
+    stopped.cancelled = { stage: "judge" }
+    const uncounted = record([finding({ severity: "high", file: "a.ts" })])
+    billedUncounted(uncounted)
+
+    const caveatOf = (rendered: string) =>
+      rendered.split("\n").filter((l) => l.includes("FLOOR") || l.includes("missing here"))
+    expect(caveatOf(output(stopped))).toEqual(caveatOf(output(uncounted)))
+  })
+
+  test("A CLEAN RUN GETS NEITHER — the caveat is conditional on both counts", () => {
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedCounted(rec)
+
+    const rendered = output(rec)
+    expect(rec.cancelled).toBeUndefined()
+    expect(rec.ledger.unknownUsage).toHaveLength(0)
+    expect(rendered).not.toContain("THAT TOTAL IS A FLOOR")
+  })
+})
+
+describe("story 2.3 — the two new codes render on the side their membership dictates", () => {
+  test("`usage-unquantified` is a DEGRADATION and `session-cleanup-unresolved` a DISCLOSURE", () => {
+    // The MATRIX test above walks `WARNING_CODES` and is deliberately generic.
+    // This one names the two codes story 2.3 added, because the split they sit on
+    // is a decision that took an argument (*Dev Notes → Two new warning codes*)
+    // and a decision worth arguing is worth pinning by name: an untrustworthy
+    // token column makes the run worth LESS, while a session MAD could not delete
+    // is untidy and changes nothing about the review.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.warnings = [
+      { code: "usage-unquantified", stage: "discover", message: "USAGE UNQUANTIFIED: 1 turn" },
+      { code: "session-cleanup-unresolved", stage: "judge", message: "SESSION NOT DELETED: 1 session" },
+    ]
+    const rendered = output(rec)
+
+    expect(rendered).toContain("WARNINGS — this run is degraded")
+    expect(rendered).toContain("! [discover/usage-unquantified]")
+    expect(rendered).toContain("DISCLOSURE: [judge/session-cleanup-unresolved]")
+    expect(rendered).not.toContain("! [judge/session-cleanup-unresolved]")
+    expect(rendered).not.toContain("DISCLOSURE: [discover/usage-unquantified]")
+  })
+
+  test("a cleanup disclosure ALONE leaves the run clean, and is still printed", () => {
+    // The half that would be lost if the code were filed as a degradation: a run
+    // whose only blemish is a session still sitting on the host is not a degraded
+    // review, and saying it is would be the false degradation report AD-6 exists
+    // to prevent.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.warnings = [
+      { code: "session-cleanup-unresolved", stage: "debate", message: "SESSION NOT DELETED: 2 sessions" },
+    ]
+    const rendered = output(rec)
+
+    expect(rendered).toContain("WARNINGS: none — this run is clean.")
+    expect(rendered).toContain("DISCLOSURE: [debate/session-cleanup-unresolved] SESSION NOT DELETED: 2 sessions")
   })
 })

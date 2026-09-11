@@ -32,10 +32,57 @@ export function tokens(input = 10, output = 20): TokenUsage {
   return { ...emptyTokenUsage(), input, output }
 }
 
+/**
+ * Story 2.3 — WHAT A SCRIPTED TURN CAN SAY ABOUT MONEY AND CLEANUP.
+ *
+ * Both modifiers are optional, and their ABSENCE is today's behaviour exactly:
+ * every step written before this story bills `tokens()` and resolves its
+ * cleanup, so no existing test moves.
+ *
+ * ## Why modifiers and not two new `kind`s
+ *
+ * A `kind: "usage-unknown"` variant was the obvious shape and it is wrong,
+ * because unknown usage is ORTHOGONAL to the outcome. All four combinations are
+ * real and observed: a turn that failed and billed nothing countable, a turn
+ * that failed and billed something countable, a turn that SUCCEEDED with the
+ * host reporting no `tokens` field at all, and a turn that succeeded and
+ * reported them. A separate `kind` can express two of the four and forces the
+ * other two to be written as something they are not — which is how a test about
+ * the honest path ends up scripted against the dishonest one.
+ *
+ * The same argument covers `cleanupUnresolved`: a session MAD could not delete
+ * says nothing about whether the turn answered
+ * (`adapters/opencode/model-backend.ts:190-193`).
+ *
+ * ## The value is the `why`, and it is not optional-if-present
+ *
+ * `usageUnknown: "..."` carries the REASON, because `UsageUnknown.why` is
+ * mandatory and non-empty and a fake that could produce a blank one would let a
+ * test pass over a marker production could never emit. A bare `true` would have
+ * been shorter and would have made every scripted unknown identical, which is
+ * the opposite of what a test about three distinguishable causes needs.
+ */
 export type SlotStep =
   /** A payload that is run through the real schema, so malformed values are exercised. */
-  | { kind: "ok"; value: unknown }
-  | { kind: "fail"; failure: TurnFailure; message?: string }
+  | { kind: "ok"; value: unknown; usageUnknown?: string; cleanupUnresolved?: string }
+  | {
+      kind: "fail"
+      failure: TurnFailure
+      message?: string
+      /**
+       * Story 2.3 — the envelope carries `usageUnknown` with THIS reason and NO
+       * `tokens` field at all.
+       *
+       * THIS IS THE SEAM THE WHOLE STORY NEEDED FIRST. Before it, every `fail`
+       * variant attached `tokens: tokens()` unconditionally, so a turn with
+       * ABSENT usage was not scriptable — and a test written against a fake that
+       * also fabricates a number passes while the mechanism under test is
+       * wrong, which is the exact failure mode story 2.3 is about.
+       */
+      usageUnknown?: string
+      /** Story 2.3 — the turn's session could not be deleted, for THIS reason. */
+      cleanupUnresolved?: string
+    }
 
 export type SlotScript = SlotStep[]
 
@@ -137,6 +184,9 @@ export class FakeBackend implements ModelBackend {
   inFlight = 0
   peakInFlight = 0
 
+  /** Story 2.3 — how many `executionId`s this instance has minted. See `nextExecutionId`. */
+  private executions = 0
+
   capabilities(slot: string): BackendCapabilities {
     return { tools: this.toolcall[slot] !== false }
   }
@@ -175,6 +225,49 @@ export class FakeBackend implements ModelBackend {
     }
   }
 
+  /**
+   * Story 2.3 — the usage and cleanup annotations one scripted step produces.
+   *
+   * ONE HELPER FOR BOTH ENVELOPE BRANCHES, so a fake cannot answer the ok path
+   * and the fail path differently about money. It returns an object that
+   * genuinely OMITS the keys it does not set — conditional spreads, never
+   * `tokens: undefined` — because `exactOptionalPropertyTypes` is off in this
+   * repository, so a present-but-undefined `tokens` would satisfy the type and
+   * make `"tokens" in envelope` true. Absent and undefined are the two states
+   * story 2.3's assertions distinguish, and a fake that blurred them would make
+   * every one of those assertions vacuous.
+   */
+  private extras(step: SlotStep): {
+    tokens?: TokenUsage
+    usageUnknown?: { executionId: string; why: string }
+    cleanupUnresolved?: { why: string }
+  } {
+    return {
+      ...(step.usageUnknown === undefined
+        ? { tokens: tokens() }
+        : { usageUnknown: { executionId: this.nextExecutionId(), why: step.usageUnknown } }),
+      ...(step.cleanupUnresolved === undefined
+        ? {}
+        : { cleanupUnresolved: { why: step.cleanupUnresolved } }),
+    }
+  }
+
+  /**
+   * A monotonic per-instance counter, MINTED ONLY WHERE A STEP ASKS FOR ONE.
+   *
+   * It mirrors the real backend's rule — one id per physical model request, from
+   * a counter, never `Math.random()` — so a test stays deterministic. Minting
+   * only for the steps that need one is the part that is not the real backend's
+   * rule, and it is deliberate: if every turn consumed an id, the id a test
+   * asserts on would shift whenever somebody added an unrelated turn to an
+   * unrelated slot's script, and the assertion would be about test ordering
+   * rather than about the mechanism.
+   */
+  private nextExecutionId(): string {
+    this.executions += 1
+    return `exec-${this.executions}`
+  }
+
   private answer<T>(
     slot: string,
     role: JudgeRoleTag | undefined,
@@ -197,7 +290,7 @@ export class FakeBackend implements ModelBackend {
         slot,
         failure: step.failure,
         message: step.message ?? "scripted failure",
-        tokens: tokens(),
+        ...this.extras(step),
       }
     }
 
@@ -208,13 +301,13 @@ export class FakeBackend implements ModelBackend {
         slot,
         failure: "schema-invalid",
         message: parsed.error.issues.map((i) => i.message).join("; "),
-        tokens: tokens(),
         // Mirrors the real adapter: the unvalidated payload rides along so the
         // stage can salvage the valid items from it.
         raw: step.value,
+        ...this.extras(step),
       }
     }
-    return { ok: true, slot, value: parsed.data, tokens: tokens() }
+    return { ok: true, slot, value: parsed.data, ...this.extras(step) }
   }
 }
 

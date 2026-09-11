@@ -37,6 +37,23 @@ interface Fake {
   perStage?: unknown
   total?: unknown
   shares?: unknown
+  /**
+   * AC5 (story 2.3) — the usage-audit half of `spend`, overridable field by
+   * field so a malformed one can be written without hand-rolling a whole
+   * manifest.
+   *
+   * THE DEFAULTS CHANGED WITH THE WRITER, and deliberately: this fixture wrote
+   * `usageCompleteness: "unaudited"` because story 2.2's builder could write
+   * nothing else. `buildManifest` now audits the ledger, so a fixture frozen at
+   * `unaudited` would be a reader tested against a manifest MAD no longer
+   * produces. The default here is what a clean run produces — `complete`, no
+   * identities, exposure `quantified` — and every test that wants another state
+   * asks for it.
+   */
+  usageCompleteness?: unknown
+  unknownUsage?: unknown
+  unknownUsageCount?: unknown
+  exposure?: unknown
 }
 
 function manifestFor(fake: Fake): unknown {
@@ -78,7 +95,14 @@ function manifestFor(fake: Fake): unknown {
     spend: {
       perStage: fake.perStage ?? [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
       total: fake.total ?? { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-      usageCompleteness: "unaudited",
+      // `in` RATHER THAN `??`, for these four only. A test that wants to write a
+      // manifest with the field ABSENT — the pre-2.3 shape a reader will meet on
+      // disk — passes `undefined`, which `JSON.stringify` drops; `??` would
+      // silently substitute the healthy default and the test would pin nothing.
+      usageCompleteness: "usageCompleteness" in fake ? fake.usageCompleteness : "complete",
+      unknownUsage: "unknownUsage" in fake ? fake.unknownUsage : [],
+      unknownUsageCount: "unknownUsageCount" in fake ? fake.unknownUsageCount : 0,
+      exposure: "exposure" in fake ? fake.exposure : "quantified",
     },
     status: {
       completion: fake.completion ?? "completed",
@@ -900,5 +924,127 @@ describe("a duplicate index slot is a corrupt roster, not a repeated measurement
     const result = await readBundle(root)
     if ("error" in result) throw new Error(result.error)
     expect(renderBundle(result)).toContain("OBSERVATIONS PER ARM: control 2")
+  })
+})
+
+/**
+ * AC5 (story 2.3) — the reader states a usage verdict PER ARM, and validates the
+ * widened union before it does.
+ *
+ * Story 2.2's reader printed one hardcoded paragraph for the whole bundle —
+ * *"USAGE COMPLETENESS is `unaudited` for every run in this bundle"* — which was
+ * true while `buildManifest` could write nothing else. It is false the moment two
+ * arms can disagree, and a paragraph that is false in the interesting case is
+ * worse than no paragraph: the interesting case is exactly the one where one
+ * arm's token column is short and the other's is not.
+ */
+describe("AC5 — the usage verdict is per arm, and the union is checked", () => {
+  const unknownIn = (executionId: string) => ({
+    slot: "discovery-1",
+    stage: "discover",
+    attempt: 1,
+    executionId,
+    why: "the host settled the turn and reported no tokens",
+  })
+
+  const incomplete = (armId: string, ids: readonly string[]) => ({
+    armId,
+    repeatId: 0,
+    usageCompleteness: "incomplete",
+    unknownUsage: ids.map(unknownIn),
+    unknownUsageCount: ids.length,
+    exposure: "unquantified",
+  })
+
+  test("two arms disagreeing on usage each get their OWN sentence", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [{ armId: "on", repeatId: 0 }, incomplete("off", ["exec-2", "exec-5"])],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("USAGE COMPLETENESS, PER ARM")
+    expect(text).toContain("on repeat 0 — complete")
+    expect(text).toContain("off repeat 0 — INCOMPLETE: 2 execution(s)")
+    expect(text).toContain("exec-2")
+    expect(text).toContain("unquantified")
+    // The bundle-wide claim is gone, not reworded.
+    expect(text).not.toContain("for every run in this bundle")
+  })
+
+  test("an `unaudited` arm is not reported as a clean one", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, usageCompleteness: "unaudited", exposure: "unquantified" }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+    expect(text).toContain("on repeat 0 — UNAUDITED")
+    expect(text).not.toContain("on repeat 0 — complete")
+  })
+
+  test("the tokens column is labelled OBSERVED spend, whatever the verdict", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    // `evaluation-protocol.md:511-517` — "a missing tag is not evidence of
+    // complete usage", so the label is unconditional. A column headed `tokens`
+    // only when something is known to be missing teaches a reader to read the
+    // unlabelled one as a bill.
+    expect(renderBundle(result)).toContain("tokens (observed)")
+  })
+
+  test("USAGE COMPLETENESS IS NOT A COMPARABILITY FIELD — it labels, it does not segregate", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [{ armId: "on", repeatId: 0 }, incomplete("off", ["exec-1"])],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    // The four comparability fields are facts about WHAT WAS REVIEWED; usage
+    // completeness is a fact about MAD's own instrumentation. Partitioning on it
+    // would split a legitimately paired block in half because one arm's host
+    // dropped a `tokens` field, which is the reverse of what segregation is for.
+    expect(result.segregated).toEqual([])
+    expect(result.comparable).toHaveLength(2)
+    expect(result.cohortSize).toBe(2)
+  })
+
+  test("a verdict outside the union is UNREADABLE, not printed as a word", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, usageCompleteness: "probably-fine" }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.comparable).toEqual([])
+    expect(result.unreadable[0]!.reason).toContain("spend.usageCompleteness")
+  })
+
+  test("the identities, the count and the exposure are checked as hard as the total is", async () => {
+    const cases: [string, Partial<Fake>, string][] = [
+      ["no identities at all", { unknownUsage: undefined }, "spend.unknownUsage"],
+      ["identities that are not a list", { unknownUsage: {} }, "spend.unknownUsage"],
+      ["an identity with no `why`", { unknownUsage: [{ ...unknownIn("exec-1"), why: "" }] }, "spend.unknownUsage[0]"],
+      ["an identity with no `executionId`", { unknownUsage: [{ slot: "s", stage: "discover", attempt: 1, why: "w" }] }, "spend.unknownUsage[0]"],
+      ["a count that is not a number", { unknownUsageCount: "two" }, "spend.unknownUsageCount"],
+      ["an exposure outside the union", { exposure: "sort-of" }, "spend.exposure"],
+    ]
+    for (const [name, over, expected] of cases) {
+      const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0, ...over }])
+      const result = await readBundle(root)
+      if ("error" in result) throw new Error(result.error)
+      expect(result.comparable, name).toEqual([])
+      expect(result.unreadable[0]!.reason, name).toContain(expected)
+    }
   })
 })

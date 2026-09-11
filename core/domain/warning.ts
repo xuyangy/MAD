@@ -213,6 +213,74 @@ export const WARNING_CODES = [
    * answer (story 10, Decision 1, approved by the human 2026-09-08).
    */
   "blame-unavailable",
+  /**
+   * AD-6 / AD-15 / FR10 (story 2.3) — MAD BILLED FOR A TURN IT COULD NOT COUNT.
+   *
+   * The seventeenth code. A turn was cancelled in flight, timed out, or settled
+   * with the host reporting no `tokens` field at all. The provider billed
+   * whatever it billed; MAD does not know the number and will not invent one
+   * (`core/domain/run-record.ts`, `UnknownUsageEntry`). So the run's TOKENS line
+   * is a floor standing in the position a total occupies, and this code is the
+   * sentence that says so in the vocabulary rather than only in the prose of one
+   * renderer.
+   *
+   * WHY IT MEETS THE BAR THE LAST FIVE CODES SET. **No existing code can carry
+   * the fact without lying.** `model-dropped-out` blames a provider for a
+   * failure that may not have happened — a settled, successful turn whose host
+   * omitted `tokens` is a working model and a working provider, and the missing
+   * number is MAD's own instrumentation gap. `run-cancelled` is raised once per
+   * run about the USER's stop and says nothing about money; `unresolved-findings`
+   * is AD-6d and is about findings, not about the bill. **And it is a fact about
+   * what was reviewed, not a decision MAD made:** every cost figure the run
+   * prints, and every cost comparison an ablation draws from it
+   * (`evaluation-protocol.md:511-517` — "a missing tag is not evidence of
+   * complete usage"), was computed over a total that is known to be short.
+   *
+   * A DEGRADATION, and this one is not the safe default falling through — it is
+   * the answer. AD-6's honesty rule exists so a degraded review cannot read like
+   * a good one, and the single number a reader most takes for exact is the token
+   * total. Filing an untrustworthy total as a *disclosure* would put it under a
+   * heading that says the run is fine.
+   *
+   * IT MUST NEVER READ AS "THIS TURN WAS FREE". That is the whole of it, and it
+   * is the exact lie story 2.3 deletes: `emptyTokenUsage()` is a truthy object,
+   * so a fabricated all-zero entry used to reach the ledger and a turn that
+   * billed money was recorded as a turn that cost nothing.
+   *
+   * Raised by the stage that detected it, over the unknown-usage entries the
+   * ledger now carries, and rendered once at output.
+   */
+  "usage-unquantified",
+  /**
+   * AD-2 / AD-6 (story 2.3) — A SESSION MAD OPENED AND COULD NOT DELETE.
+   *
+   * The eighteenth code. Session disposal is bounded by a deadline (AC3: an
+   * unresolved cleanup is exposed rather than awaited silently), so a `delete`
+   * that hangs or throws now ends the turn with the session still on the host
+   * instead of holding the run open until it answers.
+   *
+   * A DISCLOSURE, AND IT IS THE FIRST CODE SINCE `provider-fan-out` TO EARN
+   * THAT SIDE. `adapters/opencode/model-backend.ts` has recorded the judgement
+   * in prose since story 1 — "a session we cannot delete is untidy, not a
+   * failure of the review" — and this code puts that same judgement in the
+   * vocabulary without changing it. Nothing about an orphaned session changes
+   * which findings were raised, which were argued, or which were judged: the
+   * review is worth exactly what it was worth, and the only actionable fact is
+   * that something remains on the host.
+   *
+   * WHY IT IS A CODE AT ALL, GIVEN THAT. Because the alternative is silence.
+   * The old `finally { await this.disposeSession(...) }` swallowed every failure
+   * on purpose and reported nothing, which is defensible for an error and not
+   * defensible for a resource the user is still paying to store. A disclosure is
+   * what "here is a fact, it is not a fault" looks like in this vocabulary, and
+   * it is the same shape `provider-fan-out` uses for "here is where your code
+   * went".
+   *
+   * IT MUST NEVER GROW A DEGRADATION'S VOICE. In particular it must not say the
+   * turn failed, name a model, or appear beside `model-dropped-out` — the turn
+   * it rides on may have succeeded completely, and usually did.
+   */
+  "session-cleanup-unresolved",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]
@@ -237,6 +305,18 @@ export type WarningCode = (typeof WARNING_CODES)[number]
 export const DISCLOSURE_CODES: ReadonlySet<WarningCode> = new Set<WarningCode>([
   /** AD-3 — which providers a run sends code to. A fact, not a fault. */
   "provider-fan-out",
+  /**
+   * AD-2 (story 2.3) — a session MAD opened and could not delete. Untidy on the
+   * host, not a failure of the review, and the turn it rides on may have
+   * succeeded completely. The reasoning is at the code's own entry above; it is
+   * repeated nowhere, because being listed HERE is what makes a code a
+   * disclosure and the argument belongs beside the code it is about.
+   *
+   * Note what is NOT here: `usage-unquantified`, which arrived in the same
+   * story and is a degradation. The two are the reason `warning.test.ts` writes
+   * this set out in full rather than counting it.
+   */
+  "session-cleanup-unresolved",
 ])
 
 export interface Warning {

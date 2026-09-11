@@ -28,7 +28,17 @@
  * (Story 2.2 added a SECOND module reaching into `adapters/`: `ablation/bundle.ts`
  * imports `adapters/opencode/artifacts.ts`. That file pulls in only `node:` and
  * `core/` types and no SDK, so the sentence that matters here — the scripted path
- * constructs no opencode client — is unchanged.)
+ * constructs no opencode client — is unchanged.
+ *
+ * Story 2.3 widened the REACH of that import without changing the sentence, and
+ * the difference is worth recording rather than leaving to be rediscovered:
+ * `ablation/arms.ts` now imports `EvaluationBundleError` from `bundle.ts` so the
+ * governor's refusal is the deliberate stop this tree already has rather than a
+ * new exception vocabulary. `arms.ts` is on the SCRIPTED path, so that path now
+ * loads `artifacts.ts` too. Still no SDK, still no client, still nothing written
+ * unless a caller asks — but the import is no longer confined to the live path,
+ * and a future edit to `artifacts.ts` that pulled in the SDK would now reach the
+ * scripted run as well.)
  *
  * ## It bills real money against the caller's own credentials
  *
@@ -51,6 +61,7 @@ import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
 import { EvaluationBundleError, writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
 import { buildReport, lensTokenCost, type AblationReport } from "./compare.ts"
+import { createExperimentGovernor } from "./governor.ts"
 import type { EvaluationIdentity } from "./manifest.ts"
 
 export interface LiveOptions {
@@ -179,6 +190,25 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     }
   }
 
+  // AC4 (story 2.3) — THE EXPERIMENT-WIDE STOP MECHANISM
+  // (`evaluation-protocol.md:332-339`), built here and consulted by
+  // `runAblation` before every arm.
+  //
+  // ONLY WHEN A BUNDLE IS WRITTEN, and that is the mechanism rather than a
+  // convenience: the halt is persisted as a marker in the bundle root, and "do
+  // not resume automatically" means the refusal has to outlive this process. A
+  // governor with nowhere to write would hold its halt in memory and lift it the
+  // moment the operator ran the command again. It is built AFTER the index for
+  // the same reason the index is written first — a run whose evidence cannot be
+  // declared never reaches the point of needing a gate.
+  //
+  // The scripted path passes no bundle, builds no governor, and is unchanged
+  // (AD-16).
+  const governor =
+    options.bundle === undefined
+      ? undefined
+      : createExperimentGovernor({ bundleRoot: options.bundle.root })
+
   const runs = await runAblation(
     specs,
     {
@@ -189,7 +219,14 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
       // turn every unknown slot into a silent double drop-out that reads exactly
       // like a flaky provider. Both collections, for the reason `plugin.ts`
       // records at its own construction site.
-      backendFor: (spec) => {
+      //
+      // `lateUsage` IS THE ARM'S OWN SINK, minted by `runArm` and handed in. It
+      // goes onto the backend here and onto `review()` there, and they are the
+      // same object by construction rather than by two call sites agreeing. On
+      // the live path this is the only thing that recovers a bill the provider
+      // reports after MAD stopped waiting for it (AC2, story 2.3) — without it
+      // an evaluation halts on an uncountable turn that was, in fact, countable.
+      backendFor: (spec, lateUsage) => {
         const resolved = selectRoster(candidates, {
           slots: spec.slots,
           lenses: spec.lenses ?? [],
@@ -200,6 +237,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
           serverUrl: options.serverUrl,
           directory: options.directory,
           slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
+          lateUsage,
         })
         if (options.bundle === undefined) return backend
         const recorder = createTurnRecorder()
@@ -212,6 +250,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
       change,
       candidates,
       providerConfigKey,
+      ...(governor === undefined ? {} : { governor }),
       ...(options.tokenCap === undefined ? {} : { dials: { tokenCap: options.tokenCap } }),
       // EACH ARM IS PERSISTED AS IT FINISHES (review finding 4, 2026-09-10).
       // Writing every dump after the whole loop meant an evaluation that died in

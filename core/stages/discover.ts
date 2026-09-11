@@ -90,8 +90,14 @@ import {
   type Locus,
 } from "../domain/finding.ts"
 import type { RosterSlot, Roster } from "../domain/roster.ts"
-import { ceilingNamed, mayISpend } from "../budget/ledger.ts"
-import { recordTurn, type LensInstructionRecord, type TokenLedger } from "../domain/run-record.ts"
+import {
+  ceilingNamed,
+  mayISpend,
+  recordTurn,
+  recordUnknownTurn,
+  unknownUsageCount,
+} from "../budget/ledger.ts"
+import type { LensInstructionRecord, TokenLedger } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
@@ -280,6 +286,19 @@ async function runWithOneRetry(
   input: DiscoverInput,
   slot: string,
   instructions: string,
+  /**
+   * AC3 (story 2.3) — WHERE A SESSION MAD COULD NOT DELETE IS WRITTEN DOWN, and
+   * it is a parameter rather than something read off the returned envelope.
+   *
+   * The reason is the retry: this loop returns ONE envelope and the first
+   * attempt's is discarded, so a caller reading only the result would drop a
+   * session that is still sitting on the host whenever the retry succeeded —
+   * the silent swallow AC3 exists to end, reintroduced one level up. Unknown
+   * USAGE needs no such channel because it goes to the ledger, which is the
+   * run's one record of money; a cleanup fact has no home on the record, so the
+   * stage carries it to the warning it raises.
+   */
+  cleanups: { slot: string; why: string }[],
 ): Promise<SlotOutcome> {
   let last: Envelope<DiscoveryEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -351,9 +370,61 @@ async function runWithOneRetry(
         message: error instanceof Error ? error.message : "backend threw a non-Error value",
       }
     }
-    if (envelope.tokens) {
+    // FR10 / AC1 (story 2.3) — THE ORDERED RECORD, AND THE ORDER IS THE RULE.
+    //
+    // Unknown marker FIRST, else `tokens`, else nothing. The whole of this used
+    // to be `if (envelope.tokens) recordTurn(...)`, and that guard is what made
+    // the lie possible: the adapter had no way to say "the host reported no
+    // usage" and fabricated `emptyTokenUsage()`, which is a TRUTHY object, so an
+    // all-zero entry landed in the ledger and a turn that billed money was
+    // recorded as a turn that cost nothing — in the direction that flatters MAD.
+    // `evaluation-protocol.md:341-343` names that line as the reason the
+    // protocol's own stop rule could not work before this story.
+    //
+    // The order decides exactly one case: an envelope carrying BOTH. The marker
+    // wins, because a backend that sent both has told MAD two things about one
+    // turn and only one of them is defensible — taking the number would be the
+    // pre-2.3 behaviour arriving through a different door.
+    //
+    // `else`, and never two `if`s. A turn is counted once or marked once. Doing
+    // both would put one execution in `entries` AND in `unknownUsage`, and every
+    // reader downstream treats those two collections as a partition:
+    // `usageIsComplete`, the manifest's audit verdict, and the renderer's
+    // observed-spend caveat all read them that way.
+    //
+    // NO RETRY IS ADDED, and none may be — "Cancellation, budget refusal and
+    // unquantified usage never authorize a retry" (`evaluation-protocol.md:311-327`).
+    // A turn whose first attempt cannot be counted is a turn a retry makes
+    // WORSE: it adds a second uncountable bill to the first.
+    //
+    // THE LOOP BELOW IS UNTOUCHED, AND THE REFUSAL COMES FROM THE ACCOUNTANT
+    // INSTEAD — which is the whole reason it can be honoured without a second
+    // gate in this stage. `mayISpend` is asked before EVERY attempt including
+    // the retry, and it refuses once the ledger holds an unknown and the run's
+    // `stopOnUnknownUsage` dial is set. So under an evaluation, a failed turn
+    // whose usage is unknown is asked ONCE and never again; under an ordinary
+    // review the dial is off, the retry proceeds, and the second attempt is
+    // recorded as its own unknown. Both behaviours are deliberate and the story
+    // records why (*Dev Notes → Why the stop rule is a dial*); the protocol's
+    // rule binds the first, which is the path that bills an experiment.
+    //
+    // Pinned end-to-end by `discover.test.ts`'s "AC4 — with the stop dial set,
+    // the retry after an unknown is REFUSED, not billed", because the dial being
+    // correct in `core/budget/ledger.ts` proves nothing about the stage reaching
+    // it on the retry path.
+    if (envelope.usageUnknown) {
+      recordUnknownTurn(input.ledger, {
+        slot,
+        stage: "discover",
+        attempt,
+        executionId: envelope.usageUnknown.executionId,
+        why: envelope.usageUnknown.why,
+      })
+    } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "discover", attempt, tokens: envelope.tokens })
     }
+    // AC3 — collected per ATTEMPT, for the reason the parameter's comment gives.
+    if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { skippedForBudget: false, envelope, attempts: attempt }
     // A backend that DID honour the signal reports `cancelled`. Same rule as the
     // pre-check above: no second attempt, and the attempt that was billed is
@@ -409,18 +480,33 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const withSlot = <T>(turn: () => Promise<T>): Promise<T> =>
     input.limiter ? input.limiter.run(turn) : turn()
 
+  // Story 2.3 — the two facts this stage learns about a turn that are NOT about
+  // findings, gathered here so the warnings below are raised once for the stage
+  // rather than once per slot.
+  //
+  // THE UNKNOWNS ARE NOT COLLECTED INTO A SECOND LIST, deliberately. They are
+  // already on the ledger, which is the run's ONE record of what was spent, and
+  // a stage keeping its own parallel count of money is the second authority
+  // AD-15 exists to prevent. `unknownUsageCount` marks the ledger's high-water
+  // point before the fan-out, and everything appended past it is this stage's —
+  // the stages run strictly in sequence (`core/run/review.ts`), so the tail is
+  // exactly what discovery recorded. Cleanups have no place on the record at
+  // all, which is why they alone need the array.
+  const unknownBefore = unknownUsageCount(input.ledger)
+  const cleanups: { slot: string; why: string }[] = []
+
   const [poolOutcomes, lensOutcomes] = await Promise.all([
     Promise.all(
       roster.slots.map(async (rosterSlot) => ({
         rosterSlot,
-        ...(await withSlot(() => runWithOneRetry(input, rosterSlot.slot, input.instructions.text))),
+        ...(await withSlot(() => runWithOneRetry(input, rosterSlot.slot, input.instructions.text, cleanups))),
       })),
     ),
     Promise.all(
       roster.lensSlots.map(async (lensSlot, index) => ({
         rosterSlot: lensSlot as RosterSlot,
         lens: lensSlot.lens,
-        ...(await withSlot(() => runWithOneRetry(input, lensSlot.slot, lensSets[index]!.text))),
+        ...(await withSlot(() => runWithOneRetry(input, lensSlot.slot, lensSets[index]!.text, cleanups))),
       })),
     ),
   ])
@@ -677,6 +763,70 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         requested: roster.requested,
         cancelled,
         skippedForBudget: poolSkippedCount,
+      },
+    })
+  }
+
+  // FR10 / AC1 (story 2.3) — WHAT DISCOVERY BILLED AND COULD NOT COUNT.
+  //
+  // The ledger's tail, not a count this stage kept: see `unknownBefore` above
+  // for why the ledger is the only place a stage reads its own spend from.
+  //
+  // ONE WARNING FOR THE STAGE, not one per turn. A fan-out whose host stopped
+  // reporting usage would otherwise raise a warning per slot per attempt, and a
+  // warnings block a reader learns to skip is a degradation report that has
+  // stopped working (the accumulation rule `judge.ts` states for `blame`).
+  const unquantified = input.ledger.unknownUsage.slice(unknownBefore)
+  if (unquantified.length > 0) {
+    // The DISTINCT causes, in first-seen order. "cancelled in flight", "timed
+    // out" and "the host reported nothing" are three different facts a reader
+    // acts on differently, and printing the same one eight times says less than
+    // printing each once.
+    const why = [...new Set(unquantified.map((entry) => entry.why))]
+    warnings.push({
+      code: "usage-unquantified",
+      stage: "discover",
+      // NO MODEL AND NO PROVIDER IS NAMED, and that is not an oversight. A
+      // settled turn whose host omitted `tokens` is a working model answering
+      // normally; the gap is MAD's own instrumentation, and naming a provider
+      // for it is the false degradation report AD-6 exists to prevent. NO
+      // NUMBER IS PUT ON THE GAP either (AC1: nothing is estimated or
+      // interpolated) — the sentence says what is missing and stops.
+      message:
+        `USAGE UNQUANTIFIED: ${unquantified.length} discovery turn(s) billed an amount MAD ` +
+        `cannot count (${why.join("; ")}). Those turns were NOT free: the TOKENS total for this ` +
+        `run is OBSERVED spend and is short by whatever they cost, and MAD does not fill the ` +
+        `gap in.`,
+      detail: {
+        turns: unquantified.length,
+        executions: unquantified.map((entry) => ({
+          slot: entry.slot,
+          attempt: entry.attempt,
+          executionId: entry.executionId,
+          why: entry.why,
+        })),
+      },
+    })
+  }
+
+  // AC3 (story 2.3) — SESSIONS STILL ON THE HOST. A DISCLOSURE, and it keeps a
+  // disclosure's voice: no model is named, no turn is called failed, and the
+  // sentence says outright that the review is worth what it was worth. The turn
+  // each of these rides on may have succeeded completely, and usually did.
+  if (cleanups.length > 0) {
+    const why = [...new Set(cleanups.map((cleanup) => cleanup.why))]
+    warnings.push({
+      code: "session-cleanup-unresolved",
+      stage: "discover",
+      message:
+        `SESSION NOT DELETED: ${cleanups.length} session(s) MAD opened during discovery could ` +
+        `not be deleted (${why.join("; ")}). Nothing about the review ` +
+        `changed — the same findings were raised by the same models — but those sessions may ` +
+        `still be on the host.`,
+      detail: {
+        sessions: cleanups.length,
+        slots: [...new Set(cleanups.map((cleanup) => cleanup.slot))],
+        reasons: why,
       },
     })
   }

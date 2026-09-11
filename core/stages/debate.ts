@@ -74,7 +74,15 @@
 
 import { z } from "zod"
 
-import { ceilingClause, ceilingNamed, mayISpend, recordTurn, type BudgetLedger } from "../budget/ledger.ts"
+import {
+  ceilingClause,
+  ceilingNamed,
+  mayISpend,
+  recordTurn,
+  recordUnknownTurn,
+  unknownUsageCount,
+  type BudgetLedger,
+} from "../budget/ledger.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import {
   appendEntry,
@@ -343,15 +351,33 @@ function roomFor(
  * retry path where "one retry" is an architectural decision rather than a
  * parameter (AD-6b).
  *
- * The ledger is written on EVERY attempt that reported tokens, exactly as
- * discovery does: a retried turn cost money whether or not it produced anything,
- * and a ledger that only recorded successes would under-report the run.
+ * The ledger is written on EVERY attempt MAD LEARNED ANYTHING ABOUT THE COST OF,
+ * exactly as discovery does: a retried turn cost money whether or not it
+ * produced anything, and a ledger that only recorded successes would
+ * under-report the run.
+ *
+ * THAT SENTENCE SAID "every attempt that REPORTED TOKENS" UNTIL STORY 2.3, and
+ * the change is the story rather than a rewording. An attempt that reported no
+ * tokens used to write nothing at all, so a turn MAD could not count was
+ * indistinguishable from a turn that never happened; now it writes an
+ * `UnknownUsageEntry` instead of a `LedgerEntry` and the run knows its own total
+ * is short. Only an attempt that reported NEITHER a figure nor an unknown marker
+ * — a turn the core refused to issue, which was never billed — still writes
+ * nothing.
  */
 async function runDebateTurn(
   input: DebateInput,
   slot: string,
   instructions: string,
   prompt: string,
+  /**
+   * AC3 (story 2.3) — where a session MAD could not delete is written down.
+   * `core/stages/discover.ts`'s `runWithOneRetry` carries the argument for why
+   * this is a parameter rather than a field on the returned envelope: the retry
+   * discards the first attempt's envelope, and a session still on the host must
+   * not be discarded with it.
+   */
+  cleanups: { slot: string; why: string }[],
 ): Promise<{ envelope: Envelope<DebateEnvelope>; attempts: number }> {
   let last: Envelope<DebateEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -385,9 +411,25 @@ async function runDebateTurn(
         message: error instanceof Error ? error.message : "backend threw a non-Error value",
       }
     }
-    if (envelope.tokens) {
+    // FR10 / AC1 (story 2.3) — THE ORDERED RECORD: unknown marker first, else
+    // `tokens`, else nothing. `core/stages/discover.ts` carries the full
+    // argument — the fabricated `emptyTokenUsage()` this replaces, why the
+    // marker wins when a backend sends both, and why it is `else` and not two
+    // `if`s. The rule is the same here, and the retry loop is untouched:
+    // unquantified usage never authorizes a retry
+    // (`evaluation-protocol.md:311-327`).
+    if (envelope.usageUnknown) {
+      recordUnknownTurn(input.ledger, {
+        slot,
+        stage: "debate",
+        attempt,
+        executionId: envelope.usageUnknown.executionId,
+        why: envelope.usageUnknown.why,
+      })
+    } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "debate", attempt, tokens: envelope.tokens })
     }
+    if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { envelope, attempts: attempt }
     if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
     last = envelope
@@ -803,6 +845,15 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     input.instructions ?? resolveInstructions({ taskType: "coding", role: "debate" })
   const warnings: Warning[] = []
 
+  // Story 2.3 — the two facts a debate turn carries that are not about a
+  // position. `core/stages/discover.ts` carries the argument for both: the
+  // unknowns live on the LEDGER, which is the run's one record of money, and
+  // this marks its high-water point so the tail is exactly what debate
+  // recorded; cleanups have no home on the record, so the stage carries them to
+  // the warning it raises.
+  const unknownBefore = unknownUsageCount(ledger)
+  const cleanups: { slot: string; why: string }[] = []
+
   // AD-17a — the lens NEVER reaches a debate turn. The registry is asked for the
   // UNLENSED generalist, by name, and one text is handed to every seat: there is
   // no per-participant instruction and no branch on `finding.lens` anywhere in
@@ -951,7 +1002,13 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         // fan-out shape and its positional resolution are unchanged; only the
         // number in flight is bounded (`core/budget/limiter.ts`).
         ...(await withSlot(() =>
-          runDebateTurn(input, slot, debateInstructionText, buildPrompt(input, slot, bySlot.get(slot)!, round)),
+          runDebateTurn(
+            input,
+            slot,
+            debateInstructionText,
+            buildPrompt(input, slot, bySlot.get(slot)!, round),
+            cleanups,
+          ),
         )),
       })),
     )
@@ -1333,6 +1390,57 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
       `debate counts: ${convergedUncontested} uncontested + ${convergedUnsure} unsure exceeds ` +
         `${converged} converged — the two are SUBSETS of converged, not extra buckets`,
     )
+  }
+
+  // FR10 / AC1 (story 2.3) — WHAT DEBATE BILLED AND COULD NOT COUNT.
+  //
+  // ONE WARNING FOR THE STAGE, and debate is the stage where that matters most:
+  // it is the only one that can issue the same slot a turn in every round, so a
+  // host that stopped reporting usage would otherwise raise `rounds x
+  // participants` copies of one sentence.
+  const unquantified = ledger.unknownUsage.slice(unknownBefore)
+  if (unquantified.length > 0) {
+    const why = [...new Set(unquantified.map((entry) => entry.why))]
+    warnings.push({
+      code: "usage-unquantified",
+      stage: "debate",
+      // No model, no provider, and no number on the gap — `discover.ts` gives
+      // the reasoning for all three.
+      message:
+        `USAGE UNQUANTIFIED: ${unquantified.length} debate turn(s) billed an amount MAD cannot ` +
+        `count (${why.join("; ")}). Those turns were NOT free: the TOKENS total for this run is ` +
+        `OBSERVED spend and is short by whatever they cost, and MAD does not fill the gap in.`,
+      detail: {
+        turns: unquantified.length,
+        executions: unquantified.map((entry) => ({
+          slot: entry.slot,
+          attempt: entry.attempt,
+          executionId: entry.executionId,
+          why: entry.why,
+        })),
+      },
+    })
+  }
+
+  // AC3 (story 2.3) — sessions still on the host. A DISCLOSURE, in a
+  // disclosure's voice: no model named, no turn called failed, and the rounds
+  // these rode on completed exactly as they are reported above.
+  if (cleanups.length > 0) {
+    const why = [...new Set(cleanups.map((cleanup) => cleanup.why))]
+    warnings.push({
+      code: "session-cleanup-unresolved",
+      stage: "debate",
+      message:
+        `SESSION NOT DELETED: ${cleanups.length} session(s) MAD opened during debate could not be ` +
+        `deleted (${why.join("; ")}). Nothing about the debate ` +
+        `changed — the same positions were stated and the same exits recorded — but those ` +
+        `sessions may still be on the host.`,
+      detail: {
+        sessions: cleanups.length,
+        slots: [...new Set(cleanups.map((cleanup) => cleanup.slot))],
+        reasons: why,
+      },
+    })
   }
 
   return {

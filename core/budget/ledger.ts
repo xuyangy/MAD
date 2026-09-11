@@ -30,9 +30,11 @@
 
 import {
   recordTurn,
+  recordUnknownTurn,
   type LedgerEntry,
   type TokenLedger,
   type TokenUsage,
+  type UnknownUsageEntry,
 } from "../domain/run-record.ts"
 import { CUMULATIVE_SHARE, type SpendStage } from "./presets.ts"
 
@@ -128,9 +130,114 @@ export function clampTokenCap(cap: number | undefined | null): number | null {
  * debate".
  */
 export function mayISpend(ledger: BudgetLedger, stage: SpendStage): boolean {
+  // AC4 (story 2.3, `evaluation-protocol.md:332-339`) — THE WITHIN-RUN HALF OF
+  // THE UNKNOWN-USAGE STOP RULE, and it is checked FIRST for a reason that is
+  // not stylistic.
+  //
+  // Every other branch of this gate compares a number against a ceiling. This
+  // one fires because there is NO number to compare: an execution billed
+  // something MAD cannot quantify, so `spent(ledger)` is a floor and every
+  // comparison built on it is a comparison against an unknown remainder. The
+  // protocol struck out its own earlier draft for exactly this reason — a cap
+  // of 10% unquantified exposure "is not an observable predicate, an unknown
+  // amount cannot be compared with a number".
+  //
+  // AHEAD OF THE `ceiling === null` EARLY RETURN, deliberately. "No ceiling
+  // never refuses" has been this gate's first rule since story 5, and the
+  // evaluation path is precisely a path that may run uncapped — a stop rule
+  // placed after it would be dead code on the runs AC4 was written for.
+  //
+  // IT LIVES HERE AND NOWHERE ELSE. A second gate beside this one is the
+  // failure AD-15's single accountant exists to prevent (see this module's
+  // header): the experiment-wide half of the same rule is a DIFFERENT LEVEL
+  // with a different subject — it admits ARMS, never turns — and it is
+  // `ablation/governor.ts`, not a second opinion on this question.
+  //
+  // A REFUSAL, NOT A THROW (`:21-26`). And the dial defaults `false`, so an
+  // ordinary review reports the unknown honestly and keeps working; see
+  // `TokenLedger.stopOnUnknownUsage` for why that is a decision rather than a
+  // half-measure.
+  if (ledger.stopOnUnknownUsage && !usageIsComplete(ledger)) return false
   const ceiling = stageCeiling(ledger, stage)
   if (ceiling === null) return true
   return spent(ledger) < ceiling
+}
+
+/**
+ * AC1 (story 2.3) — "IS THIS LEDGER'S TOKEN COLUMN THE WHOLE BILL?"
+ *
+ * The one predicate every reader asks, answered HERE so nobody asks it twice in
+ * two ways. `core/stages/output.ts` gates its caveat on it, `ablation/manifest.ts`
+ * writes its audit verdict from it, and `mayISpend` above refuses on it — three
+ * callers, one answer, which is the same argument `ceilingClause` makes for the
+ * sentence a stranding stage prints.
+ *
+ * COMPLETE MEANS "NO UNKNOWNS", NOT "SOME SPEND WAS RECORDED". A run that billed
+ * three turns and could not count a fourth is exactly the state this story
+ * exists to make visible, and it has a perfectly healthy-looking `total`.
+ *
+ * It follows recovery rather than latching, so a run whose provider eventually
+ * reported every missing number reads complete again — `reconcileLateUsage`
+ * moves the recovered entry out of `unknownUsage` and into `entries`, and this
+ * reads the collection rather than a flag somebody has to remember to clear.
+ */
+export function usageIsComplete(ledger: TokenLedger): boolean {
+  return ledger.unknownUsage.length === 0
+}
+
+/**
+ * AC4 (story 2.3) — HOW MANY EXECUTIONS MAD COULD NOT COUNT.
+ *
+ * `evaluation-protocol.md:337-338` requires the count AND the identities to be
+ * recorded on a halt. The identities are `ledger.unknownUsage` itself, which
+ * every caller already holds; the COUNT is here because it is the figure a
+ * renderer prints and a renderer must compute nothing (AD-15, and
+ * `scripts/lint-dependency-direction.ts:135-141` enforces the stage half of it
+ * by text match).
+ *
+ * It counts EXECUTIONS, not slots and not turns: `stage + slot + attempt` is not
+ * a unique id (`evaluation-protocol.md:504-507`), so two unknowns on one slot in
+ * one stage are two.
+ */
+export function unknownUsageCount(ledger: TokenLedger): number {
+  return ledger.unknownUsage.length
+}
+
+/**
+ * AC1 (story 2.3) — THE ONE PHRASING OF "this total is short", beside
+ * `ceilingClause` and `ceilingNamed` and for their reason exactly: the renderer
+ * formats what comes back and computes no part of it.
+ *
+ * `null` WHEN THERE IS NOTHING TO DISCLOSE, and never `""`. The renderer's gate
+ * is then `!== null` rather than `if (clause)`, which matters in this story more
+ * than anywhere else: an empty string and a sentence are two states a truthiness
+ * test collapses, and two states a truthiness test collapses is the entire
+ * subject of story 2.3 (`emptyTokenUsage()` is a truthy object, which is how a
+ * turn that billed money came to be recorded as a turn that cost nothing).
+ *
+ * WHAT THE SENTENCE MAY NOT DO, and the caveat it replaces did:
+ *
+ * - **It may not name a cause.** `core/stages/output.ts` used to say "a turn MAD
+ *   stopped waiting on returns no usage", which is accurate for a cancellation
+ *   and FALSE for a settled, successful turn whose host reported no `tokens`
+ *   field. One sentence covers both by describing the gap; the cause rides on
+ *   each `UnknownUsageEntry.why`.
+ * - **It may not put a number on the gap.** No estimate, no interpolation, no
+ *   "approximately" (AC1). An estimate printed beside a real figure is worse
+ *   than a stated gap, because the reader cannot tell which is which.
+ *
+ * The count is pluralised because a reader counts what the sentence says, and
+ * "1 turns" is the kind of seam that makes a reader distrust the figure beside
+ * it — which, on this particular line, is the opposite of the point.
+ */
+export function unknownUsageClause(ledger: TokenLedger): string | null {
+  const count = unknownUsageCount(ledger)
+  if (count === 0) return null
+  const subject = count === 1 ? "1 turn in this run has" : `${count} turns in this run have`
+  return (
+    `${subject} UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full ` +
+    `count. MAD does not fill the gap in.`
+  )
 }
 
 /**
@@ -286,9 +393,16 @@ export function ceilingNamed(ledger: BudgetLedger, stage: SpendStage): string {
  * one import for both halves of it. `recordTurn` still lives in the domain,
  * because what a turn cost is a fact about the run rather than a decision about
  * it — this module owns only the decision.
+ *
+ * `recordUnknownTurn` rides beside it (story 2.3) for the same reason and one
+ * more: the two are an ORDERED PAIR at every call site — unknown marker first,
+ * else `envelope.tokens`, else nothing — and a stage that could import one
+ * without the other is a stage that can write the second branch and silently
+ * omit the first, which is the pre-2.3 behaviour exactly. Both halves arrive
+ * through one import, so the pair is visible in the import line.
  */
-export { recordTurn }
-export type { LedgerEntry }
+export { recordTurn, recordUnknownTurn }
+export type { LedgerEntry, UnknownUsageEntry }
 
 /**
  * AD-15 amended (story 7A) — the PEAK half of the same accountant, re-exported

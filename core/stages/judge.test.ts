@@ -10,7 +10,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { BudgetLedger } from "../budget/ledger.ts"
-import { emptyLedger, recordTurn } from "../domain/run-record.ts"
+import { emptyLedger, emptyTokenUsage, recordTurn } from "../domain/run-record.ts"
 import type { Entry, Finding, Severity } from "../domain/finding.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { CODING_LENSES } from "../instructions/coding/lenses.ts"
@@ -18,6 +18,7 @@ import { resolveInstructions } from "../instructions/registry.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
+  DEFAULT_JUDGE_ANSWERS,
   fakeClock,
   FakeBackend,
   judgeRoleOf,
@@ -1459,5 +1460,127 @@ describe("the blame call is BOUNDED in range and skipped after a stop", () => {
 
     expect(calls).toBe(0)
     expect(argued.history.map((entry) => entry.kind)).toContain("run-cancelled")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.3 — the turns MAD could not count, and the sessions it could not close
+// ---------------------------------------------------------------------------
+
+/** A fact-check step that answers normally and reports usage the way `draft` says. */
+function factCheck(draft: { usageUnknown?: string; cleanupUnresolved?: string }): SlotScript {
+  return [{ kind: "ok", value: DEFAULT_JUDGE_ANSWERS["fact-check"], ...draft }]
+}
+
+describe("judge — an unknown bill is recorded as unknown (story 2.3, AC1)", () => {
+  test("a turn whose host reported no usage writes an unknown, and the verdict still lands", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const f = finding({ route: "judge" })
+    const result = await run([f], {
+      ledger,
+      backend: new FakeBackend({}, {}, { "fact-check": factCheck({ usageUnknown: "the host reported no usage" }) }),
+    })
+
+    // An uncountable turn is not a failed one: the check ran, the verdict is on
+    // the finding, and nothing was dropped out.
+    expect(f.verdict).toBe("upheld")
+    expect(result.verifiedIndependently).toBe(1)
+    expect(result.factChecksDroppedOut).toBe(0)
+
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.total).toEqual(emptyTokenUsage())
+    expect(ledger.unknownUsage).toHaveLength(1)
+    expect(ledger.unknownUsage[0]).toMatchObject({
+      stage: "judge",
+      attempt: 1,
+      executionId: "exec-1",
+      why: "the host reported no usage",
+    })
+  })
+
+  test("the unknown marker WINS over a `tokens` field on the same envelope", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const inner = new FakeBackend({}, {}, { "fact-check": factCheck({ usageUnknown: "timed out in flight" }) })
+    const both: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, instructions, input, schema, signal) {
+        const envelope = await inner.runTurn(slot, instructions, input, schema, signal)
+        return envelope.usageUnknown ? { ...envelope, tokens: tokens() } : envelope
+      },
+    }
+    await run([finding({ route: "judge" })], { ledger, backend: both })
+
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.total).toEqual(emptyTokenUsage())
+    expect(ledger.unknownUsage).toHaveLength(1)
+  })
+
+  test("the stage raises `usage-unquantified`, blaming no model", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const result = await run([finding({ route: "judge" })], {
+      ledger,
+      backend: new FakeBackend({}, {}, { "fact-check": factCheck({ usageUnknown: "timed out in flight" }) }),
+    })
+
+    const unquantified = result.warnings.find((w) => w.code === "usage-unquantified")
+    expect(unquantified).toBeDefined()
+    expect(unquantified!.stage).toBe("judge")
+    expect(unquantified!.message).toContain("timed out in flight")
+    expect(unquantified!.detail).toMatchObject({ turns: 1 })
+    expect(result.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+  })
+
+  test("A JUDGE PASS WHOSE USAGE IS COMPLETE RAISES NOTHING — the assertion above is not vacuous", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const result = await run([finding({ route: "judge" })], { ledger })
+
+    expect(ledger.unknownUsage).toEqual([])
+    expect(ledger.entries.length).toBeGreaterThan(0)
+    expect(result.warnings.map((w) => w.code)).not.toContain("usage-unquantified")
+  })
+})
+
+describe("judge — a session MAD could not delete (story 2.3, AC3)", () => {
+  test("it is DISCLOSED, and the verdict it rides on stands", async () => {
+    const f = finding({ route: "judge" })
+    const result = await run([f], {
+      backend: new FakeBackend(
+        {},
+        {},
+        { "fact-check": factCheck({ cleanupUnresolved: "session.delete did not answer in 2000ms" }) },
+      ),
+    })
+
+    expect(f.verdict).toBe("upheld")
+    const cleanup = result.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.stage).toBe("judge")
+    expect(cleanup!.message).toContain("session.delete did not answer in 2000ms")
+    expect(cleanup!.detail).toMatchObject({ sessions: 1 })
+  })
+
+  test("a cleanup on the attempt the RETRY replaced is still disclosed", async () => {
+    const result = await run([finding({ route: "judge" })], {
+      backend: new FakeBackend(
+        {},
+        {},
+        {
+          "fact-check": [
+            { kind: "fail", failure: "model-error", cleanupUnresolved: "session.delete threw: ECONNRESET" },
+            { kind: "ok", value: DEFAULT_JUDGE_ANSWERS["fact-check"] },
+          ],
+        },
+      ),
+    })
+
+    const cleanup = result.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.message).toContain("ECONNRESET")
+  })
+
+  test("A JUDGE PASS THAT CLOSED EVERY SESSION RAISES NOTHING", async () => {
+    const result = await run([finding({ route: "judge" })])
+
+    expect(result.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
   })
 })

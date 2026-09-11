@@ -16,6 +16,8 @@ import {
   PRESET_DIALS,
   PRESETS,
   SUGGESTED_BUDGET,
+  unknownUsageCount,
+  usageIsComplete,
   type Preset,
 } from "../../core/budget/ledger.ts"
 import type { Warning } from "../../core/domain/warning.ts"
@@ -32,6 +34,7 @@ import {
   type ArtifactOutcome,
 } from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
+import { createLateUsageSink } from "../../core/ports/late-usage.ts"
 import { opencodeRepo } from "./repo.ts"
 import { opencodeTools } from "./tools.ts"
 import { resolveRoster } from "./roster.ts"
@@ -420,10 +423,30 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // envelope, so passing only `slots` here would turn every lens slot
           // into a silent double drop-out that looks like a flaky provider.
           // Nothing type-checks this — `plugin-wiring.test.ts` is what does.
+          // AC2 (story 2.3) — ONE SINK PER REVIEW, AND THE SAME OBJECT BOTH
+          // WAYS.
+          //
+          // `OpencodeModelBackend` reports a bill that arrives after MAD stopped
+          // waiting for the turn INTO this object, from a continuation the
+          // critical path never awaits; `review()` drains THIS object
+          // immediately before it stamps `finishedAt`. The two halves are only a
+          // mechanism when they are the same sink — with two objects, or with
+          // none, every late bill is dropped and a turn MAD could have counted
+          // stays an unknown for the rest of the run's life.
+          //
+          // IT WAS MISSING HERE UNTIL 2026-09-11. Both ends shipped tested and
+          // mutation-verified in story 2.3 and `createLateUsageSink` had no
+          // caller outside tests, so the recovery existed and ran nowhere. Kept
+          // adjacent to the two constructor calls it joins, because the failure
+          // mode is silent: nothing throws, nothing is logged, and the token
+          // column is merely more pessimistic than it needs to be.
+          const lateUsage = createLateUsageSink()
+
           const backend = new OpencodeModelBackend({
             serverUrl,
             directory,
             slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
+            lateUsage,
           })
 
           // AD-16 amended (story 7A) — the turn recorder is constructed ONLY
@@ -455,6 +478,8 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             backend: recorder ? recorder.wrap(backend) : backend,
             clock: systemClock(),
             change,
+            // The same object the backend above reports into. See its comment.
+            lateUsage,
             // The core DRIVES it; the core never constructs one (AD-1). This is
             // the only place in the tree a `Tools` implementation is built.
             tools,
@@ -602,6 +627,34 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               lensInstructions: record.lensInstructions,
               warnings: record.warnings.map((w) => w.code),
               tokens: record.ledger.total,
+              // FR10 / AC1 (story 2.3) — WHETHER THAT FIGURE IS THE WHOLE BILL,
+              // and TWO FIELDS rather than one, for `artifactsOutcome`'s reason
+              // exactly (see below): the boolean is the discriminant a host
+              // branches on, the count is the data. Folding them into one — a
+              // `tokens` of `null` when anything is unknown, say — would throw
+              // away the observed spend to report the gap, and a host that only
+              // wanted the number would learn nothing at all.
+              //
+              // WITHOUT THIS FIELD THE HOST CANNOT TELL. `record.ledger.total`
+              // is folded out of the turns MAD could COUNT, so a run that billed
+              // a turn whose usage never arrived hands back a total that looks
+              // exactly like a complete one — the direction that flatters MAD,
+              // at the boundary a calling agent reads instead of the report. The
+              // rendered report says it in prose (`core/stages/output.ts`); a
+              // machine should not have to match MAD's English to find out.
+              //
+              // BOTH ARE THE ACCOUNTANT'S ANSWERS (AD-15). This layer counts
+              // nothing: `usageIsComplete` and `unknownUsageCount` live beside
+              // `mayISpend` in `core/budget/ledger.ts` so the host, the renderer
+              // and the gate cannot disagree about what is missing.
+              //
+              // A COUNT AND NOT THE IDENTITIES, for `budgetSkipped`'s reason: a
+              // host branching on "is this figure short" needs the number, and
+              // the execution ids are already in the rendered report and in the
+              // `usage-unquantified` warning's `detail` for anyone who needs
+              // which.
+              usageComplete: usageIsComplete(record.ledger),
+              unknownUsageCount: unknownUsageCount(record.ledger),
               // AD-6f — machine-readable beside the prose, for a host that wants
               // to branch on it rather than read a title.
               cancelled: record.cancelled?.stage,

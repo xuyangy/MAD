@@ -41,6 +41,9 @@ import type { Candidate } from "../core/domain/roster.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 import type { RunRecord } from "../core/domain/run-record.ts"
 import { review } from "../core/run/review.ts"
+import { createLateUsageSink, type LateUsageSink } from "../core/ports/late-usage.ts"
+import { EvaluationBundleError } from "./bundle.ts"
+import type { ExperimentGovernor } from "./governor.ts"
 
 /**
  * Where an arm's numbers came from, and it is on the ARM rather than on the run.
@@ -130,8 +133,34 @@ export interface ArmDeps {
    * attempts per (slot, role) and replays a script's last step once it runs out,
    * so one scripted instance shared across three arms hands arm 2 the step arm 1
    * finished on. A live backend is per-roster by construction and supplies this.
+   *
+   * IT IS HANDED THE ARM'S LATE-USAGE SINK rather than building its own, and the
+   * parameter exists for exactly one reason: AC2's recovery only works when the
+   * sink the backend reports INTO is the same object `review()` drains. Minting
+   * it in `runArm` and passing it both ways makes that an argument-passing fact
+   * instead of a convention two call sites have to remember — which is how it was
+   * missed in the first place (deferred-work.md, story 2.3's section, entry 1:
+   * both ends built, tested and mutation-verified, joined by nothing).
+   *
+   * A backend with no late usage to report simply never calls it.
    */
-  backendFor?: (spec: ArmSpec) => ModelBackend
+  backendFor?: (spec: ArmSpec, lateUsage: LateUsageSink) => ModelBackend
+  /**
+   * AC4 (story 2.3) — the experiment-wide stop mechanism
+   * (`evaluation-protocol.md:332-339`), consulted before every arm and told about
+   * every arm that finishes.
+   *
+   * OPTIONAL, AND ABSENT IS TODAY'S BEHAVIOUR EXACTLY. The scripted path passes
+   * none and bills nothing, so AD-16's rule that evaluation machinery is additive
+   * and never changes an ordinary run holds here the way it holds for `bundle`.
+   * `ablation/live.ts` supplies one whenever it is writing a bundle, because the
+   * bundle root is where the halt is persisted.
+   *
+   * IT GATES ARMS AND NOTHING SMALLER. "May this TURN spend?" stays
+   * `core/budget/ledger.ts`'s question; see `ablation/governor.ts`'s header for
+   * why two levels of one rule is not two authorities on one question.
+   */
+  governor?: ExperimentGovernor
 }
 
 /** One arm: build its roster, run the shipped seam, keep the record. */
@@ -142,10 +171,28 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     pins: spec.pins ?? [],
     providerConfigKey: deps.providerConfigKey,
   })
+  // AC2 (story 2.3) — ONE SINK PER ARM RUN, AND THE SAME OBJECT BOTH WAYS.
+  //
+  // The backend reports a bill that arrives after the turn was abandoned INTO
+  // this object; `review()` drains THIS object before it stamps `finishedAt`. If
+  // they were two objects the recovery would be silently dead, which is exactly
+  // the state the tree shipped in until 2026-09-11: `createLateUsageSink` had no
+  // caller outside tests, so nothing a live arm billed late was ever recovered.
+  //
+  // Minted here rather than in `ablation/live.ts` so the two handoffs are one
+  // function's business. A sink per ARM and not per experiment, because
+  // `reconcileLateUsage` matches on an `executionId` minted per backend instance
+  // and a shared sink would carry another arm's unmatched reports into this arm's
+  // drain.
+  //
+  // It is minted even when `deps.backend` is used and `backendFor` is absent. An
+  // empty drain reconciles nothing, so the cost is one closure, and the
+  // alternative — a sink only on some paths — is the branch that goes stale.
+  const lateUsage = createLateUsageSink()
   // RESOLVED ONCE INTO A CONST, so the object handed to `review()` is the same
   // object handed back on the `ArmRun`. Calling `backendFor` twice would build a
   // second backend and return an identity that names nothing.
-  const backend = deps.backendFor ? deps.backendFor(spec) : deps.backend
+  const backend = deps.backendFor ? deps.backendFor(spec, lateUsage) : deps.backend
   const { record, rendered } = await review({
     roster: resolved.roster,
     backend,
@@ -153,6 +200,32 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     change: deps.change,
     priorWarnings: resolved.warnings,
     ...(deps.dials ?? {}),
+    // BELOW THE DIALS SPREAD, for the reason `stopOnUnknownUsage` is below it:
+    // `dials` is the caller's object and this is not the caller's to unset. The
+    // `Dials` type cannot name this field, so the ordering is belt-and-braces
+    // rather than load-bearing — and it is the cheap half of the pair.
+    lateUsage,
+    // AC4 (story 2.3) — THE TURN-LEVEL HALF OF THE STOP RULE, ARMED BY THE SAME
+    // FACT THAT ARMS THE ARM-LEVEL HALF.
+    //
+    // A governor being present IS what "this is an evaluation" means here: the
+    // scripted path passes none and bills nothing, and `ablation/live.ts`
+    // supplies one exactly when it is writing a bundle. So the two levels cannot
+    // drift into disagreement about whether the rule is in force — there is one
+    // condition, not a governor flag and a separate ledger flag a caller could
+    // set inconsistently.
+    //
+    // WITHOUT THIS LINE THE RULE WAS HALF-BUILT (wave-5 review, 2026-09-11): the
+    // governor refused the next ARM after an unknown while the stage loops went
+    // on retrying the unknown TURN inside the current one, which is the retry
+    // `evaluation-protocol.md:311-327` forbids, live on the only path that
+    // bills.
+    //
+    // It is NOT in `deps.dials`, and deliberately: `dials` is the caller's
+    // spread and is applied above, so a harness that set this itself could turn
+    // the rule OFF for a run the governor is watching. The one spelling of "may
+    // I spend after losing count?" is decided here.
+    ...(deps.governor ? { stopOnUnknownUsage: true } : {}),
   })
   return { spec, repeat, record, rendered, backend }
 }
@@ -175,8 +248,31 @@ export async function runAblation(
   const runs: ArmRun[] = []
   for (let repeat = 0; repeat < repeats; repeat += 1) {
     for (const spec of specs) {
+      // AC4 — ASKED BEFORE THE ARM IS BUILT, not after (story 2.3). `runArm`
+      // resolves a roster and constructs a backend before it bills anything, but
+      // a gate placed after either of those is a gate that has already decided
+      // the experiment may continue. The protocol's rule is about ADMISSION.
+      //
+      // A REFUSAL IS `EvaluationBundleError`, which is not a new vocabulary: it
+      // is the class this tree already throws when the evidence for a run cannot
+      // be written, it means the same thing ("the evaluation stopped on purpose
+      // and nothing further was billed"), and `scripts/ablation.ts` already
+      // catches it and prints it as a refusal rather than a crash. A second class
+      // would have been a second thing that CLI has to learn.
+      const admission = await deps.governor?.admit()
+      if (admission !== undefined && !admission.ok) {
+        throw new EvaluationBundleError(
+          `the evaluation stopped before arm \`${spec.id}\` repeat ${repeat}: ${admission.reason}`,
+        )
+      }
+
       const run = await runArm(spec, deps, repeat)
       runs.push(run)
+      // OBSERVED BEFORE THE DUMP IS WRITTEN. `onArmComplete` can throw — a
+      // mandatory dump that failed stops the evaluation — and a halt recorded
+      // after it would be a halt the next process never learns about, on exactly
+      // the run that could not be written down.
+      await deps.governor?.observe(run)
       // AWAITED, AND NOT GUARDED. A caller that needs each arm persisted before
       // the next one bills gets exactly that, and a throw from here stops the
       // loop — which is the point: continuing to bill after a mandatory dump

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { emptyLedger, recordTurn } from "../domain/run-record.ts"
+import { emptyLedger, reconcileLateUsage, recordTurn, recordUnknownTurn } from "../domain/run-record.ts"
 import { tokens } from "../test-support/fakes.ts"
 import {
   budgetReport,
@@ -12,6 +12,9 @@ import {
   spentInStage,
   spentTokens,
   stageCeiling,
+  unknownUsageClause,
+  unknownUsageCount,
+  usageIsComplete,
   type BudgetLedger,
 } from "./ledger.ts"
 
@@ -347,5 +350,188 @@ describe("ceilingClause / ceilingNamed — ONE phrasing, shared by both strandin
     expect(ceilingClause(ledger, "debate")).toBe("the run was stopped, though no token cap was set")
     expect(ceilingClause(ledger, "debate")).not.toContain("ran out")
     expect(ceilingNamed(ledger, "debate")).toBe("no token cap")
+  })
+})
+
+describe("usage completeness — the accountant answers, so no renderer computes (AC1, story 2.3)", () => {
+  const withUnknown = (count: number, cap: number | null = 400): BudgetLedger => {
+    const ledger = emptyLedger(cap) as BudgetLedger
+    for (let n = 1; n <= count; n += 1) {
+      recordUnknownTurn(ledger, {
+        slot: "discovery-1",
+        stage: "discover",
+        attempt: 1,
+        executionId: `exec-${n}`,
+        why: "the host reported no usage for this turn",
+      })
+    }
+    return ledger
+  }
+
+  test("a ledger with no unknowns is COMPLETE, and one with any unknown is not", () => {
+    expect(usageIsComplete(emptyLedger(400) as BudgetLedger)).toBe(true)
+    expect(usageIsComplete(withUnknown(1))).toBe(false)
+  })
+
+  test("SPEND IS NOT COMPLETENESS — a ledger with real entries AND an unknown is incomplete", () => {
+    // The regression this guards: "we recorded some turns" is not "we recorded
+    // every turn", and a run that billed three turns and could not count a
+    // fourth is exactly the state that used to be indistinguishable from a run
+    // that billed three.
+    const ledger = withUnknown(1)
+    recordTurn(ledger, { slot: "discovery-2", stage: "discover", attempt: 1, tokens: tokens(50, 0) })
+    expect(spent(ledger)).toBe(50)
+    expect(usageIsComplete(ledger)).toBe(false)
+  })
+
+  test("`unknownUsageCount` counts EXECUTIONS, and it is the number AC4 says to record", () => {
+    expect(unknownUsageCount(emptyLedger(400) as BudgetLedger)).toBe(0)
+    expect(unknownUsageCount(withUnknown(3))).toBe(3)
+  })
+
+  test("recovering the last unknown makes the ledger complete again (AC2)", () => {
+    // `reconcileLateUsage` moves a matched unknown into `entries`, so the
+    // predicate has to follow the recovery rather than latch. A latched
+    // "incomplete" would make a run whose provider eventually reported
+    // everything report forever as unquantified.
+    const ledger = withUnknown(1)
+    reconcileLateUsage(ledger, [{ executionId: "exec-1", tokens: tokens(12, 0) }])
+    expect(usageIsComplete(ledger)).toBe(true)
+    expect(spent(ledger)).toBe(12)
+  })
+})
+
+describe("unknownUsageClause — the ONE sentence, owned here and not by the renderer", () => {
+  const withUnknown = (count: number): BudgetLedger => {
+    const ledger = emptyLedger(400) as BudgetLedger
+    for (let n = 1; n <= count; n += 1) {
+      recordUnknownTurn(ledger, {
+        slot: "discovery-1",
+        stage: "discover",
+        attempt: 1,
+        executionId: `exec-${n}`,
+        why: "the run was cancelled while this turn was in flight",
+      })
+    }
+    return ledger
+  }
+
+  test("NULL when usage is complete — ABSENCE, so the renderer's gate is not a falsiness test", () => {
+    // `""` was the other option and it is the one this story is written against:
+    // an empty string and a sentence are two states an `if (clause)` collapses,
+    // and the whole subject of story 2.3 is two states a truthiness test
+    // collapses. `null` makes the renderer's gate `!== null`.
+    expect(unknownUsageClause(emptyLedger(400) as BudgetLedger)).toBeNull()
+  })
+
+  test("it NAMES THE COUNT and calls the total OBSERVED, never an estimate", () => {
+    const clause = unknownUsageClause(withUnknown(2))
+    expect(clause).toContain("2")
+    expect(clause).toContain("OBSERVED")
+    // The property, not the wording: the sentence must never put a number on
+    // the gap. `core/budget/ledger.ts` refuses a fabricated estimate on
+    // principle, and an estimate printed beside a real figure is worse than a
+    // stated gap.
+    expect(clause).not.toContain("estimate")
+  })
+
+  test("ONE unknown reads in the singular, because a reader counts what the sentence says", () => {
+    expect(unknownUsageClause(withUnknown(1))).toContain("1 turn ")
+    expect(unknownUsageClause(withUnknown(2))).toContain("2 turns ")
+  })
+
+  test("the sentence is true for BOTH causes — it names neither cancellation nor the host", () => {
+    // The caveat this replaces said "a turn MAD stopped waiting on returns no
+    // usage", which is accurate for a cancellation and WRONG for a settled turn
+    // whose host reported nothing. One sentence covers both by describing the
+    // gap and not its cause; the per-entry `why` carries the cause.
+    const clause = unknownUsageClause(withUnknown(1))!
+    expect(clause).not.toContain("cancel")
+    expect(clause).not.toContain("stopped waiting")
+  })
+})
+
+describe("mayISpend and the unknown-usage stop rule (AC4, story 2.3)", () => {
+  const stopping = (cap: number | null = 400): BudgetLedger => {
+    const ledger = emptyLedger(cap) as BudgetLedger
+    ledger.stopOnUnknownUsage = true
+    return ledger
+  }
+
+  const withUnknown = (ledger: BudgetLedger): BudgetLedger => {
+    recordUnknownTurn(ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      executionId: "exec-1",
+      why: "the host reported no usage for this turn",
+    })
+    return ledger
+  }
+
+  test("THE DIAL DEFAULTS OFF — an ordinary run reports the unknown and keeps working", () => {
+    // AD-16: evaluation machinery is additive and never changes an ordinary run.
+    // Halting a code review because one host response omitted a `tokens` field
+    // would be this story inventing a policy for a caller the protocol never
+    // spoke about.
+    const ledger = withUnknown(emptyLedger(400) as BudgetLedger)
+    expect(ledger.stopOnUnknownUsage).toBe(false)
+    expect(mayISpend(ledger, "discover")).toBe(true)
+  })
+
+  test("with the dial ON and an unknown present, EVERY stage is refused", () => {
+    const ledger = withUnknown(stopping())
+    for (const stage of ["discover", "debate", "judge"] as const) {
+      expect(mayISpend(ledger, stage)).toBe(false)
+    }
+  })
+
+  test("the dial ON with NO unknown refuses nothing — it is a stop rule, not a kill switch", () => {
+    for (const stage of ["discover", "debate", "judge"] as const) {
+      expect(mayISpend(stopping(), stage)).toBe(true)
+    }
+  })
+
+  test("IT OUTRANKS `cap: null` — no ceiling is not permission to spend past an unknown", () => {
+    // This is the assertion that makes the rule a rule. `mayISpend`'s first
+    // branch has always been "no ceiling never refuses", and the evaluation
+    // path is precisely a path that may run uncapped: a stop rule placed after
+    // that branch would be dead code on the runs AC4 was written for.
+    expect(mayISpend(withUnknown(stopping(null)), "judge")).toBe(false)
+  })
+
+  test("REFUSAL IS A `false`, never a throw (AD-15, AD-6d)", () => {
+    // `core/budget/ledger.ts:21-26`. A budget that threw would make a run that
+    // ran out of money look like a run that crashed, and the same argument
+    // covers a run that stopped over an uncountable turn.
+    const ledger = withUnknown(stopping())
+    expect(() => mayISpend(ledger, "debate")).not.toThrow()
+  })
+
+  test("asking does not mutate the ledger, and does not consume the unknown", () => {
+    const ledger = withUnknown(stopping())
+    mayISpend(ledger, "discover")
+    mayISpend(ledger, "discover")
+    expect(ledger.unknownUsage).toHaveLength(1)
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.total).toEqual(emptyLedger().total)
+  })
+
+  test("recovering the unknown LIFTS the refusal (AC2 meets AC4)", () => {
+    // The halt is on the UNKNOWN, not on the fact that there once was one. A
+    // provider that eventually reported the number has removed the reason the
+    // gate refused, and the run's own accountant says so — which is a different
+    // authority from the experiment-wide halt, that one being persisted and
+    // deliberately not self-resuming (`ablation/governor.ts`).
+    const ledger = withUnknown(stopping())
+    expect(mayISpend(ledger, "judge")).toBe(false)
+    reconcileLateUsage(ledger, [{ executionId: "exec-1", tokens: tokens(1, 0) }])
+    expect(mayISpend(ledger, "judge")).toBe(true)
+  })
+
+  test("the ceiling still refuses when the dial is off — the two rules compose", () => {
+    const ledger = emptyLedger(100) as BudgetLedger
+    recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(100, 0) })
+    expect(mayISpend(ledger, "judge")).toBe(false)
   })
 })

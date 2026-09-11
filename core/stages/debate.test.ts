@@ -2023,3 +2023,149 @@ describe("debate's money sentence names DEBATE's ceiling, not the cap (code revi
     expect(findings[0]!.unresolved!.reason).not.toContain("share of")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Story 2.3 — the turns MAD could not count, and the sessions it could not close
+// ---------------------------------------------------------------------------
+
+describe("debate — an unknown bill is recorded as unknown (story 2.3, AC1)", () => {
+  test("a turn whose host reported no usage writes an unknown, and its ROOM-MATE still bills", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const finding = contested()
+    const result = await run(
+      [finding],
+      {
+        "discovery-1": [
+          { ...says({ findingId: "f-1", position: "upholds" }), usageUnknown: "the host reported no usage" },
+        ],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      },
+      { ledger },
+    )
+
+    // The debate ran normally. An uncountable turn is not an absent one: the
+    // position it carried is on the record and the room converged.
+    expect(finding.exit).toBe("converged")
+    expect(result.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+
+    // One countable turn, one uncountable one — and the uncountable one is NOT
+    // an all-zero entry sitting in `entries`.
+    expect(ledger.entries.map((entry) => entry.slot)).toEqual(["discovery-2"])
+    expect(ledger.unknownUsage).toEqual([
+      {
+        slot: "discovery-1",
+        stage: "debate",
+        attempt: 1,
+        executionId: "exec-1",
+        why: "the host reported no usage",
+      },
+    ])
+  })
+
+  test("the unknown marker WINS over a `tokens` field on the same envelope", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const inner = new FakeBackend({
+      "discovery-1": [
+        { ...says({ findingId: "f-1", position: "upholds" }), usageUnknown: "cancelled in flight" },
+      ],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+    const both: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, instructions, input, schema, signal) {
+        const envelope = await inner.runTurn(slot, instructions, input, schema, signal)
+        return envelope.usageUnknown ? { ...envelope, tokens: tokens() } : envelope
+      },
+    }
+    await run([contested()], {}, { backend: both, ledger })
+
+    // The marker wins, so the ledger holds ONE entry (the room-mate's) and one
+    // unknown — never a counted turn MAD could not count.
+    expect(ledger.entries.map((entry) => entry.slot)).toEqual(["discovery-2"])
+    expect(ledger.unknownUsage).toHaveLength(1)
+  })
+
+  test("the stage raises `usage-unquantified`, blaming no model", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const result = await run(
+      [contested()],
+      {
+        "discovery-1": [
+          { ...says({ findingId: "f-1", position: "upholds" }), usageUnknown: "cancelled in flight" },
+        ],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      },
+      { ledger },
+    )
+
+    const unquantified = result.warnings.find((w) => w.code === "usage-unquantified")
+    expect(unquantified).toBeDefined()
+    expect(unquantified!.stage).toBe("debate")
+    expect(unquantified!.message).toContain("cancelled in flight")
+    expect(unquantified!.message).not.toContain("discovery-1")
+    expect(unquantified!.detail).toMatchObject({ turns: 1 })
+  })
+
+  test("A DEBATE WHOSE USAGE IS COMPLETE RAISES NOTHING — the assertion above is not vacuous", async () => {
+    const ledger = emptyLedger() as BudgetLedger
+    const result = await run(
+      [contested()],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      },
+      { ledger },
+    )
+
+    expect(ledger.unknownUsage).toEqual([])
+    expect(ledger.entries.length).toBeGreaterThan(0)
+    expect(result.warnings.map((w) => w.code)).not.toContain("usage-unquantified")
+  })
+})
+
+describe("debate — a session MAD could not delete (story 2.3, AC3)", () => {
+  test("it is DISCLOSED, and the round it rides on is unaffected", async () => {
+    const finding = contested()
+    const result = await run([finding], {
+      "discovery-1": [
+        {
+          ...says({ findingId: "f-1", position: "upholds" }),
+          cleanupUnresolved: "session.delete did not answer in 2000ms",
+        },
+      ],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+
+    expect(finding.exit).toBe("converged")
+    expect(result.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+
+    const cleanup = result.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.stage).toBe("debate")
+    expect(cleanup!.message).toContain("session.delete did not answer in 2000ms")
+    expect(cleanup!.detail).toMatchObject({ sessions: 1 })
+  })
+
+  test("a cleanup on the attempt the RETRY replaced is still disclosed", async () => {
+    const result = await run([contested()], {
+      "discovery-1": [
+        { kind: "fail", failure: "model-error", cleanupUnresolved: "session.delete threw: ECONNRESET" },
+        says({ findingId: "f-1", position: "upholds" }),
+      ],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+
+    const cleanup = result.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.message).toContain("ECONNRESET")
+  })
+
+  test("A DEBATE THAT CLOSED EVERY SESSION RAISES NOTHING", async () => {
+    const result = await run([contested()], {
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+
+    expect(result.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
+  })
+})

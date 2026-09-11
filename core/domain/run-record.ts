@@ -72,9 +72,181 @@ export interface LedgerEntry {
   tokens: TokenUsage
 }
 
+/**
+ * FR10 / AC1 (story 2.3) — ONE TURN WHOSE COST MAD DOES NOT KNOW.
+ *
+ * Three real states produce one of these: a turn cancelled while in flight, a
+ * turn MAD stopped waiting on at its deadline, and a turn that SETTLED
+ * SUCCESSFULLY with the host reporting no `tokens` field at all. All three
+ * billed whatever the provider billed. None of them told MAD the number.
+ *
+ * ## Why this is a separate type and not a nullable `tokens` on `LedgerEntry`
+ *
+ * Decided 2026-09-10 by the human, from two options. `tokens: TokenUsage | null`
+ * on `LedgerEntry` puts every turn in one collection — which is tidier to read
+ * and changes what `entries` and `total` MEAN for every existing reader
+ * (`core/stages/output.ts:1621` prints `entries.length` as billed turns,
+ * `ablation/compare.ts:143` compares it across arms, `ablation/manifest.ts:206`
+ * records it). It also needs the dated AD-15 semantic amendment
+ * `evaluation-protocol.md:500-509` describes.
+ *
+ * A second collection leaves `TokenUsage`, `LedgerEntry`, `addTokens` and
+ * `recordTurn` byte-identical, and buys one property that the tidier option
+ * cannot: **there is no code path by which an unknown becomes a number.** Not a
+ * zero, not a `NaN`, not an interpolation — the type system has nowhere to put
+ * one. AC1's "no unknown value is ever estimated or interpolated" is then a
+ * structural fact rather than a discipline somebody has to keep.
+ *
+ * The cost is stated rather than hidden: a reader wanting "how many turns did
+ * this run bill?" has to read TWO collections, which is why every renderer this
+ * story touches says *observed* where it used to say nothing.
+ *
+ * ## `executionId`, and why it is not `stage + slot + attempt`
+ *
+ * Those three are NOT a unique id (`evaluation-protocol.md:504-507`): debate
+ * rounds and different judge findings reuse all three. `executionId` names ONE
+ * physical model request, minted by the backend at the call site where the
+ * physical execution happens, so a late usage report can be matched back to the
+ * turn that incurred it (`reconcileLateUsage`) and so the identities AC4's stop
+ * rule requires MAD to record are identities of something real.
+ *
+ * ## `why` is mandatory and NON-EMPTY
+ *
+ * The same rule `ablation/manifest.ts:87` applies to `unknownValue`, restated
+ * here rather than imported, because `core/` may not import `ablation/`. The
+ * reasoning is the same as it is there: `?` says "this may be missing" and stays
+ * silent about the cause, and "cancelled in flight", "timed out" and "the host
+ * reported nothing" are three different facts that a reader — and story 2.3's
+ * governor — act on differently. What enforces non-emptiness is
+ * `recordUnknownTurn`, by SUBSTITUTION and never by throwing; see its own
+ * comment for why losing the unknown is the one unacceptable outcome.
+ */
+export interface UnknownUsageEntry {
+  slot: string
+  stage: string
+  attempt: number
+  /** ONE physical model request. See the header: not `stage + slot + attempt`. */
+  executionId: string
+  /** Non-empty, always. Which of the three states this is, in words. */
+  why: string
+}
+
+/**
+ * AC2 (story 2.3) — a token payload a provider supplied AFTER MAD stopped
+ * waiting for it, keyed to the physical execution it belongs to.
+ *
+ * IT IS DECLARED HERE, IN THE DOMAIN, AND RE-EXPORTED BY
+ * `core/ports/late-usage.ts`, which is where a caller imports it from. The split
+ * is deliberate and it is not a duplication: the DOMAIN owns the vocabulary of
+ * what usage is (`TokenUsage` has lived here since story 1, and
+ * `reconcileLateUsage` below is the one function that consumes a report), while
+ * the PORT owns the mechanism by which one is delivered. Declaring it in the
+ * port instead would mean `core/domain/` importing `core/ports/` — and
+ * `core/ports/model-backend.ts` already imports `TokenUsage` from this file, so
+ * that arrow is a module cycle. Restating the shape in both places was the other
+ * option and was rejected: two structurally identical types with two names is
+ * one field edit away from a reconciler that silently accepts a payload it
+ * cannot read.
+ *
+ * It carries the id and the tokens and NOTHING ELSE. The provider knows what it
+ * billed; MAD knows which slot, stage and attempt asked for it. A report that
+ * also carried provenance would let an adapter decide what a ledger row says
+ * about the pipeline, which is a fact an adapter does not hold.
+ */
+export interface LateUsageReport {
+  executionId: string
+  tokens: TokenUsage
+}
+
+/**
+ * `evaluation-protocol.md:504-507` — "Disagreeing token payloads for one
+ * physical execution are an **integrity error**, not something to deduplicate by
+ * first-seen."
+ *
+ * So it is reported, and BOTH payloads ride along, because the useful question
+ * for a human reading it is *how far apart are they* — and because a summary
+ * that recorded only "there was a conflict" would leave the reader unable to
+ * tell a rounding disagreement from a factor of ten.
+ */
+export interface UsageIntegrityConflict {
+  executionId: string
+  /** Every DISTINCT payload reported for this execution, in arrival order. */
+  payloads: TokenUsage[]
+}
+
+/**
+ * What one `reconcileLateUsage` pass did — returned rather than logged, and
+ * returned rather than thrown.
+ *
+ * The caller (`core/run/review.ts`, story 2.3 task 11) uses it to raise the
+ * warnings that describe the pass; nothing here decides whether the run is
+ * degraded, because that is AD-6's question and this module only records.
+ */
+export interface LateUsageReconciliation {
+  /** The unknowns this pass turned into counted spend. */
+  recovered: UnknownUsageEntry[]
+  /** Reports naming an execution this ledger holds no unknown for. */
+  unmatched: LateUsageReport[]
+  /** One execution, two payloads that do not agree. */
+  conflicts: UsageIntegrityConflict[]
+  /** How many unknowns are STILL unknown when the pass ends. */
+  stillUnknown: number
+}
+
 export interface TokenLedger {
   entries: LedgerEntry[]
   total: TokenUsage
+  /**
+   * FR10 / AC1 (story 2.3) — every turn whose cost is NOT KNOWN.
+   *
+   * REQUIRED AND NEVER OPTIONAL, for exactly the reason `cap` is required:
+   * absent and none must not be two ways of saying the same thing. An optional
+   * field would let a ledger built before this question existed read as "this
+   * run's usage is complete" — the flattering answer — at the one site that
+   * matters most, since `core/budget/ledger.ts`'s gate refuses to spend past a
+   * non-empty one and `ablation/manifest.ts` writes its audit verdict from it.
+   *
+   * It sits BESIDE `entries` and never inside it. `UnknownUsageEntry`'s header
+   * carries the whole argument and the rejected alternative; the short version
+   * is that `entries.length` means "billed turns" to three existing readers and
+   * `total` means "the bill", and an unknown in either would put a number where
+   * there is none.
+   *
+   * Nothing in this module enforces anything about it, because recording and
+   * permitting are different jobs — the same division `cap` and `shares` are
+   * documented under. `core/budget/ledger.ts` answers `usageIsComplete`.
+   */
+  unknownUsage: UnknownUsageEntry[]
+  /**
+   * AC4 (story 2.3, `evaluation-protocol.md:332-339`) — WHETHER AN UNKNOWN
+   * SHOULD STOP THE SPENDING.
+   *
+   * REQUIRED, and `emptyLedger` defaults it `false`, which means an ordinary
+   * code review REPORTS an unknown honestly and then keeps working.
+   *
+   * IT IS A DIAL AND NOT A CONSTANT, and that is a decision rather than an
+   * oversight. The protocol's stop rule is about the EXPERIMENT: on any billed
+   * execution whose usage is missing, stop admitting new billable requests
+   * experiment-wide, retries and calibration and pilots included. Halting an
+   * ordinary review because one host response omitted a `tokens` field would be
+   * this story inventing a policy for a caller the protocol never spoke about,
+   * and AD-16's rule that evaluation machinery is additive and never changes an
+   * ordinary run cuts the same way.
+   *
+   * The evaluation path sets it `true`, and then the run's OWN accountant
+   * refuses the next turn. That keeps the within-run gate in the one place that
+   * answers "may I spend?" (`core/budget/ledger.ts:10-19`) instead of adding a
+   * second authority beside it — the experiment-wide half is a separate level
+   * with a separate authority (`ablation/governor.ts`), never a second gate on
+   * the same question.
+   *
+   * A BOOLEAN AND NOT A THRESHOLD, deliberately. An earlier draft of the
+   * protocol capped unquantified exposure at 10% of the cap and the protocol
+   * itself struck it out: "that is not an observable predicate — an unknown
+   * amount cannot be compared with a number". One unknown is the trigger,
+   * because one unknown is all it takes for the comparison to be impossible.
+   */
+  stopOnUnknownUsage: boolean
   /**
    * AD-15 — the ceiling, in tokens, and `null` MEANS "no ceiling". Required and
    * never optional, for the same reason `RunRecord.threshold` is: absent and
@@ -382,7 +554,21 @@ export function emptyLedger(
   maxConcurrency: number = DEFAULT_MAX_CONCURRENCY,
   shares: SpendShares = CUMULATIVE_SHARE,
 ): TokenLedger {
-  return { entries: [], total: emptyTokenUsage(), cap, maxConcurrency, shares }
+  return {
+    entries: [],
+    total: emptyTokenUsage(),
+    cap,
+    maxConcurrency,
+    shares,
+    // Story 2.3 — PRESENT AND EMPTY, never absent, and `false` rather than
+    // undefined. Both are required fields whose empty value is a real fact; see
+    // their comments on `TokenLedger`. They take no positional parameter here
+    // because no ordinary caller sets either: unknowns arrive by
+    // `recordUnknownTurn` during the run, and the stop dial is set by the
+    // evaluation path alone (AD-16 — additive, never changing an ordinary run).
+    unknownUsage: [],
+    stopOnUnknownUsage: false,
+  }
 }
 
 /**
@@ -403,6 +589,221 @@ export function withShares(ledger: TokenLedger, shares: SpendShares): TokenLedge
 export function recordTurn(ledger: TokenLedger, entry: LedgerEntry): void {
   ledger.entries.push(entry)
   ledger.total = addTokens(ledger.total, entry.tokens)
+}
+
+/**
+ * The sentence a blank `why` becomes. Exported so the substitution is TESTED
+ * rather than trusted, the pattern `clampTokenCap` and the three other clamps
+ * set — and so a reader who finds it in a record can search for it and land
+ * here rather than guessing which layer wrote it.
+ */
+export const UNKNOWN_USAGE_UNSTATED_REASON = "unknown usage with no reason recorded"
+
+/**
+ * FR10 / AC1 (story 2.3) — THE SECOND WRITER, beside `recordTurn`.
+ *
+ * `recordTurn` says what a turn cost. This says that MAD does not know what a
+ * turn cost, which before this story was not sayable at all: a cancelled,
+ * timed-out or thrown turn wrote NOTHING — no entry, no marker, no count — so
+ * the run total was not merely wrong, it did not know it was wrong.
+ *
+ * It writes to `unknownUsage` and touches NEITHER `entries` NOR `total`. That is
+ * the whole point of the second collection and it is asserted in
+ * `run-record.test.ts`, not merely promised here.
+ *
+ * ## A BLANK `why` IS SUBSTITUTED, NEVER THROWN ON AND NEVER DROPPED
+ *
+ * `why` is typed mandatory, so TypeScript already rejects the ordinary mistake;
+ * this covers the JavaScript caller and the empty string, the way every clamp in
+ * `core/budget/ledger.ts` covers the seam TypeScript cannot police. Both
+ * alternatives were rejected for the same reason:
+ *
+ * - **Throwing** would make a programmer's empty string DELETE an unknown from
+ *   the record. A lost unknown reads as a free turn, which is the exact lie this
+ *   story exists to remove, so the failure mode of the validation would be the
+ *   failure mode the validation is for.
+ * - **Dropping it silently** is the same outcome with no traceback.
+ *
+ * A recorded unknown with a weak reason is strictly better than no record, so
+ * the reason is replaced and the unknown is kept. `recordTurn`'s neighbour
+ * behaviour is unchanged in kind: nothing in this module throws.
+ */
+export function recordUnknownTurn(ledger: TokenLedger, entry: UnknownUsageEntry): void {
+  const why =
+    typeof entry.why === "string" && entry.why.trim().length > 0
+      ? entry.why
+      : UNKNOWN_USAGE_UNSTATED_REASON
+  ledger.unknownUsage.push({ ...entry, why })
+}
+
+/**
+ * Whether a value is a `TokenUsage` MAD may actually ADD — all five fields
+ * present, and every one of them a finite number.
+ *
+ * It is deliberately stricter than "is an object with the right keys". A late
+ * usage report reaches `reconcileLateUsage` through an exported seam, so a
+ * partial or non-numeric payload is reachable, and the consequence of admitting
+ * one is not a wrong row: `addTokens` propagates `NaN` across the run total
+ * while the matching unknown entry is removed, so the ledger loses the record
+ * that it could not count AND the number it replaced it with is unusable.
+ *
+ * `Number.isFinite` covers `NaN`, both infinities, `undefined` and every
+ * non-number in one check — the same reason `clampTokenCap` reaches for it in
+ * `core/budget/ledger.ts` rather than testing `typeof` and `NaN` separately.
+ * Negative values are rejected too: a provider reporting `-5` output tokens has
+ * reported something MAD cannot interpret, and interpreting it anyway is the
+ * estimation AC1 forbids.
+ */
+function isCountableUsage(value: unknown): value is TokenUsage {
+  if (value === null || typeof value !== "object") return false
+  const usage = value as Record<string, unknown>
+  for (const field of ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const) {
+    const n = usage[field]
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return false
+  }
+  return true
+}
+
+/** The five integers, compared field by field. Two payloads or one fact. */
+function sameUsage(a: TokenUsage, b: TokenUsage): boolean {
+  return (
+    a.input === b.input &&
+    a.output === b.output &&
+    a.reasoning === b.reasoning &&
+    a.cacheRead === b.cacheRead &&
+    a.cacheWrite === b.cacheWrite
+  )
+}
+
+/**
+ * AC2 (story 2.3) — LATE USAGE, RECOVERED INTO THE RECORD.
+ *
+ * A provider that answers after MAD stopped waiting for it eventually reports
+ * what the request actually cost. `core/ports/late-usage.ts` collects those
+ * reports without anything awaiting them, and this is the function that folds a
+ * drained batch back into the ledger: a matched unknown MOVES into `entries`
+ * with its real tokens and is added to `total`, so a turn MAD could not count
+ * at the time becomes a turn MAD counted.
+ *
+ * ## What it deliberately does NOT do
+ *
+ * - **It invents nothing.** An unknown nobody reported stays unknown, and a
+ *   report naming an execution this ledger holds no unknown for changes nothing
+ *   at all — it is returned in `unmatched`. MAD does not learn about a turn from
+ *   a bill: an entry created here from an unmatched report would be a ledger row
+ *   with no slot, stage or attempt that any stage ever ran.
+ * - **It does not deduplicate a disagreement by first-seen.**
+ *   `evaluation-protocol.md:504-507` names that an INTEGRITY ERROR, and this
+ *   honours it by leaving the unknown UNKNOWN and reporting both payloads. Two
+ *   numbers MAD cannot choose between is not one number; picking either would
+ *   put an undefendable figure into the column this whole story is about, and
+ *   picking the smaller one would do it in the flattering direction.
+ * - **It does not treat a repeat delivery as a disagreement.** The protocol's
+ *   rule is about disagreement, and a reporter that delivered the same payload
+ *   twice has told MAD one thing twice. Counting it twice would double a real
+ *   bill — the opposite error, equally wrong.
+ * - **It throws nothing**, for the reason `core/budget/ledger.ts:21-26` gives
+ *   for the gate: a record that threw would make a run whose provider was slow
+ *   with its accounting look like a run that crashed. Every refusal is a value
+ *   in the returned summary.
+ *
+ * ## The honest limit, stated rather than hidden
+ *
+ * Disagreement is detected WITHIN one batch. Once an unknown has been
+ * reconciled its `executionId` is gone from `unknownUsage`, and `LedgerEntry`
+ * carries no execution id (it stays byte-identical, which is the story's whole
+ * structural argument), so a payload arriving in a LATER batch for an
+ * already-reconciled execution comes back as `unmatched` rather than as a
+ * conflict. In the shipped wiring that gap is unreachable — `core/run/review.ts`
+ * drains once, immediately before `finishedAt` — and it is written down here
+ * rather than left for a reader to discover. Carrying the ids on `entries` to
+ * close it is story 2.5A's inherited-entry provenance, which is where the AD-15
+ * semantic amendment for it belongs.
+ *
+ * Usage arriving after the drain is not in this run's record, and this story
+ * does not pretend otherwise.
+ */
+export function reconcileLateUsage(
+  ledger: TokenLedger,
+  reports: readonly LateUsageReport[],
+): LateUsageReconciliation {
+  const recovered: UnknownUsageEntry[] = []
+  const unmatched: LateUsageReport[] = []
+  const conflicts: UsageIntegrityConflict[] = []
+
+  // Grouped by execution FIRST, so a disagreement is seen before either payload
+  // is applied. Applying as we go and detecting afterwards would mean the first
+  // payload had already entered `total` by the time the second contradicted it,
+  // and unwinding a total is exactly the kind of arithmetic that ends up off by
+  // one turn.
+  const byExecution = new Map<string, LateUsageReport[]>()
+  const order: string[] = []
+  for (const report of reports ?? []) {
+    // `review()` is an exported seam and a JavaScript caller can reach the sink
+    // that feeds this with anything. A malformed report is ignored rather than
+    // thrown on, and it is not counted as unmatched either: `unmatched` is a
+    // claim about executions, and this is not one.
+    if (report === null || typeof report !== "object") continue
+    const id = report.executionId
+    if (typeof id !== "string" || id.length === 0) continue
+    if (report.tokens === null || typeof report.tokens !== "object") continue
+    // AND THE FIVE NUMBERS INSIDE IT, not merely the object around them (review
+    // 2026-09-10, found by two independent verifiers on the same commit).
+    //
+    // Checking the wrapper and trusting its contents was the one hole through
+    // which an unknown could still become a number: `{ input: 5 }` passed the
+    // `typeof` test, `addTokens` summed `5 + undefined` into `NaN` for the other
+    // four fields, and the unknown entry was SPLICED OUT while it happened. The
+    // ledger then held a `NaN` total, `usageIsComplete` answered `true`, and
+    // `mayISpend` stopped applying AC4's stop rule — a run that could not count
+    // its own spend reporting itself as fully counted, which is the exact
+    // failure this story exists to delete, reintroduced by the recovery path.
+    //
+    // `isCountableUsage` rather than a cast, because a cast asserts what a
+    // JavaScript caller can trivially falsify, and the sink this reads is fed
+    // through an exported seam.
+    if (!isCountableUsage(report.tokens)) continue
+    const group = byExecution.get(id)
+    if (group) group.push(report)
+    else {
+      byExecution.set(id, [report])
+      order.push(id)
+    }
+  }
+
+  for (const id of order) {
+    const group = byExecution.get(id)!
+    const distinct: TokenUsage[] = []
+    for (const report of group) {
+      if (!distinct.some((seen) => sameUsage(seen, report.tokens))) distinct.push(report.tokens)
+    }
+
+    if (distinct.length > 1) {
+      conflicts.push({ executionId: id, payloads: distinct })
+      continue
+    }
+
+    const at = ledger.unknownUsage.findIndex((entry) => entry.executionId === id)
+    if (at === -1) {
+      unmatched.push(...group)
+      continue
+    }
+
+    // The unknown's provenance is what the entry carries, never the report's:
+    // the provider knows what it billed and MAD knows which slot, stage and
+    // attempt asked for it.
+    const entry = ledger.unknownUsage[at]!
+    ledger.unknownUsage.splice(at, 1)
+    recordTurn(ledger, {
+      slot: entry.slot,
+      stage: entry.stage,
+      attempt: entry.attempt,
+      tokens: distinct[0]!,
+    })
+    recovered.push(entry)
+  }
+
+  return { recovered, unmatched, conflicts, stillUnknown: ledger.unknownUsage.length }
 }
 
 /**

@@ -70,6 +70,13 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
       cap: 1000,
       maxConcurrency: 4,
       shares: CUMULATIVE_SHARE,
+      // Story 2.3 — REQUIRED FIELDS, WRITTEN OUT even though the `as RunRecord`
+      // assertion at the bottom of this builder would have let them be omitted
+      // silently. This fixture is what `buildManifest` reads, and a ledger whose
+      // `unknownUsage` is `undefined` at run time is a fixture that would make
+      // an audit verdict of "complete" pass for the wrong reason.
+      unknownUsage: [],
+      stopOnUnknownUsage: false,
     },
     ...over,
   } as RunRecord
@@ -230,31 +237,107 @@ describe("AC4 — nothing is inferred; an unknown says so", () => {
   })
 })
 
-describe("AC5 — usage completeness is never claimed", () => {
-  test("the only v1 value is `unaudited`", () => {
+/**
+ * AC5 (story 2.3) — THIS BLOCK IS A DELIBERATE REWRITE, and the three tests it
+ * replaces were right when they were written.
+ *
+ * Story 2.2 shipped `UsageCompleteness = "unaudited"` and pinned exactly that:
+ * the only value was `unaudited`, no run shape could produce another, and a
+ * `@ts-expect-error` asserted that `"complete"` did not even type-check. Those
+ * tests were pinning the absence of a mechanism, which is what 2.2 had. Story
+ * 2.3 built the mechanism (`core/budget/ledger.ts`'s `usageIsComplete` over
+ * `TokenLedger.unknownUsage`), so the assertions that said "MAD cannot answer
+ * this" now pin a lie rather than guard against one. They are rewritten to pin
+ * the three answers instead, and the type-level guard is kept — pointed at a
+ * value outside the widened union rather than deleted, because a union that
+ * accepts anything is not a guard.
+ */
+describe("AC5 — usage completeness is an audit verdict, not a placeholder", () => {
+  test("a ledger holding no unknown reads `complete`, and its exposure is quantified", () => {
     const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0) })
-    expect(manifest.spend.usageCompleteness).toBe("unaudited")
+    expect(manifest.spend.usageCompleteness).toBe("complete")
+    expect(manifest.spend.unknownUsage).toEqual([])
+    expect(manifest.spend.unknownUsageCount).toBe(0)
+    expect(manifest.spend.exposure).toBe("quantified")
   })
 
-  test("no run shape can talk the field into claiming complete usage", () => {
+  test("an unknown execution reads `incomplete`, and its identity and count ride beside it", () => {
+    const unknown = {
+      slot: "discovery-2",
+      stage: "discover",
+      attempt: 1,
+      executionId: "exec-7",
+      why: "the host settled the turn and reported no tokens",
+    }
+    const manifest = buildManifest({
+      record: record({ ledger: { ...record().ledger, unknownUsage: [unknown] } }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(manifest.spend.usageCompleteness).toBe("incomplete")
+    expect(manifest.spend.unknownUsage).toEqual([unknown])
+    expect(manifest.spend.unknownUsageCount).toBe(1)
+    // `evaluation-protocol.md:337-338` — the label is the protocol's word, and
+    // the observed total is still written beside it rather than suppressed.
+    expect(manifest.spend.exposure).toBe("unquantified")
+    expect(manifest.spend.total).toEqual({ ...emptyTokenUsage(), input: 10, output: 20 })
+  })
+
+  test("no run shape talks the verdict out of `incomplete` while an unknown stands", () => {
+    const withUnknown = {
+      ...record().ledger,
+      unknownUsage: [
+        { slot: "discovery-1", stage: "judge", attempt: 2, executionId: "exec-1", why: "cancelled in flight" },
+      ],
+    }
     const shapes: Partial<RunRecord>[] = [
-      {},
-      { finishedAt: undefined },
-      { cancelled: { stage: "judge" } },
-      { warnings: [{ code: "model-dropped-out", stage: "discover", message: "dropped" }] },
-      { ledger: { ...record().ledger, cap: null } },
+      { ledger: withUnknown },
+      { ledger: withUnknown, finishedAt: undefined },
+      { ledger: withUnknown, cancelled: { stage: "judge" } },
+      {
+        ledger: withUnknown,
+        warnings: [{ code: "model-dropped-out", stage: "discover", message: "dropped" }],
+      },
+      { ledger: { ...withUnknown, cap: null } },
     ]
     for (const shape of shapes) {
       const manifest = buildManifest({ record: record(shape), change, identity, turnFiles: known(0) })
-      expect(manifest.spend.usageCompleteness).toBe("unaudited")
+      expect(manifest.spend.usageCompleteness).toBe("incomplete")
+      expect(manifest.spend.exposure).toBe("unquantified")
     }
   })
 
-  test("the union is the guard: `complete` is not assignable to the field", () => {
-    // @ts-expect-error — AC5. If this line ever type-checks, story 2.3's schema
-    // landed without anyone deciding what `complete` is allowed to mean.
-    const claimed: UsageCompleteness = "complete"
-    expect(String(claimed)).toBe("complete")
+  test("a record carrying NO unknown-usage collection reads `unaudited` — absent is not none", () => {
+    // The pre-2.3 ledger shape, which `RunRecord`'s type no longer permits and a
+    // JSON file on disk or a JavaScript caller can still hand over. An audit that
+    // never ran must not read as an audit that found nothing: that is the same
+    // absent/none collapse `TokenLedger.unknownUsage` is required in order to
+    // prevent, one layer out.
+    const legacy = { ...record().ledger } as Record<string, unknown>
+    delete legacy.unknownUsage
+    const manifest = buildManifest({
+      record: record({ ledger: legacy as never }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    expect(manifest.spend.usageCompleteness).toBe("unaudited")
+    expect(manifest.spend.unknownUsage).toEqual([])
+    expect(manifest.spend.unknownUsageCount).toBe(0)
+    // NOT `quantified`. An empty identity list under an `unaudited` verdict is
+    // "no audit produced one", never "there were none".
+    expect(manifest.spend.exposure).toBe("unquantified")
+  })
+
+  test("the union is still the guard: a value outside the three is not assignable", () => {
+    const audited: UsageCompleteness = "complete"
+    expect(String(audited)).toBe("complete")
+    // @ts-expect-error — AC5. The union widened to three named verdicts and no
+    // further. A fourth spelling reaching this field would be a reader branching
+    // on a word nobody decided the meaning of.
+    const invented: UsageCompleteness = "probably-fine"
+    expect(String(invented)).toBe("probably-fine")
   })
 })
 

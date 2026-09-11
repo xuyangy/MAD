@@ -64,12 +64,29 @@ import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
 import {
   MANIFEST_FILE,
   MANIFEST_SCHEMA_VERSION,
+  USAGE_COMPLETENESS_VALUES,
   fromPersistedFindings,
   type Maybe,
   type RunManifest,
 } from "./manifest.ts"
 
-/** The four fields cross-arm comparability is decided on. */
+/**
+ * The four fields cross-arm comparability is decided on.
+ *
+ * STILL FOUR AFTER STORY 2.3, AND USAGE COMPLETENESS IS NOT THE FIFTH. That is a
+ * decision rather than an omission, because the field arrived in the same commit
+ * as this comment and adding it would have been the obvious move.
+ *
+ * These four are facts about WHAT WAS REVIEWED — which protocol, which fixture,
+ * which bytes, which code. Usage completeness is a fact about MAD's OWN
+ * INSTRUMENTATION. Partitioning cohorts on the second would split a legitimately
+ * paired block into two incomparable halves because one arm's host dropped a
+ * `tokens` field, which is the reverse of what segregation is for: the two arms
+ * reviewed the same change with the same code and their findings are exactly as
+ * comparable as they were: it is the BILL that is short, not the measurement.
+ * It becomes a labelled column plus the per-arm disclosure `usageCompleteness`
+ * prints instead.
+ */
 export const COMPARABILITY_FIELDS = ["protocolHash", "fixtureHash", "changeId", "codeRevision"] as const
 export type ComparabilityField = (typeof COMPARABILITY_FIELDS)[number]
 
@@ -435,8 +452,50 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     // wants to trust.
     return fail("carries no readable `spend.total`")
   }
-  if (typeof spend.usageCompleteness !== "string") {
-    return fail("carries no `spend.usageCompleteness`")
+  // AC5 (story 2.3) — THE CHECKED SET IS THE TOUCHED SET, and this block is
+  // where that rule met a widened schema.
+  //
+  // `typeof … === "string"` was enough while `UsageCompleteness` had exactly one
+  // value and nothing branched on it. It is not enough now: the renderer below
+  // states a verdict PER ARM and prints a different sentence for each of the
+  // three, so an unrecognised fourth word would reach a reader as a verdict
+  // nobody defined — which is the `{"kind":"known"}` failure this function's
+  // header describes, in a different field. The union is the contract; a reader
+  // that accepts a word outside it is a reader that guesses.
+  if (!USAGE_COMPLETENESS_VALUES.some((verdict) => verdict === spend.usageCompleteness)) {
+    return fail(
+      `has a \`spend.usageCompleteness\` this reader does not know: ` +
+        `${JSON.stringify(spend.usageCompleteness)} (it knows ${USAGE_COMPLETENESS_VALUES.join(", ")})`,
+    )
+  }
+  // THE IDENTITIES ARE RENDERED, SO THEY ARE CHECKED. `evaluation-protocol.md:337-338`
+  // requires the identities and the count of executions with unknown usage to be
+  // recorded, and the per-arm statement prints an `executionId` and a `why` off
+  // each one: a junk entry here is `undefined (undefined)` in a report about
+  // money, which is the same class of hole as the `NaN` tokens guarded above.
+  if (!Array.isArray(spend.unknownUsage)) {
+    return fail("carries no `spend.unknownUsage` list")
+  }
+  for (const [position, entry] of spend.unknownUsage.entries()) {
+    if (
+      !isRecord(entry) ||
+      !isText(entry.slot) ||
+      !isText(entry.stage) ||
+      !isCount(entry.attempt) ||
+      !isText(entry.executionId) ||
+      !isText(entry.why)
+    ) {
+      return fail(`has an unreadable \`spend.unknownUsage[${position}]\``)
+    }
+  }
+  if (!isCount(spend.unknownUsageCount)) {
+    return fail("carries no numeric `spend.unknownUsageCount`")
+  }
+  if (spend.exposure !== "quantified" && spend.exposure !== "unquantified") {
+    return fail(
+      `has a \`spend.exposure\` this reader does not know: ${JSON.stringify(spend.exposure)} ` +
+        `(it knows quantified, unquantified)`,
+    )
   }
 
   // ---- status ----
@@ -719,7 +778,14 @@ export function renderBundle(result: BundleReadResult): string {
   lines.push("")
 
   if (result.comparable.length > 0) {
-    lines.push("  arm            repeat  slots  answered  pooled  canonical  status      tokens")
+    // THE COLUMN IS LABELLED OBSERVED, UNCONDITIONALLY (AC5, story 2.3).
+    // `evaluation-protocol.md:511-517` — "a missing tag is not evidence of
+    // complete usage" — so the label cannot be applied only to the arms known to
+    // be short: a column headed `tokens` on every other row teaches a reader that
+    // the unlabelled ones are complete bills, which is the inference the protocol
+    // forbids. What each arm's figure is missing, if anything, is the per-arm
+    // block below.
+    lines.push("  arm            repeat  slots  answered  pooled  canonical  status      tokens (observed)")
     for (const row of result.comparable) {
       const manifest = row.manifest
       lines.push(
@@ -748,13 +814,7 @@ export function renderBundle(result: BundleReadResult): string {
     lines.push(...disclosures(result.comparable))
   }
 
-  lines.push(
-    "USAGE COMPLETENESS is `unaudited` for every run in this bundle: the mechanism that could",
-  )
-  lines.push(
-    "check it is story 2.3's and does not exist yet. Read every token figure here as observed",
-  )
-  lines.push("spend, never as a complete bill.")
+  lines.push(...usageCompleteness(result))
   lines.push(
     "NO FINDING WAS COMPARED ACROSS ARMS. This reader establishes that the arms are comparable;",
   )
@@ -870,6 +930,80 @@ function disclosures(comparable: readonly ArmRow[]): string[] {
   }
 
   lines.push("")
+  return lines
+}
+
+/**
+ * AC5 (story 2.3) — THE USAGE VERDICT, ONE ARM AT A TIME.
+ *
+ * This replaces a hardcoded paragraph that said *"USAGE COMPLETENESS is
+ * `unaudited` for every run in this bundle: the mechanism that could check it is
+ * story 2.3's and does not exist yet"*. That sentence was true when story 2.2
+ * wrote it — `buildManifest` had one value it could write — and it is false the
+ * moment two arms can disagree. A bundle-wide claim in the one case that matters
+ * most (one arm's token column is short and the other's is not) is worse than no
+ * claim at all, because it tells the reader the two figures are equally trustworthy.
+ *
+ * EVERY ARM THE READER LOADED, NOT ONLY THE COMPARABLE ONES. A segregated arm
+ * still billed real money and its manifest still carries the verdict; leaving it
+ * out would mean the one thing the reader knows about a segregated arm's spend
+ * goes unsaid. Missing and unreadable arms have no manifest and therefore no
+ * verdict, and the banners above them already say so.
+ *
+ * THE IDENTITIES ARE PRINTED, NOT JUST THE COUNT (`evaluation-protocol.md:337-338`),
+ * because "2 executions were not counted" is not something an operator can act
+ * on and `exec-2 (discover/discovery-1, attempt 1): the host settled the turn and
+ * reported no tokens` is. They are capped at five per arm with the remainder
+ * counted: a fan-out that lost fifty would otherwise bury the rest of the report,
+ * and the manifests on disk carry every one.
+ */
+function usageCompleteness(result: BundleReadResult): string[] {
+  const lines = [
+    "USAGE COMPLETENESS, PER ARM — a fact about MAD's INSTRUMENTATION, not about the change",
+    "under review, which is why it labels these rows and does not segregate them:",
+  ]
+
+  const rows = [
+    ...result.comparable.map((row) => ({ row, note: "" })),
+    ...result.segregated.map((row) => ({ row, note: " [segregated]" })),
+  ]
+  if (rows.length === 0) {
+    lines.push("  no arm in this bundle was readable, so no usage verdict is stated for any of them.")
+    return lines
+  }
+
+  for (const { row, note } of rows) {
+    const spend = row.manifest.spend
+    const at = `  ${row.armId} repeat ${row.repeatId}${note} — `
+    if (spend.usageCompleteness === "complete") {
+      lines.push(`${at}complete: every turn this run billed is in its token figure.`)
+      continue
+    }
+    if (spend.usageCompleteness === "unaudited") {
+      lines.push(
+        `${at}UNAUDITED: this run's record carried no usage audit at all, so its token figure is ` +
+          `OBSERVED spend that nothing has checked. Exposure is ${spend.exposure}.`,
+      )
+      continue
+    }
+    lines.push(
+      `${at}INCOMPLETE: ${spend.unknownUsageCount} execution(s) MAD could not count, so its token ` +
+        `figure is OBSERVED spend and the gap is NOT filled in. Exposure is ${spend.exposure}.`,
+    )
+    for (const entry of spend.unknownUsage.slice(0, 5)) {
+      lines.push(
+        `      ${entry.executionId} (${entry.stage}/${entry.slot}, attempt ${entry.attempt}): ${entry.why}`,
+      )
+    }
+    if (spend.unknownUsage.length > 5) {
+      lines.push(`      …and ${spend.unknownUsage.length - 5} more, in this arm's \`manifest.json\`.`)
+    }
+  }
+
+  lines.push(
+    "Read every token figure in this report as OBSERVED spend: a missing tag is not evidence of",
+  )
+  lines.push("complete usage (`evaluation-protocol.md:511-517`).")
   return lines
 }
 

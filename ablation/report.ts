@@ -107,7 +107,13 @@ export function renderAblation(report: AblationReport): string[] {
       `  ${arm.id} (${arm.label}) [${arm.provenance}]${repeat} slots=${arm.slots}${lenses}${pins}`,
       `    answered: ${arm.answered} | canonical findings: ${arm.findings} | pooled: ${arm.pooled}` +
         ` | file-level (never alignable with a line-cited finding): ${arm.fileLevel}`,
-      `    tokens: ${arm.cost.tokens} over ${arm.cost.billedTurns} billed turn(s), cap ${capText(arm.cost.cap)}` +
+      // OBSERVED, UNCONDITIONALLY (AC5, story 2.3). `ArmCost.tokens` is the
+      // accountant's total and counts only the turns MAD could count; a turn
+      // whose usage the host never reported is in `ledger.unknownUsage` and in no
+      // figure on this line. `evaluation-protocol.md:511-517` requires the label
+      // at the human-facing end and requires it unlabelled-means-nothing:
+      // "a missing tag is not evidence of complete usage".
+      `    tokens (observed): ${arm.cost.tokens} over ${arm.cost.billedTurns} billed turn(s), cap ${capText(arm.cost.cap)}` +
         ` | in ${arm.cost.input} / out ${arm.cost.output} / reasoning ${arm.cost.reasoning}` +
         ` / cache r ${arm.cost.cacheRead} w ${arm.cost.cacheWrite}`,
       `    route: ${countsText(arm.routeCounts)}`,
@@ -186,7 +192,12 @@ export function renderAblation(report: AblationReport): string[] {
   }
 
   // ---- Token cost ----
-  lines.push("2. TOKEN COST — a count of tokens. Not divided by the count above it.")
+  lines.push(
+    "2. TOKEN COST — OBSERVED spend: a count of the tokens MAD could COUNT. Not divided by the",
+  )
+  lines.push(
+    "   count above it, and not topped up for any turn whose usage the host never reported.",
+  )
   for (const arm of report.arms) {
     const repeat = report.repeats > 1 ? ` (repeat ${arm.repeat})` : ""
     lines.push(

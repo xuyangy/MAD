@@ -97,7 +97,13 @@
  * multi-model run says so (`pooledNotYetMerged`).
  */
 
-import { budgetReport, ceilingNamed, spentTokens } from "../budget/ledger.ts"
+import {
+  budgetReport,
+  ceilingNamed,
+  spentTokens,
+  unknownUsageClause,
+  usageIsComplete,
+} from "../budget/ledger.ts"
 import { BLAME_KIND } from "../judge/blame.ts"
 import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
@@ -1617,9 +1623,36 @@ export function renderRunRecord(record: RunRecord): string {
   // renders byte-identically to what it rendered before this story.
   const spentClause =
     record.ledger.cap === null ? "" : ` | spent: ${spentTokens(t)} of ${record.ledger.cap}`
+  // FR10 / AC1 (story 2.3) — THE WORD THIS LINE DID NOT SAY, and the sentence
+  // that explains it, BOTH ANSWERED BY THE ACCOUNTANT.
+  //
+  // Every figure on this line is true about the turns MAD could COUNT, and until
+  // this story that was the whole of what it claimed to be: `entries.length` and
+  // `total` are folded out of `ledger.entries`, and a turn whose usage MAD never
+  // received writes an `UnknownUsageEntry` beside them and nothing into them
+  // (*Dev Notes → Why a second collection*). So a run that billed four turns and
+  // could count three renders a perfectly healthy-looking three-turn total, in
+  // the direction that flatters MAD — which is the failure this story exists to
+  // delete, surviving into the one place a human actually reads.
+  //
+  // THE RENDERER COMPUTES NO PART OF IT. `unknownUsageClause` phrases the
+  // sentence and `usageIsComplete` answers the gate, both in
+  // `core/budget/ledger.ts` beside `ceilingClause`, for that function's reason
+  // exactly: a renderer that counted `ledger.unknownUsage` itself would be a
+  // stage doing the accountant's arithmetic, which AD-15 forbids and
+  // `scripts/lint-dependency-direction.ts:135-141` enforces by text match. The
+  // mark on the line itself is a LABEL and not a figure: it interpolates nothing,
+  // and the one number MAD does have — the count — is the accountant's sentence.
+  //
+  // `=== null` AND NOT `if (clause)` (the accountant's own note). An empty string
+  // and a sentence are two states a truthiness test collapses, and two states a
+  // truthiness test collapses is the whole subject of story 2.3.
+  const unknownUsage = unknownUsageClause(record.ledger)
+  const observedMark = unknownUsage === null ? "" : " (OBSERVED)"
   lines.push(
-    `TOKENS — turns: ${record.ledger.entries.length} | in: ${t.input} | out: ${t.output} | ` +
-      `reasoning: ${t.reasoning} | cache r/w: ${t.cacheRead}/${t.cacheWrite}${spentClause}`,
+    `TOKENS${observedMark} — turns: ${record.ledger.entries.length} | in: ${t.input} | ` +
+      `out: ${t.output} | reasoning: ${t.reasoning} | ` +
+      `cache r/w: ${t.cacheRead}/${t.cacheWrite}${spentClause}`,
   )
   // AD-15 amended (story 7A) — the PEAK, beside the total it is the second time
   // scale of. It is MAD-computed and it is not a degradation, so it belongs on
@@ -1638,12 +1671,40 @@ export function renderRunRecord(record: RunRecord): string {
   // on principle, and an estimate printed beside a real figure is worse than a
   // stated gap. What it CAN do is not let the figure read as complete, which is
   // AD-6's rule applied to the one number a reader takes for exact.
-  if (record.cancelled !== undefined) {
+  //
+  // AC1 (story 2.3) — THE GATE IS NOW "CANCELLED **OR** UNCOUNTED", AND THE
+  // SENTENCE NO LONGER BLAMES THE STOP.
+  //
+  // Both halves were wrong in the same direction. The gate read
+  // `record.cancelled !== undefined`, so a run that finished normally while its
+  // host reported no `tokens` field for one turn printed its short total with no
+  // caveat at all — the quieter half of this story's failure, and the half a
+  // reader cannot detect. And the wording, "a turn MAD stopped waiting on
+  // returns no usage", is true of a cancellation and FALSE of that turn: it
+  // would tell a reader MAD stopped waiting on a turn that settled successfully.
+  //
+  // ONE SENTENCE FOR BOTH, describing the GAP and never the cause. The cause is
+  // per-execution and belongs where it is known exactly — `UnknownUsageEntry.why`
+  // ("cancelled in flight", "timed out", "the host reported nothing"), which the
+  // three stages fold into the `usage-unquantified` warning above. A second
+  // wording here would be a second place to keep true, and a run can be both
+  // stopped AND missing usage at once, which no cause-naming caveat can say.
+  if (record.cancelled !== undefined || !usageIsComplete(record.ledger)) {
     lines.push(
-      `  THAT TOTAL IS A FLOOR, not a full count: a turn MAD stopped waiting on returns no`,
-      `  usage, so anything the provider billed for it is missing here. MAD does not estimate it.`,
+      `  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one`,
+      `  it stopped waiting on, or one that settled with the host reporting none — still billed,`,
+      `  and that spend is missing here. MAD does not estimate it.`,
     )
   }
+  // ...AND HOW MANY, when the ledger knows. The caveat above fires for a stop
+  // that may have cost nothing countable at all, so it can state only the
+  // principle; this line is the accountant's finished sentence and carries the
+  // one figure MAD does have — the COUNT of executions it could not count
+  // (`evaluation-protocol.md:337-338` requires the count; the identities ride in
+  // the `usage-unquantified` warning's `detail`). It says OBSERVED, it names no
+  // number for the gap itself, and it is printed BELOW the peak so story 7A's
+  // TOKENS/PEAK pairing is undisturbed.
+  if (unknownUsage !== null) lines.push(`  ${unknownUsage}`)
   lines.push(...budgetBlock(record))
 
   return lines.join("\n")

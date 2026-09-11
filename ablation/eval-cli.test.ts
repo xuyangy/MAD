@@ -155,10 +155,28 @@ describe("the evaluation reader CLI", () => {
           shares: { discover: 0.3, debate: 0.65, judge: 1 },
           preset: unknownValue("the caller named no preset"),
         },
+        // AC5 (story 2.3) — THIS FIXTURE IS DELIBERATELY AN INCOMPLETE ARM, and
+        // it wrote `usageCompleteness: "unaudited"` before. That value was the
+        // only one story 2.2's builder could produce; `buildManifest` now audits
+        // the ledger, so keeping it would have pinned the CLI against a manifest
+        // MAD no longer writes. The interesting state is the one this end-to-end
+        // path has to carry all the way to an operator's terminal: a run whose
+        // token figure is short and says so.
         spend: {
           perStage: [{ stage: "discover", spent: 30, total: 30, ceiling: null }],
           total: { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-          usageCompleteness: "unaudited",
+          usageCompleteness: "incomplete",
+          unknownUsage: [
+            {
+              slot: "discovery-1",
+              stage: "discover",
+              attempt: 1,
+              executionId: "exec-1",
+              why: "the host settled the turn and reported no tokens",
+            },
+          ],
+          unknownUsageCount: 1,
+          exposure: "unquantified",
         },
         status: {
           completion: "completed",
@@ -177,7 +195,13 @@ describe("the evaluation reader CLI", () => {
     expect(code).toBe(0)
     expect(text).toContain("COMPARABLE ARMS")
     expect(text).toContain("ceiling none")
-    expect(text).toContain("USAGE COMPLETENESS is `unaudited`")
+    // The bundle-wide "`unaudited` for every run in this bundle" paragraph this
+    // line used to assert is gone: the verdict is per arm now, and an operator
+    // reading one arm's short token figure gets the identity that made it short.
+    expect(text).toContain("USAGE COMPLETENESS, PER ARM")
+    expect(text).toContain("on repeat 0 — INCOMPLETE: 1 execution(s)")
+    expect(text).toContain("exec-1 (discover/discovery-1, attempt 1)")
+    expect(text).toContain("tokens (observed)")
   })
 })
 

@@ -85,6 +85,11 @@ interface ToolResult {
     preset?: string
     tokenCap?: number | null
     budgetSkipped?: number
+    // Story 2.3 — whether the `tokens` figure beside these is the whole bill,
+    // and how many executions it is short by. Two fields, for the reason
+    // `artifactsOutcome`/`artifacts` are two: see the test below.
+    usageComplete?: boolean
+    unknownUsageCount?: number
     artifacts?: string
     artifactsOutcome?: string
   }
@@ -688,5 +693,120 @@ describe("mad_review.execute — the preset's own lens list is inside the clamp 
     )
     expect(reverted).not.toContain("truncatedListWarnings({ models: args.models, lenses: requestedLenses })")
     expect(reverted).toContain("truncatedListWarnings(args)")
+  })
+})
+
+/**
+ * STORY 2.3, TASK 14 — THE HOST IS TOLD WHETHER THE TOKEN FIGURE IS THE BILL.
+ *
+ * `metadata.tokens` has carried `record.ledger.total` since story 1, and a host
+ * reading it has had no way to learn that the run billed a turn MAD could not
+ * count: the total looks identical either way, which is the whole of this
+ * story's failure mode expressed at the machine boundary rather than in prose.
+ * The rendered report now says so (`core/stages/output.ts`), but a calling agent
+ * branching on a number should not have to string-match MAD's own English to
+ * find out the number is short.
+ *
+ * TWO FIELDS, NOT ONE OVERLOADED FIGURE — the precedent set three lines above
+ * them by `artifactsOutcome`/`artifacts` (code review 2026-08-31). The boolean
+ * is the discriminant a host branches on; the count is data, and it is a COUNT
+ * rather than the execution ids for `budgetSkipped`'s reason exactly — the
+ * identities are already in the report and in the `usage-unquantified` warning's
+ * `detail` for a caller that needs which.
+ *
+ * WHAT THIS HARNESS CANNOT DO, stated rather than hidden: the server URL is
+ * deliberately unreachable, so every turn here is a transport failure that never
+ * settled and therefore has NO unknown-usage marker (`model-backend.ts` attaches
+ * one only to a request that went out). The false branch is pinned where it can
+ * be produced — `core/budget/ledger.test.ts` over the accountant, and
+ * `core/stages/output.test.ts` over the renderer. What is pinned here is that
+ * this boundary forwards the accountant's answer instead of asserting its own.
+ */
+describe("mad_review.execute — the completeness of the token figure is machine-readable", () => {
+  test("a run with nothing uncounted says so, in both fields", async () => {
+    const result = await executeWith({})
+
+    expect(result.metadata?.usageComplete).toBe(true)
+    expect(result.metadata?.unknownUsageCount).toBe(0)
+    // PRESENT, NOT MERELY FALSY. Absent and "none" must not be two ways of
+    // saying the same thing — the rule `TokenLedger.unknownUsage` is required
+    // for, at the boundary that consumes it.
+    expect("usageComplete" in (result.metadata ?? {})).toBe(true)
+    expect("unknownUsageCount" in (result.metadata ?? {})).toBe(true)
+    // ...and the machine-readable answer cannot disagree with the prose: both
+    // come off the one ledger this run wrote.
+    expect(result.output).not.toContain("TOKENS (OBSERVED)")
+  })
+
+  test("the two fields are the ACCOUNTANT'S answers, not the plugin's own", async () => {
+    // STRUCTURAL, for the reason the lens-clamp test above is: the state that
+    // separates a forwarded answer from a hardcoded `true` cannot be produced
+    // against an unreachable server, and a test that asserts `true` against a
+    // literal `true` is a test that passes on the bug. This one fails the moment
+    // the boundary starts answering the question itself — which is also the
+    // AD-15 violation (`scripts/lint-dependency-direction.ts`) of a caller doing
+    // the accountant's counting.
+    const source = await Bun.file(new URL("./plugin.ts", import.meta.url)).text()
+
+    expect(source).toContain("usageComplete: usageIsComplete(record.ledger)")
+    expect(source).toContain("unknownUsageCount: unknownUsageCount(record.ledger)")
+    expect(source).not.toContain("usageComplete: true")
+    expect(source).not.toContain("record.ledger.unknownUsage.length")
+  })
+})
+
+/**
+ * STORY 2.3, AC2 — THE HOST BUILDS THE SINK, AND BUILDS ONE.
+ *
+ * The backend reports a bill that arrives after MAD stopped waiting into a
+ * `LateUsageSink`; `review()` drains one immediately before it stamps
+ * `finishedAt`. Story 2.3 shipped both ends tested and mutation-verified and
+ * shipped NO CALLER: `createLateUsageSink` existed only in test files, so this
+ * plugin — the published entry point — built a backend with nowhere to report and
+ * called `review()` with nothing to drain. Every late bill was dropped.
+ *
+ * STRUCTURAL, and the limit is the one this file already declares for
+ * `usageComplete`: this harness drives a deliberately unreachable server, so every
+ * turn fails at `session.create` before a prompt goes out and no late report can
+ * exist to recover. The recovery's BEHAVIOUR is pinned in `core/run/review.test.ts`
+ * and the JOIN in `ablation/arms.test.ts`; what only this file can pin is that the
+ * shipped host constructs a sink and hands the SAME ONE to both.
+ */
+describe("mad_review.execute — one late-usage sink, reaching the backend and review()", () => {
+  const pluginSource = () => Bun.file(new URL("./plugin.ts", import.meta.url)).text()
+
+  test("the sink is constructed once and named once, then used twice", async () => {
+    const source = await pluginSource()
+
+    expect(source).toContain("const lateUsage = createLateUsageSink()")
+    // Onto the backend, so there is somewhere to report.
+    expect(source).toContain("slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,")
+    // And onto the run, so there is something to drain. A bare `lateUsage,` in
+    // the `review({...})` literal is the same identifier, which is the whole
+    // point — two `createLateUsageSink()` calls would satisfy a weaker assertion
+    // and recover nothing.
+    expect(source).toContain("// The same object the backend above reports into. See its comment.\n            lateUsage,")
+    // Exactly one construction in the file.
+    expect(source.split("createLateUsageSink()").length - 1).toBe(1)
+  })
+
+  test("the assertions above can FAIL — the unwired shape does not satisfy them", async () => {
+    // The tree as story 2.3 shipped it before 2026-09-11.
+    const reverted = (await pluginSource())
+      .replace("const lateUsage = createLateUsageSink()\n", "")
+      .replace(
+        "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,",
+        "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],",
+      )
+      .replace(
+        "// The same object the backend above reports into. See its comment.\n            lateUsage,\n",
+        "",
+      )
+
+    expect(reverted).not.toContain("const lateUsage = createLateUsageSink()")
+    expect(reverted).not.toContain(
+      "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,",
+    )
+    expect(reverted.split("createLateUsageSink()").length - 1).toBe(0)
   })
 })

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
 import { DISCLOSURE_CODES } from "../domain/warning.ts"
 import type { RunRecord } from "../domain/run-record.ts"
+import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { selectRoster } from "../roster/select.ts"
@@ -18,7 +19,8 @@ import {
   type SlotScript,
   type SlotStep,
 } from "../test-support/fakes.ts"
-import { SUGGESTED_BUDGET } from "../budget/ledger.ts"
+import { SUGGESTED_BUDGET, usageIsComplete } from "../budget/ledger.ts"
+import { createLateUsageSink, type LateUsageReport } from "../ports/late-usage.ts"
 import { frameForHostAgent, review } from "./review.ts"
 
 const ENVELOPE = {
@@ -2182,5 +2184,151 @@ describe("review — F8: budget-stranded AND cancelled, at the seam the AC names
       expect(reason).toContain("cancelled")
       expect(reason).not.toContain("budget")
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.3, AC2 — late usage, drained before the record closes
+// ---------------------------------------------------------------------------
+
+/** One slot, one finding, and discovery's turn reports no usage at all. */
+function unknownDiscoveryRun() {
+  const resolved = setup([["anthropic", "claude-sonnet-4-5"]])
+  return {
+    roster: resolved.roster,
+    backend: new FakeBackend(
+      abstainingInDebate({
+        "discovery-1": [{ kind: "ok" as const, value: ENVELOPE, usageUnknown: "the host reported no usage" }],
+      }),
+    ),
+    clock: fakeClock(),
+    change: fakeChange(),
+    priorWarnings: resolved.warnings,
+  }
+}
+
+describe("review — late usage is recovered before `finishedAt` (story 2.3, AC2)", () => {
+  test("A RUN THAT PASSES NO SINK IS BYTE-FOR-BYTE THE RUN IT IS TODAY", async () => {
+    // The compatibility claim, asserted rather than promised: the same run with
+    // no `lateUsage` and with an EMPTY one renders identically and closes over
+    // the same ledger. Every `ReviewDeps` construction site in the tree passes
+    // no sink, so this is the path that must not move.
+    const without = await review(unknownDiscoveryRun())
+    const withEmpty = await review({ ...unknownDiscoveryRun(), lateUsage: createLateUsageSink() })
+
+    expect(withEmpty.rendered).toBe(without.rendered)
+    expect(withEmpty.record.ledger.entries).toEqual(without.record.ledger.entries)
+    expect(withEmpty.record.ledger.total).toEqual(without.record.ledger.total)
+
+    // And the unknown is STILL UNKNOWN — nothing invented a number for it.
+    expect(without.record.ledger.unknownUsage).toHaveLength(1)
+    expect(without.record.ledger.unknownUsage[0]!.executionId).toBe("exec-1")
+    expect(usageIsComplete(without.record.ledger)).toBe(false)
+    expect(without.record.ledger.entries.some((entry) => entry.stage === "discover")).toBe(false)
+  })
+
+  test("a report that arrived BEFORE the drain becomes a counted turn", async () => {
+    const lateUsage = createLateUsageSink()
+    // The provider answered after MAD stopped waiting, so the adapter's
+    // non-awaited continuation reported it. `exec-1` is the id the backend
+    // minted for the discovery turn.
+    lateUsage.report({ executionId: "exec-1", tokens: tokens(7, 11) })
+
+    const { record } = await review({ ...unknownDiscoveryRun(), lateUsage })
+
+    expect(record.ledger.unknownUsage).toEqual([])
+    expect(usageIsComplete(record.ledger)).toBe(true)
+    const recovered = record.ledger.entries.find((entry) => entry.stage === "discover")
+    expect(recovered).toBeDefined()
+    // The provenance is the UNKNOWN's, never the report's: the report carries an
+    // id and tokens and nothing else.
+    expect(recovered).toEqual({ slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(7, 11) })
+    expect(record.ledger.total.input).toBeGreaterThanOrEqual(7)
+    // It landed BEFORE the record closed, which is the whole of AC2's ordering.
+    expect(record.finishedAt).toBeDefined()
+  })
+
+  test("the sink is drained EXACTLY ONCE, and usage arriving after that is not in the record", async () => {
+    // The honest limit, stated in `reconcileLateUsage`'s header and asserted
+    // here rather than left for a reader to discover: the run closes over what
+    // had arrived, the sink keeps the rest, and nothing waits for a completion
+    // MAD cannot guarantee.
+    const inner = createLateUsageSink()
+    let drains = 0
+    const lateUsage = {
+      report: (report: LateUsageReport) => inner.report(report),
+      drain: () => {
+        drains += 1
+        return inner.drain()
+      },
+    }
+
+    const { record } = await review({ ...unknownDiscoveryRun(), lateUsage })
+    expect(drains).toBe(1)
+
+    lateUsage.report({ executionId: "exec-1", tokens: tokens(7, 11) })
+    expect(record.ledger.unknownUsage).toHaveLength(1)
+    expect(record.ledger.entries.some((entry) => entry.stage === "discover")).toBe(false)
+  })
+
+  test("the drain happens BEFORE `finishedAt` is stamped, not after the record closed", async () => {
+    // The ordering is the acceptance criterion, and it is otherwise invisible:
+    // the ledger is the same object either way, so a drain moved one line later
+    // would leave every assertion above green while closing the record over a
+    // total that then changed. `finishedAt` is the LAST `clock.now()` a run
+    // makes, so counting the calls the drain had already seen pins the order
+    // without reaching into `review()`.
+    let nowCalls = 0
+    const counting: Clock = {
+      now: () => {
+        nowCalls += 1
+        return "2026-08-13T00:00:00.000Z"
+      },
+      id: (prefix) => `${prefix}-${nowCalls}`,
+    }
+    const inner = createLateUsageSink()
+    let nowCallsAtDrain = -1
+    const lateUsage = {
+      report: (report: LateUsageReport) => inner.report(report),
+      drain: () => {
+        nowCallsAtDrain = nowCalls
+        return inner.drain()
+      },
+    }
+
+    await review({ ...unknownDiscoveryRun(), clock: counting, lateUsage })
+
+    expect(nowCallsAtDrain).toBe(nowCalls - 1)
+  })
+
+  test("a report naming an execution this run never made changes NOTHING", async () => {
+    // MAD does not learn about a turn from a bill. An entry built out of an
+    // unmatched report would be a ledger row for a turn no stage ever ran.
+    const lateUsage = createLateUsageSink()
+    lateUsage.report({ executionId: "exec-from-another-run", tokens: tokens(7, 11) })
+
+    const { record } = await review({ ...unknownDiscoveryRun(), lateUsage })
+
+    expect(record.ledger.unknownUsage).toHaveLength(1)
+    expect(record.ledger.entries.some((entry) => entry.stage === "discover")).toBe(false)
+  })
+
+  test("two DISAGREEING payloads leave the unknown unknown and are disclosed", async () => {
+    // `evaluation-protocol.md:504-507` — a disagreement is an integrity error,
+    // "not something to deduplicate by first-seen". Picking either would put an
+    // undefendable figure in the column this whole story is about.
+    const lateUsage = createLateUsageSink()
+    lateUsage.report({ executionId: "exec-1", tokens: tokens(7, 11) })
+    lateUsage.report({ executionId: "exec-1", tokens: tokens(700, 1100) })
+
+    const { record } = await review({ ...unknownDiscoveryRun(), lateUsage })
+
+    expect(record.ledger.unknownUsage).toHaveLength(1)
+    expect(record.ledger.entries.some((entry) => entry.stage === "discover")).toBe(false)
+    const conflict = record.warnings.find(
+      (w) => w.code === "usage-unquantified" && String(w.message).includes("DISAGREE"),
+    )
+    expect(conflict).toBeDefined()
+    expect(conflict!.detail).toMatchObject({ conflicts: 1 })
   })
 })

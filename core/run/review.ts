@@ -21,11 +21,12 @@ import {
   type SpendShares,
 } from "../budget/ledger.ts"
 import type { Stage } from "../domain/finding.ts"
-import { emptyLedger, type RunRecord } from "../domain/run-record.ts"
+import { emptyLedger, reconcileLateUsage, type RunRecord } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
+import type { LateUsageSink } from "../ports/late-usage.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
 import type { Tools } from "../ports/tools.ts"
@@ -172,6 +173,58 @@ export interface ReviewDeps {
    * surface. The tool surface gets `budget` and `preset` and nothing else.
    */
   spendShares?: Partial<SpendShares>
+  /**
+   * AC2 (story 2.3) — WHERE USAGE THAT ARRIVED TOO LATE IS COLLECTED.
+   *
+   * A provider MAD stopped waiting on keeps working and eventually reports what
+   * the request cost. `adapters/opencode/model-backend.ts` hands that figure to
+   * the WRITE half of this object from a non-awaited continuation on the
+   * abandoned prompt promise; the run holds the read half and folds whatever has
+   * arrived back into the ledger as the record closes
+   * (`reconcileLateUsage`), turning a turn MAD could not count into a turn MAD
+   * counted.
+   *
+   * OPTIONAL, AND ITS ABSENCE IS THE ORDINARY RUN — every `ReviewDeps`
+   * construction site in this tree passes none today, and a run without one
+   * behaves exactly as it did before this story: unknown usage is still
+   * recorded, still reported, and simply never recovered. That is AD-16's rule
+   * that evaluation machinery is additive, applied to the recovery half of
+   * story 2.3 rather than only to the recording half.
+   *
+   * A SINK AND NOT A REPORTER, and the narrowing runs the other way for the
+   * adapter: the run needs `drain()` and the backend must not have it, because a
+   * backend that could drain would silently take usage this record was about to
+   * recover (`core/ports/late-usage.ts`).
+   */
+  lateUsage?: LateUsageSink
+
+  /**
+   * AC4 (story 2.3) — THE WITHIN-RUN HALF OF THE UNKNOWN-USAGE STOP RULE, and
+   * the reason it is a caller's dial rather than always-on.
+   *
+   * Set, the run's accountant refuses the next turn once any turn's usage has
+   * gone unknown: `mayISpend` answers `false` and every stage strands what it
+   * had, exactly as it does for an exhausted budget. Absent — the default, and
+   * every ordinary review — the run REPORTS the unknown and keeps working.
+   *
+   * The split is not squeamishness about halting. The stop rule comes from
+   * `evaluation-protocol.md:332-339` and it is a rule about the EXPERIMENT: an
+   * evaluation that cannot count a turn must not buy another one, because its
+   * whole output is a number about spend. An ordinary code review's output is a
+   * list of findings, and abandoning it because one host response omitted a
+   * `tokens` field would be this story inventing a policy for a caller the
+   * protocol never spoke about — and AD-16's rule that evaluation machinery is
+   * additive and never changes an ordinary run cuts the same way.
+   *
+   * WITHOUT THIS FIELD THE RULE HAD NO PRODUCTION CALLER AT ALL (found by the
+   * wave-5 review, 2026-09-11). `mayISpend`'s refusal and its tests were
+   * correct, the ledger carried the flag, and nothing outside a test ever set
+   * it — so `ablation/` armed the arm-level governor while the turn-level gate
+   * stayed off, and the protocol's "unquantified usage never authorizes a retry"
+   * was enforced by no path an evaluation runs. A dial nothing can turn is not a
+   * dial; this is the knob.
+   */
+  stopOnUnknownUsage?: boolean
   /**
    * AD-2 amended / AD-6f (story 7A) — the user's stop.
    *
@@ -404,11 +457,20 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
     // unclamped `NaN` is the one that bites: `spent < NaN` is false for every
     // spend, so it refuses the first turn and the run then blames a budget
     // nobody set (code review 2026-08-24).
-    ledger: emptyLedger(
-      clampTokenCap(deps.tokenCap),
-      clampConcurrency(deps.maxConcurrency ?? dials.maxConcurrency),
-      clampSpendShares(deps.spendShares),
-    ),
+    // AC4 (story 2.3) — the stop dial is SPREAD ON rather than passed as a
+    // fourth positional parameter. `withShares` exists because `shares` being
+    // third already forced a caller to name a `maxConcurrency` it did not care
+    // about; a fourth would make that worse for the one flag most callers never
+    // set. `=== true` and not `??`, so any non-boolean a JavaScript caller
+    // supplies lands on the safe default rather than on `truthy`.
+    ledger: {
+      ...emptyLedger(
+        clampTokenCap(deps.tokenCap),
+        clampConcurrency(deps.maxConcurrency ?? dials.maxConcurrency),
+        clampSpendShares(deps.spendShares),
+      ),
+      stopOnUnknownUsage: deps.stopOnUnknownUsage === true,
+    },
   }
 
   // AD-6 / `dial-clamped` (epic-1 retrospective) — raised HERE, once, because
@@ -698,6 +760,69 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // the report away instead would leave the user who stopped the run with
   // nothing to show for the turns they already paid for, which is the opposite
   // of what AD-6 asks for: a partial run is surfaced, never dropped.
+
+  // AC2 (story 2.3) — DRAIN AND RECONCILE, SYNCHRONOUSLY, IN THE LAST MOMENT
+  // THE RECORD IS STILL OPEN.
+  //
+  // ## Why exactly here
+  //
+  // Every turn-issuing stage has returned, so every unknown this run can produce
+  // is already on the ledger and a late report has something to match against.
+  // And `finishedAt` has not been stamped, so a figure recovered here is inside
+  // the record rather than an amendment to a run that already claimed to be
+  // finished. One line later would be a record closed over a total that then
+  // changed; one stage earlier would drain before the turns that produce most of
+  // the unknowns had run.
+  //
+  // ## Why nothing is awaited, and what that costs
+  //
+  // `drain()` is synchronous BY TYPE (`core/ports/late-usage.ts`), so "the run
+  // waits for no completion it cannot guarantee" is a property of the port and
+  // not of this call site's discipline. The cost is stated rather than hidden:
+  // usage that arrives after this line is NOT in this run's record. The sink
+  // still holds it and nothing throws it away, and no part of this story
+  // pretends the record is closed over a number that had not arrived.
+  //
+  // ## What is deliberately NOT done here
+  //
+  // A recovery does not retract the `usage-unquantified` warning the stage
+  // raised when it observed the gap. That warning is a true statement about what
+  // the stage saw, and rewriting a stage's honest observation from the assembly
+  // is a worse property than a run that reports a degradation it later recovered
+  // from — over-reporting a degradation is noise, under-reporting one is the
+  // failure AD-6 exists to prevent (`core/domain/warning.ts`). The
+  // MACHINE-READABLE answer follows the recovery either way, because
+  // `usageIsComplete` reads the collection rather than a flag.
+  if (deps.lateUsage) {
+    const reconciled = reconcileLateUsage(record.ledger, deps.lateUsage.drain())
+    // `evaluation-protocol.md:504-507` — disagreeing payloads for ONE physical
+    // execution are an integrity error, not something to deduplicate by
+    // first-seen. `reconcileLateUsage` therefore leaves the unknown UNKNOWN, and
+    // this is the sentence that says so: without it the only trace of the
+    // disagreement would be a number that never appeared.
+    if (reconciled.conflicts.length > 0) {
+      record.warnings.push({
+        code: "usage-unquantified",
+        // NOT a turn-issuing stage. The reconciliation runs as the record
+        // closes, and naming `judge` — the last stage that actually spent — would
+        // put a fact the judge never saw in the judge's name.
+        stage: "output",
+        message:
+          `USAGE REPORTS DISAGREE: ${reconciled.conflicts.length} execution(s) were reported with ` +
+          `two or more DIFFERENT token payloads, so MAD cannot say what they cost and has left ` +
+          `them UNKNOWN. Every payload is in the detail — nothing was deduplicated by first-seen, ` +
+          `and no figure was chosen between them.`,
+        detail: {
+          conflicts: reconciled.conflicts.length,
+          executions: reconciled.conflicts,
+          recovered: reconciled.recovered.length,
+          unmatched: reconciled.unmatched.length,
+          stillUnknown: reconciled.stillUnknown,
+        },
+      })
+    }
+  }
+
   record.finishedAt = clock.now()
   const rendered = output(record)
 

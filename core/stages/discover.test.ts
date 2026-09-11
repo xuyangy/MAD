@@ -3,11 +3,11 @@ import { describe, expect, test } from "bun:test"
 import type { ZodType } from "zod"
 
 import { createLimiter } from "../budget/limiter.ts"
-import { emptyLedger } from "../domain/run-record.ts"
+import { emptyLedger, emptyTokenUsage } from "../domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../instructions/coding/discovery.ts"
 import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
 import { selectRoster } from "../roster/select.ts"
-import { candidate, fakeClock, FakeBackend, type SlotScript } from "../test-support/fakes.ts"
+import { candidate, fakeClock, FakeBackend, tokens, type SlotScript } from "../test-support/fakes.ts"
 import { discover } from "./discover.ts"
 
 function rosterOf(slots: number, models: [string, string][], lenses: readonly string[] = []) {
@@ -1085,5 +1085,218 @@ describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
     expect(out.answered).toBe(3)
     expect(out.skippedForBudget).toEqual([])
     expect(out.warnings.map((w) => w.code)).not.toContain("discovery-truncated")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.3 — the turns MAD could not count, and the sessions it could not close
+// ---------------------------------------------------------------------------
+
+describe("discover — an unknown bill is recorded as unknown (story 2.3, AC1)", () => {
+  test("a SETTLED turn whose host reported no usage writes an unknown and NO entry", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result, ledger } = run(roster, {
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING, usageUnknown: "the host reported no usage" }],
+    })
+    const discovered = await result
+
+    // The model ANSWERED. An unknown bill is not a failed turn, and nothing
+    // here may turn it into one.
+    expect(discovered.answered).toBe(1)
+    expect(discovered.findings).toHaveLength(1)
+    expect(discovered.droppedOut).toEqual([])
+
+    // The fabricated zero is gone: no entry, and the total is untouched rather
+    // than incremented by nothing.
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.total).toEqual(emptyTokenUsage())
+    expect(ledger.unknownUsage).toEqual([
+      {
+        slot: "discovery-1",
+        stage: "discover",
+        attempt: 1,
+        executionId: "exec-1",
+        why: "the host reported no usage",
+      },
+    ])
+  })
+
+  test("EVERY billed attempt is recorded, so a retried unknown is TWO unknowns", async () => {
+    const roster = rosterOf(1, [["openai", "gpt-5"]])
+    const { result, ledger } = run(roster, {
+      "discovery-1": [{ kind: "fail", failure: "model-error", usageUnknown: "cancelled in flight" }],
+    })
+    await result
+
+    // The mirror of `every attempt is billed to the ledger, including failed
+    // ones` above: the attempt that cannot be counted is recorded twice too,
+    // because both attempts billed.
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.unknownUsage.map((entry) => entry.attempt)).toEqual([1, 2])
+    // Two PHYSICAL executions, two ids. `stage + slot + attempt` is not one
+    // (`evaluation-protocol.md:504-507`), which is why the id is minted per call.
+    expect(ledger.unknownUsage.map((entry) => entry.executionId)).toEqual(["exec-1", "exec-2"])
+  })
+
+  test("AC4 — with the stop dial set, the retry after an unknown is REFUSED, not billed", async () => {
+    // THE TEST THE STORY'S CENTRAL CLAIM RESTS ON, added at the wave-3 review
+    // (2026-09-11) because the dial was pinned in `core/budget/ledger.test.ts`
+    // and never once exercised THROUGH a stage.
+    //
+    // The protocol is flat about it: "Cancellation, budget refusal and
+    // unquantified usage never authorize a retry"
+    // (`evaluation-protocol.md:311-327`). The test above shows a retried unknown
+    // becoming TWO unknowns, which is the ordinary-run behaviour and correct
+    // there — an ordinary review reports the unknown and keeps working (*Dev
+    // Notes → Why the stop rule is a dial*).
+    //
+    // Under an EVALUATION the dial is set, and then the second attempt must
+    // never be issued: the retry is a new billable request, and admitting one
+    // after MAD has lost count is exactly the exposure the stop rule exists to
+    // bound. The mechanism is `mayISpend`, asked before EVERY attempt including
+    // the retry, so the refusal comes from the ONE accountant rather than from a
+    // second gate in the stage (AD-15).
+    const roster = rosterOf(1, [["openai", "gpt-5"]])
+    const backend = new FakeBackend({
+      "discovery-1": [{ kind: "fail", failure: "model-error", usageUnknown: "cancelled in flight" }],
+    })
+    const ledger = { ...emptyLedger(), stopOnUnknownUsage: true }
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+    })
+
+    // ONE physical execution, not two. This is the assertion that would fail if
+    // the retry were gated on anything other than the accountant.
+    expect(backend.calls).toHaveLength(1)
+    expect(ledger.unknownUsage.map((entry) => entry.attempt)).toEqual([1])
+    expect(ledger.unknownUsage.map((entry) => entry.executionId)).toEqual(["exec-1"])
+
+    // And nothing was invented to fill the gap: no entry, no zero, no total.
+    expect(ledger.entries).toEqual([])
+    expect(ledger.total).toEqual(emptyTokenUsage())
+
+    // The slot still reports as a drop-out, because it IS one — the model
+    // failed. What changed is only that MAD did not ask it a second time.
+    expect(discovered.answered).toBe(0)
+  })
+
+  test("the unknown marker WINS over a `tokens` field on the same envelope", async () => {
+    // The ORDER, pinned. A backend that sends both has told MAD two things about
+    // one turn, and the honest reading is the one that does not put a number
+    // where MAD cannot defend it — recording the tokens instead would be the
+    // pre-2.3 behaviour arriving through a different door.
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const inner = new FakeBackend({
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING, usageUnknown: "the host reported no usage" }],
+    })
+    const both: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, instructions, input, schema, signal) {
+        const envelope = await inner.runTurn(slot, instructions, input, schema, signal)
+        return { ...envelope, tokens: tokens() }
+      },
+    }
+    const ledger = emptyLedger()
+    await discover({
+      roster,
+      backend: both,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+    })
+
+    expect(ledger.entries).toHaveLength(0)
+    expect(ledger.total).toEqual(emptyTokenUsage())
+    expect(ledger.unknownUsage).toHaveLength(1)
+  })
+
+  test("the stage raises `usage-unquantified`, blaming no model and naming no number", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result } = run(roster, {
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING, usageUnknown: "the host reported no usage" }],
+    })
+    const discovered = await result
+
+    const unquantified = discovered.warnings.find((w) => w.code === "usage-unquantified")
+    expect(unquantified).toBeDefined()
+    expect(unquantified!.stage).toBe("discover")
+    expect(unquantified!.message).toContain("the host reported no usage")
+    // A settled, successful turn whose host omitted `tokens` is a WORKING model
+    // and a working provider. The gap is MAD's own instrumentation, so no
+    // provider or model name appears in it (AD-6).
+    expect(unquantified!.message).not.toContain("anthropic")
+    expect(unquantified!.message).not.toContain("claude-sonnet-4-5")
+    expect(discovered.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+    expect(unquantified!.detail).toMatchObject({ turns: 1 })
+  })
+
+  test("A RUN WHOSE USAGE IS COMPLETE RAISES NOTHING — the assertion above is not vacuous", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result, ledger } = run(roster, { "discovery-1": [{ kind: "ok", value: ONE_FINDING }] })
+    const discovered = await result
+
+    expect(ledger.unknownUsage).toEqual([])
+    expect(ledger.entries).toHaveLength(1)
+    expect(discovered.warnings.map((w) => w.code)).not.toContain("usage-unquantified")
+  })
+})
+
+describe("discover — a session MAD could not delete (story 2.3, AC3)", () => {
+  test("it is DISCLOSED, and the turn it rides on still counts", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result, ledger } = run(roster, {
+      "discovery-1": [
+        { kind: "ok", value: ONE_FINDING, cleanupUnresolved: "session.delete did not answer in 2000ms" },
+      ],
+    })
+    const discovered = await result
+
+    // Untidy on the host, not a failure of the review: the finding is kept, the
+    // slot answered, and the turn was billed exactly as it would have been.
+    expect(discovered.answered).toBe(1)
+    expect(discovered.findings).toHaveLength(1)
+    expect(discovered.droppedOut).toEqual([])
+    expect(ledger.entries).toHaveLength(1)
+
+    const cleanup = discovered.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.stage).toBe("discover")
+    expect(cleanup!.message).toContain("session.delete did not answer in 2000ms")
+    expect(cleanup!.detail).toMatchObject({ sessions: 1 })
+    // It must never grow a degradation's voice, and least of all this one.
+    expect(discovered.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+  })
+
+  test("a cleanup on the attempt the RETRY replaced is still disclosed", async () => {
+    // The envelope carrying it is discarded by the retry loop, so a stage that
+    // only read the LAST envelope would drop a session still sitting on the
+    // host — the silent swallow AC3 exists to end.
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result } = run(roster, {
+      "discovery-1": [
+        { kind: "fail", failure: "model-error", cleanupUnresolved: "session.delete threw: ECONNRESET" },
+        { kind: "ok", value: ONE_FINDING },
+      ],
+    })
+    const discovered = await result
+
+    expect(discovered.answered).toBe(1)
+    const cleanup = discovered.warnings.find((w) => w.code === "session-cleanup-unresolved")
+    expect(cleanup).toBeDefined()
+    expect(cleanup!.message).toContain("ECONNRESET")
+  })
+
+  test("A RUN THAT CLOSED EVERY SESSION RAISES NOTHING", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result } = run(roster, { "discovery-1": [{ kind: "ok", value: ONE_FINDING }] })
+    const discovered = await result
+
+    expect(discovered.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
   })
 })
