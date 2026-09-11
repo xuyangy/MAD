@@ -16,6 +16,7 @@ import {
   verdictDifference,
   verdictState,
 } from "./compare.ts"
+import { measureCrossArm } from "./cross-arm-rates.ts"
 
 function finding(id: string, partial: Partial<Finding> = {}): Finding {
   return {
@@ -291,6 +292,16 @@ describe("buildReport — AD-9: four numbers, and NOTHING fuses them", () => {
       overMerge: measured.overMerge,
       underMerge: measured.underMerge,
     })
+  })
+
+  test("the cross-arm calibration is copied through when given, and absent when not", async () => {
+    const a = armRun("a", record())
+    const b = armRun("b", record())
+    expect("crossArmCalibration" in (await buildReport([a, b], { pairings: [] }))).toBe(false)
+
+    const { calibration } = await measureCrossArm()
+    const report = await buildReport([a, b], { pairings: [], crossArmCalibration: calibration })
+    expect(report.crossArmCalibration).toEqual(calibration)
   })
 
   test("`anyScripted` is true when ANY arm was scripted — it drives an unsuppressable banner", async () => {

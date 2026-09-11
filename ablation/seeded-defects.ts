@@ -41,6 +41,7 @@ import { fakeClock, FakeBackend } from "../core/test-support/fakes.ts"
 import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
 import { buildReport, lensTokenCost, type AblationReport } from "./compare.ts"
+import { crossArmCalibrationFor } from "./cross-arm-rates.ts"
 
 export const CONTROL = "control"
 export const POOL = "pool"
@@ -111,6 +112,9 @@ export async function scriptedAblation(options: ScriptedOptions): Promise<Ablati
     })
   }
 
+  // This ablation reviews `SEEDED_CHANGE`, the change the cross-arm set was drawn
+  // from, so the lookup finds it; the rule stays the lookup's, not this caller's.
+  const crossArmCalibration = await crossArmCalibrationFor(SEEDED_CHANGE)
   return buildReport(runs, {
     pairings,
     lens: {
@@ -121,5 +125,6 @@ export async function scriptedAblation(options: ScriptedOptions): Promise<Ablati
       gain: lensRecallGain(SEEDED_DEFECTS, lensed.record.pool),
       cost: lensTokenCost(lensed.record, pool.record),
     },
+    ...(crossArmCalibration === undefined ? {} : { crossArmCalibration }),
   })
 }

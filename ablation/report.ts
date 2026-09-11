@@ -37,6 +37,7 @@
  */
 
 import type { AblationReport } from "./compare.ts"
+import { countText, matcherText } from "./cross-arm-rates.ts"
 
 function fraction(part: number, whole: number): string {
   return `${part} of ${whole}`
@@ -69,12 +70,45 @@ export function renderAblation(report: AblationReport): string[] {
       "  whether debate is worth its bill — for that, run a live arm (see ablation/LIVE-RUN.md).",
     )
   }
+  // THE CROSS-ARM PARAGRAPH HAS TWO BRANCHES AND ONE RULE. `crossArmCalibration`
+  // is present only when the reviewed change's diff hash equals the sealed
+  // cross-arm set's recorded source diff (`cross-arm-rates.ts`). Absent, the
+  // UNMEASURED disclosure prints, and it says no labelled set APPLIES to this
+  // change — a set exists, it just does not describe this diff. Present, the
+  // measured rates print with the set's identity and the matcher's, scoped to
+  // this change and to the small hand-built case set they were counted on.
+  // Both branches keep the one-for-one sentence and the within-run line.
+  const cross = report.crossArmCalibration
+  if (cross === undefined) {
+    lines.push(
+      "  CROSS-ARM MATCHING IS UNMEASURED. Two arms raise different findings, so they are aligned",
+      "  by the shipped clustering matcher. Its error is measured ONLY on an 8-row, single-file,",
+      "  WITHIN-run labelled set; no cross-arm labelled set applies to this change. That error enters",
+      "  the difference count one for one — an over-merge invents a matched pair, an under-merge",
+      "  hides a real one in `only in`.",
+    )
+  } else {
+    const counts = cross.labelCounts
+    lines.push(
+      "  CROSS-ARM MATCHING IS MEASURED FOR THIS CHANGE ONLY. Two arms raise different findings, so",
+      "  they are aligned by the shipped clustering matcher. This run reviewed the change a sealed,",
+      `  hand-labelled cross-arm case set was drawn from. The rates below were counted offline on`,
+      `  ${cross.samples} hand-built case(s) that cite this change's lines, NOT on this run's findings.`,
+      "  Some cases were built so the matcher gets them wrong, the denominators are small, and the",
+      "  rates carry over to no other change. That error enters the difference count one for one —",
+      "  an over-merge invents a matched pair, an under-merge hides a real one in `only in`.",
+      `  Cross-arm set: ${cross.version} (${cross.datasetHash}), ${cross.samples} case(s):` +
+        ` equivalent ${counts.equivalent}, distinct ${counts.distinct},` +
+        ` only-in-one-arm ${counts["only-in-one-arm"]}, ambiguous ${counts.ambiguous}.`,
+      `  Matcher: ${matcherText(cross.matcher)}.`,
+      `  Cross-arm calibration: over-merge ${countText(cross.overMerge.grouped, cross.overMerge.of)}` +
+        ` (distinct and only-in-one-arm cases grouped), under-merge` +
+        ` ${countText(cross.underMerge.ungrouped, cross.underMerge.of)} (equivalent cases not grouped);` +
+        ` ${cross.ambiguousExcluded} ambiguous case(s) excluded from both` +
+        ` (\`bun run cross-arm-rates\` names which cases it gets wrong).`,
+    )
+  }
   lines.push(
-    "  CROSS-ARM MATCHING IS UNMEASURED. Two arms raise different findings, so they are aligned",
-    "  by the shipped clustering matcher. Its error is measured ONLY on an 8-row, single-file,",
-    "  WITHIN-run labelled set; no cross-arm labelled set exists in this repo. That error enters",
-    "  the difference count one for one — an over-merge invents a matched pair, an under-merge",
-    "  hides a real one in `only in`.",
     `  Matcher calibration, measured live this run: over-merge ` +
       `${fraction(report.matcherCalibration.overMerge.merged, report.matcherCalibration.overMerge.of)}` +
       `, under-merge ` +

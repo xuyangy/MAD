@@ -13,13 +13,26 @@
  * at all, and an unmeasured instrument reporting a rate is exactly the
  * overstatement CAP-9 exists to prevent.
  *
- * THE CALIBRATION DOES NOT TRANSFER, AND THE REPORT SAYS SO. Those two rates
- * were measured on an 8-row, single-file, WITHIN-run labelled set
- * (`core/clustering/fixtures/pairs.ts`). No cross-arm labelled set exists in this
- * repo, so the aligner's cross-arm error is UNMEASURED, and it enters the
- * difference count one for one: an over-merge invents a matched pair whose two
- * sides were never the same defect, and an under-merge hides a real pair in
- * `onlyIn`. `report.ts` prints that sentence above the number.
+ * THE WITHIN-RUN CALIBRATION DOES NOT TRANSFER, AND THE REPORT SAYS SO. Those
+ * two rates were measured on an 8-row, single-file, WITHIN-run labelled set
+ * (`core/clustering/fixtures/pairs.ts`). Whatever the cross-arm error is, it
+ * enters the difference count one for one: an over-merge invents a matched pair
+ * whose two sides were never the same defect, and an under-merge hides a real
+ * pair in `onlyIn`. `report.ts` prints that sentence above the number.
+ *
+ * The cross-arm error is counted for ONE change only. `fixtures/cross-arm-pairs/`
+ * is a small, sealed set of hand-built cross-arm cases that cite the
+ * seeded-defect change's lines, some built so this matcher gets them wrong.
+ * `cross-arm-rates.ts` scores this function on it offline, and a report prints
+ * those counts only when the run reviewed that same change (its diff hash equals
+ * the set's recorded source diff hash). They are not measured on any run's own
+ * findings, their denominators are small, and they carry over to no other
+ * change. For every other change the cross-arm error is UNMEASURED and the
+ * report says so.
+ *
+ * `ALIGNER_MATCHER` names the matcher those rates belong to. Its `version` is
+ * hand-written: a change to the similarity function, the block key or the
+ * linkage that the thresholds do not capture must bump it.
  *
  * ## It calls the ENGINE, never the stage
  *
@@ -40,10 +53,30 @@
  */
 
 import { clusterItems, type BlockKey, type Similar } from "../core/clustering/engine.ts"
-import { findingBlockKey, lexicalSimilarity } from "../core/clustering/similarity.ts"
+import {
+  findingBlockKey,
+  LINE_TOLERANCE,
+  lexicalSimilarity,
+  OVERLAP_THRESHOLD,
+} from "../core/clustering/similarity.ts"
 import type { Finding } from "../core/domain/finding.ts"
 
 const SEPARATOR = "::"
+
+/**
+ * The identity of the matcher `alignArms` uses by default: what a measured
+ * cross-arm rate is a rate OF. The thresholds are imported so they cannot
+ * drift from the shipped ones; `version` is hand-written.
+ */
+export const ALIGNER_MATCHER = {
+  version: "lexical-single-linkage-1",
+  lineTolerance: LINE_TOLERANCE,
+  overlapThreshold: OVERLAP_THRESHOLD,
+  blockKey: "file-basename",
+  linkage: "single",
+} as const
+
+export type AlignerMatcher = typeof ALIGNER_MATCHER
 
 /** One aligned group of findings, classified by which arms reached it. */
 export interface AlignedGroup {

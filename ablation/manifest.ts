@@ -464,7 +464,12 @@ function auditUsage(ledger: TokenLedger): {
   }
 }
 
-function changeIdFor(change: ChangeSet): ChangeId {
+/**
+ * The change's identity as a manifest records it. `diffHash` is also the key
+ * `ablation/cross-arm-rates.ts` compares against a labelled set's recorded
+ * source diff, so the two can never disagree on how a change is hashed.
+ */
+export function changeIdFor(change: ChangeSet): ChangeId {
   return {
     description: change.description,
     files: change.files,

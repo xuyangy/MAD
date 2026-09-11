@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import { alignArms } from "./align.ts"
+import { ALIGNER_MATCHER, alignArms } from "./align.ts"
 import { runAblation } from "./arms.ts"
+import { matcherText, measureCrossArm } from "./cross-arm-rates.ts"
+import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { CONTROL, LENSED, POOL, scriptedAblation, scriptedArms } from "./seeded-defects.ts"
 import { renderAblation } from "./report.ts"
 import { main, MAX_REPEATS, MAX_TOKEN_CAP, numericFlag } from "../scripts/ablation.ts"
@@ -407,9 +409,31 @@ describe("the reporter", () => {
     const report = await scriptedAblation({ pin: PIN })
     const rendered = renderAblation(report).join("\n")
     expect(rendered).toContain("NOISE FLOOR")
-    expect(rendered).toContain("CROSS-ARM MATCHING IS UNMEASURED")
     expect(rendered).toContain("DEBATE CANNOT BE ISOLATED")
     expect(rendered).toContain("LENSES CANNOT BE SEPARATED FROM FAN-OUT")
+  })
+
+  test("A RUN OVER SEEDED_CHANGE PRINTS THE MEASURED CROSS-ARM RATES, scoped to this change", async () => {
+    // The scripted ablation reviews the change the sealed cross-arm set was drawn
+    // from, so its report takes the measured branch rather than UNMEASURED.
+    const report = await scriptedAblation({ pin: PIN })
+    const rendered = renderAblation(report).join("\n")
+    const calibration = report.crossArmCalibration!
+    expect(calibration).toEqual((await measureCrossArm()).calibration)
+    expect(rendered).not.toContain("CROSS-ARM MATCHING IS UNMEASURED")
+    expect(rendered).not.toContain("no cross-arm labelled set applies to this change")
+    expect(rendered).toContain("CROSS-ARM MATCHING IS MEASURED FOR THIS CHANGE ONLY")
+    expect(rendered).toContain(`${calibration.samples} hand-built case(s) that cite this change's lines`)
+    expect(rendered).toContain(`Cross-arm set: ${CROSS_ARM_PAIRS_SEAL.version} (${CROSS_ARM_PAIRS_SEAL.datasetHash})`)
+    expect(rendered).toContain(`Matcher: ${matcherText(ALIGNER_MATCHER)}.`)
+    expect(rendered).toContain(
+      `over-merge ${calibration.overMerge.grouped} of ${calibration.overMerge.of} (distinct and only-in-one-arm cases grouped)`,
+    )
+    expect(rendered).toContain(
+      `under-merge ${calibration.underMerge.ungrouped} of ${calibration.underMerge.of} (equivalent cases not grouped)`,
+    )
+    expect(rendered).toContain("Matcher calibration, measured live this run")
+    expect(rendered.replace(/\n\s*/g, " ")).toContain("the difference count one for one")
   })
 
   test("the report states `execution: sequential` (code review 2026-09-08)", async () => {

@@ -33,6 +33,7 @@ import type { RunRecord } from "../core/domain/run-record.ts"
 import type { Warning } from "../core/domain/warning.ts"
 import type { Alignment } from "./align.ts"
 import type { ArmRun } from "./arms.ts"
+import type { CrossArmCalibration } from "./cross-arm-rates.ts"
 
 /**
  * What one finding's adjudication came to — TOTAL over six values, so no absence
@@ -336,6 +337,12 @@ export interface AblationReport {
    * report's limitations block buries the one sentence a reader has to read.
    */
   matcherCalibration: { overMerge: { merged: number; of: number }; underMerge: { unmerged: number; of: number } }
+  /**
+   * The aligner's error on the sealed CROSS-ARM case set, present only when the
+   * reviewed change is the one that set was drawn from (`crossArmCalibrationFor`
+   * decides, by diff hash). Absent, `report.ts` prints the UNMEASURED disclosure.
+   */
+  crossArmCalibration?: CrossArmCalibration
   /** True when ANY arm was scripted. Drives a banner that cannot be suppressed. */
   anyScripted: boolean
   /**
@@ -350,6 +357,8 @@ export interface AblationReport {
 export interface BuildOptions {
   pairings: readonly { a: string; b: string; alignment: Alignment }[]
   lens?: { gain?: LensGain; cost: LensTokenCost }
+  /** `crossArmCalibrationFor(<the reviewed change>)`, copied through unchanged. */
+  crossArmCalibration?: CrossArmCalibration
 }
 
 export async function buildReport(
@@ -403,6 +412,9 @@ export async function buildReport(
     matcherCalibration: (({ overMerge, underMerge }) => ({ overMerge, underMerge }))(
       await measurePairs(),
     ),
+    ...(options.crossArmCalibration === undefined
+      ? {}
+      : { crossArmCalibration: options.crossArmCalibration }),
     anyScripted: runs.some((run) => run.spec.provenance === "scripted"),
     repeats: new Set(runs.map((run) => run.repeat)).size,
   }

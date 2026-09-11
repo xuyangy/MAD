@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
+import { ALIGNER_MATCHER } from "./align.ts"
 import type { AblationReport } from "./compare.ts"
+import type { CrossArmCalibration } from "./cross-arm-rates.ts"
 import { renderAblation } from "./report.ts"
 
 function baseArm(id: string, overrides: Partial<AblationReport["arms"][number]> = {}) {
@@ -88,11 +90,117 @@ describe("the LIMITATIONS block sits above the numbers", () => {
     expect(banner).toBeLessThan(firstNumber)
   })
 
-  test("THE CALIBRATION STATES THERE IS NO CROSS-ARM LABELLED SET", () => {
+  test("THE CALIBRATION STATES THAT NO CROSS-ARM LABELLED SET APPLIES TO THIS CHANGE", () => {
     const rendered = text(report())
     expect(rendered).toContain("CROSS-ARM MATCHING IS UNMEASURED")
-    expect(rendered).toContain("no cross-arm labelled set exists")
+    expect(rendered).toContain("no cross-arm labelled set applies to this change")
+    // A set exists in this repo, so the old sentence would be false on every unlabelled run.
+    expect(rendered).not.toContain("no cross-arm labelled set exists")
     expect(rendered).toContain("over-merge 1 of 3, under-merge 1 of 5")
+  })
+})
+
+/** A calibration shaped as `crossArmCalibrationFor` returns it. */
+function crossArm(overrides: Partial<CrossArmCalibration> = {}): CrossArmCalibration {
+  return {
+    version: "cross-arm-pairs-1",
+    datasetHash: "sha256:9d07db2dcd532642290f41c7d1ca38a2592caaa9fc7ad5c27873b1665e503786",
+    sourceDiffHash: "sha256:cea5679939f5cb4ccd90230a4eddde861119f375ced04cad474fc2b0ec57e213",
+    samples: 20,
+    labelCounts: { equivalent: 7, distinct: 5, "only-in-one-arm": 4, ambiguous: 4 },
+    matcher: ALIGNER_MATCHER,
+    overMerge: { grouped: 3, of: 9 },
+    underMerge: { ungrouped: 3, of: 7 },
+    ambiguousExcluded: 4,
+    ...overrides,
+  }
+}
+
+describe("the cross-arm paragraph: UNMEASURED unless the run reviewed the labelled change", () => {
+  const WITHIN_RUN_LINE =
+    "  Matcher calibration, measured live this run: over-merge 1 of 3, under-merge 1 of 5 " +
+    "(WITHIN-run set; `bun run clustering-rates` names which rows it gets wrong)."
+
+  test("WITHOUT a cross-arm calibration the UNMEASURED paragraph is pinned byte for byte", () => {
+    // Byte-identical to the paragraph before the cross-arm set existed, except the
+    // one phrase the story's Spec Change Log names: "exists in this repo" became
+    // "applies to this change".
+    const lines = renderAblation(report())
+    const start = lines.indexOf(
+      "  CROSS-ARM MATCHING IS UNMEASURED. Two arms raise different findings, so they are aligned",
+    )
+    expect(start).toBeGreaterThan(-1)
+    expect(lines.slice(start, start + 6)).toEqual([
+      "  CROSS-ARM MATCHING IS UNMEASURED. Two arms raise different findings, so they are aligned",
+      "  by the shipped clustering matcher. Its error is measured ONLY on an 8-row, single-file,",
+      "  WITHIN-run labelled set; no cross-arm labelled set applies to this change. That error enters",
+      "  the difference count one for one — an over-merge invents a matched pair, an under-merge",
+      "  hides a real one in `only in`.",
+      WITHIN_RUN_LINE,
+    ])
+    expect(lines.join("\n")).not.toContain("MEASURED FOR THIS CHANGE ONLY")
+  })
+
+  test("WITH one, the rates print with the set's and the matcher's identity, scoped to this change", () => {
+    const rendered = text(report({ crossArmCalibration: crossArm() }))
+    expect(rendered).not.toContain("CROSS-ARM MATCHING IS UNMEASURED")
+    expect(rendered).not.toContain("no cross-arm labelled set applies to this change")
+    expect(rendered).toContain("CROSS-ARM MATCHING IS MEASURED FOR THIS CHANGE ONLY")
+    // The scope is stated as what it is: a count over a small hand-built set.
+    expect(rendered).toContain("20 hand-built case(s) that cite this change's lines, NOT on this run's findings.")
+    expect(rendered).toContain("Some cases were built so the matcher gets them wrong, the denominators are small")
+    expect(rendered).toContain("rates carry over to no other change")
+    expect(rendered).not.toContain("describe the matcher on THIS change")
+    expect(rendered).toContain(
+      "Cross-arm set: cross-arm-pairs-1 " +
+        "(sha256:9d07db2dcd532642290f41c7d1ca38a2592caaa9fc7ad5c27873b1665e503786), 20 case(s): " +
+        "equivalent 7, distinct 5, only-in-one-arm 4, ambiguous 4.",
+    )
+    expect(rendered).toContain(
+      "Matcher: lexical-single-linkage-1 (line tolerance 8, overlap threshold 34/100, " +
+        "block key file-basename, linkage single).",
+    )
+    expect(rendered).toContain("over-merge 3 of 9 (distinct and only-in-one-arm cases grouped)")
+    expect(rendered).toContain("under-merge 3 of 7 (equivalent cases not grouped)")
+    expect(rendered).toContain("4 ambiguous case(s) excluded from both")
+  })
+
+  test("both branches keep the one-for-one sentence and the within-run line", () => {
+    for (const r of [report(), report({ crossArmCalibration: crossArm() })]) {
+      const lines = renderAblation(r)
+      expect(lines.join("\n").replace(/\n\s*/g, " ")).toContain("the difference count one for one")
+      expect(lines).toContain(WITHIN_RUN_LINE)
+    }
+  })
+
+  test("the measured branch prints no float and no percentage", () => {
+    const rendered = text(report({ crossArmCalibration: crossArm() }))
+    expect(rendered).not.toMatch(/\d%/)
+    expect(rendered).not.toMatch(/\d\.\d/)
+  })
+
+  test("an EMPTY denominator renders `not measurable (0 cases)`, never `0 of 0`", () => {
+    const rendered = text(
+      report({
+        crossArmCalibration: crossArm({
+          labelCounts: { equivalent: 0, distinct: 5, "only-in-one-arm": 4, ambiguous: 4 },
+          samples: 13,
+          underMerge: { ungrouped: 0, of: 0 },
+        }),
+      }),
+    )
+    expect(rendered).toContain("under-merge not measurable (0 cases)")
+    expect(rendered).not.toContain("0 of 0")
+  })
+
+  test("an injected matcher is named as injected, not as the shipped version", () => {
+    const rendered = text(report({ crossArmCalibration: crossArm({ matcher: "injected" }) }))
+    expect(rendered).toContain("Matcher: injected (not the shipped matcher; no version).")
+    expect(rendered).not.toContain("lexical-single-linkage-1")
+  })
+
+  test("renderAblation still takes ONE argument", () => {
+    expect(renderAblation).toHaveLength(1)
   })
 })
 

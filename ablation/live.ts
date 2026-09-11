@@ -70,6 +70,7 @@ import { alignArms } from "./align.ts"
 import { runAblation, type ArmSpec } from "./arms.ts"
 import { EvaluationBundleError, writeArmDump, writeBundleIndex, type BundleArm } from "./bundle.ts"
 import { buildReport, lensTokenCost, type AblationReport } from "./compare.ts"
+import { crossArmCalibrationFor } from "./cross-arm-rates.ts"
 import { createExperimentGovernor } from "./governor.ts"
 import type { EvaluationIdentity } from "./manifest.ts"
 
@@ -187,6 +188,13 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     worktree: options.worktree ?? options.directory,
   })
   const change = options.change ?? (await repo.change(options.target))
+
+  // THE CROSS-ARM CALIBRATION IS DECIDED BEFORE ANYTHING BILLS. It follows the
+  // change actually reviewed — present for the labelled change, absent for a
+  // change read out of a worktree. Computed here, a calibration failure (cases
+  // drifted from their seal) stops the run before an arm is paid for; computed
+  // after the arms, it would throw away a billed run's report.
+  const crossArmCalibration = await crossArmCalibrationFor(change)
 
   // ONE RECORDER PER ARM RUN, KEYED BY THE BACKEND OBJECT ITSELF (review finding
   // a/4, 2026-09-10). This was an array matched to `runs` by index, which is
@@ -395,5 +403,6 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
     ...(lensed === undefined
       ? {}
       : { lens: { gain: undefined, cost: lensTokenCost(lensed.record, pool.record) } }),
+    ...(crossArmCalibration === undefined ? {} : { crossArmCalibration }),
   })
 }

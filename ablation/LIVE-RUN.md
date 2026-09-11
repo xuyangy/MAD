@@ -128,11 +128,13 @@ judgement and not the tool's (AD-9).
 
 **Cross-arm matching is the instrument's weakest joint.** Two arms raise
 different findings, so they are aligned by the shipped clustering matcher, whose
-error is measured only on an 8-row, single-file, *within-run* labelled set. No
-cross-arm labelled set exists. That error enters the difference count one for
-one: an over-merge invents a matched pair whose two sides were never the same
-defect, and an under-merge hides a real pair in `only in`. Read `only in` and
-`ambiguous` beside the difference, never the difference alone.
+error is measured only on an 8-row, single-file, *within-run* labelled set. On an
+unlabelled change no cross-arm labelled set applies, and the cross-arm error is
+unmeasured. That error enters the difference count one for one: an over-merge
+invents a matched pair whose two sides were never the same defect, and an
+under-merge hides a real pair in `only in`. Read `only in` and `ambiguous` beside
+the difference, never the difference alone. (A labelled run is the one exception;
+see *What a labelled run gives you: cross-arm counts for that change only* below.)
 
 **A degraded arm is not a measurement.** If any arm reports `DEGRADED`, the
 report draws no experimental line from it. Fix the roster and run again.
@@ -242,6 +244,25 @@ Three more refusals, all of them before anything bills:
   would bill a live roster and leave numbers that trace to nothing (FR1). This is a
   refusal, not a warning.
 
+### What a labelled run gives you: cross-arm counts for that change only
+
+A labelled run's report prints the aligner's cross-arm over-merge and under-merge as
+`x of y`, with the case set's version (`cross-arm-pairs-1`), its hash, its label counts, and
+the matcher's version and configuration. Read them for what they are:
+
+- **They were counted offline on a small set of hand-built cases** in
+  `fixtures/cross-arm-pairs/` that cite this change's files and lines. They were NOT
+  measured on the run's own findings.
+- **Some cases were built so the shipped matcher gets them wrong**, in both directions. The
+  counts reflect that choice of cases, not a sample of real arm findings.
+- **The denominators are small**, so one case moves a rate a long way.
+- **They carry over to no other change.** The report prints them only when the reviewed
+  diff hashes to the set's recorded source diff; every other run keeps the unmeasured
+  disclosure above.
+
+`bun run cross-arm-rates` lists every case, its label and what the aligner did with it.
+Scoring calls no model and bills nothing.
+
 ### What a labelled run does NOT give you
 
 - **No precision, no false-positive count, no rate.** A finding no planted label covers is
@@ -250,8 +271,9 @@ Three more refusals, all of them before anything bills:
   which would score the thirteen-defect label set rather than the model
   (`evaluation-protocol.md:130`). Story 2.8 owns precision, under the protocol's bound
   arithmetic.
-- **No cross-arm calibration.** The aligner's own error is still unmeasured on a cross-arm
-  set; the paragraph above about `only in` and `ambiguous` is unchanged.
+- **No cross-arm rate that carries over, and none for this run's own findings.** The counts
+  above are over the hand-built cases for this change. They say nothing about another
+  change, and nothing exact about how the aligner treated the findings this run raised.
 
 ## What would falsify the design
 

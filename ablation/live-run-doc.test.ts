@@ -17,9 +17,46 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
+
+describe("LIVE-RUN.md names the cross-arm case set that is actually in force", () => {
+  test("the cross-arm set version in the document is the seal's", async () => {
+    expect(await liveRunDoc()).toContain(CROSS_ARM_PAIRS_SEAL.version)
+  })
+
+  /**
+   * The document names neither cross-arm hash today. If one is ever added, it
+   * must be the CURRENT one: every `sha256:` literal in the document has to be an
+   * identity in force, so a re-sealed set cannot leave a stale hash behind.
+   */
+  test("every sha256 in the document is a current seal identity", async () => {
+    const current = new Set([
+      LABELLED_CHANGE_SEAL.materialHash,
+      CROSS_ARM_PAIRS_SEAL.datasetHash,
+      CROSS_ARM_PAIRS_SEAL.sourceDiffHash,
+    ])
+    const named = [...(await liveRunDoc()).matchAll(/sha256:[0-9a-f]{64}/g)].map((match) => match[0])
+    expect(named.length).toBeGreaterThan(0)
+    for (const hash of named) expect(current.has(hash)).toBe(true)
+  })
+
+  test("the scope of the labelled-run counts is stated", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("They were NOT measured on the run's own findings.")
+    expect(doc).toContain("Some cases were built so the shipped matcher gets them wrong")
+    expect(doc).toContain("The denominators are small")
+    expect(doc).toContain("They carry over to no other change.")
+  })
+
+  test("the unlabelled-change limitation is still stated", async () => {
+    expect((await liveRunDoc()).replace(/\s+/g, " ")).toContain(
+      "On an unlabelled change no cross-arm labelled set applies, and the cross-arm error is unmeasured.",
+    )
+  })
+})
 
 describe("LIVE-RUN.md documents the sealed fixture identity that is actually in force", () => {
   test("the material hash in the document is the seal's", async () => {

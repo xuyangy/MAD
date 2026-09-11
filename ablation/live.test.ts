@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
+import type { ChangeSet } from "../core/ports/repo.ts"
+import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
+import { measureCrossArm } from "./cross-arm-rates.ts"
 import { runLiveAblation } from "./live.ts"
 
 /**
@@ -141,8 +144,11 @@ describe("the live ablation hands each arm's backend the arm's own late-usage si
  *   `enumerateCandidates` succeeds and control reaches the change decision.
  * - `shell` is a stub whose command tag THROWS, so any call to `repo.change`
  *   announces itself by name instead of passing silently.
- * - the injected `ChangeSet`'s `diff` is a getter that throws a sentinel, so the
- *   run announces the moment THAT object is read as the change under review.
+ * - the injected `ChangeSet`'s `diff` is a getter that throws a sentinel from its
+ *   SECOND read on, so the run announces the moment THAT object is read as the
+ *   change under review. The first read is the cross-arm applicability check,
+ *   which hashes the diff before any arm runs; throwing there would stop the run
+ *   before `runAblation` and make the mutation below pass unseen.
  *
  * No network and no provider: the run stops on the sentinel inside
  * `runAblation`, before any turn is issued. Which error comes back is the whole
@@ -181,14 +187,18 @@ describe("the injected change is what the run actually reviews", () => {
       }),
     }) as never
 
-  const sentinelChange = () =>
-    ({
+  const sentinelChange = () => {
+    let reads = 0
+    return {
       description: "the injected labelled change",
       files: ["src/billing/refund.ts"],
       get diff(): string {
+        reads += 1
+        if (reads === 1) return "not the labelled diff"
         throw new Error("SENTINEL: the injected change was read")
       },
-    }) as never
+    } as never
+  }
 
   test("WITH a change: `repo.change` is never called, and THAT object is what runAblation reviews", async () => {
     const error = await runLiveAblation({
@@ -223,6 +233,86 @@ describe("the injected change is what the run actually reviews", () => {
     )
 
     expect(error?.message).toContain("repo.change was called")
+  })
+})
+
+/**
+ * Story 2.5 — the live report carries the cross-arm calibration of the change it
+ * REVIEWED.
+ *
+ * BEHAVIOURAL for applicability. With no server at `127.0.0.1:1`, every model
+ * turn fails as a transport error, every arm finishes degraded with nothing
+ * billed, and `runLiveAblation` returns a real report. That report is what is
+ * asserted: the calibration is present for `SEEDED_CHANGE` (fails if the spread
+ * into `buildReport` is deleted) and absent for a one-byte-different diff (fails
+ * if the lookup is hard-wired to `SEEDED_CHANGE`).
+ *
+ * STRUCTURAL for ordering, and said so: "computed before any arm bills" has no
+ * observable difference in a run where nothing bills, so the source order is
+ * what is pinned.
+ */
+describe("the live report's cross-arm calibration follows the reviewed change", () => {
+  const stubClient = () => ({
+    config: {
+      providers: async () => ({
+        data: {
+          providers: ["p1", "p2", "p3"].map((id, index) => ({
+            id,
+            models: {
+              only: {
+                id: `m${index + 1}`,
+                name: `m${index + 1}`,
+                capabilities: { toolcall: true },
+                limit: { context: 200_000 },
+              },
+            },
+          })),
+          default: {},
+        },
+      }),
+    },
+  })
+
+  const refusingShell = () =>
+    ({
+      cwd: () => ({
+        nothrow: () => () => {
+          throw new Error("repo.change was called")
+        },
+      }),
+    }) as never
+
+  const reportFor = (change: ChangeSet) =>
+    runLiveAblation({
+      pin: { providerId: "p1", modelId: "m1" },
+      serverUrl: "http://127.0.0.1:1",
+      directory: "/tmp/mad-live-test-directory",
+      change,
+      createClient: stubClient as never,
+      shell: refusingShell(),
+    })
+
+  test("BEHAVIOURAL: reviewing SEEDED_CHANGE, the report carries the sealed calibration", async () => {
+    const report = await reportFor(SEEDED_CHANGE)
+    expect(report.crossArmCalibration).toEqual((await measureCrossArm()).calibration)
+  })
+
+  test("BEHAVIOURAL: reviewing any other diff, the report carries none", async () => {
+    const report = await reportFor({ ...SEEDED_CHANGE, diff: `${SEEDED_CHANGE.diff}\n` })
+    expect(report.crossArmCalibration).toBeUndefined()
+    expect("crossArmCalibration" in report).toBe(false)
+  })
+
+  test("STRUCTURAL: the calibration is computed from `change` after it is resolved and before any arm runs", async () => {
+    const source = await Bun.file(new URL("./live.ts", import.meta.url)).text()
+    const resolved = source.indexOf("const change = options.change ?? (await repo.change(options.target))")
+    const computed = source.indexOf("const crossArmCalibration = await crossArmCalibrationFor(change)")
+    const armsRun = source.indexOf("await runAblation(")
+
+    expect(resolved).toBeGreaterThan(-1)
+    expect(computed).toBeGreaterThan(resolved)
+    expect(armsRun).toBeGreaterThan(computed)
+    expect(source).not.toContain("crossArmCalibrationFor(SEEDED_CHANGE)")
   })
 })
 
