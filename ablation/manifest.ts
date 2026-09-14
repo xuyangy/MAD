@@ -255,6 +255,26 @@ export interface ManifestWarning {
   disclosure: boolean
 }
 
+/**
+ * Story 2-5c — which planned slot of a sealed paired schedule this run is.
+ *
+ * Written only by the paired runner, after it checked `block`, `arm` and
+ * `position` against the schedule and `prefixRunId` against the run's own
+ * `forkedFrom`. Optional and additive: `MANIFEST_SCHEMA_VERSION` stays 1, and a
+ * manifest without it is never read as a paired arm.
+ */
+export interface ExperimentBinding {
+  /** The sealed schedule's `scheduleHash`. */
+  scheduleHash: string
+  /** 1-based block number. */
+  block: number
+  arm: "on" | "off"
+  /** Whether this arm ran first or second in its block. */
+  position: "first" | "second"
+  /** The shared prefix run both arms of the block were forked from. Equal to `run.forkedFrom`. */
+  prefixRunId: string
+}
+
 export interface RunManifest {
   schemaVersion: number
   identity: EvaluationIdentity & { changeId: ChangeId }
@@ -379,6 +399,8 @@ export interface RunManifest {
     recordFile: string
     turnFiles: Maybe<number>
   }
+  /** Story 2-5c — present only on a paired runner's arm. See `ExperimentBinding`. */
+  experiment?: ExperimentBinding
 }
 
 export interface BuildManifestInput {
@@ -386,6 +408,8 @@ export interface BuildManifestInput {
   change: ChangeSet
   identity: EvaluationIdentity
   turnFiles: Maybe<number>
+  /** Omitted from the manifest when absent, so an ordinary manifest is unchanged. */
+  experiment?: ExperimentBinding
 }
 
 export function buildManifest(input: BuildManifestInput): RunManifest {
@@ -462,6 +486,7 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     },
     findings: { ...toPersistedFindings(record), lensInstructions: record.lensInstructions },
     stageOutputs: { recordFile: "record.json", turnFiles: input.turnFiles },
+    ...(input.experiment === undefined ? {} : { experiment: { ...input.experiment } }),
   }
 }
 

@@ -582,3 +582,86 @@ describe("ledger provenance in the manifest (story 2.5A, 2-5b)", () => {
     }
   })
 })
+
+describe("the optional `experiment` block (story 2-5c)", () => {
+  const forked = () => record({ runId: "run-branch", forkedFrom: "run-prefix", routingPolicy: "debate-off" })
+  const experiment = {
+    scheduleHash: `sha256:${"a".repeat(64)}`,
+    block: 2,
+    arm: "off" as const,
+    position: "first" as const,
+    prefixRunId: "run-prefix",
+  }
+  const roundTrip = (value: unknown) => parseManifest(JSON.parse(JSON.stringify(value)))
+
+  test("absent unless the paired runner supplies one, so an ordinary manifest is unchanged", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0) })
+    expect("experiment" in manifest).toBe(false)
+    expect(MANIFEST_SCHEMA_VERSION).toBe(1)
+  })
+
+  test("written as given, and it reads back", () => {
+    const manifest = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment })
+    expect(manifest.experiment).toEqual(experiment)
+    const parsed = roundTrip(manifest)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect(parsed.value.experiment).toEqual(experiment)
+  })
+
+  test("a prefix that is not the run's forkedFrom is refused", () => {
+    const manifest = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment: { ...experiment, prefixRunId: "run-other" } })
+    const parsed = roundTrip(manifest)
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain("not its `run.forkedFrom`")
+  })
+
+  test("an experiment on a run that was not forked is refused", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(0), experiment })
+    expect(roundTrip(manifest).ok).toBe(false)
+  })
+
+  test.each([
+    ["no schedule hash", { ...experiment, scheduleHash: "" }],
+    ["block 0", { ...experiment, block: 0 }],
+    ["a fractional block", { ...experiment, block: 1.5 }],
+    ["an unknown arm", { ...experiment, arm: "both" }],
+    ["an unknown position", { ...experiment, position: "third" }],
+    ["no prefix", { ...experiment, prefixRunId: undefined }],
+    ["not an object", "paired"],
+    ["block 4", { ...experiment, block: 4 }],
+    ["a schedule hash not in sha256:<64 hex> form", { ...experiment, scheduleHash: "sha256:schedule" }],
+    ["an uppercase schedule hash", { ...experiment, scheduleHash: `sha256:${"A".repeat(64)}` }],
+  ])("a malformed experiment (%s) is refused", (_name, malformed) => {
+    const manifest = { ...buildManifest({ record: forked(), change, identity, turnFiles: known(0) }), experiment: malformed }
+    const parsed = roundTrip(manifest)
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain("experiment")
+  })
+})
+
+describe("the `experiment` arm agrees with the routing policy (story 2-5c review)", () => {
+  const binding = (arm: "on" | "off") => ({
+    scheduleHash: `sha256:${"b".repeat(64)}`,
+    block: 1,
+    arm,
+    position: "first" as const,
+    prefixRunId: "run-prefix",
+  })
+
+  test.each([
+    ["on", "shipped", true],
+    ["off", "debate-off", true],
+    ["on", "debate-off", false],
+    ["off", "shipped", false],
+  ] as const)("arm %s with routing policy %s reads back: %s", (arm, policy, readable) => {
+    const run = record({
+      runId: "run-branch",
+      forkedFrom: "run-prefix",
+      ...(policy === "shipped" ? {} : { routingPolicy: policy }),
+    })
+    const manifest = buildManifest({ record: run, change, identity, turnFiles: known(0), experiment: binding(arm) })
+    const parsed = parseManifest(JSON.parse(JSON.stringify(manifest)))
+    expect(parsed.ok).toBe(readable)
+    if (!parsed.ok) expect(parsed.reason).toContain("routingPolicy")
+  })
+})

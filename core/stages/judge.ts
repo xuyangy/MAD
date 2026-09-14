@@ -107,6 +107,7 @@ import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
+import type { AdmissionSettlement, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import type { Tools } from "../ports/tools.ts"
 import { material, oneLine } from "../prompt/material.ts"
@@ -233,6 +234,12 @@ export interface JudgeInput {
   limiter?: ConcurrencyLimiter
   /** AD-2 amended / AD-6f — the user's stop. */
   signal?: AbortSignal
+  /**
+   * Story 2-5c — the experiment's per-request admission. Optional; absent, the
+   * stage gates exactly as it does without it. Present, every role's every
+   * attempt also asks `mayISpend` and then this port. See `runJudgeTurn`.
+   */
+  admission?: RequestAdmission
 }
 
 export interface JudgeStageResult extends JudgeCounts {
@@ -252,8 +259,25 @@ export interface JudgeStageResult extends JudgeCounts {
 // ---------------------------------------------------------------------------
 
 interface TurnOutcome<T> {
+  refused: false
   envelope: Envelope<T>
   attempts: number
+}
+
+/**
+ * Story 2-5c — an attempt the ledger or the experiment's admission refused, so
+ * it was never issued. A local value and never a fabricated failure envelope:
+ * that would name a working model as lost. Every call site takes the
+ * budget-exhausted path for it.
+ */
+interface RefusedTurn {
+  refused: true
+  /** The billed count: 1 when a retry was refused after a failed first attempt. */
+  attempts: number
+  /** The admission's reason. Absent when the run's own ledger refused. */
+  admissionReason?: string
+  /** The first attempt's real failure, when the refused attempt was its retry. */
+  failure?: Envelope<unknown>
 }
 
 /**
@@ -275,7 +299,7 @@ async function runJudgeTurn<T>(
    * not be discarded with it.
    */
   cleanups: { slot: string; why: string }[],
-): Promise<TurnOutcome<T>> {
+): Promise<TurnOutcome<T> | RefusedTurn> {
   let last: Envelope<T> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     // AD-2 amended / AD-6f — never issue a turn the user stopped, and never
@@ -286,15 +310,34 @@ async function runJudgeTurn<T>(
       // `attempts: 0`, not 1 — see `discover.ts`'s `runWithOneRetry` for the
       // argument and the Spec Change Log for the decision. A turn the core
       // refused to issue was never billed, and `attempts` is the billed count.
-      return { envelope: cancelledTurn<T>(slot), attempts: attempt - 1 }
+      return { refused: false, envelope: cancelledTurn<T>(slot), attempts: attempt - 1 }
+    }
+    // Story 2-5c — PER-ATTEMPT GATES, only when an evaluation supplied an
+    // admission: the ledger's question, then the experiment's, for every role and
+    // every retry. The call sites' own gates still run. After admission resolves
+    // the signal is read again, and nothing is awaited between that check and
+    // `runTurn`.
+    let settle: SettleRequest | undefined
+    if (input.admission !== undefined) {
+      const failure = last === undefined ? {} : { failure: last as Envelope<unknown> }
+      if (!mayISpend(input.ledger, "judge")) return { refused: true, attempts: attempt - 1, ...failure }
+      const decision = await input.admission.admit({ stage: "judge", slot, attempt })
+      if (!decision.ok) return { refused: true, attempts: attempt - 1, admissionReason: decision.reason, ...failure }
+      if (input.signal?.aborted) {
+        await decision.settle({ kind: "not-issued" })
+        return { refused: false, envelope: cancelledTurn<T>(slot), attempts: attempt - 1 }
+      }
+      settle = decision.settle
     }
     let envelope: Envelope<T>
+    let threw = false
     try {
       envelope = await input.backend.runTurn(slot, instructions, prompt, schema, input.signal)
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). One judge role throwing must not cost the finding its verdict,
       // let alone cost the stage the rest of the findings.
+      threw = true
       envelope = {
         ok: false,
         slot,
@@ -320,12 +363,29 @@ async function runJudgeTurn<T>(
     } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "judge", attempt, tokens: envelope.tokens })
     }
+    if (settle !== undefined) await settle(settlementOf(envelope, threw))
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
-    if (envelope.ok) return { envelope, attempts: attempt }
-    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
+    if (envelope.ok) return { refused: false, envelope, attempts: attempt }
+    if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
-  return { envelope: last!, attempts: 2 }
+  return { refused: false, envelope: last!, attempts: 2 }
+}
+
+/**
+ * Story 2-5c — what an admitted, issued attempt cost. `core/stages/discover.ts`'s
+ * `settlementOf` carries the rule: the unknown marker first, else `tokens`, else
+ * unknown, because an issued request with no figure may have billed.
+ */
+function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
+  if (envelope.usageUnknown) {
+    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
+  }
+  if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
+  return {
+    kind: "unknown",
+    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -879,7 +939,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * retried on a later finding — is the trade AD-6b already makes inside one
    * turn, applied at the stage's granularity rather than contradicted at it.
    */
-  const noteDropOut = (slot: string, role: JudgeRole, message: string): void => {
+  const noteDropOut = (slot: string, role: JudgeRole, message: string, retryRefused = false): void => {
     if (droppedOut.includes(slot)) return
     droppedOut.push(slot)
     warnings.push({
@@ -894,16 +954,22 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // roster block, `raised by:`, the transcript — identifies a participant
       // by it. `discover.ts` set this shape first.
       message:
-        `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) failed twice on the ${role} step and ` +
+        `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) ${retryRefused ? "failed once, and its retry was refused," : "failed twice"} on the ${role} step and ` +
         `the run continued without it. Any finding it was asked about is decided on what the other ` +
         `steps produced, which is less than it should have been. (${message})`,
-      detail: { slot, model: modelOf(slot), role, message },
+      detail: { slot, model: modelOf(slot), role, message, attempts: retryRefused ? 1 : 2 },
     })
   }
 
 
   const ordered = visitOrder(findings)
   let exhausted = false
+  /**
+   * Story 2-5c — the experiment admission's reason, when an admission refusal
+   * latched `exhausted` first. Every finding stranded on that latch is stranded
+   * for this reason, and the run's own cap is not named.
+   */
+  let refusedBy: string | undefined
   let unavailable = false
   // AD-6f — a THIRD reason to stop, kept apart from `exhausted` for the reason
   // `core/stages/debate.ts` records at its own gate: "the budget ran out" and
@@ -942,6 +1008,31 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     counts.unresolvedByCancellation += 1
     strandCancelled(finding, clock.now(), cancelledWhere())
     return true
+  }
+
+  /**
+   * Story 2-5c — a role turn the admission refused takes the budget gate's path:
+   * latch `exhausted`, count the finding unresolved and strand it. The call site
+   * counted an allocation before issuing; it is returned when nothing was issued,
+   * so the stranding sentence and `turns` match a gate that refused before asking.
+   */
+  const refuseTurn = (finding: Finding, outcome: RefusedTurn, slot: string, role: JudgeRole): void => {
+    if (outcome.attempts === 0) counts.turns -= 1
+    noteRefusedFailure(outcome, slot, role)
+    if (!exhausted) refusedBy = outcome.admissionReason
+    exhausted = true
+    counts.unresolved += 1
+    strand(finding, ledger, clock.now(), strandedWhere(), refusedBy)
+  }
+
+  /**
+   * A retry refused after a real failure keeps that failure: the model is named
+   * as it would be after two failures, with the retry named as refused.
+   */
+  const noteRefusedFailure = (outcome: RefusedTurn, slot: string, role: JudgeRole): void => {
+    if (outcome.failure !== undefined && !outcome.failure.ok) {
+      noteDropOut(slot, role, outcome.failure.message, true)
+    }
   }
 
   const { signal } = input
@@ -1041,7 +1132,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // actually stopped on, false of every one after it.
       turnsBefore = counts.turns
       counts.unresolved += 1
-      strand(finding, ledger, clock.now(), strandedWhere())
+      strand(finding, ledger, clock.now(), strandedWhere(), refusedBy)
       continue
     }
 
@@ -1163,7 +1254,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       if (!mayISpend(ledger, "judge")) {
         exhausted = true
         counts.unresolved += 1
-        strand(finding, ledger, clock.now(), strandedWhere())
+        strand(finding, ledger, clock.now(), strandedWhere(), refusedBy)
         continue
       }
       counts.turns += 1
@@ -1179,6 +1270,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         ),
       )
       counts.attempts += outcome.attempts
+      if (outcome.refused) {
+        refuseTurn(finding, outcome, slot, "evidence-extract")
+        continue
+      }
       if (outcome.envelope.ok) {
         evidence = evidenceBody(outcome.envelope.value)
         finding.evidence = evidence
@@ -1200,7 +1295,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     if (!mayISpend(ledger, "judge")) {
       exhausted = true
       counts.unresolved += 1
-      strand(finding, ledger, clock.now(), strandedWhere())
+      strand(finding, ledger, clock.now(), strandedWhere(), refusedBy)
       continue
     }
 
@@ -1360,7 +1455,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     // gate below is what records the exhaustion. Asking costs nothing and
     // preserves the single parallel barrier.
     const logicSlot = slots.byRole["logic-eval"]
-    let logicPromise: Promise<TurnOutcome<LogicEvalEnvelope>> | undefined
+    let logicPromise: Promise<TurnOutcome<LogicEvalEnvelope> | RefusedTurn> | undefined
     if (argued && mayISpend(ledger, "judge")) {
       counts.turns += 1
       logicPromise = withSlot(() =>
@@ -1375,8 +1470,36 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       )
     }
 
-    const [factOutcome, logicOutcome] = await Promise.all([factPromise, logicPromise])
-    counts.attempts += factOutcome.attempts + (logicOutcome?.attempts ?? 0)
+    const [factResult, logicResult] = await Promise.all([factPromise, logicPromise])
+    counts.attempts += factResult.attempts + (logicResult?.attempts ?? 0)
+
+    // Story 2-5c — a refused LOGIC evaluation is read like the gate that declines
+    // to issue one: the finding is not stranded here, and the aggregator's gate
+    // records any exhaustion. Its allocation is returned when nothing was issued.
+    let logicOutcome: TurnOutcome<LogicEvalEnvelope> | undefined
+    if (logicResult?.refused) {
+      if (logicResult.attempts === 0) counts.turns -= 1
+      noteRefusedFailure(logicResult, logicSlot, "logic-eval")
+    } else {
+      logicOutcome = logicResult
+    }
+    // A refused FACT-CHECK strands the finding on the budget path, after keeping
+    // the logic evaluation that came back beside it.
+    if (factResult.refused) {
+      if (logicOutcome?.envelope.ok) {
+        finding.logicEval = logicOutcome.envelope.value.assessment
+        appendEntry(finding, {
+          stage: "judge",
+          actor: logicSlot,
+          at: clock.now(),
+          kind: "judge-logic-eval",
+          body: logicOutcome.envelope.value.assessment,
+        })
+      }
+      refuseTurn(finding, factResult, factSlot, "fact-check")
+      continue
+    }
+    const factOutcome = factResult
 
     if (factOutcome.envelope.ok) {
       const value = factOutcome.envelope.value
@@ -1516,7 +1639,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     if (!mayISpend(ledger, "judge")) {
       exhausted = true
       counts.unresolved += 1
-      strand(finding, ledger, clock.now(), strandedWhere())
+      strand(finding, ledger, clock.now(), strandedWhere(), refusedBy)
       continue
     }
 
@@ -1542,6 +1665,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       ),
     )
     counts.attempts += aggregateOutcome.attempts
+    if (aggregateOutcome.refused) {
+      refuseTurn(finding, aggregateOutcome, aggregateSlot, "aggregate")
+      continue
+    }
 
     if (aggregateOutcome.envelope.ok) {
       // COUNTED AFTER THE TURN CAME BACK, not before it was issued (code review
@@ -1657,7 +1784,19 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   // the remainder, and the two numbers sum to `counts.unresolved` by
   // construction rather than by a second count that could drift.
   const strandedByBudget = counts.unresolved - counts.unresolvedByCancellation
-  if (strandedByBudget > 0) {
+  if (strandedByBudget > 0 && refusedBy !== undefined) {
+    // Story 2-5c — the experiment's admission refused, not the run's cap, so the
+    // cap is not named as the cause.
+    warnings.push({
+      code: "unresolved-findings",
+      stage: "judge",
+      message:
+        `ADMISSION REFUSED IN JUDGING: ${strandedByBudget} finding(s) were still undecided when the ` +
+        `experiment's admission refused the next request (${refusedBy}). They are reported in the ` +
+        `UNRESOLVED section with the evidence they accumulated — nothing was dropped.`,
+      detail: { cap: ledger.cap, unresolved: strandedByBudget, admission: refusedBy },
+    })
+  } else if (strandedByBudget > 0) {
     warnings.push({
       code: "unresolved-findings",
       stage: "judge",
@@ -1756,16 +1895,30 @@ type StrandedWhere =
  * shows that fact-check in the unresolved section, which is the difference
  * between "we ran out before looking" and "we looked and ran out before ruling".
  * It gets NO verdict, because none was reached.
+ *
+ * `admissionReason` is set when the experiment's admission refused rather than
+ * the run's ledger (story 2-5c). The reason then names that refusal and not the
+ * cap, which did not refuse.
  */
-function strand(finding: Finding, ledger: BudgetLedger, at: string, where: StrandedWhere): void {
+function strand(
+  finding: Finding,
+  ledger: BudgetLedger,
+  at: string,
+  where: StrandedWhere,
+  admissionReason?: string,
+): void {
+  const cause =
+    admissionReason === undefined
+      ? // AD-15 (story 8) — shared with debate so the two stages cannot drift in
+        // what they tell the user. The judge's ceiling IS the cap by construction
+        // (the judge's share is 1, and a share below 1 would make part of the
+        // stated cap unreachable), so this renders exactly as it always has
+        // in every reachable case; it is shared for the drift, not for the wording.
+        ceilingClause(ledger, "judge")
+      : `the experiment's admission refused the next request (${admissionReason})`
   finding.unresolved = {
     diedAtStage: "judge",
-    // AD-15 (story 8) — shared with debate so the two stages cannot drift in
-    // what they tell the user. The judge's ceiling IS the cap by construction
-    // (the judge's share is 1, and a share below 1 would make part of the
-    // stated cap unreachable), so this renders exactly as it always has
-    // in every reachable case; it is shared for the drift, not for the wording.
-    reason: `${ceilingClause(ledger, "judge")} ${where}`,
+    reason: `${cause} ${where}`,
   }
   appendEntry(finding, {
     stage: "judge",
@@ -1773,8 +1926,11 @@ function strand(finding: Finding, ledger: BudgetLedger, at: string, where: Stran
     at,
     kind: "judge-budget-exhausted",
     body:
-      `Judging stopped ${where}: the token budget ran out. This finding was left undecided rather ` +
-      `than dropped, and whatever earlier steps produced for it is recorded above.`,
+      admissionReason === undefined
+        ? `Judging stopped ${where}: the token budget ran out. This finding was left undecided rather ` +
+          `than dropped, and whatever earlier steps produced for it is recorded above.`
+        : `Judging stopped ${where}: the experiment's admission refused the next request. This finding ` +
+          `was left undecided rather than dropped, and whatever earlier steps produced for it is recorded above.`,
   })
 }
 

@@ -56,6 +56,7 @@ import {
   unknownValue,
   type CodeRevision,
   type EvaluationIdentity,
+  type ExperimentBinding,
   type Maybe,
 } from "./manifest.ts"
 
@@ -187,6 +188,8 @@ export interface WriteArmDumpInput {
   /** From `createTurnRecorder()`, when the caller wrapped the backend. */
   turns?: readonly TurnArtifact[]
   worktree: string
+  /** Story 2-5c — the paired runner's slot binding. Checked by the runner before this is called. */
+  experiment?: ExperimentBinding
 }
 
 /**
@@ -210,6 +213,7 @@ export async function writeArmDump(input: WriteArmDumpInput): Promise<ArtifactOu
       input.turns === undefined
         ? unknownValue("the caller did not wrap the backend with a turn recorder")
         : known(input.turns.length),
+    ...(input.experiment === undefined ? {} : { experiment: input.experiment }),
   })
 
   return dumpRunArtifacts({

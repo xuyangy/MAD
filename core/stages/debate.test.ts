@@ -12,6 +12,7 @@ import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { output } from "./output.ts"
 import {
+  fakeAdmission,
   fakeClock,
   FakeBackend,
   materialSpans,
@@ -2167,5 +2168,167 @@ describe("debate — a session MAD could not delete (story 2.3, AC3)", () => {
     })
 
     expect(result.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
+  })
+})
+
+describe("debate — the per-request admission seam (story 2-5c)", () => {
+  test("every participant's attempt asks, and is settled", async () => {
+    const admission = fakeAdmission()
+    const finding = contested()
+    await run(
+      [finding],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+      },
+      { admission: admission.admission, maxRounds: 1 },
+    )
+    const asked = admission.asked.map((request) => `${request.stage}/${request.slot}/${request.attempt}`).sort()
+    expect(asked).toEqual(["debate/discovery-1/1", "debate/discovery-2/1"])
+    expect(admission.settlements.map((entry) => entry.settlement.kind)).toEqual(["usage", "usage"])
+  })
+
+  test("a refused participant strands the round on the budget path, with no drop-out and no exit", async () => {
+    const admission = fakeAdmission((request) => request.slot === "discovery-2")
+    const finding = contested()
+    const result = await run(
+      [finding],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "denies" })],
+      },
+      { admission: admission.admission },
+    )
+    expect(result.droppedOut).toEqual([])
+    expect(result.cancelled).toBe(false)
+    expect(finding.exit).toBeUndefined()
+    expect(finding.unresolved?.diedAtStage).toBe("debate")
+    expect(finding.history.some((entry) => entry.kind === "budget-exhausted")).toBe(true)
+    expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+    // The participant that was admitted kept its stated position and its bill.
+    expect(roundEntries(finding).map((entry) => entry.actor)).toEqual(["discovery-1"])
+    expect(result.attempts).toBe(1)
+    expect(result.turns).toBe(1)
+  })
+
+  test("a retry refused after a failed attempt is not issued; the real failure is kept and the room strands", async () => {
+    const admission = fakeAdmission((request) => request.attempt === 2)
+    const finding = contested()
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [{ kind: "fail", failure: "model-error" }, says({ findingId: "f-1", position: "upholds" })],
+    })
+    const result = await run([finding], {}, { admission: admission.admission, backend })
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(1)
+    expect(result.droppedOut).toEqual(["discovery-2"])
+    const dropped = result.warnings.find((warning) => warning.code === "model-dropped-out")
+    expect(dropped?.message).toContain("its retry was refused")
+    expect(dropped?.message).toContain("model-error")
+    expect(finding.unresolved?.diedAtStage).toBe("debate")
+    // discovery-1 answered once; discovery-2 was billed once and then refused.
+    expect(result.attempts).toBe(2)
+    expect(result.turns).toBe(2)
+  })
+
+  test("the ledger is asked per attempt when admission is present", async () => {
+    const admission = fakeAdmission()
+    const ledger = { ...emptyLedger(), cap: 0 } as BudgetLedger
+    const finding = contested()
+    await run([finding], { "discovery-1": [says({ findingId: "f-1", position: "upholds" })] }, { admission: admission.admission, ledger })
+    expect(admission.asked).toHaveLength(0)
+    expect(finding.unresolved?.diedAtStage).toBe("debate")
+  })
+
+  test("a stop while admission waits settles not-issued and strands as cancelled", async () => {
+    const controller = new AbortController()
+    const admission = fakeAdmission(undefined, () => controller.abort())
+    const finding = contested()
+    const backend = new FakeBackend({ "discovery-1": [says({ findingId: "f-1", position: "upholds" })] })
+    const result = await run([finding], {}, { admission: admission.admission, backend, signal: controller.signal })
+    expect(backend.calls).toHaveLength(0)
+    expect(result.cancelled).toBe(true)
+    expect(admission.settlements.every((entry) => entry.settlement.kind === "not-issued")).toBe(true)
+    expect(finding.unresolved?.reason).toContain("cancelled")
+  })
+})
+
+describe("debate — admission refusals name their cause and strand only their rooms (story 2-5c review)", () => {
+  test("an admission refusal names the admission's reason, not the run's cap", async () => {
+    const admission = fakeAdmission((request) => request.slot === "discovery-2")
+    const finding = contested()
+    const result = await run(
+      [finding],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "denies" })],
+      },
+      { admission: admission.admission, ledger: { ...emptyLedger(), cap: 255_000 } as BudgetLedger },
+    )
+    expect(finding.unresolved?.reason).toContain("refused by the fake admission")
+    expect(finding.unresolved?.reason).not.toContain("token budget")
+    const warning = result.warnings.find((entry) => entry.code === "unresolved-findings")
+    expect(warning?.message).toContain("ADMISSION REFUSED IN DEBATE")
+    expect(warning?.message).not.toContain("255000")
+    expect(warning?.detail?.["admission"]).toEqual(["refused by the fake admission"])
+  })
+
+  test("only the room with a refused seat is stranded; a room whose seats all answered keeps its exit", async () => {
+    const admission = fakeAdmission((request) => request.slot === "discovery-2")
+    const refusedRoom = contested({ id: "f-1", author: "discovery-1" })
+    const answeredRoom = contested({ id: "f-2", author: "discovery-3" })
+    const result = await run(
+      [refusedRoom, answeredRoom],
+      {
+        "discovery-1": [says({ findingId: "f-1", position: "upholds" }, { findingId: "f-2", position: "upholds" })],
+        "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+        "discovery-3": [says({ findingId: "f-2", position: "upholds" })],
+      },
+      { admission: admission.admission, maxRounds: 1 },
+    )
+    expect(refusedRoom.exit).toBeUndefined()
+    expect(refusedRoom.unresolved?.diedAtStage).toBe("debate")
+    expect(answeredRoom.unresolved).toBeUndefined()
+    expect(answeredRoom.exit).toBe("converged")
+    expect(result.unresolved).toBe(1)
+  })
+
+  test("the per-attempt ledger gate refuses a retry after a failure pushed spend past debate's share", async () => {
+    const admission = fakeAdmission()
+    const finding = contested()
+    // Ceiling 26 (0.65 of 40). The round gate passes at 0; both first attempts bill 30.
+    const ledger = { ...emptyLedger(), cap: 40 } as BudgetLedger
+    const backend = new FakeBackend({
+      "discovery-1": [{ kind: "fail", failure: "model-error" }, says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+    const result = await run([finding], {}, { admission: admission.admission, backend, ledger })
+    expect(backend.calls.filter((call) => call.slot === "discovery-1")).toHaveLength(1)
+    expect(admission.asked.some((request) => request.attempt === 2)).toBe(false)
+    expect(finding.unresolved?.reason).toContain("share of the token budget")
+    expect(result.droppedOut).toEqual(["discovery-1"])
+  })
+
+  test("settlement: unknown wins over tokens, a missing figure and a throw both settle unknown", async () => {
+    const admission = fakeAdmission()
+    const backend: ModelBackend = {
+      capabilities: () => ({ tools: true }),
+      async runTurn(slot, _instructions, _input, schema) {
+        if (slot === "discovery-3") throw new Error("socket closed")
+        const value = schema.parse({ turns: [] })
+        if (slot === "discovery-1") {
+          return { ok: true, slot, value, tokens: tokens(), usageUnknown: { executionId: "exec-1", why: "host said so" } }
+        }
+        return { ok: true, slot, value }
+      },
+    }
+    await run(
+      [contested({ id: "f-1", author: "discovery-1" }), contested({ id: "f-2", author: "discovery-3" })],
+      {},
+      { admission: admission.admission, backend, maxRounds: 1 },
+    )
+    const kinds = (slot: string) => admission.settlements.filter((entry) => entry.request.slot === slot).map((entry) => entry.settlement)
+    expect(kinds("discovery-1")).toEqual([{ kind: "unknown", why: "host said so", executionId: "exec-1" }])
+    expect(kinds("discovery-2").map((settlement) => settlement.kind)).toEqual(["unknown"])
+    expect(kinds("discovery-3").map((settlement) => settlement.kind)).toEqual(["unknown", "unknown"])
   })
 })

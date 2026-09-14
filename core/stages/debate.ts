@@ -97,6 +97,7 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
+import type { AdmissionSettlement, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import { listCell, material, oneLine } from "../prompt/material.ts"
 
@@ -244,6 +245,13 @@ export interface DebateInput {
   limiter?: ConcurrencyLimiter
   /** AD-2 amended / AD-6f — the user's stop. */
   signal?: AbortSignal
+  /**
+   * Story 2-5c — the experiment's per-request admission. Optional; absent, the
+   * stage gates once per round exactly as it does without it. Present, every
+   * participant's every attempt also asks `mayISpend` and then this port. See
+   * `runDebateTurn`.
+   */
+  admission?: RequestAdmission
 }
 
 export interface DebateStageResult extends DebateCounts {
@@ -342,6 +350,19 @@ function roomFor(
 }
 
 /**
+ * What one participant's turn came to. `refused` is story 2-5c's third outcome:
+ * the ledger or the experiment's admission refused an attempt, so it was never
+ * issued. It is a local value and never a fabricated failure envelope, which
+ * would name a working model as dropped out. `attempts` is the billed count, so
+ * it is 1 when a retry was refused after a failed first attempt; `failure` is
+ * then that attempt's real failure. `admissionReason` is absent when the run's
+ * own ledger refused.
+ */
+type DebateTurnOutcome =
+  | { refused: false; envelope: Envelope<DebateEnvelope>; attempts: number }
+  | { refused: true; attempts: number; admissionReason?: string; failure?: Envelope<DebateEnvelope> }
+
+/**
  * One debate turn plus, on failure, exactly one retry (AD-6b, AD-12).
  *
  * Deliberately NOT a shared helper with `discover.ts`'s `runWithOneRetry`: the
@@ -378,7 +399,7 @@ async function runDebateTurn(
    * not be discarded with it.
    */
   cleanups: { slot: string; why: string }[],
-): Promise<{ envelope: Envelope<DebateEnvelope>; attempts: number }> {
+): Promise<DebateTurnOutcome> {
   let last: Envelope<DebateEnvelope> | undefined
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     // AD-2 amended / AD-6f — never ISSUE a turn the user stopped, and never
@@ -389,9 +410,28 @@ async function runDebateTurn(
       // `attempts: 0`, not 1 — see `discover.ts`'s `runWithOneRetry` for the
       // argument and the Spec Change Log for the decision. A turn the core
       // refused to issue was never billed, and `attempts` is the billed count.
-      return { envelope: cancelledTurn<DebateEnvelope>(slot), attempts: attempt - 1 }
+      return { refused: false, envelope: cancelledTurn<DebateEnvelope>(slot), attempts: attempt - 1 }
+    }
+    // Story 2-5c — PER-ATTEMPT GATES, only when an evaluation supplied an
+    // admission. The round gate below still runs once per round; this adds the
+    // ledger's question and the experiment's for every participant and retry,
+    // because concurrent seats and retries each bill separately. After admission
+    // resolves the signal is read again, and nothing is awaited between that
+    // check and `runTurn`.
+    let settle: SettleRequest | undefined
+    if (input.admission !== undefined) {
+      const failure = last === undefined ? {} : { failure: last }
+      if (!mayISpend(input.ledger, "debate")) return { refused: true, attempts: attempt - 1, ...failure }
+      const decision = await input.admission.admit({ stage: "debate", slot, attempt })
+      if (!decision.ok) return { refused: true, attempts: attempt - 1, admissionReason: decision.reason, ...failure }
+      if (input.signal?.aborted) {
+        await decision.settle({ kind: "not-issued" })
+        return { refused: false, envelope: cancelledTurn<DebateEnvelope>(slot), attempts: attempt - 1 }
+      }
+      settle = decision.settle
     }
     let envelope: Envelope<DebateEnvelope>
+    let threw = false
     try {
       envelope = await input.backend.runTurn(
         slot,
@@ -404,6 +444,7 @@ async function runDebateTurn(
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). If one throws anyway, that is this slot's problem and must not
       // take the rest of the round's fan-out down with it.
+      threw = true
       envelope = {
         ok: false,
         slot,
@@ -429,12 +470,29 @@ async function runDebateTurn(
     } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "debate", attempt, tokens: envelope.tokens })
     }
+    if (settle !== undefined) await settle(settlementOf(envelope, threw))
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
-    if (envelope.ok) return { envelope, attempts: attempt }
-    if (envelope.failure === "cancelled") return { envelope, attempts: attempt }
+    if (envelope.ok) return { refused: false, envelope, attempts: attempt }
+    if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
-  return { envelope: last!, attempts: 2 }
+  return { refused: false, envelope: last!, attempts: 2 }
+}
+
+/**
+ * Story 2-5c — what an admitted, issued attempt cost. `core/stages/discover.ts`'s
+ * `settlementOf` carries the rule: the unknown marker first, else `tokens`, else
+ * unknown, because an issued request with no figure may have billed.
+ */
+function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
+  if (envelope.usageUnknown) {
+    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
+  }
+  if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
+  return {
+    kind: "unknown",
+    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
+  }
 }
 
 /**
@@ -754,15 +812,17 @@ function exitFor(
  * rule is that a claim is backed by the material it names OR the claim is
  * reworded; this rewords it.
  *
- * ## The middle case is unreachable TODAY, and is written anyway
+ * ## The middle case is reachable only under a per-request admission
  *
- * A mixed strand cannot occur through this stage, and the reason is an
- * invariant two functions apart: `mayISpend` is checked ONCE per round before
+ * Without one, a mixed strand cannot occur through this stage, and the reason is
+ * an invariant two functions apart: `mayISpend` is checked ONCE per round before
  * the fan-out, so a round is all-or-nothing, and `exitFor`'s rule 1 exits any
  * room that has produced no position as `stalled`/`silent` at the end of every
  * round that runs. So either the gate refused at round 1 — every stranded room
  * has nothing — or a round completed, and every position-less room already left
- * with an exit. `withPositions` is therefore always `0` or `stranded.length`.
+ * with an exit. `withPositions` is then always `0` or `stranded.length`. An
+ * admission (story 2-5c) can refuse some seats of a round and not others, which
+ * strands rooms with and without positions together.
  *
  * It is written and tested regardless, because "some argued and some did not" is
  * a third fact and reporting it as either of the other two is the same AD-6
@@ -925,6 +985,12 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   let turns = 0
   let attempts = 0
   let exhausted = false
+  /**
+   * Story 2-5c — rooms with a seat the ledger or the admission refused, and the
+   * admission's reason when it was the admission. Such a room takes no exit and
+   * is stranded on the budget path; rooms whose seats all answered keep arguing.
+   */
+  const refusedRooms = new Map<Room, string | undefined>()
   // AD-6f — a SECOND, separate reason to stop. See the gate in the round loop
   // for why it is not folded into `exhausted`.
   let cancelled = false
@@ -934,7 +1000,9 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     input.limiter ? input.limiter.run(turn) : turn()
 
   for (let round = 1; round <= maxRounds && !exhausted && !cancelled; round += 1) {
-    const open = rooms.filter((room) => room.finding.exit === undefined && !room.finding.unresolved)
+    const open = rooms.filter(
+      (room) => room.finding.exit === undefined && !room.finding.unresolved && !refusedRooms.has(room),
+    )
     if (open.length === 0) break
 
     // Batching (lever 1, AD-15): one turn per MODEL, covering every open finding
@@ -989,12 +1057,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // failure envelope, so no slot can abort the round, and `Promise.all`
     // resolves POSITIONALLY, so the record is in participant order however the
     // network behaved.
-    const outcomes: {
-      slot: string
-      rooms: Room[]
-      envelope: Envelope<DebateEnvelope>
-      attempts: number
-    }[] = await Promise.all(
+    const outcomes: ({ slot: string; rooms: Room[] } & DebateTurnOutcome)[] = await Promise.all(
       permitted.map(async (slot) => ({
         slot,
         rooms: bySlot.get(slot)!,
@@ -1027,8 +1090,21 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // allocation-versus-billing comparison only when `attempts > turns`; but the
     // record is what story 7A's own artifact dump serializes for a human to
     // read, and `discover.ts` has always been scrupulous about exactly this.
+    //
+    // A seat an admission refused (story 2-5c) counts as a turn only when its
+    // first attempt was issued before the retry was refused.
+    const refusedThisRound = new Map<Room, string | undefined>()
     for (const outcome of outcomes) {
       attempts += outcome.attempts
+      if (outcome.refused) {
+        for (const room of outcome.rooms) {
+          if (!refusedThisRound.has(room) || refusedThisRound.get(room) === undefined) {
+            refusedThisRound.set(room, outcome.admissionReason)
+          }
+        }
+        if (outcome.attempts > 0) turns += 1
+        continue
+      }
       if (outcome.envelope.ok || outcome.envelope.failure !== "cancelled") turns += 1
     }
 
@@ -1041,6 +1117,34 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     }
 
     for (const outcome of outcomes) {
+      // A refused seat stated nothing. When its first attempt really failed and
+      // only the retry was refused, that failure is kept: the model is named as
+      // dropped out, with the retry named as refused.
+      if (outcome.refused) {
+        if (outcome.failure !== undefined && !outcome.failure.ok && !droppedOutThisStage.has(outcome.slot)) {
+          droppedOutThisStage.add(outcome.slot)
+          warnings.push({
+            code: "model-dropped-out",
+            stage: "debate",
+            message:
+              `MODEL DROPPED OUT OF DEBATE: \`${modelOf(outcome.slot)}\` (slot ${outcome.slot}) failed ` +
+              `once in round ${round}, and its retry was refused ` +
+              `(${outcome.failure.failure}: ${outcome.failure.message}). It is NOT asked again in any later ` +
+              `round of this debate, and the findings it was seated for were left undecided.`,
+            detail: {
+              slot: outcome.slot,
+              model: modelOf(outcome.slot),
+              round,
+              attempts: outcome.attempts,
+              failure: outcome.failure.failure,
+              error: outcome.failure.message,
+              findings: outcome.rooms.map((room) => room.finding.id),
+              ...(outcome.admissionReason === undefined ? {} : { admission: outcome.admissionReason }),
+            },
+          })
+        }
+        continue
+      }
       if (!outcome.envelope.ok) {
         // AD-2 amended / AD-6f — A CANCELLED TURN IS NOT A DROP-OUT. The model
         // did not fail twice in this round; the user stopped the run mid-round,
@@ -1174,7 +1278,13 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // positions that were stated stay on the record; the room stays open and is
     // stranded, with the cancellation named as the cause.
     if (cancelled) break
+    // Story 2-5c — A ROOM WITH A REFUSED SEAT takes no exit this round: that seat
+    // stated no position, and `exitFor` would read the silence as abstention. The
+    // stated positions stay on the record and the room is stranded on the budget
+    // path below. Every other room is read as usual and keeps arguing.
+    for (const [room, reason] of refusedThisRound) refusedRooms.set(room, reason)
     for (const room of open) {
+      if (refusedRooms.has(room)) continue
       const decided = exitFor(
         room.finding,
         round,
@@ -1198,7 +1308,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   if (!exhausted && !cancelled) {
     const at = clock.now()
     for (const room of rooms) {
-      if (room.finding.exit === undefined && !room.finding.unresolved) {
+      if (room.finding.exit === undefined && !room.finding.unresolved && !refusedRooms.has(room)) {
         recordExit(room.finding, { exit: "cap", reason: "capped" }, maxRounds, at)
       }
     }
@@ -1268,9 +1378,19 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   // AD-6d — budget exhaustion is NOT an error. Undecided findings are marked
   // with the stage they died at and surfaced; none is dropped, and none is given
   // an `exit`, because no exit happened.
-  if (exhausted) {
+  if (exhausted || refusedRooms.size > 0) {
     const at = clock.now()
-    const stranded = rooms.filter((room) => room.finding.exit === undefined)
+    const stranded = rooms.filter(
+      (room) =>
+        room.finding.exit === undefined &&
+        !room.finding.unresolved &&
+        (exhausted || refusedRooms.has(room)),
+    )
+    // Story 2-5c — the experiment admission's reason for a room whose seat it
+    // refused. A room refused by the run's own ledger, or stranded at the round
+    // gate, has none and names the ceiling as before.
+    const admissionOf = (room: Room): string | undefined => refusedRooms.get(room)
+    const admissionReasons = [...new Set(stranded.map(admissionOf).filter((reason) => reason !== undefined))]
     // "after round 0 of 3" is not English and not true — no round happened, so
     // nothing came "after" one. The two cases are genuinely different facts and
     // read differently: one debate ran out of money partway, the other never
@@ -1290,7 +1410,10 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         // TOKENS line and find wrong. `ceilingClause` owns the phrasing for both
         // stranding stages, so the two cannot drift, and returns today's wording
         // character-for-character whenever the ceiling IS the cap.
-        reason: `${ceilingClause(ledger, "debate")} ${where}`,
+        reason:
+          admissionOf(room) === undefined
+            ? `${ceilingClause(ledger, "debate")} ${where}`
+            : `the experiment's admission refused the next request (${admissionOf(room)}) ${where}`,
       }
       appendEntry(room.finding, {
         stage: "debate",
@@ -1298,8 +1421,11 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         at,
         kind: "budget-exhausted",
         body:
-          `Debate stopped ${where}: the token budget ran out. This finding was left undecided ` +
-          `rather than dropped.`,
+          admissionOf(room) === undefined
+            ? `Debate stopped ${where}: the token budget ran out. This finding was left undecided ` +
+              `rather than dropped.`
+            : `Debate stopped ${where}: the experiment's admission refused the next request. This ` +
+              `finding was left undecided rather than dropped.`,
       })
     }
     if (stranded.length > 0) {
@@ -1326,9 +1452,14 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         code: "unresolved-findings",
         stage: "debate",
         message:
-          `BUDGET EXHAUSTED IN DEBATE: ${stranded.length} contested finding(s) were still undecided ` +
-          `when ${ceilingNamed(ledger, "debate")} was reached, ${where}. ${carried}`,
+          admissionReasons.length > 0 && stranded.every((room) => admissionOf(room) !== undefined)
+            ? `ADMISSION REFUSED IN DEBATE: ${stranded.length} contested finding(s) were still undecided ` +
+              `when the experiment's admission refused the next request (${admissionReasons.join("; ")}), ` +
+              `${where}. ${carried}`
+            : `BUDGET EXHAUSTED IN DEBATE: ${stranded.length} contested finding(s) were still undecided ` +
+              `when ${ceilingNamed(ledger, "debate")} was reached, ${where}. ${carried}`,
         detail: {
+          ...(admissionReasons.length === 0 ? {} : { admission: admissionReasons }),
           cap: ledger.cap,
           roundsRun: rounds,
           maxRounds,

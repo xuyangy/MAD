@@ -31,6 +31,7 @@ import {
 import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
+import type { RequestAdmission } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { LateUsageSink } from "../ports/late-usage.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
@@ -247,6 +248,16 @@ export interface ReviewDeps {
    * than by letting the caller throw the result away.
    */
   signal?: AbortSignal
+  /**
+   * Story 2-5c — the experiment's per-request admission (`core/ports/admission.ts`).
+   *
+   * Optional. Absent, every stage gates exactly as it does without it and the
+   * record is unchanged. Present, each stage asks `mayISpend` and then this port
+   * before every attempt it issues, retries and every debate participant and
+   * judge role included, and settles each admitted attempt with what it cost.
+   * Only the paired runner (`ablation/paired.ts`) supplies one.
+   */
+  admission?: RequestAdmission
 }
 
 export interface ReviewResult {
@@ -502,7 +513,7 @@ export interface PreparedReview {
  * What a continuation needs from its caller: runtime ports only. See
  * `PreparedReview` for why nothing that decides the review is in this list.
  */
-export type ContinueDeps = Pick<ReviewDeps, "backend" | "clock" | "tools" | "signal" | "lateUsage">
+export type ContinueDeps = Pick<ReviewDeps, "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission">
 
 /**
  * Records already continued or forked. Keyed on the RECORD rather than the
@@ -626,6 +637,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
     ledger: record.ledger,
     limiter,
     signal,
+    ...(deps.admission === undefined ? {} : { admission: deps.admission }),
   })
 
   record.answered = discovered.answered
@@ -945,6 +957,7 @@ export async function continueReview(
     maxRounds: record.maxRounds,
     limiter,
     signal,
+    ...(deps.admission === undefined ? {} : { admission: deps.admission }),
   })
   // Re-stamped from the stage's return for routing's reason exactly: the record
   // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is
@@ -997,6 +1010,7 @@ export async function continueReview(
     // CAP-8 (story 10) — the judge is the only stage that drives it, and this is
     // the seam that hands it over. `undefined` is a supported value, not a hole.
     tools: deps.tools,
+    ...(deps.admission === undefined ? {} : { admission: deps.admission }),
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the

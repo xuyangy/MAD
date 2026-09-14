@@ -9,7 +9,20 @@ import { selectRoster } from "../core/roster/select.ts"
 import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-support/fakes.ts"
 import { runAblation, type ArmRun } from "./arms.ts"
 import { EvaluationBundleError } from "./bundle.ts"
-import { HALT_MARKER_FILE, createExperimentGovernor } from "./governor.ts"
+import {
+  HALT_MARKER_FILE,
+  PAIRED_ALLOWANCES,
+  createExperimentGovernor,
+  governorStateFromBill,
+  requestGate,
+  type RequestGateView,
+} from "./governor.ts"
+import { acquireLock, openJournal } from "./journal.ts"
+import { mayISpend, type BudgetLedger } from "../core/budget/ledger.ts"
+import type { Finding } from "../core/domain/finding.ts"
+import { recordTurn } from "../core/domain/run-record.ts"
+import { debate } from "../core/stages/debate.ts"
+import { judge } from "../core/stages/judge.ts"
 
 /**
  * THE TEMP DIRECTORY IS OUTSIDE THE REPOSITORY, exactly as `bundle.test.ts`
@@ -437,5 +450,207 @@ describe("AC4 — the refusal reaches the harness as the stop that already exist
       deps(),
     )
     expect(runs).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-5c — the request-level gates over the journal's unique-execution bill
+// ---------------------------------------------------------------------------
+
+describe("requestGate — every Blocks request passes every gate (story 2-5c)", () => {
+  function view(over: Partial<RequestGateView> & { phases?: Record<string, number>; blocks?: number } = {}): RequestGateView {
+    return {
+      stop: over.stop ?? null,
+      halt: over.halt ?? null,
+      globalSpent: over.globalSpent ?? 0,
+      categorySpent: (category) => (category === "blocks" ? (over.blocks ?? 0) : 0),
+      phaseSpent: (block, phase) => over.phases?.[`${block}:${phase}`] ?? 0,
+    }
+  }
+
+  test("the prefix gate refuses AT 60,000 new consumption, not above it", () => {
+    expect(requestGate(view({ phases: { "1:prefix": 59_999 } }), { block: 1, phase: "prefix" }).ok).toBe(true)
+    expect(requestGate(view({ phases: { "1:prefix": 60_000 } }), { block: 1, phase: "prefix" })).toMatchObject({
+      ok: false,
+      cause: "budget",
+    })
+  })
+
+  test("each continuation has its own 195,000; ON's exhaustion does not refuse OFF", () => {
+    const exhaustedOn = view({ phases: { "1:on": 195_000 } })
+    expect(requestGate(exhaustedOn, { block: 1, phase: "on" }).ok).toBe(false)
+    expect(requestGate(exhaustedOn, { block: 1, phase: "off" }).ok).toBe(true)
+    expect(requestGate(exhaustedOn, { block: 2, phase: "on" }).ok).toBe(true)
+  })
+
+  test("Blocks, global and the halt still apply to the other arm", () => {
+    expect(requestGate(view({ blocks: 1_400_000 }), { block: 3, phase: "off" })).toMatchObject({ ok: false, cause: "budget" })
+    expect(requestGate(view({ globalSpent: 2_000_000 }), { block: 3, phase: "off" })).toMatchObject({ ok: false, cause: "budget" })
+    expect(requestGate(view({ halt: "exec-1 unknown" }), { block: 3, phase: "off" })).toMatchObject({ ok: false, cause: "halted" })
+    expect(requestGate(view({ stop: "disk full" }), { block: 3, phase: "off" })).toMatchObject({ ok: false, cause: "runner-stop" })
+  })
+
+  test("the 50,000 of reporting headroom is never admitted against by a phase", () => {
+    expect(PAIRED_ALLOWANCES.prefix + 2 * PAIRED_ALLOWANCES.continuation).toBe(450_000)
+    expect(PAIRED_ALLOWANCES.blocks - 3 * 450_000).toBe(50_000)
+  })
+})
+
+describe("the ordinary stage ceiling and the experiment gate, together (story 2-5c)", () => {
+  async function journalWithOnSpend(root: string, onSpend: number) {
+    const lock = await acquireLock(root, "t")
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, () => "t")
+    if (!opened.ok) throw new Error(opened.reason)
+    const journal = opened.journal
+    const decision = await journal.admission({ block: 1, phase: "on", runId: () => "run-on" }).admit({ stage: "judge", slot: "discovery-1", attempt: 1 })
+    if (!decision.ok) throw new Error(decision.reason)
+    await decision.settle({ kind: "usage", tokens: { ...emptyTokenUsage(), input: onSpend } })
+    return journal
+  }
+
+  function branchLedger(inherited: number, fresh: number): BudgetLedger {
+    const ledger = { ...emptyLedger(255_000), stopOnUnknownUsage: true } as BudgetLedger
+    recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: { ...emptyTokenUsage(), input: inherited }, origin: { runId: "prefix", entry: 0 } })
+    recordTurn(ledger, { slot: "discovery-1", stage: "judge", attempt: 1, tokens: { ...emptyTokenUsage(), input: fresh } })
+    return ledger
+  }
+
+  function routedFinding(route: "judge" | "debate"): Finding {
+    return {
+      id: "f-1",
+      claim: "a claim",
+      reasoning: "a reason",
+      locus: { file: "src/pay.ts", startLine: 1, endLine: 1 },
+      severity: "high",
+      author: "discovery-1",
+      source: "pool",
+      coDiscovery: { raised: 1, answered: 1 },
+      route,
+      history: [],
+    }
+  }
+
+  const roster = () =>
+    selectRoster([candidate("anthropic", "claude-sonnet-4-5")], { slots: 1, providerConfigKey: "provider" }).roster
+
+  test("judge: inherited 50,000 + new 195,000 passes the 255,000 ceiling and is refused by the continuation gate", async () => {
+    const root = await tempDir("mad-gates-")
+    const journal = await journalWithOnSpend(root, 195_000)
+    const ledger = branchLedger(50_000, 195_000)
+    expect(mayISpend(ledger, "judge")).toBe(true)
+    const backend = new FakeBackend({})
+    const finding = routedFinding("judge")
+    await judge({
+      findings: [finding],
+      roster: roster(),
+      answeredSlots: ["discovery-1"],
+      backend,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+      admission: journal.admission({ block: 1, phase: "on", runId: () => "run-on" }),
+    })
+    expect(backend.calls).toHaveLength(0)
+    expect(finding.unresolved?.diedAtStage).toBe("judge")
+    await journal.close()
+  })
+
+  test("debate at the same point is already refused by its own share, at 165,750", async () => {
+    const root = await tempDir("mad-gates-")
+    const journal = await journalWithOnSpend(root, 0)
+    const ledger = branchLedger(50_000, 195_000)
+    expect(mayISpend(ledger, "debate")).toBe(false)
+    const asked: string[] = []
+    const admission = journal.admission({ block: 1, phase: "on", runId: () => "run-on" })
+    const finding = routedFinding("debate")
+    await debate({
+      findings: [finding],
+      roster: roster(),
+      answeredSlots: ["discovery-1"],
+      backend: new FakeBackend({}),
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+      admission: { admit: (request) => (asked.push(request.slot), admission.admit(request)) },
+    })
+    expect(asked).toHaveLength(0)
+    expect(finding.unresolved?.diedAtStage).toBe("debate")
+    await journal.close()
+  })
+
+  test("judge: inherited 70,000 + new 185,000 is refused by the ordinary ceiling though new is under 195,000", async () => {
+    const root = await tempDir("mad-gates-")
+    const journal = await journalWithOnSpend(root, 185_000)
+    const ledger = branchLedger(70_000, 185_000)
+    expect(mayISpend(ledger, "judge")).toBe(false)
+    expect(journal.bill().byPhase[0]!.tokens.input).toBeLessThan(PAIRED_ALLOWANCES.continuation)
+    const asked: string[] = []
+    const admission = journal.admission({ block: 1, phase: "on", runId: () => "run-on" })
+    const finding = routedFinding("judge")
+    await judge({
+      findings: [finding],
+      roster: roster(),
+      answeredSlots: ["discovery-1"],
+      backend: new FakeBackend({}),
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+      admission: { admit: (request) => (asked.push(request.slot), admission.admit(request)) },
+    })
+    expect(asked).toHaveLength(0)
+    expect(finding.unresolved?.reason).toContain("the token budget (255000) ran out")
+    await journal.close()
+  })
+})
+
+describe("two branches of one prefix bill it once (story 2-5c)", () => {
+  test("the journal bill counts each physical execution once; attributed ledgers count the prefix twice", async () => {
+    const root = await tempDir("mad-bill-")
+    const lock = await acquireLock(root, "t")
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, () => "t")
+    if (!opened.ok) throw new Error(opened.reason)
+    const journal = opened.journal
+    const spend = async (phase: "prefix" | "on" | "off", input: number) => {
+      const decision = await journal.admission({ block: 1, phase, runId: () => `run-${phase}` }).admit({ stage: "discover", slot: "discovery-1", attempt: 1 })
+      if (!decision.ok) throw new Error(decision.reason)
+      await decision.settle({ kind: "usage", tokens: { ...emptyTokenUsage(), input } })
+    }
+    await spend("prefix", 1_000)
+    await spend("on", 300)
+    await spend("off", 200)
+
+    const bill = journal.bill()
+    const prefixTokens = bill.byPhase.find((phase) => phase.phase === "prefix")!.tokens.input
+    expect(bill.byCategory.blocks!.input).toBe(1_500)
+    // Each branch inherits the prefix against its own cap.
+    const attributedOn = prefixTokens + 300
+    const attributedOff = prefixTokens + 200
+    expect(attributedOn + attributedOff - bill.byCategory.blocks!.input).toBe(prefixTokens)
+
+    const state = governorStateFromBill(bill)
+    expect(state.knownSpendTokens).toBe(1_500)
+    expect(state.halted).toBe(false)
+    expect(state.exposure).toBe("quantified")
+    await journal.close()
+  })
+
+  test("the halt presentation names each unknown execution from the bill, and exposure is unquantified", async () => {
+    const root = await tempDir("mad-bill-")
+    const lock = await acquireLock(root, "t")
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, () => "t")
+    if (!opened.ok) throw new Error(opened.reason)
+    const decision = await opened.journal.admission({ block: 2, phase: "off", runId: () => "run-off" }).admit({ stage: "judge", slot: "discovery-1", attempt: 2 })
+    if (!decision.ok) throw new Error(decision.reason)
+    await decision.settle({ kind: "unknown", why: "timed out", executionId: "exec-4" })
+    const state = governorStateFromBill(opened.journal.bill())
+    expect(state.halted).toBe(true)
+    expect(state.exposure).toBe("unquantified")
+    expect(state.unknownUsage).toEqual([
+      { armId: "off", repeatId: 1, runId: "run-off", entry: { slot: "discovery-1", stage: "judge", attempt: 2, executionId: "exec-4", why: "timed out" } },
+    ])
+    await opened.journal.close()
   })
 })

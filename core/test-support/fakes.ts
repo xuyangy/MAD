@@ -8,6 +8,7 @@ import type { ZodType } from "zod"
 import type { Candidate } from "../domain/roster.ts"
 import { CODING_AGGREGATE, CODING_EVIDENCE_EXTRACT, CODING_FACT_CHECK, CODING_LOGIC_EVAL } from "../instructions/coding/judge.ts"
 import { emptyTokenUsage, type TokenUsage } from "../domain/run-record.ts"
+import type { AdmissionRequest, AdmissionSettlement, RequestAdmission } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import {
   cancelledTurn,
@@ -430,4 +431,42 @@ export function occurrencesOf(haystack: string, needle: string): number[] {
     found.push(at)
   }
   return found
+}
+
+/**
+ * Story 2-5c — a scripted `RequestAdmission` that records every request it was
+ * asked and every settlement it received.
+ *
+ * `refuse` decides per request (with its 0-based position among all requests).
+ * `whileAdmitting` runs before the decision resolves, standing in for the I/O a
+ * real journal awaits, so a test can abort a signal in that window.
+ */
+export function fakeAdmission(
+  refuse: (request: AdmissionRequest, index: number) => boolean = () => false,
+  whileAdmitting?: (request: AdmissionRequest) => Promise<void> | void,
+): {
+  admission: RequestAdmission
+  asked: AdmissionRequest[]
+  settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[]
+} {
+  const asked: AdmissionRequest[] = []
+  const settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[] = []
+  return {
+    asked,
+    settlements,
+    admission: {
+      async admit(request) {
+        const index = asked.length
+        asked.push({ ...request })
+        if (whileAdmitting) await whileAdmitting(request)
+        if (refuse(request, index)) return { ok: false, cause: "budget", reason: "refused by the fake admission" }
+        return {
+          ok: true,
+          settle: async (settlement) => {
+            settlements.push({ request: { ...request }, settlement })
+          },
+        }
+      },
+    },
+  }
 }

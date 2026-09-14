@@ -563,6 +563,42 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   const turnFiles = maybeOf(outputs.turnFiles, isCount, "a whole number")
   if (turnFiles !== undefined) return fail(`has a malformed \`stageOutputs.turnFiles\`: ${turnFiles}`)
 
+  // ---- experiment (story 2-5c) ----
+  // OPTIONAL. Absent is an ordinary arm, and absence never qualifies a manifest
+  // as paired. Present, its shape is checked and its prefix must be the run's own
+  // parent: a branch that names one prefix while its provenance names another is
+  // two claims about one run.
+  if ("experiment" in value) {
+    const experiment = value.experiment
+    if (
+      !isRecord(experiment) ||
+      typeof experiment.scheduleHash !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(experiment.scheduleHash) ||
+      !isCount(experiment.block) ||
+      experiment.block < 1 ||
+      experiment.block > 3 ||
+      (experiment.arm !== "on" && experiment.arm !== "off") ||
+      (experiment.position !== "first" && experiment.position !== "second") ||
+      !isText(experiment.prefixRunId)
+    ) {
+      return fail("has a malformed `experiment`")
+    }
+    // The arm IS the routing policy: ON runs the shipped pathway, OFF the
+    // evaluation-only debate-off policy. A disagreement is two claims about the
+    // intervention.
+    const policyForArm = experiment.arm === "on" ? "shipped" : "debate-off"
+    if (dials.routingPolicy !== policyForArm) {
+      return fail(
+        `has an \`experiment.arm\` of ${experiment.arm}, but its \`dials.routingPolicy\` is ` +
+          `${JSON.stringify(dials.routingPolicy)} (arm ${experiment.arm} runs ${policyForArm})`,
+      )
+    }
+    const parent = run.forkedFrom as { kind?: unknown; value?: unknown } | undefined
+    if (parent?.kind !== "known" || parent.value !== experiment.prefixRunId) {
+      return fail("has an `experiment.prefixRunId` that is not its `run.forkedFrom`")
+    }
+  }
+
   return { ok: true, value: value as unknown as RunManifest }
 }
 

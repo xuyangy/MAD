@@ -102,6 +102,7 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
+import type { AdmissionSettlement, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 
@@ -188,6 +189,11 @@ export interface DiscoverInput {
    * cancelled passes nothing and this stage behaves exactly as it did.
    */
   signal?: AbortSignal
+  /**
+   * Story 2-5c — the experiment's per-request admission. Optional; absent, the
+   * stage gates exactly as it does without it. See `runWithOneRetry`.
+   */
+  admission?: RequestAdmission
 }
 
 export interface DiscoverResult {
@@ -278,9 +284,19 @@ function toLocus(raw: { file: string; startLine?: number; endLine?: number }): L
  *      already refuses to produce for cancellation.
  */
 type SlotOutcome =
-  | { skippedForBudget: false; envelope: Envelope<DiscoveryEnvelope>; attempts: number }
-  /** Never asked. `attempts` is the count actually BILLED, so it is always 0. */
-  | { skippedForBudget: true; attempts: 0 }
+  | {
+      skippedForBudget: false
+      envelope: Envelope<DiscoveryEnvelope>
+      attempts: number
+      /** Story 2-5c — set when the experiment's admission refused this slot's retry. */
+      admissionReason?: string
+    }
+  /**
+   * Never asked. `attempts` is the count actually BILLED, so it is always 0.
+   * `admissionReason` is set when the experiment's admission refused, rather
+   * than the run's ledger (story 2-5c).
+   */
+  | { skippedForBudget: true; attempts: 0; admissionReason?: string }
 
 async function runWithOneRetry(
   input: DiscoverInput,
@@ -350,7 +366,31 @@ async function runWithOneRetry(
       if (attempt === 1) return { skippedForBudget: true, attempts: 0 }
       return { skippedForBudget: false, envelope: last!, attempts: 1 }
     }
+    // Story 2-5c — THE EXPERIMENT'S GATE, asked after the ledger's and only when
+    // an evaluation supplied one. A refusal takes the budget branch above for
+    // every cause, so no retry follows it and nothing blames the model. The
+    // signal is read again once admission resolves, because admission may wait
+    // on I/O: a stop that landed meanwhile settles the request as never issued.
+    // Nothing is awaited between that check and `runTurn`.
+    let settle: SettleRequest | undefined
+    if (input.admission !== undefined) {
+      const decision = await input.admission.admit({ stage: "discover", slot, attempt })
+      if (!decision.ok) {
+        if (attempt === 1) return { skippedForBudget: true, attempts: 0, admissionReason: decision.reason }
+        return { skippedForBudget: false, envelope: last!, attempts: 1, admissionReason: decision.reason }
+      }
+      if (input.signal?.aborted) {
+        await decision.settle({ kind: "not-issued" })
+        return {
+          skippedForBudget: false,
+          envelope: cancelledTurn<DiscoveryEnvelope>(slot),
+          attempts: attempt - 1,
+        }
+      }
+      settle = decision.settle
+    }
     let envelope: Envelope<DiscoveryEnvelope>
+    let threw = false
     try {
       envelope = await input.backend.runTurn(
         slot,
@@ -363,6 +403,7 @@ async function runWithOneRetry(
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). If one throws anyway, that is still this slot's problem and
       // must not take the rest of the fan-out down with it.
+      threw = true
       envelope = {
         ok: false,
         slot,
@@ -423,6 +464,7 @@ async function runWithOneRetry(
     } else if (envelope.tokens) {
       recordTurn(input.ledger, { slot, stage: "discover", attempt, tokens: envelope.tokens })
     }
+    if (settle !== undefined) await settle(settlementOf(envelope, threw))
     // AC3 — collected per ATTEMPT, for the reason the parameter's comment gives.
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { skippedForBudget: false, envelope, attempts: attempt }
@@ -435,6 +477,23 @@ async function runWithOneRetry(
     last = envelope
   }
   return { skippedForBudget: false, envelope: last!, attempts: 2 }
+}
+
+/**
+ * Story 2-5c — what an admitted, issued attempt cost, in the ledger's order:
+ * the unknown marker first, else `tokens`, else unknown. A request that went out
+ * and came back with no usage figure, or whose `runTurn` threw, may have billed,
+ * so it is never settled as free.
+ */
+function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
+  if (envelope.usageUnknown) {
+    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
+  }
+  if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
+  return {
+    kind: "unknown",
+    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
+  }
 }
 
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
@@ -515,6 +574,8 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const warnings: Warning[] = []
   const droppedOut: string[] = []
   const skippedForBudget: string[] = []
+  /** Story 2-5c — the admission's reason for each slot it refused, by slot. */
+  const admissionRefusals = new Map<string, string>()
   let answered = 0
 
   /**
@@ -543,6 +604,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // named, once, without a provider in it.
     if (outcome.skippedForBudget) {
       skippedForBudget.push(rosterSlot.slot)
+      if (outcome.admissionReason !== undefined) admissionRefusals.set(rosterSlot.slot, outcome.admissionReason)
       return false
     }
     const { envelope } = outcome
@@ -599,6 +661,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
           attempts: outcome.attempts,
           failure: envelope.ok ? "none" : envelope.failure,
           error: envelope.ok ? "" : envelope.message,
+          ...(outcome.admissionReason === undefined ? {} : { admission: outcome.admissionReason }),
         },
       })
       return false
@@ -706,13 +769,20 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // The ceiling is NAMED BY THE ACCOUNTANT, not computed here. A stage that
     // multiplies the cap by its own share is a stage metering itself, which
     // AD-15 forbids and `scripts/lint-dependency-direction.ts` catches.
+    // Story 2-5c — when the experiment's admission refused every skipped slot,
+    // the run's own ceiling did not, so the sentence names the admission instead.
+    const admissionReasons = [...new Set(admissionRefusals.values())]
+    const cause =
+      admissionRefusals.size === skippedForBudget.length
+        ? `the experiment's admission refused them (${admissionReasons.join("; ")})`
+        : `doing so would have taken the run past ${ceilingNamed(input.ledger, "discover")}` +
+          (admissionReasons.length > 0 ? `, or the experiment's admission refused them (${admissionReasons.join("; ")})` : "")
     warnings.push({
       code: "discovery-truncated",
       stage: "discover",
       message:
         `BUDGET TRUNCATED DISCOVERY: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
-        `were never asked, because doing so would have taken the run past ` +
-        `${ceilingNamed(input.ledger, "discover")}. THOSE SLOTS were not skipped because a ` +
+        `were never asked, because ${cause}. THOSE SLOTS were not skipped because a ` +
         `model failed — they were never asked at all. This run examined the change with fewer ` +
         `models than it had available.`,
       detail: {
@@ -720,6 +790,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         poolSkipped,
         lensSkipped,
         cap: input.ledger.cap,
+        ...(admissionRefusals.size === 0 ? {} : { admission: Object.fromEntries(admissionRefusals) }),
       },
     })
   }
@@ -746,10 +817,13 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // rather than a branch.
     const poolIds = new Set(roster.slots.map((rosterSlot) => rosterSlot.slot))
     const poolSkippedCount = skippedForBudget.filter((slot) => poolIds.has(slot)).length
+    const poolAdmissionRefused = skippedForBudget.filter((slot) => poolIds.has(slot) && admissionRefusals.has(slot)).length
     const becauseBudget =
-      poolSkippedCount > 0
-        ? ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
-        : ""
+      poolSkippedCount === 0
+        ? ""
+        : poolAdmissionRefused === poolSkippedCount
+          ? ` ${poolSkippedCount} were never asked: the experiment's admission refused their turn.`
+          : ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
     warnings.push({
       code: "denominator-reduced",
       stage: "discover",

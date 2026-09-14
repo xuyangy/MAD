@@ -275,6 +275,65 @@ Scoring calls no model and bills nothing.
   above are over the hand-built cases for this change. They say nothing about another
   change, and nothing exact about how the aligner treated the findings this run raised.
 
+## The paired block runner (story 2-5c): a library, not a command
+
+`ablation/paired.ts` runs the protocol's three paired blocks. It has no CLI flag, and
+`scripts/ablation.ts` does not call it. Nothing in this section authorizes billing.
+
+Two calls, kept apart on purpose:
+
+1. `createSchedule` (`ablation/schedule.ts`) tosses one fair coin and publishes
+   `paired-schedule.json` at the bundle root. Heads gives first arms ON, OFF, ON; tails
+   gives OFF, ON, OFF. The file binds the frozen protocol's hash, the fixture seal, the code
+   revision, the resolved roster and a digest of every non-intervention setting. An existing
+   schedule refuses. A schedule is never re-tossed.
+2. `runPairedBlocks` takes the bundle root's lock (`paired.lock`), checks the schedule
+   against its own inputs, and writes `paired-start.json` before anything can bill. A present
+   start marker refuses every later invocation, so a started schedule is never run again.
+   Each block is one prefix, one fork, and the two continuations in the scheduled order.
+   Each arm with a run record gets one manifest carrying an `experiment` block.
+
+Every billable request is written to `paired-journal.jsonl` before it goes out and settled
+there with what it cost. The journal's bill counts each physical execution once, so a shared
+prefix is not counted again for each branch that inherited it. `paired-slots.jsonl` records a
+started and a terminal status, with its reason, for each of the six planned arm slots.
+
+Late usage is the caller's to reconcile. The result carries a reconciliation handle. A
+report that arrives after the run returned is held in memory until the caller calls
+`flush()`, and a process that exits first loses it.
+
+### What the fake-backed tests do not establish
+
+- **The runner's semantics, and nothing about a host.** Every test drives port calls on
+  fakes. They do not show how many physical requests a real host makes per port call.
+  The port forbids backend retries, but whether the opencode host honours that, and whether
+  each host subcall is accounted for, is unverified. Story 2.8 owns that check, and it must
+  pass before anything bills.
+- **A residual confound between the two arms of a block.** Each branch is a new run with
+  its own run id, and the judge's anonymizer seeds its order from the run id and the finding
+  id (`core/run/review.ts`, the `runId` passed to `judge`). So the two arms can show the judge
+  the same exchange in different anonymized orders. That difference is part of every paired
+  contrast, and it is not removed. It is documented here. Story 2-5d, the pairing reader,
+  owns reporting it beside each paired result; nothing reports it beside a result yet.
+
+### When a run stops and needs a human
+
+Nothing in the runner resumes on its own. Three states stop it and wait for a person:
+
+- **A stale `paired.lock`.** A process that died while it held the lock leaves the file
+  behind, and every later writer refuses. Confirm that no runner is still active on that
+  bundle root before you remove it.
+- **A latched halt.** Unknown usage, an uncertain request or an integrity failure latches
+  the halt and writes `unknown-usage-halt.json` at the bundle root. The journal and the arm
+  governor both refuse while that file exists.
+- **An uncertain request.** An `issued` line in `paired-journal.jsonl` with no `settled`
+  line was sent by an invocation that did not finish. Its cost is unquantified.
+
+In every case, keep `paired-journal.jsonl`, `paired-schedule.json`, `paired-start.json`
+and `paired-slots.jsonl` as they are. They are the evidence of what was scheduled, admitted
+and billed. A started schedule is never executed again, so a new evaluation starts from a
+new bundle root.
+
 ## What would falsify the design
 
 This is the experiment's whole point, so it is worth writing down before you run

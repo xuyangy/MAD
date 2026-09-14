@@ -7,7 +7,7 @@ import { emptyLedger, emptyTokenUsage } from "../domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../instructions/coding/discovery.ts"
 import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
 import { selectRoster } from "../roster/select.ts"
-import { candidate, fakeClock, FakeBackend, tokens, type SlotScript } from "../test-support/fakes.ts"
+import { candidate, fakeAdmission, fakeClock, FakeBackend, tokens, type SlotScript } from "../test-support/fakes.ts"
 import { discover } from "./discover.ts"
 
 function rosterOf(slots: number, models: [string, string][], lenses: readonly string[] = []) {
@@ -1298,5 +1298,192 @@ describe("discover — a session MAD could not delete (story 2.3, AC3)", () => {
     const discovered = await result
 
     expect(discovered.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
+  })
+})
+
+describe("discover — the per-request admission seam (story 2-5c)", () => {
+  function admitted(
+    script: Record<string, SlotScript>,
+    admission: ReturnType<typeof fakeAdmission>,
+    extra: { signal?: AbortSignal; slots?: number } = {},
+  ) {
+    const roster = rosterOf(extra.slots ?? 1, [
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+    ])
+    const backend = new FakeBackend(script)
+    const ledger = emptyLedger()
+    return {
+      backend,
+      ledger,
+      result: discover({
+        roster,
+        backend,
+        instructions: DISCOVERY_INSTRUCTIONS,
+        input: "diff",
+        clock: fakeClock(),
+        ledger,
+        admission: admission.admission,
+        ...(extra.signal === undefined ? {} : { signal: extra.signal }),
+      }),
+    }
+  }
+
+  test("every attempt asks, the retry included, and each is settled with its usage", async () => {
+    const admission = fakeAdmission()
+    const { result, backend } = admitted(
+      { "discovery-1": [{ kind: "fail", failure: "model-error" }, { kind: "ok", value: ONE_FINDING }] },
+      admission,
+    )
+    const discovered = await result
+    expect(discovered.answered).toBe(1)
+    expect(backend.calls).toHaveLength(2)
+    expect(admission.asked).toEqual([
+      { stage: "discover", slot: "discovery-1", attempt: 1 },
+      { stage: "discover", slot: "discovery-1", attempt: 2 },
+    ])
+    expect(admission.settlements.map((entry) => entry.settlement)).toEqual([
+      { kind: "usage", tokens: tokens() },
+      { kind: "usage", tokens: tokens() },
+    ])
+  })
+
+  test("a refused first attempt is a budget skip: never issued, never a drop-out", async () => {
+    const admission = fakeAdmission(() => true)
+    const { result, backend, ledger } = admitted({ "discovery-1": [{ kind: "ok", value: ONE_FINDING }] }, admission)
+    const discovered = await result
+    expect(backend.calls).toHaveLength(0)
+    expect(discovered.skippedForBudget).toEqual(["discovery-1"])
+    expect(discovered.droppedOut).toEqual([])
+    expect(discovered.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+    expect(ledger.entries).toHaveLength(0)
+    expect(admission.settlements).toHaveLength(0)
+  })
+
+  test("a retry refused after the first attempt settled is not issued", async () => {
+    const admission = fakeAdmission((request) => request.attempt === 2)
+    const { result, backend } = admitted(
+      { "discovery-1": [{ kind: "fail", failure: "model-error" }, { kind: "ok", value: ONE_FINDING }] },
+      admission,
+    )
+    const discovered = await result
+    expect(backend.calls).toHaveLength(1)
+    expect(admission.settlements).toHaveLength(1)
+    const dropped = discovered.warnings.find((warning) => warning.code === "model-dropped-out")
+    expect(dropped?.message).toContain("failed once, and the budget refused the retry")
+  })
+
+  test("the ledger's gate is asked first: a refused ledger never reaches admission", async () => {
+    const admission = fakeAdmission()
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const backend = new FakeBackend({ "discovery-1": [{ kind: "ok", value: ONE_FINDING }] })
+    await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: { ...emptyLedger(), cap: 0 },
+      admission: admission.admission,
+    })
+    expect(admission.asked).toHaveLength(0)
+    expect(backend.calls).toHaveLength(0)
+  })
+
+  test("a stop that lands while admission waits settles the request as never issued", async () => {
+    const controller = new AbortController()
+    const admission = fakeAdmission(undefined, () => controller.abort())
+    const { result, backend, ledger } = admitted(
+      { "discovery-1": [{ kind: "ok", value: ONE_FINDING }] },
+      admission,
+      { signal: controller.signal },
+    )
+    const discovered = await result
+    expect(backend.calls).toHaveLength(0)
+    expect(discovered.cancelled).toBe(true)
+    expect(admission.settlements.map((entry) => entry.settlement)).toEqual([{ kind: "not-issued" }])
+    expect(ledger.unknownUsage).toHaveLength(0)
+  })
+
+  test("unknown wins over tokens; neither field and a throw both settle unknown", async () => {
+    const admission = fakeAdmission()
+    const envelopes: Envelope<unknown>[] = [
+      { ok: true, slot: "discovery-1", value: ONE_FINDING, tokens: tokens(), usageUnknown: { executionId: "exec-9", why: "host said so" } },
+      { ok: true, slot: "discovery-2", value: ONE_FINDING },
+    ]
+    let call = 0
+    const backend: ModelBackend = {
+      capabilities: (): BackendCapabilities => ({ tools: true }),
+      async runTurn<T>(slot: string, _i: string, _input: string, _schema: ZodType<T>): Promise<Envelope<T>> {
+        call += 1
+        if (slot === "discovery-3") throw new Error("socket closed")
+        return envelopes[call - 1] as Envelope<T>
+      },
+    }
+    const roster = rosterOf(3, [
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ])
+    await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+      limiter: createLimiter(1),
+      admission: admission.admission,
+    })
+    const bySlot = (slot: string) => admission.settlements.filter((entry) => entry.request.slot === slot).map((entry) => entry.settlement)
+    expect(bySlot("discovery-1")).toEqual([{ kind: "unknown", why: "host said so", executionId: "exec-9" }])
+    expect(bySlot("discovery-2")[0]).toMatchObject({ kind: "unknown" })
+    expect(bySlot("discovery-3").every((settlement) => settlement.kind === "unknown")).toBe(true)
+    expect(bySlot("discovery-3").length).toBeGreaterThan(0)
+  })
+
+  test("absent, nothing is asked and the stage is what it was", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result, backend } = run(roster, { "discovery-1": [{ kind: "ok", value: ONE_FINDING }] })
+    expect((await result).answered).toBe(1)
+    expect(backend.calls).toHaveLength(1)
+  })
+})
+
+describe("discover — an admission refusal names its cause (story 2-5c review)", () => {
+  test("the truncation warning names the admission's reason, not the run's ceiling", async () => {
+    const admission = fakeAdmission(() => true)
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const discovered = await discover({
+      roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ONE_FINDING }] }),
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: { ...emptyLedger(), cap: 255_000 },
+      admission: admission.admission,
+    })
+    const truncated = discovered.warnings.find((warning) => warning.code === "discovery-truncated")
+    expect(truncated?.message).toContain("the experiment's admission refused them (refused by the fake admission)")
+    expect(truncated?.message).not.toContain("taken the run past")
+    expect(truncated?.detail?.["admission"]).toEqual({ "discovery-1": "refused by the fake admission" })
+    const reduced = discovered.warnings.find((warning) => warning.code === "denominator-reduced")
+    expect(reduced?.message).toContain("the experiment's admission refused their turn")
+  })
+
+  test("a refused retry after a real failure records the admission's reason in the drop-out detail", async () => {
+    const admission = fakeAdmission((request) => request.attempt === 2)
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const discovered = await discover({
+      roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "fail", failure: "model-error" }] }),
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+      admission: admission.admission,
+    })
+    const dropped = discovered.warnings.find((warning) => warning.code === "model-dropped-out")
+    expect(dropped?.detail?.["admission"]).toBe("refused by the fake admission")
   })
 })

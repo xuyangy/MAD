@@ -19,6 +19,7 @@ import type { ModelBackend } from "../ports/model-backend.ts"
 import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
   DEFAULT_JUDGE_ANSWERS,
+  fakeAdmission,
   fakeClock,
   FakeBackend,
   judgeRoleOf,
@@ -28,6 +29,7 @@ import {
   type SlotScript,
 } from "../test-support/fakes.ts"
 import { MAX_BLAME_ROWS } from "../judge/blame.ts"
+import { assignJudgeSlots } from "../judge/slots.ts"
 import { judge, type JudgeInput } from "./judge.ts"
 
 // ---------------------------------------------------------------------------
@@ -1582,5 +1584,136 @@ describe("judge — a session MAD could not delete (story 2.3, AC3)", () => {
     const result = await run([finding({ route: "judge" })])
 
     expect(result.warnings.map((w) => w.code)).not.toContain("session-cleanup-unresolved")
+  })
+})
+
+describe("judge — the per-request admission seam (story 2-5c)", () => {
+  test("every role asks, and every admitted attempt is settled", async () => {
+    const admission = fakeAdmission()
+    await run([argued()], { admission: admission.admission })
+    expect(admission.asked.map((request) => request.stage)).toEqual(["judge", "judge", "judge", "judge"])
+    expect(admission.settlements).toHaveLength(4)
+  })
+
+  test("a refused aggregator strands the finding on the budget path, keeping the steps before it", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "aggregate")
+    const result = await run([subject], { admission: admission.admission, roster: roster(FIVE) })
+    expect(subject.verdict).toBeUndefined()
+    expect(subject.unresolved?.diedAtStage).toBe("judge")
+    expect(subject.unresolved?.reason).toContain("while it was being judged")
+    expect(subject.factCheck).toBeDefined()
+    expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+    expect(result.unresolved).toBe(1)
+    expect(result.turns).toBe(3)
+  })
+
+  test("a refused fact-check strands the finding and keeps the logic evaluation beside it", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "fact-check")
+    const result = await run([subject], { admission: admission.admission, roster: roster(FIVE) })
+    expect(subject.unresolved?.diedAtStage).toBe("judge")
+    expect(subject.logicEval).toBeDefined()
+    expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+  })
+
+  test("a refused logic evaluation does not strand: the aggregator still rules", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "logic-eval")
+    await run([subject], { admission: admission.admission, roster: roster(FIVE) })
+    expect(subject.unresolved).toBeUndefined()
+    expect(subject.logicEval).toBeUndefined()
+    expect(subject.verdict).toBe("upheld")
+  })
+
+  test("a refused first finding latches exhaustion for every later finding", async () => {
+    const admission = fakeAdmission(() => true)
+    const first = argued({ id: "f-1", severity: "critical" })
+    const second = finding({ id: "f-2", route: "judge" })
+    const result = await run([first, second], { admission: admission.admission })
+    expect(first.unresolved?.diedAtStage).toBe("judge")
+    expect(second.unresolved?.diedAtStage).toBe("judge")
+    expect(result.turns).toBe(0)
+    expect(admission.asked).toHaveLength(1)
+  })
+})
+
+/**
+ * Five slots give every judge role its own slot for one finding, so a request's
+ * slot names its role.
+ */
+const FIVE = ["discovery-1", "discovery-2", "discovery-3", "discovery-4", "discovery-5"]
+
+function rolesBySlot(subject: Finding): Map<string, JudgeRoleTag> {
+  const assigned = assignJudgeSlots({ roster: roster(FIVE), answeredSlots: FIVE, hasTools: () => true, finding: subject })!
+  const roles = new Map<string, JudgeRoleTag>()
+  for (const [role, slot] of Object.entries(assigned.byRole)) roles.set(slot, role as JudgeRoleTag)
+  if (roles.size !== 4) throw new Error("the judge roles did not get distinct slots")
+  return roles
+}
+
+describe("judge — admission refusals name their cause and keep real failures (story 2-5c review)", () => {
+  test("an admission refusal names the admission's reason, not the run's cap", async () => {
+    const admission = fakeAdmission(() => true)
+    const subject = finding({ route: "judge" })
+    const result = await run([subject], { admission: admission.admission, ledger: { ...emptyLedger(), cap: 255_000 } })
+    expect(subject.unresolved?.reason).toContain("refused by the fake admission")
+    expect(subject.unresolved?.reason).not.toContain("token budget")
+    const warning = result.warnings.find((entry) => entry.code === "unresolved-findings")
+    expect(warning?.message).toContain("ADMISSION REFUSED IN JUDGING")
+    expect(warning?.message).not.toContain("255000")
+    expect(warning?.detail?.["admission"]).toBe("refused by the fake admission")
+  })
+
+  test("a retry refused at attempt 2 keeps the first attempt's failure and strands the finding", async () => {
+    const admission = fakeAdmission((request) => request.attempt === 2)
+    const subject = finding({ route: "judge" })
+    const backend = failingRoles("fact-check")
+    const result = await run([subject], { admission: admission.admission, backend })
+    expect(backend.calls).toHaveLength(1)
+    const lost = result.warnings.find((warning) => warning.code === "model-dropped-out")
+    expect(lost?.message).toContain("its retry was refused")
+    expect(lost?.detail?.["attempts"]).toBe(1)
+    expect(subject.unresolved?.diedAtStage).toBe("judge")
+    expect(subject.verdict).toBeUndefined()
+    expect(result.attempts).toBe(1)
+    expect(result.turns).toBe(1)
+  })
+
+  test("the per-attempt ledger gate refuses a retry after a failure pushed spend past the judge's ceiling", async () => {
+    const admission = fakeAdmission()
+    const subject = finding({ route: "judge" })
+    const backend = failingRoles("fact-check")
+    await run([subject], { admission: admission.admission, backend, ledger: { ...emptyLedger(), cap: 20 } })
+    expect(backend.calls).toHaveLength(1)
+    expect(admission.asked).toHaveLength(1)
+    expect(subject.unresolved?.reason).toContain("the token budget (20) ran out")
+  })
+
+  test.each([
+    ["unknown wins over tokens", "both" as const, [{ kind: "unknown" as const, why: "host said so", executionId: "exec-1" }]],
+    ["a missing figure settles unknown", "none" as const, "unknown"],
+    ["a throw settles unknown", "throw" as const, "unknown"],
+  ])("settlement: %s", async (_name, mode, expected) => {
+    const admission = fakeAdmission()
+    const backend: ModelBackend = {
+      capabilities: () => ({ tools: true }),
+      async runTurn(slot, instructions, _input, schema) {
+        if (mode === "throw") throw new Error("socket closed")
+        const value = schema.parse(DEFAULT_JUDGE_ANSWERS[judgeRoleOf(instructions)!])
+        if (mode === "both") return { ok: true, slot, value, tokens: tokens(), usageUnknown: { executionId: "exec-1", why: "host said so" } }
+        return { ok: true, slot, value }
+      },
+    }
+    await run([finding({ route: "judge" })], { admission: admission.admission, backend })
+    const settlements = admission.settlements.map((entry) => entry.settlement)
+    if (Array.isArray(expected)) expect(settlements).toEqual(expected)
+    else {
+      expect(settlements.length).toBeGreaterThan(0)
+      expect(settlements.every((settlement) => settlement.kind === expected)).toBe(true)
+    }
   })
 })

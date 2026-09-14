@@ -35,8 +35,15 @@
  *
  * A governor that also answered the first question would put two authorities on
  * one question, which is the failure `core/budget/ledger.ts:10-19` exists to
- * prevent. The surface is three functions and `governor.test.ts` pins that it is
- * three.
+ * prevent. The arm governor object's surface is three functions and
+ * `governor.test.ts` pins that it is three; the request-level functions below
+ * are module exports, not part of that object.
+ *
+ * The paired runner (story 2-5c) adds a third question at a different level:
+ * **"may the experiment issue this REQUEST?"**, answered by `requestGate` below
+ * over the journal's unique-execution bill (`ablation/journal.ts`). It does not
+ * replace the run's answer. A stage asks `mayISpend` first and the experiment's
+ * admission second, and a request must pass both.
  *
  * ## THE HALT IS A FILE, BECAUSE AN IN-MEMORY FLAG RESUMES AUTOMATICALLY
  *
@@ -91,6 +98,7 @@ import {
   type UnknownUsageEntry,
 } from "../core/domain/run-record.ts"
 import type { ArmRun } from "./arms.ts"
+import type { UniqueExecutionBill } from "./journal.ts"
 import type { TokenExposure } from "./manifest.ts"
 
 /**
@@ -447,5 +455,174 @@ export function createExperimentGovernor(options: ExperimentGovernorOptions): Ex
     },
 
     state,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Story 2-5c — the request-level gates of the paired runner
+// ---------------------------------------------------------------------------
+
+/**
+ * `evaluation-protocol.md` §4 — the configured admission thresholds, in the
+ * ledger's own five-counter unit.
+ *
+ * - `global` bounds persisted spend over EVERY allowance category.
+ * - `blocks` bounds the Blocks category. Three blocks admit at most 1,350,000;
+ *   the remaining 50,000 is reporting headroom for overshoot and is never
+ *   admitted against.
+ * - `prefix` bounds one block's shared preparation, and `continuation` each of
+ *   its ON and OFF continuations. Both count NEW consumption only.
+ * - `runCap` is the ordinary attributed whole-run cap each branch keeps. It is
+ *   the ledger's `tokenCap` and is enforced by `mayISpend`, not here.
+ *
+ * Thresholds, not bills: work admitted below a threshold may overshoot it, and
+ * the overshoot is reported rather than borrowed from another allowance.
+ */
+export const PAIRED_ALLOWANCES = {
+  global: 2_000_000,
+  blocks: 1_400_000,
+  prefix: 60_000,
+  continuation: 195_000,
+  runCap: 255_000,
+} as const
+
+/** The four allowance categories the protocol names. Only `blocks` is wired. */
+export type AllowanceCategory = "blocks" | "adversarial" | "calibration" | "pilot"
+
+/** Where a Blocks request is spent: a block's shared prefix or one continuation. */
+export type PairedPhase = "prefix" | "on" | "off"
+
+/**
+ * What the request gates read: known persisted spend from the journal's
+ * unique-execution bill, plus the two latched states.
+ */
+export interface RequestGateView {
+  /** Why the runner stopped admitting (a journal or persistence failure), or `null`. */
+  stop: string | null
+  /** The first unknown-usage, uncertainty or integrity reason, or `null`. Never cleared. */
+  halt: string | null
+  /** Known spend over every category, each physical execution once. */
+  globalSpent: number
+  categorySpent(category: AllowanceCategory): number
+  phaseSpent(block: number, phase: PairedPhase): number
+}
+
+export type RequestGateResult =
+  | { ok: true }
+  | { ok: false; cause: "budget" | "halted" | "runner-stop"; reason: string }
+
+/**
+ * May the experiment issue one more Blocks request in `block`/`phase`?
+ *
+ * Every test is `spent < limit`, so a threshold refuses AT its value. In-flight
+ * work has no finite bound and none is invented: an admitted request that has
+ * not settled adds nothing here. The order only decides which reason is
+ * reported; a request must pass all of them.
+ */
+export function requestGate(
+  view: RequestGateView,
+  target: { block: number; phase: PairedPhase },
+): RequestGateResult {
+  if (view.stop !== null) {
+    return {
+      ok: false,
+      cause: "runner-stop",
+      reason: `the paired runner stopped admitting: ${view.stop}. No model failed.`,
+    }
+  }
+  if (view.halt !== null) {
+    return {
+      ok: false,
+      cause: "halted",
+      reason:
+        `the experiment is HALTED: ${view.halt}. Token exposure is unquantified and admission does ` +
+        `not resume automatically (\`evaluation-protocol.md:332-339\`).`,
+    }
+  }
+  if (!(view.globalSpent < PAIRED_ALLOWANCES.global)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${PAIRED_ALLOWANCES.global} tokens`,
+    }
+  }
+  const blocks = view.categorySpent("blocks")
+  if (!(blocks < PAIRED_ALLOWANCES.blocks)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the Blocks allowance is exhausted: ${blocks} of ${PAIRED_ALLOWANCES.blocks} tokens`,
+    }
+  }
+  const limit = target.phase === "prefix" ? PAIRED_ALLOWANCES.prefix : PAIRED_ALLOWANCES.continuation
+  const phase = view.phaseSpent(target.block, target.phase)
+  if (!(phase < limit)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason:
+        `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
+        `allowance is exhausted: ${phase} of ${limit} newly executed tokens`,
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * The halt, in `ExperimentGovernorState`'s terms, read off a journal bill rather
+ * than off attributed ledgers: known spend counts each physical execution once,
+ * and a shared prefix is not counted again for each branch that inherited it.
+ *
+ * Unknown executions keep their identity, and an uncertain request (issued by an
+ * interrupted invocation and never settled) is listed with them:
+ *
+ * - `armId` is the arm (`on` or `off`) for a continuation, `prefix of block N`
+ *   for a block's shared preparation, and the category name for any other
+ *   allowance category.
+ * - `repeatId` is the 0-based block for a Blocks request, and -1 for a request
+ *   that belongs to no block.
+ *
+ * Three fields read differently from the arm governor's:
+ *
+ * - `observedRuns` counts the distinct runs the journal holds requests for.
+ * - `unresolvedCleanups` is empty because the journal records requests, not
+ *   warnings; session cleanups stay on each arm's own record and manifest.
+ * - `markerFile` / `markerError` describe the halt marker the journal wrote.
+ *
+ * A runner stop is not a halt, and a completed invocation always ends with one,
+ * so it is carried in its own `runnerStop` field.
+ */
+export function governorStateFromBill(bill: UniqueExecutionBill): ExperimentGovernorState & { runnerStop: string | null } {
+  const unknownRequests = [...bill.unknown, ...bill.uncertain]
+  return {
+    halted: bill.halt !== null,
+    haltReason: bill.halt,
+    knownSpend: { ...bill.known },
+    knownSpendTokens: spentTokens(bill.known),
+    unknownUsage: unknownRequests.map((request) => ({
+      armId:
+        request.category !== "blocks" || request.phase === null
+          ? request.category
+          : request.phase === "prefix"
+            ? `prefix of block ${request.block}`
+            : request.phase,
+      repeatId: request.category === "blocks" && request.block !== null ? request.block - 1 : -1,
+      runId: request.runId,
+      entry: {
+        slot: request.slot,
+        stage: request.stage,
+        attempt: request.attempt,
+        executionId: request.executionId ?? request.physicalId,
+        why: request.why ?? "issued by an interrupted invocation and never settled",
+      },
+    })),
+    unknownUsageCount: unknownRequests.length,
+    unresolvedCleanups: [],
+    inFlight: bill.inFlight.length,
+    observedRuns: new Set(bill.requests.map((request) => request.runId)).size,
+    exposure: bill.halt !== null || unknownRequests.length > 0 ? "unquantified" : "quantified",
+    markerFile: bill.haltMarker.file,
+    markerError: bill.haltMarker.error,
+    runnerStop: bill.stop,
   }
 }
