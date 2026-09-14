@@ -29,6 +29,8 @@
  */
 
 import {
+  addTokens,
+  emptyTokenUsage,
   recordTurn,
   recordUnknownTurn,
   type LedgerEntry,
@@ -237,6 +239,99 @@ export function unknownUsageClause(ledger: TokenLedger): string | null {
   return (
     `${subject} UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full ` +
     `count. MAD does not fill the gap in.`
+  )
+}
+
+/** One part of a ledger's usage: counted tokens, counted turns, uncounted executions. */
+export interface UsageSlice {
+  tokens: TokenUsage
+  turns: number
+  unknown: number
+}
+
+export interface UsageByOrigin {
+  attributed: UsageSlice
+  executedHere: UsageSlice
+  inherited: UsageSlice
+}
+
+/**
+ * SPEC.md "Evaluation exception" / AD-15 amended — the ledger split by WHO
+ * EXECUTED each row (`evaluation-protocol.md` §8, *The readers are the work*).
+ *
+ * - `attributed` — everything this ledger holds: `total`, `entries.length` and
+ *   `unknownUsage.length`. It is what `mayISpend` compares with the cap, so a
+ *   forked branch inherits its prefix against its own logical cap.
+ * - `executedHere` — rows with no `origin`: requests this run issued itself.
+ * - `inherited` — rows with an `origin`: requests an earlier run issued.
+ *
+ * TWO BRANCHES' ATTRIBUTED FIGURES ARE NOT A BILL. Each counts the same prefix,
+ * so their sum counts it twice. A bill over several runs counts each physical
+ * execution once, and nothing here computes it.
+ *
+ * On a ledger no fork touched, `executedHere` equals `attributed` and `inherited`
+ * is zero, which is what lets every renderer print its labels only for a forked
+ * run. An inherited unknown is counted in `inherited.unknown` and never becomes
+ * a number.
+ *
+ * A LEDGER WITH NO UNKNOWN-USAGE COLLECTION IS READ AS AN EMPTY ONE, and the
+ * `Array.isArray` guard is not dead code though the type says it is:
+ * `TokenLedger.unknownUsage` is required, so every ledger MAD builds has one,
+ * but a record deserialized from a pre-2.3 dump or handed over by a JavaScript
+ * caller has not been through that type. `ablation/manifest.ts`'s `auditUsage`
+ * and `ablation/governor.ts`'s `observe` already meet that shape and answer it
+ * without throwing, and `ablation/compare.ts`'s `armCost` reads the same
+ * untrusted records; a split that threw instead would make the report builder
+ * the one place a pre-2.3 dump crashes. The absence costs this function nothing,
+ * because an absent collection holds no inherited unknown either way.
+ *
+ * IT IS NOT A CLAIM THAT THE USAGE IS COMPLETE. `usageIsComplete` and
+ * `unknownUsageCount` answer that, and they still read the field directly — a
+ * `core/` caller renders a ledger this module's own types built.
+ */
+export function usageByOrigin(ledger: TokenLedger): UsageByOrigin {
+  const unknownUsage = Array.isArray(ledger.unknownUsage) ? ledger.unknownUsage : []
+  let hereTokens = emptyTokenUsage()
+  let inheritedTokens = emptyTokenUsage()
+  let hereTurns = 0
+  let inheritedTurns = 0
+  for (const entry of ledger.entries) {
+    if (entry.origin === undefined) {
+      hereTokens = addTokens(hereTokens, entry.tokens)
+      hereTurns += 1
+    } else {
+      inheritedTokens = addTokens(inheritedTokens, entry.tokens)
+      inheritedTurns += 1
+    }
+  }
+  const inheritedUnknown = unknownUsage.filter((entry) => entry.origin !== undefined).length
+  return {
+    attributed: { tokens: ledger.total, turns: ledger.entries.length, unknown: unknownUsage.length },
+    executedHere: {
+      tokens: hereTokens,
+      turns: hereTurns,
+      unknown: unknownUsage.length - inheritedUnknown,
+    },
+    inherited: { tokens: inheritedTokens, turns: inheritedTurns, unknown: inheritedUnknown },
+  }
+}
+
+/**
+ * Whether the split holds any inherited usage at all, counted or not.
+ *
+ * TOKENS ARE TESTED BESIDE THE TWO COUNTS, and not because a ledger can carry
+ * inherited tokens over zero inherited turns — `usageByOrigin` adds a row's
+ * tokens and its turn together, so it cannot. A split READ BACK from a manifest
+ * can: `ablation/read-bundle.ts` parses a `spend.origin` some other writer
+ * produced, and a figure the reader would add across arms must not go
+ * unlabelled because its turn count happened to be zero. One predicate, so a
+ * renderer's idea of "inherited" cannot drift from the reader's validation.
+ */
+export function hasInheritedUsage(split: UsageByOrigin): boolean {
+  return (
+    split.inherited.turns > 0 ||
+    split.inherited.unknown > 0 ||
+    spentTokens(split.inherited.tokens) > 0
   )
 }
 

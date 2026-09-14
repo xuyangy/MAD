@@ -327,3 +327,41 @@ describe("reconcileLateUsage — AC2, and it throws nothing", () => {
     expect(summary).toEqual({ recovered: [], unmatched: [], conflicts: [], stillUnknown: 1 })
   })
 })
+
+describe("ledger provenance — an origin survives recording and recovery (story 2.5A, 2-5b)", () => {
+  test("an INHERITED unknown recovers into a row that names the executing run by execution id", () => {
+    const ledger = emptyLedger()
+    recordUnknownTurn(ledger, unknown({ origin: { runId: "run-P" } }))
+    expect(ledger.unknownUsage[0]!.origin).toEqual({ runId: "run-P" })
+
+    reconcileLateUsage(ledger, [{ executionId: "exec-1", tokens: usage(7, 11) }])
+
+    expect(ledger.unknownUsage).toEqual([])
+    expect(ledger.entries).toEqual([
+      {
+        slot: "discovery-1",
+        stage: "discover",
+        attempt: 1,
+        tokens: usage(7, 11),
+        origin: { runId: "run-P", executionId: "exec-1" },
+      },
+    ])
+  })
+
+  test("a LOCAL unknown recovers into a row with NO origin — executed here, and no field says otherwise", () => {
+    const ledger = emptyLedger()
+    recordUnknownTurn(ledger, unknown())
+    reconcileLateUsage(ledger, [{ executionId: "exec-1", tokens: usage(7, 11) }])
+    expect(ledger.entries).toHaveLength(1)
+    expect("origin" in ledger.entries[0]!).toBe(false)
+  })
+
+  test("recordTurn keeps an origin it is handed and adds none it is not", () => {
+    const ledger = emptyLedger()
+    recordTurn(ledger, { slot: "s", stage: "discover", attempt: 1, tokens: usage(1), origin: { runId: "run-P", entry: 0 } })
+    recordTurn(ledger, { slot: "s", stage: "judge", attempt: 1, tokens: usage(2) })
+    expect(ledger.entries[0]!.origin).toEqual({ runId: "run-P", entry: 0 })
+    expect("origin" in ledger.entries[1]!).toBe(false)
+    expect(ledger.total.input).toBe(3)
+  })
+})

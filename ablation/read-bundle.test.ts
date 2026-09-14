@@ -57,9 +57,46 @@ interface Fake {
   /** Story 2.5A — absent writes the field ABSENT, the pre-2.5A shape. */
   routingPolicy?: unknown
   cap?: number
+  /**
+   * Story 2.5A, child 2-5b — `run.forkedFrom` and `spend.origin`.
+   *
+   * THE DEFAULTS ARE WHAT THE WRITER PRODUCES, for the `usageCompleteness`
+   * reason above: `buildManifest` writes both fields on EVERY manifest, so a
+   * fixture that omitted them by default would test this reader against a
+   * manifest MAD no longer produces, and would route every other case in this
+   * file down the pre-2.5b compatibility path. The default is an unforked run —
+   * `forkedFrom` unknown, an all-inherited-zero split over `total` — and a test
+   * that wants the legacy shape passes `undefined`, which `JSON.stringify`
+   * drops.
+   */
+  forkedFrom?: unknown
+  origin?: unknown
+}
+
+/**
+ * The split an UNFORKED run's manifest carries: everything attributed, all of it
+ * executed here, nothing inherited.
+ *
+ * DERIVED FROM THE FAKE'S OWN `total` AND `unknownUsage`, never a frozen literal,
+ * because `provenanceProblem` refuses a split that does not conserve against
+ * them. A test that overrides either field and says nothing about provenance
+ * would otherwise write a manifest that is malformed for a reason it never
+ * meant to test. A test writing a malformed `total` still gets the message that
+ * names `spend.total`, which is checked first.
+ */
+function unforkedOrigin(total: unknown, unknownUsage: unknown): unknown {
+  const zero = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  const unknown = Array.isArray(unknownUsage) ? unknownUsage.length : 0
+  return {
+    attributed: { tokens: total, turns: 1, unknown },
+    executedHere: { tokens: total, turns: 1, unknown },
+    inherited: { tokens: zero, turns: 0, unknown: 0 },
+  }
 }
 
 function manifestFor(fake: Fake): unknown {
+  const total = fake.total ?? { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  const unknownUsage = "unknownUsage" in fake ? fake.unknownUsage : []
   return {
     schemaVersion: fake.schemaVersion ?? MANIFEST_SCHEMA_VERSION,
     identity: {
@@ -76,7 +113,14 @@ function manifestFor(fake: Fake): unknown {
         diffHash: fake.diffHash ?? "sha256:diff",
       },
     },
-    run: { runId: `run-${fake.armId}-${fake.repeatId}`, startedAt: "2026-09-10T00:00:00.000Z", finishedAt: known("2026-09-10T00:01:00.000Z") },
+    run: {
+      runId: `run-${fake.armId}-${fake.repeatId}`,
+      ...("forkedFrom" in fake
+        ? { forkedFrom: fake.forkedFrom }
+        : { forkedFrom: unknownValue("the run was not forked") }),
+      startedAt: "2026-09-10T00:00:00.000Z",
+      finishedAt: known("2026-09-10T00:01:00.000Z"),
+    },
     roster: {
       requested: 3,
       filled: 3,
@@ -99,15 +143,16 @@ function manifestFor(fake: Fake): unknown {
     },
     spend: {
       perStage: fake.perStage ?? [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
-      total: fake.total ?? { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      total,
       // `in` RATHER THAN `??`, for these four only. A test that wants to write a
       // manifest with the field ABSENT — the pre-2.3 shape a reader will meet on
       // disk — passes `undefined`, which `JSON.stringify` drops; `??` would
       // silently substitute the healthy default and the test would pin nothing.
       usageCompleteness: "usageCompleteness" in fake ? fake.usageCompleteness : "complete",
-      unknownUsage: "unknownUsage" in fake ? fake.unknownUsage : [],
+      unknownUsage,
       unknownUsageCount: "unknownUsageCount" in fake ? fake.unknownUsageCount : 0,
       exposure: "exposure" in fake ? fake.exposure : "quantified",
+      ...("origin" in fake ? { origin: fake.origin } : { origin: unforkedOrigin(total, unknownUsage) }),
     },
     status: {
       completion: fake.completion ?? "completed",
@@ -1148,5 +1193,219 @@ describe("story 2.5A — the routing policy is the intervention, not a confound"
     expect(text).toContain("ROUTING POLICY IS MIXED WITHIN ARM(S) off")
     expect(text).not.toContain("that is the intervention")
     expect(text).not.toContain("NOISE FLOOR: for off")
+  })
+})
+
+describe("story 2.5A (2-5b) — ledger provenance is checked against the rest of spend", () => {
+  const T = (input: number, output: number) => ({ input, output, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  const slice = (tokens: ReturnType<typeof T>, turns: number, unknown = 0) => ({ tokens, turns, unknown })
+  /** Consistent with the fixture's default `spend.total` of 10 in / 20 out and no unknowns. */
+  const split = (over: Record<string, unknown> = {}) => ({
+    attributed: slice(T(10, 20), 2),
+    executedHere: slice(T(4, 8), 1),
+    inherited: slice(T(6, 12), 1),
+    ...over,
+  })
+  const identityWithOrigin = (executionId: string, origin: unknown) => ({
+    slot: "discovery-1",
+    stage: "discover",
+    attempt: 1,
+    executionId,
+    why: "the host reported no usage",
+    origin,
+  })
+
+  test("LEGACY: neither field is read as NOT FORKED, says so, and leaves the table unchanged", async () => {
+    // BOTH FIELDS PASSED `undefined`, which `JSON.stringify` drops. The fixture
+    // default is what `buildManifest` writes, so the pre-2.5b shape is the one a
+    // test has to ask for — the same way the pre-2.3 audit fields are asked for.
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [{ armId: "on", repeatId: 0, forkedFrom: undefined, origin: undefined }],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(1)
+    expect(text).toContain("on repeat 0 — carries no ledger provenance, so it is read as NOT FORKED")
+    expect(text).toContain("That says nothing about whether its usage is complete.")
+    expect(text).toContain("status      tokens (observed)")
+    expect(text).not.toContain("attributed")
+  })
+
+  test("ORDINARY: a manifest from a run never forked reads cleanly, with no legacy line and no label", async () => {
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          forkedFrom: unknownValue("the run was not forked"),
+          origin: split({ executedHere: slice(T(10, 20), 2), inherited: slice(T(0, 0), 0) }),
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(1)
+    expect(text).not.toContain("carries no ledger provenance")
+    expect(text).not.toContain("attributed")
+  })
+
+  test("FORKED: the table labels attributed and newly executed, and says which may be added", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(2)
+    expect(text).toContain("tokens (attributed, observed)  newly executed (observed)")
+    const onRow = text.split("\n").find((line) => line.startsWith("  on "))!
+    expect(onRow).toMatch(/30 +12$/)
+    expect(text).toContain("Add newly executed figures")
+  })
+
+  test("MIXED: a provenance-less arm beside a forked one prints its own total as newly executed", async () => {
+    // THE ONE PATH THAT REACHES `newlyExecutedTokens`' FALLBACK. The second column
+    // is printed for EVERY arm as soon as ONE arm inherited, so an arm whose
+    // manifest predates provenance is rendered through it — and the figure it
+    // prints there is the figure the line below tells a reader to add across
+    // arms. With every arm in a bundle either forked or alone, the fallback could
+    // be deleted and nothing would fail.
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0, forkedFrom: undefined, origin: undefined },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(2)
+    expect(text).toContain("tokens (attributed, observed)  newly executed (observed)")
+    // The legacy arm inherited nothing anyone can name, so its whole total is its
+    // own: 30 under both headings, and NOT 0.
+    const offRow = text.split("\n").find((line) => line.startsWith("  off "))!
+    expect(offRow).toMatch(/30 +30$/)
+    expect(text).toContain("off repeat 0 — carries no ledger provenance, so it is read as NOT FORKED")
+  })
+
+  test("FRACTIONAL token figures are accepted, and conservation tolerates regrouped sums", async () => {
+    // 0.1 + 0.2 is not 0.3 in floating point, which is the case the tolerance is for.
+    const total = { input: 0.3, output: 1.25, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          total,
+          forkedFrom: known("run-P"),
+          origin: {
+            attributed: slice(total, 2),
+            executedHere: slice({ ...T(0.1, 0.5) }, 1),
+            inherited: slice({ ...T(0.2, 0.75) }, 1),
+          },
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.unreadable).toEqual([])
+    expect(result.comparable).toHaveLength(1)
+  })
+
+  test("MALFORMED: each broken contract is refused, with its reason", async () => {
+    const forked = { forkedFrom: known("run-P") }
+    const cases: [string, Partial<Fake>, string][] = [
+      // `undefined` on the OTHER field, because the fixture default writes both:
+      // "exactly one absent" is the contract under test, so the absence has to be
+      // asked for rather than inherited from a fixture that omits it.
+      ["forkedFrom without origin", { forkedFrom: known("run-P"), origin: undefined }, "no `spend.origin`"],
+      ["origin without forkedFrom", { forkedFrom: undefined, origin: split() }, "no `run.forkedFrom`"],
+      ["malformed forkedFrom", { forkedFrom: { kind: "known", value: 3 }, origin: split() }, "`run.forkedFrom`"],
+      ["an unreadable origin", { ...forked, origin: "lots" }, "unreadable `spend.origin`"],
+      ["a negative token figure", { ...forked, origin: split({ inherited: slice(T(-1, 12), 1) }) }, "`spend.origin.inherited`"],
+      ["a non-finite token figure", { ...forked, origin: split({ inherited: slice({ ...T(6, 12), output: null } as never, 1) }) }, "`spend.origin.inherited`"],
+      ["a fractional turn count", { ...forked, origin: split({ executedHere: slice(T(4, 8), 1.5) }) }, "`spend.origin.executedHere`"],
+      ["a negative unknown count", { ...forked, origin: split({ executedHere: slice(T(4, 8), 1, -1) }) }, "`spend.origin.executedHere`"],
+      ["parts that do not add up", { ...forked, origin: split({ executedHere: slice(T(5, 8), 1) }) }, "do not add up to attributed"],
+      [
+        "attributed that differs from the total",
+        { ...forked, origin: split({ attributed: slice(T(11, 20), 2), executedHere: slice(T(5, 8), 1) }) },
+        "differs from `spend.total`",
+      ],
+      ["turns that do not add up", { ...forked, origin: split({ attributed: slice(T(10, 20), 3) }) }, "turns do not add up"],
+      [
+        "an attributed unknown count with no identity behind it",
+        { ...forked, origin: split({ attributed: slice(T(10, 20), 2, 1), executedHere: slice(T(4, 8), 1, 1) }) },
+        "attributed.unknown",
+      ],
+      [
+        "inherited identities the split does not count",
+        {
+          ...forked,
+          usageCompleteness: "incomplete",
+          unknownUsage: [identityWithOrigin("exec-P", { runId: "run-P" })],
+          unknownUsageCount: 1,
+          exposure: "unquantified",
+          origin: split({ attributed: slice(T(10, 20), 2, 1), executedHere: slice(T(4, 8), 1, 1) }),
+        },
+        "inherited.unknown",
+      ],
+      [
+        "an identity with a malformed origin",
+        {
+          ...forked,
+          usageCompleteness: "incomplete",
+          unknownUsage: [identityWithOrigin("exec-P", { runId: "" })],
+          unknownUsageCount: 1,
+          exposure: "unquantified",
+          origin: split({ attributed: slice(T(10, 20), 2, 1), inherited: slice(T(6, 12), 1, 1) }),
+        },
+        "`spend.unknownUsage[0].origin`",
+      ],
+      [
+        "an inherited identity under the legacy reading",
+        {
+          forkedFrom: undefined,
+          origin: undefined,
+          usageCompleteness: "incomplete",
+          unknownUsage: [identityWithOrigin("exec-P", { runId: "run-P" })],
+          unknownUsageCount: 1,
+          exposure: "unquantified",
+        },
+        "cannot be read as a run that was never forked",
+      ],
+      [
+        "inherited usage on a run whose forkedFrom is unknown",
+        { forkedFrom: unknownValue("the run was not forked"), origin: split() },
+        "`run.forkedFrom` is unknown",
+      ],
+    ]
+    for (const [name, over, expected] of cases) {
+      const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0, ...over }])
+      const result = await readBundle(root)
+      if ("error" in result) throw new Error(result.error)
+      expect(result.comparable, name).toEqual([])
+      expect(result.unreadable[0]?.reason, name).toContain(expected)
+    }
   })
 })

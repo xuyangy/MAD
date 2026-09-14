@@ -100,8 +100,10 @@
 import {
   budgetReport,
   ceilingNamed,
+  hasInheritedUsage,
   spentTokens,
   unknownUsageClause,
+  usageByOrigin,
   usageIsComplete,
 } from "../budget/ledger.ts"
 import { BLAME_KIND } from "../judge/blame.ts"
@@ -1662,9 +1664,18 @@ export function renderRunRecord(record: RunRecord): string {
   // and a sentence are two states a truthiness test collapses, and two states a
   // truthiness test collapses is the whole subject of story 2.3.
   const unknownUsage = unknownUsageClause(record.ledger)
-  const observedMark = unknownUsage === null ? "" : " (OBSERVED)"
+  // SPEC.md "Evaluation exception" / AD-15 amended — A FORKED RUN'S FIGURES ARE
+  // ATTRIBUTED. A branch's ledger holds the prefix it inherited as well as its
+  // own turns, so its total is what the branch counts against its cap and not
+  // what it executed, and two branches' totals added together count the prefix
+  // twice. The split is the accountant's (`usageByOrigin`); this only formats it.
+  // A run that was never forked has nothing inherited and prints neither label.
+  const origin = usageByOrigin(record.ledger)
+  const inherited = hasInheritedUsage(origin)
+  const marks = [...(inherited ? ["ATTRIBUTED"] : []), ...(unknownUsage === null ? [] : ["OBSERVED"])]
+  const tokensMark = marks.length === 0 ? "" : ` (${marks.join(", ")})`
   lines.push(
-    `TOKENS${observedMark} — turns: ${record.ledger.entries.length} | in: ${t.input} | ` +
+    `TOKENS${tokensMark} — turns: ${record.ledger.entries.length} | in: ${t.input} | ` +
       `out: ${t.output} | reasoning: ${t.reasoning} | ` +
       `cache r/w: ${t.cacheRead}/${t.cacheWrite}${spentClause}`,
   )
@@ -1677,6 +1688,23 @@ export function renderRunRecord(record: RunRecord): string {
     `PEAK — at most ${record.ledger.maxConcurrency} model turn(s) in flight at once ` +
       `(rate, not total; nothing was refused or dropped by this bound).`,
   )
+  if (inherited) {
+    const { executedHere, inherited: fromEarlier } = origin
+    const unknownPart = (count: number): string => (count > 0 ? ` | unknown usage: ${count}` : "")
+    // `?? "an earlier run"` NAMES A RECORD `forkPreparedReview` CANNOT BUILD: it
+    // writes `forkedFrom` on every branch it marks rows on, so origins without a
+    // parent id reach here only from a JavaScript caller or a hand-edited dump.
+    // The label still has to be right for that record, because the whole point of
+    // the line is that an attributed figure is never read as a bill — and a
+    // parent MAD cannot name is not a reason to withhold the warning.
+    lines.push(
+      `  ATTRIBUTED: this run was forked from ${record.forkedFrom ?? "an earlier run"}, so the TOKENS ` +
+        `figures count what it inherited as well as what it executed and are not its own bill. ` +
+        `NEWLY EXECUTED — turns: ${executedHere.turns} | tokens: ${spentTokens(executedHere.tokens)}` +
+        `${unknownPart(executedHere.unknown)}. INHERITED — turns: ${fromEarlier.turns} | ` +
+        `tokens: ${spentTokens(fromEarlier.tokens)}${unknownPart(fromEarlier.unknown)}.`,
+    )
+  }
   // THE TOTAL IS A FLOOR ON A STOPPED RUN, and says so (ledger triage
   // 2026-09-09). A turn MAD stopped waiting on — the user's stop, or the
   // adapter's timeout — returns no usage, so tokens the provider still billed

@@ -455,17 +455,16 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     }
   }
   const total = spend.total
-  if (
-    !isRecord(total) ||
-    !isFinite_(total.input) ||
-    !isFinite_(total.output) ||
-    !isFinite_(total.reasoning) ||
-    !isFinite_(total.cacheRead) ||
-    !isFinite_(total.cacheWrite)
-  ) {
+  if (!isTokenUsage(total)) {
     // NOT A TOLERATED GAP. `{}` here used to reach the table and print `NaN`
     // tokens, which is a number-shaped hole in the one column a reader most
     // wants to trust.
+    //
+    // `isTokenUsage` AND NOT FIVE `isFinite_` CALLS, so `spend.total` is held to
+    // the same non-negative rule as the three `spend.origin` slices. With a
+    // weaker rule here, a negative `spend.total.input` passed this check and was
+    // then refused by the slice conservation below, naming `spend.origin` for a
+    // fault that is entirely `spend.total`'s.
     return fail("carries no readable `spend.total`")
   }
   // AC5 (story 2.3) — THE CHECKED SET IS THE TOUCHED SET, and this block is
@@ -513,6 +512,8 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
         `(it knows quantified, unquantified)`,
     )
   }
+  const provenance = provenanceProblem(run, spend, total)
+  if (provenance !== undefined) return fail(provenance)
 
   // ---- status ----
   const status = value.status
@@ -577,6 +578,136 @@ function isCount(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+}
+
+const TOKEN_FIELDS = ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const
+
+/**
+ * Five finite, non-negative numbers. NOT required to be integers: a provider may
+ * report a fractional figure, `reconcileLateUsage` admits one, and `spend.total`
+ * has always been read that way.
+ */
+function isTokenUsage(value: unknown): value is Record<(typeof TOKEN_FIELDS)[number], number> {
+  return isRecord(value) && TOKEN_FIELDS.every((field) => isFinite_(value[field]) && (value[field] as number) >= 0)
+}
+
+/**
+ * Token sums regrouped in a different order can differ in the last bits once a
+ * component is fractional, so conservation is checked to a relative tolerance of
+ * one part in 10^9 (absolute for figures below 1). Counts are compared exactly.
+ */
+function sameTokenFigure(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))
+}
+
+/**
+ * SPEC.md "Evaluation exception" / AD-15 amended — LEDGER PROVENANCE, checked
+ * against the rest of `spend`. Returns the reason the manifest is refused, or
+ * `undefined`.
+ *
+ * `run.forkedFrom` and `spend.origin` are written together, on every manifest.
+ * BOTH ABSENT is a manifest written before ledger provenance existed, and it is
+ * read as NOT FORKED under a compatibility interpretation: no code path could
+ * fork a run before then. That is a fact about the code, not proof the artifact
+ * is authentic, and it says nothing about whether its usage is complete.
+ *
+ * Refused, because each would let inherited usage pass as this run's own or let
+ * the split disagree with the figures it splits:
+ * - exactly one of the two present;
+ * - an unknown-usage identity with a malformed `origin`, or with any `origin`
+ *   when the run is read as not forked;
+ * - a slice with a negative or non-finite token figure, or a turn or unknown
+ *   count that is not a whole number of at least 0;
+ * - `executedHere + inherited` differing from `attributed`, or `attributed`
+ *   differing from `spend.total`, `spend.unknownUsage` or `spend.unknownUsageCount`;
+ * - `inherited.unknown` differing from the identities that carry an origin;
+ * - inherited usage on a run whose `forkedFrom` is unknown.
+ *
+ * It cannot check which run executed a COUNTED row: those rows are in
+ * `record.json`, which this reader does not parse.
+ */
+function provenanceProblem(
+  run: Record<string, unknown>,
+  spend: Record<string, unknown>,
+  total: Record<string, unknown>,
+): string | undefined {
+  const unknowns = spend.unknownUsage as Record<string, unknown>[]
+  let inheritedIdentities = 0
+  for (const [position, entry] of unknowns.entries()) {
+    if (!("origin" in entry)) continue
+    if (!isRecord(entry.origin) || !isText(entry.origin.runId)) {
+      return `has a malformed \`spend.unknownUsage[${position}].origin\``
+    }
+    inheritedIdentities += 1
+  }
+
+  const hasForkedFrom = "forkedFrom" in run
+  const hasOrigin = "origin" in spend
+  if (!hasForkedFrom && !hasOrigin) {
+    return inheritedIdentities === 0
+      ? undefined
+      : `carries ${inheritedIdentities} inherited unknown-usage identit(ies) but no \`run.forkedFrom\` or ` +
+          `\`spend.origin\`, so it cannot be read as a run that was never forked`
+  }
+  if (!hasForkedFrom) return "carries `spend.origin` but no `run.forkedFrom`; the two are written together"
+  if (!hasOrigin) return "carries `run.forkedFrom` but no `spend.origin`; the two are written together"
+
+  const forkedFrom = maybeOf(run.forkedFrom, isText, "a non-empty string")
+  if (forkedFrom !== undefined) return `has a malformed \`run.forkedFrom\`: ${forkedFrom}`
+
+  const origin = spend.origin
+  if (!isRecord(origin)) return "has an unreadable `spend.origin`"
+  const slices = {} as Record<"attributed" | "executedHere" | "inherited", {
+    tokens: Record<(typeof TOKEN_FIELDS)[number], number>
+    turns: number
+    unknown: number
+  }>
+  for (const name of ["attributed", "executedHere", "inherited"] as const) {
+    const slice = origin[name]
+    if (
+      !isRecord(slice) ||
+      !isTokenUsage(slice.tokens) ||
+      !isCount(slice.turns) ||
+      slice.turns < 0 ||
+      !isCount(slice.unknown) ||
+      slice.unknown < 0
+    ) {
+      return `has an unreadable \`spend.origin.${name}\``
+    }
+    slices[name] = { tokens: slice.tokens, turns: slice.turns, unknown: slice.unknown }
+  }
+  const { attributed, executedHere, inherited } = slices
+
+  for (const field of TOKEN_FIELDS) {
+    if (!sameTokenFigure(executedHere.tokens[field] + inherited.tokens[field], attributed.tokens[field])) {
+      return `has a \`spend.origin\` whose executedHere and inherited \`${field}\` do not add up to attributed`
+    }
+    if (!sameTokenFigure(attributed.tokens[field], total[field] as number)) {
+      return `has a \`spend.origin.attributed\` whose \`${field}\` differs from \`spend.total\``
+    }
+  }
+  if (executedHere.turns + inherited.turns !== attributed.turns) {
+    return "has a `spend.origin` whose executedHere and inherited turns do not add up to attributed"
+  }
+  if (attributed.unknown !== unknowns.length || attributed.unknown !== spend.unknownUsageCount) {
+    return (
+      "has a `spend.origin.attributed.unknown` that differs from `spend.unknownUsage` or " +
+      "`spend.unknownUsageCount`"
+    )
+  }
+  if (inherited.unknown !== inheritedIdentities) {
+    return (
+      `has a \`spend.origin.inherited.unknown\` of ${inherited.unknown}, but ${inheritedIdentities} ` +
+      `\`spend.unknownUsage\` identit(ies) carry an origin`
+    )
+  }
+  if (executedHere.unknown !== unknowns.length - inheritedIdentities) {
+    return "has a `spend.origin.executedHere.unknown` that differs from the identities with no origin"
+  }
+  if (inheritsAnySlice(inherited) && (run.forkedFrom as { kind: string }).kind !== "known") {
+    return "carries inherited usage but its `run.forkedFrom` is unknown"
+  }
+  return undefined
 }
 
 /**
@@ -801,7 +932,20 @@ export function renderBundle(result: BundleReadResult): string {
     // the unlabelled ones are complete bills, which is the inference the protocol
     // forbids. What each arm's figure is missing, if anything, is the per-arm
     // block below.
-    lines.push("  arm            repeat  slots  answered  pooled  canonical  status      tokens (observed)")
+    // AD-15 amended — when any arm was forked, every figure in this column is
+    // ATTRIBUTED (it counts an inherited prefix) and a second column carries what
+    // each run executed itself. Without a forked arm the table is unchanged.
+    const attributed = result.comparable.some((row) => inheritsUsage(row.manifest))
+    // THE TOKEN COLUMN'S WIDTH IS DERIVED FROM ITS OWN HEADING, never written
+    // twice. Reworded heading, re-measured column: a literal here would let the
+    // two drift silently and put a run's newly executed figure under the
+    // attributed heading, which is the one confusion this column exists to end.
+    const tokenHeading = "tokens (attributed, observed)"
+    const tokenColumn = tokenHeading.length + 2
+    lines.push(
+      "  arm            repeat  slots  answered  pooled  canonical  status      " +
+        (attributed ? `${tokenHeading}  newly executed (observed)` : "tokens (observed)"),
+    )
     for (const row of result.comparable) {
       const manifest = row.manifest
       lines.push(
@@ -813,7 +957,15 @@ export function renderBundle(result: BundleReadResult): string {
           pad(String(manifest.findings.pool.length), 8) +
           pad(String(row.findings.length), 11) +
           pad(manifest.status.completion, 12) +
-          String(totalTokens(manifest)),
+          (attributed
+            ? pad(String(totalTokens(manifest)), tokenColumn) + String(newlyExecutedTokens(manifest))
+            : String(totalTokens(manifest))),
+      )
+    }
+    if (attributed) {
+      lines.push(
+        "  An ATTRIBUTED figure counts the prefix a forked run inherited. Add newly executed figures",
+        "  across arms, never attributed ones.",
       )
     }
     lines.push("")
@@ -1032,6 +1184,12 @@ function usageCompleteness(result: BundleReadResult): string[] {
   for (const { row, note } of rows) {
     const spend = row.manifest.spend
     const at = `  ${row.armId} repeat ${row.repeatId}${note} — `
+    if (originOf(row.manifest) === undefined) {
+      lines.push(
+        `${at}carries no ledger provenance, so it is read as NOT FORKED: no run could be forked ` +
+          `when a manifest without it was written. That says nothing about whether its usage is complete.`,
+      )
+    }
     if (spend.usageCompleteness === "complete") {
       lines.push(`${at}complete: every turn this run billed is in its token figure.`)
       continue
@@ -1071,4 +1229,51 @@ function pad(value: string, width: number): string {
 function totalTokens(manifest: RunManifest): number {
   const total = manifest.spend.total
   return total.input + total.output + total.reasoning + total.cacheRead + total.cacheWrite
+}
+
+/**
+ * `spend.origin`, or `undefined` for a manifest that predates ledger provenance.
+ * The type says the field is always there because the writer always writes it;
+ * `parseManifest` admits its absence under the compatibility interpretation.
+ */
+function originOf(manifest: RunManifest): RunManifest["spend"]["origin"] | undefined {
+  return (manifest.spend as { origin?: RunManifest["spend"]["origin"] }).origin
+}
+
+/**
+ * Whether an `inherited` slice holds any usage at all — the ONE definition, used
+ * by the validation that refuses inherited usage without a `forkedFrom` and by
+ * the table that decides whether to label its columns.
+ *
+ * TOKENS ARE TESTED BESIDE THE TWO COUNTS. A split this reader parses was
+ * written by some other process, so it can carry inherited tokens over zero
+ * inherited turns in a way `usageByOrigin` never produces. Two predicates, one
+ * with the token clause and one without, would accept such a manifest and then
+ * print its inherited tokens under an unlabelled column — the one figure this
+ * story exists to keep a reader from adding across arms.
+ */
+function inheritsAnySlice(inherited: {
+  tokens: Record<(typeof TOKEN_FIELDS)[number], number>
+  turns: number
+  unknown: number
+}): boolean {
+  return (
+    inherited.turns > 0 ||
+    inherited.unknown > 0 ||
+    TOKEN_FIELDS.some((field) => inherited.tokens[field] > 0)
+  )
+}
+
+/** Whether this arm's run inherited any usage, counted or not. */
+function inheritsUsage(manifest: RunManifest): boolean {
+  const origin = originOf(manifest)
+  return origin !== undefined && inheritsAnySlice(origin.inherited)
+}
+
+/** What this arm's run executed itself: all of its total when nothing was inherited. */
+function newlyExecutedTokens(manifest: RunManifest): number {
+  const origin = originOf(manifest)
+  if (origin === undefined) return totalTokens(manifest)
+  const here = origin.executedHere.tokens
+  return here.input + here.output + here.reasoning + here.cacheRead + here.cacheWrite
 }

@@ -70,7 +70,38 @@ export interface LedgerEntry {
   stage: string
   attempt: number
   tokens: TokenUsage
+  /**
+   * SPEC.md "Evaluation exception" / AD-15 amended — the run that EXECUTED this
+   * turn, when it is not the run whose ledger holds the row.
+   *
+   * ABSENT MEANS EXECUTED HERE, and it is absent on every ordinary run: only
+   * `forkPreparedReview` (`core/run/review.ts`) and the recovery of an inherited
+   * unknown write it, so a ledger no fork touched keeps the bytes it would have
+   * without this field. See `UsageOrigin`.
+   */
+  origin?: UsageOrigin
 }
+
+/**
+ * Where an inherited ledger row was executed (`evaluation-protocol.md` §8,
+ * *Ledger provenance*).
+ *
+ * `runId` is the run that issued the request. The second field says which
+ * request of that run it was:
+ *
+ * - `entry` — the row's position in that run's `ledger.entries`, which is
+ *   append-only. A counted row carries no execution id of its own, so its
+ *   position is the reference.
+ * - `executionId` — the physical request, for a row `reconcileLateUsage`
+ *   recovered from an inherited unknown. The executing run never counted that
+ *   request, so it has no position there.
+ *
+ * A row keeps the origin it already has when its ledger is forked again, so the
+ * reference always names the run that executed the request and never an
+ * intermediate branch. `stage + slot + attempt` is not an id and is never used
+ * as one.
+ */
+export type UsageOrigin = { runId: string; entry: number } | { runId: string; executionId: string }
 
 /**
  * FR10 / AC1 (story 2.3) — ONE TURN WHOSE COST MAD DOES NOT KNOW.
@@ -129,6 +160,13 @@ export interface UnknownUsageEntry {
   executionId: string
   /** Non-empty, always. Which of the three states this is, in words. */
   why: string
+  /**
+   * The run that executed this request, when it is not the run whose ledger
+   * holds the entry. Absent means executed here, as on `LedgerEntry.origin`;
+   * `executionId` already names the request. An inherited unknown stays unknown:
+   * the origin says who issued it, never what it cost.
+   */
+  origin?: { runId: string }
 }
 
 /**
@@ -302,6 +340,13 @@ export interface TokenLedger {
 export interface RunRecord {
   /** Opaque and sortable (spine, Ids). */
   runId: string
+  /**
+   * SPEC.md "Evaluation exception" — the `runId` of the prepared review this run
+   * was forked from: the IMMEDIATE source, which may itself be a branch. Absent
+   * on a run that was never forked. Which run executed each ledger row is on the
+   * row (`LedgerEntry.origin`), not here.
+   */
+  forkedFrom?: string
   startedAt: string
   finishedAt?: string
   roster: Roster
@@ -746,15 +791,15 @@ function sameUsage(a: TokenUsage, b: TokenUsage): boolean {
  * ## The honest limit, stated rather than hidden
  *
  * Disagreement is detected WITHIN one batch. Once an unknown has been
- * reconciled its `executionId` is gone from `unknownUsage`, and `LedgerEntry`
- * carries no execution id (it stays byte-identical, which is the story's whole
- * structural argument), so a payload arriving in a LATER batch for an
- * already-reconciled execution comes back as `unmatched` rather than as a
- * conflict. In the shipped wiring that gap is unreachable — `core/run/review.ts`
- * drains once, immediately before `finishedAt` — and it is written down here
- * rather than left for a reader to discover. Carrying the ids on `entries` to
- * close it is story 2.5A's inherited-entry provenance, which is where the AD-15
- * semantic amendment for it belongs.
+ * reconciled its `executionId` is gone from `unknownUsage`, and the counted row
+ * that replaces it carries that id only when the unknown was inherited (in its
+ * `origin`). So a payload arriving in a LATER batch for an already-reconciled
+ * execution comes back as `unmatched` rather than as a conflict, and this pass
+ * does not look for the id inside `origin` either. In the shipped wiring that
+ * gap is unreachable — `core/run/review.ts` drains once, immediately before
+ * `finishedAt` — and it is written down here rather than left for a reader to
+ * discover. Closing it for every row needs an execution id on every counted
+ * turn, which the backend port does not return for a turn that reported usage.
  *
  * Usage arriving after the drain is not in this run's record, and this story
  * does not pretend otherwise.
@@ -835,6 +880,12 @@ export function reconcileLateUsage(
       stage: entry.stage,
       attempt: entry.attempt,
       tokens: distinct[0]!,
+      // An inherited unknown stays inherited once its bill arrives. The run that
+      // executed it never counted it, so the origin names the execution rather
+      // than a position in that run's entries.
+      ...(entry.origin === undefined
+        ? {}
+        : { origin: { runId: entry.origin.runId, executionId: entry.executionId } }),
     })
     recovered.push(entry)
   }

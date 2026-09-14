@@ -5,6 +5,9 @@ import type { Finding } from "../core/domain/finding.ts"
 import type { RunRecord } from "../core/domain/run-record.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
+import { selectRoster } from "../core/roster/select.ts"
+import { forkPreparedReview, prepareReview } from "../core/run/review.ts"
+import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-support/fakes.ts"
 import {
   MANIFEST_FILE,
   MANIFEST_SCHEMA_VERSION,
@@ -16,6 +19,7 @@ import {
   type EvaluationIdentity,
   type UsageCompleteness,
 } from "./manifest.ts"
+import { parseManifest } from "./read-bundle.ts"
 
 function finding(id: string, over: Partial<Finding> = {}): Finding {
   return {
@@ -429,5 +433,135 @@ describe("story 2.5A — the routing policy is a dial the manifest always states
       turnFiles: known(3),
     })
     expect(manifest.dials.routingPolicy).toBe("debate-off")
+  })
+})
+
+describe("ledger provenance in the manifest (story 2.5A, 2-5b)", () => {
+  test("a run that was never forked: forkedFrom is an unknown with its reason, and nothing is inherited", () => {
+    const manifest = buildManifest({ record: record(), change, identity, turnFiles: known(3) })
+    expect(manifest.run.forkedFrom).toEqual(unknownValue("the run was not forked"))
+    expect(manifest.spend.origin.inherited).toEqual({ tokens: emptyTokenUsage(), turns: 0, unknown: 0 })
+    expect(manifest.spend.origin.executedHere).toEqual(manifest.spend.origin.attributed)
+    expect(manifest.spend.origin.attributed).toEqual({ tokens: manifest.spend.total, turns: 1, unknown: 0 })
+  })
+
+  test("a forked run: forkedFrom names the source and the split carries the inherited rows", () => {
+    const base = record()
+    const manifest = buildManifest({
+      record: record({
+        forkedFrom: "run-P",
+        ledger: {
+          ...base.ledger,
+          entries: [{ ...base.ledger.entries[0]!, origin: { runId: "run-P", entry: 0 } }],
+          unknownUsage: [
+            {
+              slot: "discovery-1",
+              stage: "discover",
+              attempt: 2,
+              executionId: "exec-P",
+              why: "the host reported no usage",
+              origin: { runId: "run-P" },
+            },
+          ],
+        },
+      }),
+      change,
+      identity,
+      turnFiles: known(3),
+    })
+    expect(manifest.run.forkedFrom).toEqual(known("run-P"))
+    expect(manifest.spend.origin.inherited).toEqual({ tokens: manifest.spend.total, turns: 1, unknown: 1 })
+    expect(manifest.spend.origin.executedHere).toEqual({ tokens: emptyTokenUsage(), turns: 0, unknown: 0 })
+    expect(manifest.spend.unknownUsage[0]!.origin).toEqual({ runId: "run-P" })
+  })
+
+  test("A RECORD WITH NO UNKNOWN-USAGE COLLECTION still writes a split that agrees with its audit", () => {
+    const base = record()
+    const legacy = record({ ledger: { ...base.ledger, unknownUsage: undefined as never } })
+    const manifest = buildManifest({ record: legacy, change, identity, turnFiles: known(3) })
+    expect(manifest.spend.usageCompleteness).toBe("unaudited")
+    expect(manifest.spend.origin.attributed.unknown).toBe(manifest.spend.unknownUsageCount)
+  })
+
+  test("PERSISTED FORM: a real fork's branch manifest rebuilds the same aliasing and canonical order", async () => {
+    const { roster, warnings } = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")],
+      { slots: 2, providerConfigKey: "provider" },
+    )
+    const raised = {
+      claim: "Fee is computed before the rate is validated.",
+      reasoning: "If `rate` is NaN the total silently becomes NaN.",
+      severity: "high",
+      file: "src/pay.ts",
+      startLine: 12,
+      endLine: 14,
+    }
+    const other = { ...raised, claim: "The retry loop has no ceiling.", file: "src/retry.ts", startLine: 30, endLine: 30 }
+    const clock = fakeClock()
+    const prepared = await prepareReview({
+      roster,
+      backend: new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: { findings: [other, raised] } }],
+        "discovery-2": [{ kind: "ok", value: { findings: [raised] } }],
+      }),
+      clock,
+      change: fakeChange(),
+      priorWarnings: warnings,
+    })
+    const [branch] = forkPreparedReview(prepared, clock, 2)
+    const merged = branch!.record.findings.find((f) => (f.mergedIds ?? []).length > 0)
+    expect(merged).toBeDefined()
+
+    const manifest = buildManifest({ record: branch!.record, change, identity, turnFiles: known(0) })
+    const onDisk = JSON.parse(JSON.stringify(manifest.findings)) as typeof manifest.findings
+    const back = fromPersistedFindings(onDisk)
+    if (!back.ok) throw new Error(back.reason)
+
+    expect(back.findings.map((f) => f.id)).toEqual(branch!.record.findings.map((f) => f.id))
+    for (const canonical of back.findings) {
+      expect(canonical).toBe(back.pool.find((f) => f.id === canonical.id)!)
+    }
+    const rebuilt = back.findings.find((f) => f.id === merged!.id)!
+    expect(rebuilt.mergedIds).toEqual(merged!.mergedIds)
+    for (const id of rebuilt.mergedIds!) expect(rebuilt).not.toBe(back.pool.find((f) => f.id === id)!)
+  })
+
+  test("THE WRITER'S OWN MANIFEST SATISFIES THE READER, forked and unforked", async () => {
+    // The only place `buildManifest`'s output meets `parseManifest`. The reader's
+    // conservation rules (`read-bundle.ts`'s `provenanceProblem`) and the writer's
+    // split are otherwise kept in agreement by two hand-rolled fixtures that can
+    // drift apart without anything failing — and the rules are arithmetic OVER the
+    // writer's fields, so a disagreement is a bundle MAD writes and cannot read.
+    const base = record()
+    const forked = record({
+      forkedFrom: "run-P",
+      ledger: {
+        ...base.ledger,
+        entries: [{ ...base.ledger.entries[0]!, origin: { runId: "run-P", entry: 0 } }],
+        unknownUsage: [
+          {
+            slot: "discovery-1",
+            stage: "discover",
+            attempt: 2,
+            executionId: "exec-P",
+            why: "the host reported no usage",
+            origin: { runId: "run-P" },
+          },
+        ],
+      },
+    })
+
+    for (const [name, rec] of [
+      ["never forked", base],
+      ["forked", forked],
+    ] as const) {
+      const manifest = buildManifest({ record: rec, change, identity, turnFiles: known(0) })
+      const onDisk: unknown = JSON.parse(JSON.stringify(manifest))
+      const parsed = parseManifest(onDisk)
+      expect(parsed.ok, `${name}: ${parsed.ok ? "" : parsed.reason}`).toBe(true)
+      if (!parsed.ok) continue
+      expect(parsed.value.run.forkedFrom, name).toEqual(manifest.run.forkedFrom)
+      expect(parsed.value.spend.origin, name).toEqual(manifest.spend.origin)
+    }
   })
 })

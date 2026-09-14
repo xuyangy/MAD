@@ -463,13 +463,15 @@ function recordCancellation(record: RunRecord, stage: Stage): void {
  * IT CARRIES NO RUNTIME SERVICE. The backend, clock, limiter, `Tools`, signal
  * and late-usage sink stay with the caller and arrive through `ContinueDeps`.
  * Opaque evidence is kept exactly as it came: a caller's `warning.detail` may
- * hold anything, and nothing here strips or rejects it. Cloning, persisting and
- * forking this value are not supported yet, and a value `structuredClone`
- * cannot copy is refused at that boundary, not here.
+ * hold anything, and nothing here strips or rejects it. `forkPreparedReview`
+ * copies this value for a paired continuation, and that is where a value
+ * `structuredClone` cannot copy is refused.
  *
  * SINGLE-USE. `continueReview` mutates `record` and the findings in place
  * (AD-7), so a second continuation of the same value would route findings that
- * already carry a route and would double their history. It is refused.
+ * already carry a route and would double their history. It is refused. Forking
+ * consumes the value too, so the source of a fork is never continued beside its
+ * branches.
  */
 export interface PreparedReview {
   record: RunRecord
@@ -503,10 +505,10 @@ export interface PreparedReview {
 export type ContinueDeps = Pick<ReviewDeps, "backend" | "clock" | "tools" | "signal" | "lateUsage">
 
 /**
- * Records already continued. Keyed on the RECORD rather than the prepared
- * wrapper, because the record is what a continuation mutates: a shallow copy of
- * the wrapper shares it and must be refused too. A WeakSet, so a finished run
- * is not kept alive.
+ * Records already continued or forked. Keyed on the RECORD rather than the
+ * prepared wrapper, because the record is what a continuation mutates: a shallow
+ * copy of the wrapper shares it and must be refused too. A WeakSet, so a
+ * finished run is not kept alive.
  */
 const continued = new WeakSet<RunRecord>()
 
@@ -687,6 +689,134 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
 }
 
 /**
+ * A prepared review could not be forked. Nothing was consumed: the source can
+ * still be forked or continued.
+ */
+export class CheckpointForkError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "CheckpointForkError"
+  }
+}
+
+/**
+ * Copies one prepared review into `branches` independent prepared reviews, for a
+ * paired continuation (`evaluation-protocol.md` §8, *Checkpoint cloning*).
+ *
+ * EACH BRANCH IS ONE `structuredClone` of the prepared data. One call per branch
+ * keeps the aliasing inside it: a canonical finding stays the same object as its
+ * own `pool` entry and is never an absorbed member, and branches share no
+ * mutable object with each other or with the source. `framedChange` and
+ * `stopRequested` are a string and a boolean, so they copy by value. A stop the
+ * source recorded, and every discovery drop-out and budget skip, is carried as
+ * data.
+ *
+ * EACH BRANCH IS A NEW RUN. It gets a fresh `runId` from `clock`, records the
+ * source's `runId` as `forkedFrom`, and marks every ledger row without an
+ * `origin` as executed by the source. A row that already has an origin keeps it,
+ * so a fork of a branch still names the prefix for the rows the prefix executed
+ * and names the branch for the rows the branch executed. The branch inherits that
+ * spend against its own cap, and `usageByOrigin` tells it apart from what the
+ * branch runs itself.
+ *
+ * ATOMIC. The count, the source's state, every clone and every id are checked
+ * before the source is marked consumed. A failure throws a `CheckpointForkError`,
+ * or whatever `clock.id` threw, and leaves the source usable. Once forked, the
+ * source cannot be forked or continued again, for the reason `PreparedReview`
+ * gives for single use.
+ *
+ * A value `structuredClone` cannot copy, such as a function in a caller's
+ * `warning.detail`, is refused rather than stripped: dropping it would change the
+ * evidence the branch carries.
+ *
+ * Issues no request and bills nothing.
+ */
+export function forkPreparedReview(
+  prepared: PreparedReview,
+  clock: Clock,
+  branches: number,
+): PreparedReview[] {
+  if (typeof branches !== "number" || !Number.isInteger(branches) || branches < 2) {
+    throw new CheckpointForkError(
+      `cannot fork into ${String(branches)} branch(es): a fork needs a whole number of at least 2. ` +
+        `Nothing was forked and the prepared review is still unused.`,
+    )
+  }
+  const source = prepared.record
+  if (continued.has(source)) {
+    throw new CheckpointForkError(
+      "this prepared review was already continued or forked, so its record is no longer the " +
+        "checkpoint discovery produced. Nothing was forked.",
+    )
+  }
+
+  const ids = new Set<string>([source.runId])
+  const forks: PreparedReview[] = []
+  for (let branch = 1; branch <= branches; branch += 1) {
+    const copy = cloneCheckpoint(prepared)
+    const runId = clock.id("run")
+    if (typeof runId !== "string" || runId.length === 0 || ids.has(runId)) {
+      throw new CheckpointForkError(
+        `the clock returned run id ${JSON.stringify(runId)} for branch ${branch}, which is empty or not ` +
+          `distinct from the source and the other branches. Branches must be separate runs, so nothing ` +
+          `was forked and the prepared review is still unused.`,
+      )
+    }
+    ids.add(runId)
+
+    const { record } = copy
+    record.runId = runId
+    record.forkedFrom = source.runId
+    // `startedAt` IS THE CHECKPOINT'S AND NOT THE FORK MOMENT'S, which is why
+    // the clone keeps it and no `clock.now()` is read here. A branch's figures
+    // cover the discovery it inherited as well as its own turns, so a start time
+    // that began at the fork would describe a shorter run than the one the
+    // record reports. `forkedFrom` is what says where the prefix ends.
+    record.ledger.entries = record.ledger.entries.map((entry, position) =>
+      entry.origin === undefined ? { ...entry, origin: { runId: source.runId, entry: position } } : entry,
+    )
+    record.ledger.unknownUsage = record.ledger.unknownUsage.map((entry) =>
+      entry.origin === undefined ? { ...entry, origin: { runId: source.runId } } : entry,
+    )
+    forks.push({ ...copy, framedChange: prepared.framedChange, stopRequested: prepared.stopRequested })
+  }
+
+  continued.add(source)
+  return forks
+}
+
+function cloneCheckpoint(
+  prepared: PreparedReview,
+): Pick<PreparedReview, "record" | "instructions" | "answeredSlots"> {
+  const { record, instructions, answeredSlots } = prepared
+  try {
+    return structuredClone({ record, instructions, answeredSlots })
+  } catch (error) {
+    throw new CheckpointForkError(
+      `the prepared review holds a value that cannot be copied${uncloneableWarning(record)}: ` +
+        `${error instanceof Error ? error.message : String(error)}. MAD does not strip evidence to make a ` +
+        `copy succeed, so nothing was forked and the prepared review is still unused.`,
+    )
+  }
+}
+
+/**
+ * Names the first warning whose `detail` cannot be copied. `detail` is the one
+ * field a caller fills with values of its own choosing, so it is where an
+ * uncloneable value is expected; any other location is reported without a name.
+ */
+function uncloneableWarning(record: RunRecord): string {
+  for (const [position, warning] of record.warnings.entries()) {
+    try {
+      structuredClone(warning.detail)
+    } catch {
+      return ` (the \`detail\` of warning ${position}, \`${warning.code}\`)`
+    }
+  }
+  return ""
+}
+
+/**
  * The CONTINUE half of `review()`: route once under `policy`, then the same
  * shipped debate, judge and output assembly.
  *
@@ -728,8 +858,9 @@ export async function continueReview(
   }
   if (continued.has(prepared.record)) {
     throw new Error(
-      "this prepared review was already continued. A continuation mutates the record and its " +
-        "findings in place, so a second one would route findings that are already routed.",
+      "this prepared review was already continued or forked. A continuation mutates the record and its " +
+        "findings in place, so a second one would route findings that are already routed, and a forked " +
+        "source continued beside its branches would be an unmarked copy of their prefix.",
     )
   }
   continued.add(prepared.record)

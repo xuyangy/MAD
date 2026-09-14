@@ -25,7 +25,7 @@
  * pair where either side is undecided enters NEITHER half of the fraction.
  */
 
-import { spentTokens } from "../core/budget/ledger.ts"
+import { spentTokens, usageByOrigin } from "../core/budget/ledger.ts"
 import type { LensGain } from "../fixtures/recall.ts"
 import { measurePairs } from "../core/clustering/fixtures/rates.ts"
 import type { Finding } from "../core/domain/finding.ts"
@@ -158,10 +158,23 @@ export interface ArmCost {
   cacheWrite: number
   /** `null` means no ceiling. Rendered as `none`, NEVER as `0`. */
   cap: number | null
+  /**
+   * AD-15 amended — of `tokens` and `billedTurns`, what this arm's run EXECUTED
+   * ITSELF. Equal to them for a run that was never forked.
+   *
+   * For a forked branch `tokens` and `billedTurns` are ATTRIBUTED: they include
+   * the prefix the branch inherited, so two branches' figures added together
+   * count that prefix twice. These are the figures a sum over branches may add.
+   * Both come from `usageByOrigin`; this module re-sums nothing.
+   */
+  newlyExecuted: { tokens: number; turns: number }
+  /** What the run inherited from the run it was forked from. Zero when it was not forked. */
+  inherited: { tokens: number; turns: number; unknown: number }
 }
 
 export function armCost(record: RunRecord): ArmCost {
   const t = record.ledger.total
+  const { executedHere, inherited } = usageByOrigin(record.ledger)
   return {
     tokens: spentTokens(t),
     billedTurns: record.ledger.entries.length,
@@ -171,6 +184,12 @@ export function armCost(record: RunRecord): ArmCost {
     cacheRead: t.cacheRead,
     cacheWrite: t.cacheWrite,
     cap: record.ledger.cap,
+    newlyExecuted: { tokens: spentTokens(executedHere.tokens), turns: executedHere.turns },
+    inherited: {
+      tokens: spentTokens(inherited.tokens),
+      turns: inherited.turns,
+      unknown: inherited.unknown,
+    },
   }
 }
 
@@ -192,6 +211,10 @@ export interface LensTokenCost {
    * makes it read HIGH. Each arm's own manifest carries the verdict and the
    * identities (`ablation/manifest.ts`'s `spend`), and this number is read beside
    * them rather than in place of them.
+   *
+   * It differences ATTRIBUTED totals. When either run was forked, each total
+   * includes what that run inherited (`ArmCost.inherited`), and the inherited
+   * parts cancel only if both runs inherited the same prefix.
    */
   tokens: number
   billedTurns: number

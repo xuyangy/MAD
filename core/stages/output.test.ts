@@ -2899,3 +2899,62 @@ describe("routing summary under the debate-off policy (story 2.5A)", () => {
     expect(rendered).not.toContain("EXPERIMENTAL INTERVENTION")
   })
 })
+
+describe("story 2.5A (2-5b) — a forked run's TOKENS figures are ATTRIBUTED", () => {
+  const inheritedTurn = (rec: RunRecord): void => {
+    recordTurn(rec.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: { input: 100, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      origin: { runId: "run-P", entry: 0 },
+    })
+  }
+
+  test("the line is labelled ATTRIBUTED, with ONE line of newly executed and inherited figures", () => {
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.forkedFrom = "run-P"
+    inheritedTurn(rec)
+    billedCounted(rec, 40)
+
+    const lines = output(rec).split("\n")
+    expect(lines.find((l) => l.startsWith("TOKENS"))).toStartWith("TOKENS (ATTRIBUTED) — turns: 2 | in: 140")
+    const split = lines.filter((l) => l.startsWith("  ATTRIBUTED:"))
+    expect(split).toHaveLength(1)
+    expect(split[0]).toContain("this run was forked from run-P")
+    expect(split[0]).toContain("NEWLY EXECUTED — turns: 1 | tokens: 90.")
+    expect(split[0]).toContain("INHERITED — turns: 1 | tokens: 150.")
+    // The PEAK line still follows the TOKENS line directly.
+    const at = lines.findIndex((l) => l.startsWith("TOKENS"))
+    expect(lines[at + 1]).toStartWith("PEAK")
+  })
+
+  test("an inherited UNKNOWN carries both marks and is counted, never priced", () => {
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.forkedFrom = "run-P"
+    billedCounted(rec, 40)
+    recordUnknownTurn(rec.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 2,
+      executionId: "exec-P",
+      why: "the host reported no usage",
+      origin: { runId: "run-P" },
+    })
+
+    const lines = output(rec).split("\n")
+    expect(lines.find((l) => l.startsWith("TOKENS"))).toStartWith("TOKENS (ATTRIBUTED, OBSERVED) — turns: 1")
+    const split = lines.find((l) => l.startsWith("  ATTRIBUTED:"))!
+    expect(split).toContain("INHERITED — turns: 0 | tokens: 0 | unknown usage: 1.")
+    expect(split).toContain("NEWLY EXECUTED — turns: 1 | tokens: 90.")
+  })
+
+  test("a run that was never forked prints neither label", () => {
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    billedCounted(rec)
+    const rendered = output(rec)
+    expect(rendered.split("\n").find((l) => l.startsWith("TOKENS"))).toStartWith("TOKENS — turns: 1")
+    expect(rendered).not.toContain("ATTRIBUTED")
+    expect(rendered).not.toContain("NEWLY EXECUTED")
+  })
+})

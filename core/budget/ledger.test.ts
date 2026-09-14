@@ -7,6 +7,7 @@ import {
   ceilingClause,
   ceilingNamed,
   clampTokenCap,
+  hasInheritedUsage,
   mayISpend,
   spent,
   spentInStage,
@@ -14,6 +15,7 @@ import {
   stageCeiling,
   unknownUsageClause,
   unknownUsageCount,
+  usageByOrigin,
   usageIsComplete,
   type BudgetLedger,
 } from "./ledger.ts"
@@ -533,5 +535,87 @@ describe("mayISpend and the unknown-usage stop rule (AC4, story 2.3)", () => {
     const ledger = emptyLedger(100) as BudgetLedger
     recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(100, 0) })
     expect(mayISpend(ledger, "judge")).toBe(false)
+  })
+})
+
+describe("usageByOrigin — attributed, executed here, inherited (AD-15 amended, story 2.5A 2-5b)", () => {
+  const unknownAt = (executionId: string, origin?: { runId: string }) => ({
+    slot: "discovery-1",
+    stage: "discover",
+    attempt: 1,
+    executionId,
+    why: "the host reported no usage",
+    ...(origin === undefined ? {} : { origin }),
+  })
+
+  test("a ledger no fork touched: executed here is everything and nothing is inherited", () => {
+    const ledger = emptyLedger(null)
+    recordTurn(ledger, { slot: "s", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    recordUnknownTurn(ledger, unknownAt("exec-1"))
+    const split = usageByOrigin(ledger)
+
+    expect(split.attributed).toEqual({ tokens: ledger.total, turns: 1, unknown: 1 })
+    expect(split.executedHere).toEqual(split.attributed)
+    expect(split.inherited).toEqual({ tokens: tokens(0, 0), turns: 0, unknown: 0 })
+    expect(hasInheritedUsage(split)).toBe(false)
+  })
+
+  test("a forked ledger splits by origin, and the parts add up to the attributed figures", () => {
+    const ledger = emptyLedger(null)
+    recordTurn(ledger, { slot: "s", stage: "discover", attempt: 1, tokens: tokens(10, 20), origin: { runId: "run-P", entry: 0 } })
+    recordTurn(ledger, { slot: "s", stage: "discover", attempt: 2, tokens: tokens(1, 2), origin: { runId: "run-P", executionId: "exec-9" } })
+    recordTurn(ledger, { slot: "s", stage: "judge", attempt: 1, tokens: tokens(4, 8) })
+    const split = usageByOrigin(ledger)
+
+    expect(split.inherited).toEqual({ tokens: tokens(11, 22), turns: 2, unknown: 0 })
+    expect(split.executedHere).toEqual({ tokens: tokens(4, 8), turns: 1, unknown: 0 })
+    expect(split.attributed.turns).toBe(split.inherited.turns + split.executedHere.turns)
+    expect(spentTokens(split.attributed.tokens)).toBe(
+      spentTokens(split.inherited.tokens) + spentTokens(split.executedHere.tokens),
+    )
+    expect(spentTokens(split.attributed.tokens)).toBe(spent(ledger))
+    expect(hasInheritedUsage(split)).toBe(true)
+  })
+
+  test("an INHERITED UNKNOWN is counted as inherited and never becomes a number", () => {
+    const ledger = emptyLedger(null)
+    recordUnknownTurn(ledger, unknownAt("exec-1", { runId: "run-P" }))
+    recordUnknownTurn(ledger, unknownAt("exec-2"))
+    const split = usageByOrigin(ledger)
+
+    expect(split.inherited).toEqual({ tokens: tokens(0, 0), turns: 0, unknown: 1 })
+    expect(split.executedHere.unknown).toBe(1)
+    expect(split.attributed.unknown).toBe(2)
+    expect(hasInheritedUsage(split)).toBe(true)
+    expect(usageIsComplete(ledger)).toBe(false)
+  })
+
+  test("A LEDGER WITH NO UNKNOWN-USAGE COLLECTION is read as an empty one rather than throwing", () => {
+    // The shape `ablation/manifest.ts`'s `auditUsage` and `ablation/governor.ts`'s
+    // `observe` both meet without throwing: a record from a pre-2.3 dump, or one
+    // a JavaScript caller built. `armCost` and `renderRunRecord` now go through
+    // this function, so a split that threw would take them down on a record those
+    // two survive.
+    const ledger = emptyLedger(null)
+    recordTurn(ledger, { slot: "s", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    const legacy = { ...ledger, unknownUsage: undefined as never }
+
+    const split = usageByOrigin(legacy)
+    expect(split.attributed).toEqual({ tokens: ledger.total, turns: 1, unknown: 0 })
+    expect(split.executedHere).toEqual(split.attributed)
+    expect(hasInheritedUsage(split)).toBe(false)
+  })
+
+  test("INHERITED TOKENS OVER ZERO INHERITED TURNS still count as inherited", () => {
+    // `usageByOrigin` cannot build this — it adds a row's tokens and its turn
+    // together. `ablation/read-bundle.ts` parses a split some other writer
+    // produced, and reads it through this same predicate, so the token clause is
+    // what stops an inherited figure printing under an unlabelled column.
+    const split = {
+      attributed: { tokens: tokens(10, 20), turns: 1, unknown: 0 },
+      executedHere: { tokens: tokens(10, 20), turns: 1, unknown: 0 },
+      inherited: { tokens: tokens(0, 5), turns: 0, unknown: 0 },
+    }
+    expect(hasInheritedUsage(split)).toBe(true)
   })
 })

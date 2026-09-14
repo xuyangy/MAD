@@ -26,6 +26,9 @@ function baseArm(id: string, overrides: Partial<AblationReport["arms"][number]> 
       cacheRead: 0,
       cacheWrite: 0,
       cap: null as number | null,
+      // A run that was never forked: everything it counts, it executed.
+      newlyExecuted: { tokens: 180, turns: 6 },
+      inherited: { tokens: 0, turns: 0, unknown: 0 },
     },
     fileLevel: 0,
     degradation: { degraded: false, warnings: [], budgetSkipped: 0 },
@@ -516,5 +519,36 @@ describe("AC5 — the token figures are labelled OBSERVED spend", () => {
     expect(rendered).toContain("2. TOKEN COST — OBSERVED spend")
     // Not divided by anything, still (AD-9). Labelling the figure does not fuse it.
     expect(rendered).not.toContain("per token")
+  })
+})
+
+describe("story 2.5A (2-5b) — a forked arm's token figures are ATTRIBUTED", () => {
+  test("the per-arm line, the token-cost block and the lens cost say attributed and carry the split", () => {
+    const forked = baseArm("a", {
+      cost: {
+        ...baseArm("a").cost,
+        newlyExecuted: { tokens: 60, turns: 2 },
+        inherited: { tokens: 120, turns: 4, unknown: 1 },
+      },
+    })
+    const rendered = text(
+      report({ arms: [forked, baseArm("b")], lens: { gain: undefined, cost: { tokens: 270, billedTurns: 9 } } }),
+    )
+
+    expect(rendered).toContain("tokens (attributed, observed): 180 over 6 billed turn(s)")
+    expect(rendered).toContain("| NEWLY EXECUTED 60 over 2 turn(s) | inherited 120 over 4 turn(s), 1 inherited unknown")
+    expect(rendered).toContain("a: 180 token(s) over 6 billed turn(s) ATTRIBUTED | NEWLY EXECUTED 60")
+    expect(rendered).toContain("Add NEWLY EXECUTED figures across arms,")
+    expect(rendered).toContain("a difference of ATTRIBUTED totals")
+    // The unforked arm keeps the plain label.
+    expect(rendered).toContain("b (b) [scripted]")
+    expect(rendered).toContain("b: 180 token(s) over 6 billed turn(s)\n")
+  })
+
+  test("with no forked arm, nothing says attributed", () => {
+    const rendered = text(report({ lens: { gain: undefined, cost: { tokens: 270, billedTurns: 9 } } }))
+    expect(rendered).not.toContain("ATTRIBUTED")
+    expect(rendered).not.toContain("attributed, observed")
+    expect(rendered).not.toContain("NEWLY EXECUTED")
   })
 })

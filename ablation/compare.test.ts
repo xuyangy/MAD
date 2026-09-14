@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { measurePairs } from "../core/clustering/fixtures/rates.ts"
 import type { Finding, Verdict } from "../core/domain/finding.ts"
-import { emptyLedger, recordTurn, type RunRecord } from "../core/domain/run-record.ts"
+import { emptyLedger, recordTurn, recordUnknownTurn, type RunRecord } from "../core/domain/run-record.ts"
 import { selectRoster } from "../core/roster/select.ts"
 import { FakeBackend, candidate, tokens } from "../core/test-support/fakes.ts"
 import { alignArms } from "./align.ts"
@@ -168,6 +168,60 @@ describe("armCost — read from the accountant, never re-summed", () => {
   test("`cap: null` STAYS null — it is rendered as `none`, and 0 is a real ceiling", () => {
     expect(armCost(record([], null)).cap).toBeNull()
     expect(armCost(record([], 0)).cap).toBe(0)
+  })
+
+  test("an arm that was never forked: newly executed is all of it, and nothing is inherited", () => {
+    const rec = record([], null)
+    recordTurn(rec.ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    expect(armCost(rec)).toMatchObject({
+      tokens: 30,
+      billedTurns: 1,
+      newlyExecuted: { tokens: 30, turns: 1 },
+      inherited: { tokens: 0, turns: 0, unknown: 0 },
+    })
+  })
+
+  test("a FORKED arm carries newly executed and inherited figures beside the attributed ones (2-5b)", () => {
+    const rec = record([], null)
+    recordTurn(rec.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: tokens(10, 20),
+      origin: { runId: "run-P", entry: 0 },
+    })
+    recordTurn(rec.ledger, { slot: "discovery-1", stage: "judge", attempt: 1, tokens: tokens(1, 2) })
+    recordUnknownTurn(rec.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 2,
+      executionId: "exec-P",
+      why: "the host reported no usage",
+      origin: { runId: "run-P" },
+    })
+    expect(armCost(rec)).toMatchObject({
+      tokens: 33,
+      billedTurns: 2,
+      newlyExecuted: { tokens: 3, turns: 1 },
+      inherited: { tokens: 30, turns: 1, unknown: 1 },
+    })
+  })
+
+  test("a record with NO unknown-usage collection costs out rather than throwing (2-5b)", () => {
+    // `armCost` reads `unknownUsage` through `usageByOrigin` now, where before it
+    // read only `total`, `entries.length` and `cap`. `ablation/governor.ts`
+    // halts with a reason on this same untrusted record rather than throwing, so
+    // the report builder must not be the one place a pre-2.3 dump crashes.
+    const rec = record([], null)
+    recordTurn(rec.ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    const legacy = { ...rec, ledger: { ...rec.ledger, unknownUsage: undefined as never } }
+
+    expect(armCost(legacy)).toMatchObject({
+      tokens: 30,
+      billedTurns: 1,
+      newlyExecuted: { tokens: 30, turns: 1 },
+      inherited: { tokens: 0, turns: 0, unknown: 0 },
+    })
   })
 })
 

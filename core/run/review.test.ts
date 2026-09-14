@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
 import { DISCLOSURE_CODES } from "../domain/warning.ts"
-import type { RunRecord } from "../domain/run-record.ts"
+import { recordTurn, recordUnknownTurn, type RunRecord } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
@@ -19,9 +19,24 @@ import {
   type SlotScript,
   type SlotStep,
 } from "../test-support/fakes.ts"
-import { SUGGESTED_BUDGET, usageIsComplete } from "../budget/ledger.ts"
+import {
+  hasInheritedUsage,
+  mayISpend,
+  spent,
+  spentTokens,
+  SUGGESTED_BUDGET,
+  usageByOrigin,
+  usageIsComplete,
+} from "../budget/ledger.ts"
 import { createLateUsageSink, type LateUsageReport } from "../ports/late-usage.ts"
-import { continueReview, frameForHostAgent, prepareReview, review } from "./review.ts"
+import {
+  CheckpointForkError,
+  continueReview,
+  forkPreparedReview,
+  frameForHostAgent,
+  prepareReview,
+  review,
+} from "./review.ts"
 
 const ENVELOPE = {
   findings: [
@@ -2710,5 +2725,322 @@ describe("review — the prepared value and who owns it (story 2.5A)", () => {
     expect(record.roster).toBe(prepared.record.roster)
     expect(record.threshold).toBe(0.8)
     expect(record.routeCounts?.toDebate).toBe(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2.5A, child 2-5b — the checkpoint fork and ledger provenance
+// ---------------------------------------------------------------------------
+
+/** A counted turn billing `input + output`, for fixtures that need a known spend. */
+function billed(stage: string, input: number, output = 0) {
+  return { slot: "discovery-1", stage, attempt: 1, tokens: tokens(input, output) }
+}
+
+describe("forkPreparedReview — one checkpoint, independent branches (story 2.5A, 2-5b)", () => {
+  test("ALIASING: a branch's canonical is its OWN pool entry, never an absorbed member or the source's", async () => {
+    const { deps } = mixedRun()
+    const prepared = await prepareReview(deps)
+    const merged = prepared.record.findings.find((f) => (f.mergedIds ?? []).length > 0)
+    expect(merged).toBeDefined()
+
+    const [a, b] = forkPreparedReview(prepared, deps.clock, 2)
+    for (const branch of [a!, b!]) {
+      const canonical = branch.record.findings.find((f) => f.id === merged!.id)!
+      expect(canonical).toBe(branch.record.pool.find((f) => f.id === merged!.id)!)
+      for (const id of canonical.mergedIds!) {
+        expect(canonical).not.toBe(branch.record.pool.find((f) => f.id === id)!)
+      }
+      expect(canonical).not.toBe(merged)
+      expect(branch.record.ledger).not.toBe(prepared.record.ledger)
+      expect(branch.record.findings.map((f) => f.id)).toEqual(prepared.record.findings.map((f) => f.id))
+    }
+
+    a!.record.findings[0]!.claim = "mutated in branch a"
+    a!.record.ledger.entries.push(billed("judge", 1))
+    expect(b!.record.findings[0]!.claim).not.toBe("mutated in branch a")
+    expect(prepared.record.findings[0]!.claim).not.toBe("mutated in branch a")
+    expect(b!.record.ledger.entries).toHaveLength(prepared.record.ledger.entries.length)
+  })
+
+  test("A BAD COUNT is refused before anything is consumed", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview(deps)
+    for (const branches of [1, 0, -2, 2.5, Number.NaN, "2" as never]) {
+      expect(() => forkPreparedReview(prepared, deps.clock, branches), String(branches)).toThrow(
+        CheckpointForkError,
+      )
+    }
+    const { record } = await continueReview(prepared, deps)
+    expect(record.finishedAt).toBeDefined()
+  })
+
+  test("AN UNCLONEABLE VALUE is refused by name, nothing is stripped, and the source still continues", async () => {
+    const { deps } = criticalRun()
+    const probe = () => "caller evidence"
+    const prepared = await prepareReview({
+      ...deps,
+      priorWarnings: [
+        ...deps.priorWarnings,
+        { code: "session-cleanup-unresolved", stage: "discover", message: "caller evidence", detail: { probe } },
+      ],
+    })
+
+    let error: unknown
+    try {
+      forkPreparedReview(prepared, deps.clock, 2)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(CheckpointForkError)
+    expect((error as Error).message).toContain("session-cleanup-unresolved")
+    expect(prepared.record.warnings.find((w) => w.message === "caller evidence")?.detail?.["probe"]).toBe(probe)
+
+    const { record } = await continueReview(prepared, deps)
+    expect(record.finishedAt).toBeDefined()
+  })
+
+  test("A CLOCK THAT THROWS OR REPEATS AN ID fails the fork and leaves the source usable", async () => {
+    const clocks: [string, (prepared: { record: { runId: string } }) => Clock, unknown][] = [
+      [
+        "throws on the second branch",
+        () => {
+          let calls = 0
+          return {
+            now: () => "2026-09-11T00:00:00.000Z",
+            id: (prefix) => {
+              calls += 1
+              if (calls === 2) throw new Error("clock down")
+              return `${prefix}-fork-${calls}`
+            },
+          }
+        },
+        "clock down",
+      ],
+      ["repeats an id", () => ({ now: () => "2026-09-11T00:00:00.000Z", id: () => "run-same" }), CheckpointForkError],
+      [
+        "returns the source's id",
+        (prepared) => ({ now: () => "2026-09-11T00:00:00.000Z", id: () => prepared.record.runId }),
+        CheckpointForkError,
+      ],
+    ]
+    for (const [name, clockFor, expected] of clocks) {
+      const { deps } = criticalRun()
+      const prepared = await prepareReview(deps)
+      expect(() => forkPreparedReview(prepared, clockFor(prepared), 2), name).toThrow(expected as never)
+      const [branch] = forkPreparedReview(prepared, deps.clock, 2)
+      expect(branch!.record.forkedFrom, name).toBe(prepared.record.runId)
+    }
+  })
+
+  test("SINGLE USE: continued or forked, a source and its shallow wrapper are refused", async () => {
+    const first = criticalRun()
+    const continuedSource = await prepareReview(first.deps)
+    await continueReview(continuedSource, first.deps)
+    expect(() => forkPreparedReview(continuedSource, first.deps.clock, 2)).toThrow("already continued or forked")
+    expect(() => forkPreparedReview({ ...continuedSource }, first.deps.clock, 2)).toThrow("already continued or forked")
+
+    const second = criticalRun()
+    const forkedSource = await prepareReview(second.deps)
+    forkPreparedReview(forkedSource, second.deps.clock, 2)
+    await expect(continueReview(forkedSource, second.deps)).rejects.toThrow("already continued or forked")
+    await expect(continueReview({ ...forkedSource }, second.deps)).rejects.toThrow("already continued or forked")
+    expect(() => forkPreparedReview({ ...forkedSource }, second.deps.clock, 2)).toThrow(CheckpointForkError)
+  })
+
+  test("IDENTITY: every branch is a new run that names its immediate source", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview(deps)
+    const branches = forkPreparedReview(prepared, deps.clock, 3)
+
+    expect(new Set([prepared.record.runId, ...branches.map((b) => b.record.runId)]).size).toBe(4)
+    for (const branch of branches) expect(branch.record.forkedFrom).toBe(prepared.record.runId)
+    expect(prepared.record.forkedFrom).toBeUndefined()
+  })
+
+  test("PROVENANCE: prefix rows are inherited by position, the branch's own turns are executed here", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview(deps)
+    recordTurn(prefix.record.ledger, billed("discover", 5))
+    recordTurn(prefix.record.ledger, billed("discover", 7))
+    recordUnknownTurn(prefix.record.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 2,
+      executionId: "exec-prefix",
+      why: "the host reported no usage",
+    })
+    const inheritedRows = prefix.record.ledger.entries.length
+    expect(inheritedRows).toBe(3)
+
+    const [branch] = forkPreparedReview(prefix, deps.clock, 2)
+    const backend = new FakeBackend({ "discovery-1": [{ kind: "ok", value: { findings: [RETRY_CRITICAL] } }] })
+    const { record } = await continueReview(branch!, { backend, clock: deps.clock }, "debate-off")
+
+    const P = prefix.record.runId
+    expect(record.ledger.entries.slice(0, inheritedRows).map((e) => e.origin)).toEqual([
+      { runId: P, entry: 0 },
+      { runId: P, entry: 1 },
+      { runId: P, entry: 2 },
+    ])
+    expect(record.ledger.unknownUsage.map((u) => u.origin)).toEqual([{ runId: P }])
+    const own = record.ledger.entries.slice(inheritedRows)
+    expect(own.length).toBeGreaterThan(0)
+    for (const entry of own) expect("origin" in entry).toBe(false)
+
+    const split = usageByOrigin(record.ledger)
+    expect(split.inherited).toEqual({
+      tokens: prefix.record.ledger.total,
+      turns: inheritedRows,
+      unknown: 1,
+    })
+    expect(split.executedHere.turns).toBe(own.length)
+    expect(split.executedHere.unknown).toBe(0)
+  })
+
+  test("THE SOURCE IS NOT WRITTEN TO: forking marks the branches' rows and leaves the prefix's alone", async () => {
+    // The origins a branch carries are written onto the CLONE. A fork that marked
+    // the source's rows instead would make the prefix read as inherited from
+    // itself, and `usageByOrigin` would then report the run that executed those
+    // turns as having executed none of them.
+    const { deps } = criticalRun()
+    const prefix = await prepareReview(deps)
+    recordTurn(prefix.record.ledger, billed("discover", 5))
+    recordTurn(prefix.record.ledger, billed("discover", 7))
+    recordUnknownTurn(prefix.record.ledger, {
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 2,
+      executionId: "exec-prefix",
+      why: "the host reported no usage",
+    })
+    const before = structuredClone(prefix.record.ledger)
+
+    const branches = forkPreparedReview(prefix, deps.clock, 2)
+
+    expect(prefix.record.ledger).toEqual(before)
+    expect(prefix.record.forkedFrom).toBeUndefined()
+    for (const entry of prefix.record.ledger.entries) expect("origin" in entry).toBe(false)
+    for (const unknown of prefix.record.ledger.unknownUsage) expect("origin" in unknown).toBe(false)
+    const split = usageByOrigin(prefix.record.ledger)
+    expect(split.executedHere).toEqual(split.attributed)
+    expect(hasInheritedUsage(split)).toBe(false)
+    // …while every branch DOES carry them, so the assertion above is not passing
+    // because the fork did nothing.
+    for (const branch of branches) expect(hasInheritedUsage(usageByOrigin(branch.record.ledger))).toBe(true)
+  })
+
+  test("MIXED CHAIN: a fork of a branch keeps the prefix's origins and names the branch for its own rows", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview(deps)
+    recordTurn(prefix.record.ledger, billed("discover", 5))
+    recordTurn(prefix.record.ledger, billed("discover", 7))
+    const [b] = forkPreparedReview(prefix, deps.clock, 2)
+
+    // Rows the branch executed itself, written onto an UNUSED prepared value: a
+    // continued branch is unforkable by contract, so this is the only honest way
+    // to hold local rows in a forkable checkpoint.
+    recordTurn(b!.record.ledger, billed("debate", 11))
+    recordTurn(b!.record.ledger, billed("debate", 13))
+    recordUnknownTurn(b!.record.ledger, {
+      slot: "discovery-1",
+      stage: "debate",
+      attempt: 1,
+      executionId: "exec-b",
+      why: "the run was cancelled while this turn was in flight",
+    })
+
+    const [c] = forkPreparedReview(b!, deps.clock, 2)
+    const P = prefix.record.runId
+    const B = b!.record.runId
+    expect(c!.record.forkedFrom).toBe(B)
+    expect(c!.record.ledger.entries.map((e) => e.origin)).toEqual([
+      { runId: P, entry: 0 },
+      { runId: P, entry: 1 },
+      { runId: P, entry: 2 },
+      { runId: B, entry: 3 },
+      { runId: B, entry: 4 },
+    ])
+    expect(c!.record.ledger.unknownUsage.map((u) => u.origin)).toEqual([{ runId: B }])
+  })
+
+  test("CAP: inherited spend counts against the branch's own cap", async () => {
+    const { deps } = criticalRun({ tokenCap: 150 })
+    const prefix = await prepareReview(deps)
+    recordTurn(prefix.record.ledger, billed("discover", 100 - spent(prefix.record.ledger)))
+    expect(spent(prefix.record.ledger)).toBe(100)
+
+    const [branch] = forkPreparedReview(prefix, deps.clock, 2)
+    const ledger = branch!.record.ledger
+    expect(ledger.cap).toBe(150)
+    expect(spent(ledger)).toBe(100)
+    expect(mayISpend(ledger, "judge")).toBe(true)
+    recordTurn(ledger, billed("judge", 50))
+    expect(mayISpend(ledger, "judge")).toBe(false)
+    expect(spentTokens(usageByOrigin(ledger).inherited.tokens)).toBe(100)
+  })
+
+  test("INHERITED UNKNOWN: the branch is incomplete, issues no turn, and a late bill stays inherited", async () => {
+    const run = unknownDiscoveryRun()
+    const prefix = await prepareReview({ ...run, stopOnUnknownUsage: true })
+    expect(prefix.record.ledger.unknownUsage).toHaveLength(1)
+
+    const [branch] = forkPreparedReview(prefix, run.clock, 2)
+    expect(usageIsComplete(branch!.record.ledger)).toBe(false)
+
+    const fresh = new FakeBackend(abstainingInDebate({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }))
+    const lateUsage = createLateUsageSink()
+    lateUsage.report({ executionId: "exec-1", tokens: tokens(7, 11) })
+    const { record } = await continueReview(branch!, { backend: fresh, clock: run.clock, lateUsage }, "debate-off")
+
+    expect(fresh.calls).toEqual([])
+    expect(record.ledger.entries.find((entry) => entry.stage === "discover")).toEqual({
+      slot: "discovery-1",
+      stage: "discover",
+      attempt: 1,
+      tokens: tokens(7, 11),
+      origin: { runId: prefix.record.runId, executionId: "exec-1" },
+    })
+    expect(usageByOrigin(record.ledger).inherited).toMatchObject({ turns: 1, unknown: 0 })
+    expect(usageByOrigin(record.ledger).executedHere).toMatchObject({ turns: 0, unknown: 0 })
+  })
+
+  test("PREFIX CANCELLED: every branch carries the stop and issues no request", async () => {
+    const { deps, scripts } = stoppedInDiscovery()
+    const prefix = await prepareReview(deps)
+    for (const branch of forkPreparedReview(prefix, deps.clock, 2)) {
+      expect(branch.record.cancelled).toEqual({ stage: "discover" })
+      const fresh = new FakeBackend(scripts)
+      const { record } = await continueReview(branch, { backend: fresh, clock: fakeClock() })
+      expect(fresh.calls).toEqual([])
+      expect(record.cancelled).toEqual({ stage: "discover" })
+    }
+  })
+
+  test("AC: shipped and debate-off branches inherit the prefix and execute only their own turns", async () => {
+    const { deps } = mixedRun()
+    const prefix = await prepareReview(deps)
+    const prefixTotal = structuredClone(prefix.record.ledger.total)
+    const prefixRows = prefix.record.ledger.entries.length
+    const [on, off] = forkPreparedReview(prefix, deps.clock, 2)
+
+    const results = [
+      await continueReview(on!, { backend: mixedRun().backend, clock: deps.clock }, "shipped"),
+      await continueReview(off!, { backend: mixedRun().backend, clock: deps.clock }, "debate-off"),
+    ]
+    for (const { record, rendered } of results) {
+      const split = usageByOrigin(record.ledger)
+      expect(split.inherited).toEqual({ tokens: prefixTotal, turns: prefixRows, unknown: 0 })
+      const own = record.ledger.entries.slice(prefixRows)
+      expect(split.executedHere.turns).toBe(own.length)
+      expect(spentTokens(split.executedHere.tokens)).toBe(own.reduce((sum, e) => sum + spentTokens(e.tokens), 0))
+      expect(rendered).toContain("TOKENS (ATTRIBUTED) — ")
+      expect(rendered).toContain(`this run was forked from ${prefix.record.runId}`)
+      expect(rendered).toContain("are not its own bill")
+    }
+    const [onRecord, offRecord] = results.map((r) => r.record)
+    expect(offRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(false)
+    expect(onRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(true)
+    expect(onRecord!.runId).not.toBe(offRecord!.runId)
   })
 })

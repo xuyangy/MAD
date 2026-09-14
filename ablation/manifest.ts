@@ -39,8 +39,10 @@ import { createHash } from "node:crypto"
 import {
   budgetReport,
   unknownUsageCount,
+  usageByOrigin,
   usageIsComplete,
   type StageSpend,
+  type UsageByOrigin,
 } from "../core/budget/ledger.ts"
 import type { Preset, SpendShares } from "../core/budget/presets.ts"
 import type { Finding, Stage } from "../core/domain/finding.ts"
@@ -258,6 +260,13 @@ export interface RunManifest {
   identity: EvaluationIdentity & { changeId: ChangeId }
   run: {
     runId: string
+    /**
+     * SPEC.md "Evaluation exception" — the run this one was forked from (the
+     * immediate source), or an unknown stating that it was not forked. ALWAYS
+     * WRITTEN, together with `spend.origin`. A manifest carrying neither
+     * predates ledger provenance; `ablation/read-bundle.ts` states how it is read.
+     */
+    forkedFrom: Maybe<string>
     startedAt: string
     finishedAt: Maybe<string>
   }
@@ -336,6 +345,15 @@ export interface RunManifest {
     unknownUsageCount: number
     /** `unquantified` unless the verdict is `complete`. See `TokenExposure`. */
     exposure: TokenExposure
+    /**
+     * AD-15 amended — `usageByOrigin`, the accountant's split. `attributed` is
+     * the figures above; `executedHere` is what this run issued itself;
+     * `inherited` is what earlier runs issued before this one was forked from
+     * them. ALWAYS WRITTEN; `inherited` is zero on a run that was never forked.
+     * When any arm inherited, arms' `total`s are not a bill and must not be
+     * added together.
+     */
+    origin: UsageByOrigin
   }
   status: {
     completion: Completion
@@ -378,6 +396,8 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     identity: { ...identity, changeId: changeIdFor(change) },
     run: {
       runId: record.runId,
+      forkedFrom:
+        record.forkedFrom === undefined ? unknownValue("the run was not forked") : known(record.forkedFrom),
       startedAt: record.startedAt,
       finishedAt:
         record.finishedAt === undefined
@@ -410,6 +430,10 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
       perStage: budgetReport(record.ledger),
       total: record.ledger.total,
       ...auditUsage(record.ledger),
+      // A record without an unknown-usage collection has no audited list, and
+      // `auditUsage` writes an empty one; `usageByOrigin` reads the same absence
+      // the same way, so the manifest cannot disagree with itself.
+      origin: usageByOrigin(record.ledger),
     },
     status: {
       completion: completionOf(record, warnings),

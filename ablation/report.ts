@@ -36,11 +36,33 @@
  * `scripts/ablation.ts` is the only thing that prints.
  */
 
-import type { AblationReport } from "./compare.ts"
+import type { AblationReport, ArmCost } from "./compare.ts"
 import { countText, matcherText } from "./cross-arm-rates.ts"
 
 function fraction(part: number, whole: number): string {
   return `${part} of ${whole}`
+}
+
+/**
+ * Whether an arm's run inherited any usage, counted or not.
+ *
+ * Tokens are tested beside the two counts, for `read-bundle.ts`'s
+ * `inheritsAnySlice` reason: an inherited figure that goes unlabelled is a
+ * figure a reader adds across arms, and a zero turn count must not be what
+ * silences the label.
+ */
+function inherits(cost: ArmCost): boolean {
+  return cost.inherited.turns > 0 || cost.inherited.unknown > 0 || cost.inherited.tokens > 0
+}
+
+/** The newly executed and inherited figures, printed only for an arm that inherited. */
+function splitText(cost: ArmCost): string {
+  if (!inherits(cost)) return ""
+  const unknown = cost.inherited.unknown > 0 ? `, ${cost.inherited.unknown} inherited unknown` : ""
+  return (
+    ` | NEWLY EXECUTED ${cost.newlyExecuted.tokens} over ${cost.newlyExecuted.turns} turn(s)` +
+    ` | inherited ${cost.inherited.tokens} over ${cost.inherited.turns} turn(s)${unknown}`
+  )
 }
 
 /** `null` is `none`. A cap of `0` is a real ceiling and must not read as absence. */
@@ -147,9 +169,11 @@ export function renderAblation(report: AblationReport): string[] {
       // figure on this line. `evaluation-protocol.md:511-517` requires the label
       // at the human-facing end and requires it unlabelled-means-nothing:
       // "a missing tag is not evidence of complete usage".
-      `    tokens (observed): ${arm.cost.tokens} over ${arm.cost.billedTurns} billed turn(s), cap ${capText(arm.cost.cap)}` +
+      `    tokens (${inherits(arm.cost) ? "attributed, " : ""}observed): ${arm.cost.tokens} over ` +
+        `${arm.cost.billedTurns} billed turn(s), cap ${capText(arm.cost.cap)}` +
         ` | in ${arm.cost.input} / out ${arm.cost.output} / reasoning ${arm.cost.reasoning}` +
-        ` / cache r ${arm.cost.cacheRead} w ${arm.cost.cacheWrite}`,
+        ` / cache r ${arm.cost.cacheRead} w ${arm.cost.cacheWrite}` +
+        splitText(arm.cost),
       `    route: ${countsText(arm.routeCounts)}`,
       `    debate: ${countsText(arm.debateCounts)}`,
       `    judge: ${countsText(arm.judgeCounts)}`,
@@ -235,7 +259,16 @@ export function renderAblation(report: AblationReport): string[] {
   for (const arm of report.arms) {
     const repeat = report.repeats > 1 ? ` (repeat ${arm.repeat})` : ""
     lines.push(
-      `  ${arm.id}${repeat}: ${arm.cost.tokens} token(s) over ${arm.cost.billedTurns} billed turn(s)`,
+      `  ${arm.id}${repeat}: ${arm.cost.tokens} token(s) over ${arm.cost.billedTurns} billed turn(s)` +
+        (inherits(arm.cost) ? ` ATTRIBUTED${splitText(arm.cost)}` : ""),
+    )
+  }
+  if (report.arms.some((arm) => inherits(arm.cost))) {
+    // AD-15 amended — a forked arm's figures include the prefix it inherited, so
+    // summing two such arms counts that prefix twice.
+    lines.push(
+      "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms,",
+      "  never attributed ones.",
     )
   }
   lines.push("")
@@ -274,7 +307,10 @@ export function renderAblation(report: AblationReport): string[] {
       }
     }
     lines.push(
-      `  cost: ${report.lens.cost.tokens} token(s) over ${report.lens.cost.billedTurns} extra turn(s)`,
+      `  cost: ${report.lens.cost.tokens} token(s) over ${report.lens.cost.billedTurns} extra turn(s)` +
+        (report.arms.some((arm) => inherits(arm.cost))
+          ? " — a difference of ATTRIBUTED totals, which include what forked arms inherited"
+          : ""),
     )
     if (report.lens.cost.tokens <= 0) {
       // A DIFFERENCE OF LEDGERS, NOT A PRICE. Under a shared cap both arms can be
