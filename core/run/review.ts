@@ -693,11 +693,22 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
  * still be forked or continued.
  */
 export class CheckpointForkError extends Error {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = "CheckpointForkError"
   }
 }
+
+/**
+ * The most branches one checkpoint may be forked into.
+ *
+ * A fork serves a paired continuation, so the real counts are 2 and 3. The bound
+ * exists because each branch is one `structuredClone` of the whole prepared
+ * state and the count arrives from a JavaScript caller TypeScript does not
+ * police: without it a mistyped count is a memory exhaustion rather than a
+ * refusal, and the refusal is the only one of the two a caller can act on.
+ */
+export const MAX_FORK_BRANCHES = 64
 
 /**
  * Copies one prepared review into `branches` independent prepared reviews, for a
@@ -736,10 +747,15 @@ export function forkPreparedReview(
   clock: Clock,
   branches: number,
 ): PreparedReview[] {
-  if (typeof branches !== "number" || !Number.isInteger(branches) || branches < 2) {
+  if (
+    typeof branches !== "number" ||
+    !Number.isInteger(branches) ||
+    branches < 2 ||
+    branches > MAX_FORK_BRANCHES
+  ) {
     throw new CheckpointForkError(
-      `cannot fork into ${String(branches)} branch(es): a fork needs a whole number of at least 2. ` +
-        `Nothing was forked and the prepared review is still unused.`,
+      `cannot fork into ${String(branches)} branch(es): a fork needs a whole number from 2 to ` +
+        `${MAX_FORK_BRANCHES}. Nothing was forked and the prepared review is still unused.`,
     )
   }
   const source = prepared.record
@@ -754,7 +770,20 @@ export function forkPreparedReview(
   const forks: PreparedReview[] = []
   for (let branch = 1; branch <= branches; branch += 1) {
     const copy = cloneCheckpoint(prepared)
-    const runId = clock.id("run")
+    let runId: string
+    try {
+      runId = clock.id("run")
+    } catch (error) {
+      // THE CLOCK'S OWN FAILURE IS NAMED LIKE EVERY OTHER FORK REFUSAL, so one
+      // `catch` serves a caller that cannot otherwise tell a fork that refused
+      // from a fork that half happened. `cause` carries the clock's error, which
+      // is the only thing that says what actually broke.
+      throw new CheckpointForkError(
+        `the clock failed to mint a run id for branch ${branch}, so nothing was forked and the ` +
+          `prepared review is still unused.`,
+        { cause: error },
+      )
+    }
     if (typeof runId !== "string" || runId.length === 0 || ids.has(runId)) {
       throw new CheckpointForkError(
         `the clock returned run id ${JSON.stringify(runId)} for branch ${branch}, which is empty or not ` +

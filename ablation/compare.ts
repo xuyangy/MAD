@@ -159,15 +159,16 @@ export interface ArmCost {
   /** `null` means no ceiling. Rendered as `none`, NEVER as `0`. */
   cap: number | null
   /**
-   * AD-15 amended — of `tokens` and `billedTurns`, what this arm's run EXECUTED
-   * ITSELF. Equal to them for a run that was never forked.
+   * AD-15 amended — of `tokens`, `billedTurns` and the run's unknown-usage
+   * count, what this arm's run EXECUTED ITSELF. Equal to them for a run that was
+   * never forked.
    *
    * For a forked branch `tokens` and `billedTurns` are ATTRIBUTED: they include
    * the prefix the branch inherited, so two branches' figures added together
    * count that prefix twice. These are the figures a sum over branches may add.
    * Both come from `usageByOrigin`; this module re-sums nothing.
    */
-  newlyExecuted: { tokens: number; turns: number }
+  newlyExecuted: { tokens: number; turns: number; unknown: number }
   /** What the run inherited from the run it was forked from. Zero when it was not forked. */
   inherited: { tokens: number; turns: number; unknown: number }
 }
@@ -184,7 +185,11 @@ export function armCost(record: RunRecord): ArmCost {
     cacheRead: t.cacheRead,
     cacheWrite: t.cacheWrite,
     cap: record.ledger.cap,
-    newlyExecuted: { tokens: spentTokens(executedHere.tokens), turns: executedHere.turns },
+    newlyExecuted: {
+      tokens: spentTokens(executedHere.tokens),
+      turns: executedHere.turns,
+      unknown: executedHere.unknown,
+    },
     inherited: {
       tokens: spentTokens(inherited.tokens),
       turns: inherited.turns,
@@ -212,18 +217,23 @@ export interface LensTokenCost {
    * identities (`ablation/manifest.ts`'s `spend`), and this number is read beside
    * them rather than in place of them.
    *
-   * It differences ATTRIBUTED totals. When either run was forked, each total
-   * includes what that run inherited (`ArmCost.inherited`), and the inherited
-   * parts cancel only if both runs inherited the same prefix.
+   * It differences NEWLY EXECUTED figures, never attributed ones. A forked run's
+   * total carries the prefix it inherited, and differencing two totals cancels
+   * that prefix only when both runs inherited the same one — so a pair with
+   * different prefixes, or a pair only one of which was forked, would leave an
+   * inherited remainder inside a number that claims to be the lens pass's cost.
+   * On a pair that was never forked this is the same subtraction either way.
    */
   tokens: number
   billedTurns: number
 }
 
 export function lensTokenCost(withLenses: RunRecord, without: RunRecord): LensTokenCost {
+  const lensed = usageByOrigin(withLenses.ledger).executedHere
+  const plain = usageByOrigin(without.ledger).executedHere
   return {
-    tokens: spentTokens(withLenses.ledger.total) - spentTokens(without.ledger.total),
-    billedTurns: withLenses.ledger.entries.length - without.ledger.entries.length,
+    tokens: spentTokens(lensed.tokens) - spentTokens(plain.tokens),
+    billedTurns: lensed.turns - plain.turns,
   }
 }
 

@@ -160,6 +160,15 @@ export interface ExperimentGovernorState {
    * The spend MAD COULD count, summed over every observed run's ledger total.
    * Carried as the five components because a total is not a breakdown —
    * `ablation/compare.ts`'s `ArmCost` makes the same split for the same reason.
+   *
+   * AD-15 amended — THIS SUM IS OVER ATTRIBUTED TOTALS AND DOUBLE-COUNTS A
+   * SHARED PREFIX. A forked branch's `ledger.total` carries the prefix it
+   * inherited, so two branches of one checkpoint each contribute it. The figure
+   * is reported, never compared with a threshold, so nothing is gated on the
+   * overstatement — but a human reading a halt is reading it, and no label here
+   * says so. Counting each physical execution once needs the unique-execution
+   * bill, which belongs to the paired runner (2-5c) with the rest of the
+   * cross-branch arithmetic; `usageByOrigin` is the split it will read.
    */
   knownSpend: TokenUsage
   /** The same figure summed, through the accountant's `spentTokens`. */

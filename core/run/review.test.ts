@@ -33,6 +33,7 @@ import {
   CheckpointForkError,
   continueReview,
   forkPreparedReview,
+  MAX_FORK_BRANCHES,
   frameForHostAgent,
   prepareReview,
   review,
@@ -2766,7 +2767,19 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
   test("A BAD COUNT is refused before anything is consumed", async () => {
     const { deps } = criticalRun()
     const prepared = await prepareReview(deps)
-    for (const branches of [1, 0, -2, 2.5, Number.NaN, "2" as never]) {
+    for (const branches of [
+      1,
+      0,
+      -2,
+      2.5,
+      Number.NaN,
+      "2" as never,
+      // ABOVE THE BOUND IS A BAD COUNT, not a slow fork: each branch is one
+      // `structuredClone` of the whole prepared state, so an unbounded count is a
+      // memory exhaustion where a refusal is the only outcome a caller can act on.
+      MAX_FORK_BRANCHES + 1,
+      Number.POSITIVE_INFINITY,
+    ]) {
       expect(() => forkPreparedReview(prepared, deps.clock, branches), String(branches)).toThrow(
         CheckpointForkError,
       )
@@ -2815,7 +2828,7 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
             },
           }
         },
-        "clock down",
+        CheckpointForkError,
       ],
       ["repeats an id", () => ({ now: () => "2026-09-11T00:00:00.000Z", id: () => "run-same" }), CheckpointForkError],
       [
@@ -2828,6 +2841,19 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
       const { deps } = criticalRun()
       const prepared = await prepareReview(deps)
       expect(() => forkPreparedReview(prepared, clockFor(prepared), 2), name).toThrow(expected as never)
+      // THE CLOCK'S OWN MESSAGE SURVIVES THE NAMING. A caller that catches one
+      // error type still needs to know what actually broke, and `cause` is where
+      // a fork refusal that was not the fork's own fault says so.
+      if (name === "throws on the second branch") {
+        let caught: unknown
+        try {
+          forkPreparedReview(prepared, clockFor(prepared), 2)
+        } catch (error) {
+          caught = error
+        }
+        expect((caught as { cause?: unknown }).cause).toBeInstanceOf(Error)
+        expect(((caught as { cause: Error }).cause).message).toBe("clock down")
+      }
       const [branch] = forkPreparedReview(prepared, deps.clock, 2)
       expect(branch!.record.forkedFrom, name).toBe(prepared.record.runId)
     }

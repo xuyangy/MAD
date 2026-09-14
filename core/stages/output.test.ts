@@ -2947,6 +2947,40 @@ describe("story 2.5A (2-5b) — a forked run's TOKENS figures are ATTRIBUTED", (
     const split = lines.find((l) => l.startsWith("  ATTRIBUTED:"))!
     expect(split).toContain("INHERITED — turns: 0 | tokens: 0 | unknown usage: 1.")
     expect(split).toContain("NEWLY EXECUTED — turns: 1 | tokens: 90.")
+    // NOTHING INHERITED MOVED A TOKEN, so the line must not say the figures count
+    // one. The label is still printed: an inherited unknown is still inherited.
+    expect(split).toContain("what it inherited is unknown usage that carries no number")
+    expect(split).not.toContain("count what it inherited as well as what it executed")
+  })
+
+  test("a parent MAD cannot name still gets the warning, under a stated placeholder", () => {
+    // `forkPreparedReview` writes `forkedFrom` on every branch whose rows it
+    // marks, so this record reaches the renderer only from a JavaScript caller or
+    // a hand-edited dump. The label still has to be right for it: an attributed
+    // figure read as a bill is the failure, and an unnameable parent is not a
+    // reason to withhold the warning.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    inheritedTurn(rec)
+    billedCounted(rec, 40)
+
+    const split = output(rec).split("\n").find((l) => l.startsWith("  ATTRIBUTED:"))!
+    expect(split).toContain("this run was forked from an earlier run")
+    expect(split).not.toContain("undefined")
+    expect(split).toContain("INHERITED — turns: 1 | tokens: 150.")
+  })
+
+  test("the per-stage BUDGET block is marked ATTRIBUTED on a forked run", () => {
+    // An inherited prefix sits WHOLE inside the stage that executed it, so two
+    // branches' `discover` rows added together count it twice. `budgetReport`
+    // stays attributed because that is the figure the cap gate holds against the
+    // ceiling; only the heading says so.
+    const rec = record([finding({ severity: "high", file: "a.ts" })])
+    rec.forkedFrom = "run-P"
+    rec.ledger.cap = 1000
+    inheritedTurn(rec)
+    billedCounted(rec, 40)
+
+    expect(output(rec)).toContain("BUDGET (no preset, token cap 1000, ATTRIBUTED)")
   })
 
   test("a run that was never forked prints neither label", () => {

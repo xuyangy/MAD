@@ -36,6 +36,7 @@
  * `scripts/ablation.ts` is the only thing that prints.
  */
 
+import { inheritsAny } from "../core/budget/ledger.ts"
 import type { AblationReport, ArmCost } from "./compare.ts"
 import { countText, matcherText } from "./cross-arm-rates.ts"
 
@@ -43,27 +44,33 @@ function fraction(part: number, whole: number): string {
   return `${part} of ${whole}`
 }
 
-/**
- * Whether an arm's run inherited any usage, counted or not.
- *
- * Tokens are tested beside the two counts, for `read-bundle.ts`'s
- * `inheritsAnySlice` reason: an inherited figure that goes unlabelled is a
- * figure a reader adds across arms, and a zero turn count must not be what
- * silences the label.
- */
+/** Whether an arm's run inherited any usage, counted or not. `ArmCost` sums its own tokens. */
 function inherits(cost: ArmCost): boolean {
-  return cost.inherited.turns > 0 || cost.inherited.unknown > 0 || cost.inherited.tokens > 0
+  return inheritsAny(cost.inherited)
 }
 
 /** The newly executed and inherited figures, printed only for an arm that inherited. */
 function splitText(cost: ArmCost): string {
   if (!inherits(cost)) return ""
-  const unknown = cost.inherited.unknown > 0 ? `, ${cost.inherited.unknown} inherited unknown` : ""
+  const unknown = (count: number, label: string): string =>
+    count > 0 ? `, ${count} ${label} unknown` : ""
   return (
     ` | NEWLY EXECUTED ${cost.newlyExecuted.tokens} over ${cost.newlyExecuted.turns} turn(s)` +
-    ` | inherited ${cost.inherited.tokens} over ${cost.inherited.turns} turn(s)${unknown}`
+    `${unknown(cost.newlyExecuted.unknown, "newly executed")}` +
+    ` | inherited ${cost.inherited.tokens} over ${cost.inherited.turns} turn(s)` +
+    `${unknown(cost.inherited.unknown, "inherited")}`
   )
 }
+
+/**
+ * How to add costs across arms when any of them inherited, in the words both
+ * reports print. Exported because `ablation/read-bundle.ts` prints the same rule
+ * over the same figures, and two wordings of one rule read as two rules.
+ */
+export const INHERITED_SUM_RULE = [
+  "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then",
+  "  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.",
+]
 
 /** `null` is `none`. A cap of `0` is a real ceiling and must not read as absence. */
 function capText(cap: number | null): string {
@@ -265,11 +272,13 @@ export function renderAblation(report: AblationReport): string[] {
   }
   if (report.arms.some((arm) => inherits(arm.cost))) {
     // AD-15 amended — a forked arm's figures include the prefix it inherited, so
-    // summing two such arms counts that prefix twice.
-    lines.push(
-      "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms,",
-      "  never attributed ones.",
-    )
+    // summing two such arms counts that prefix twice. SUMMING NEWLY EXECUTED
+    // FIGURES ALONE COUNTS IT ZERO TIMES: the prefix ran before the fork, so it
+    // is inherited by every branch and newly executed by none, and the run that
+    // executed it was consumed at the fork and writes no arm of its own. The
+    // rule has to name both halves or it states a bill that is short by a whole
+    // discovery pass (`evaluation-protocol.md` §4).
+    lines.push(...INHERITED_SUM_RULE)
   }
   lines.push("")
 
@@ -309,7 +318,7 @@ export function renderAblation(report: AblationReport): string[] {
     lines.push(
       `  cost: ${report.lens.cost.tokens} token(s) over ${report.lens.cost.billedTurns} extra turn(s)` +
         (report.arms.some((arm) => inherits(arm.cost))
-          ? " — a difference of ATTRIBUTED totals, which include what forked arms inherited"
+          ? " — a difference of NEWLY EXECUTED figures, so no inherited prefix is inside it"
           : ""),
     )
     if (report.lens.cost.tokens <= 0) {

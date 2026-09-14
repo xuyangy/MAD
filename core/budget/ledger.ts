@@ -306,7 +306,7 @@ export function usageByOrigin(ledger: TokenLedger): UsageByOrigin {
   }
   const inheritedUnknown = unknownUsage.filter((entry) => entry.origin !== undefined).length
   return {
-    attributed: { tokens: ledger.total, turns: ledger.entries.length, unknown: unknownUsage.length },
+    attributed: { tokens: { ...ledger.total }, turns: ledger.entries.length, unknown: unknownUsage.length },
     executedHere: {
       tokens: hereTokens,
       turns: hereTurns,
@@ -317,22 +317,33 @@ export function usageByOrigin(ledger: TokenLedger): UsageByOrigin {
 }
 
 /**
- * Whether the split holds any inherited usage at all, counted or not.
+ * Whether an inherited slice holds any usage at all, counted or not — THE ONE
+ * DEFINITION, over summed tokens so that every caller can reach it.
  *
  * TOKENS ARE TESTED BESIDE THE TWO COUNTS, and not because a ledger can carry
  * inherited tokens over zero inherited turns — `usageByOrigin` adds a row's
  * tokens and its turn together, so it cannot. A split READ BACK from a manifest
  * can: `ablation/read-bundle.ts` parses a `spend.origin` some other writer
  * produced, and a figure the reader would add across arms must not go
- * unlabelled because its turn count happened to be zero. One predicate, so a
- * renderer's idea of "inherited" cannot drift from the reader's validation.
+ * unlabelled because its turn count happened to be zero.
+ *
+ * The three shapes that hold an inherited slice differ — `UsageSlice` carries a
+ * `TokenUsage`, the bundle reader carries the same five fields off disk, and
+ * `ablation/compare.ts`'s `ArmCost` carries them already summed — so each caller
+ * sums its own tokens and the decision itself lives here once. A renderer's idea
+ * of "inherited" then cannot drift from the reader's validation.
  */
+export function inheritsAny(inherited: { tokens: number; turns: number; unknown: number }): boolean {
+  return inherited.turns > 0 || inherited.unknown > 0 || inherited.tokens > 0
+}
+
+/** `inheritsAny` over a split the accountant built. */
 export function hasInheritedUsage(split: UsageByOrigin): boolean {
-  return (
-    split.inherited.turns > 0 ||
-    split.inherited.unknown > 0 ||
-    spentTokens(split.inherited.tokens) > 0
-  )
+  return inheritsAny({
+    tokens: spentTokens(split.inherited.tokens),
+    turns: split.inherited.turns,
+    unknown: split.inherited.unknown,
+  })
 }
 
 /**

@@ -555,6 +555,10 @@ describe("usageByOrigin — attributed, executed here, inherited (AD-15 amended,
     const split = usageByOrigin(ledger)
 
     expect(split.attributed).toEqual({ tokens: ledger.total, turns: 1, unknown: 1 })
+    // A COPY, NOT THE LEDGER'S OWN OBJECT. `ablation/manifest.ts` puts this at
+    // both `spend.total` and `spend.origin.attributed.tokens`, so a caller that
+    // mutated it would write through to the ledger the gate reads.
+    expect(split.attributed.tokens).not.toBe(ledger.total)
     expect(split.executedHere).toEqual(split.attributed)
     expect(split.inherited).toEqual({ tokens: tokens(0, 0), turns: 0, unknown: 0 })
     expect(hasInheritedUsage(split)).toBe(false)

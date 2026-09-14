@@ -237,6 +237,27 @@ describe("lensTokenCost and fileLevelFindings", () => {
     expect(lensTokenCost(lensed, plain)).toEqual({ tokens: 60, billedTurns: 2 })
   })
 
+  test("AN INHERITED PREFIX NEVER REACHES THE LENS COST, however the two runs were forked", () => {
+    // Differencing attributed totals cancels a prefix only when BOTH runs
+    // inherited the same one. Here only the lensed arm was forked, so an
+    // attributed difference would report the prefix as the lens pass's cost.
+    const lensed = record([], null)
+    const plain = record([], null)
+    recordTurn(lensed.ledger, {
+      slot: "s",
+      stage: "discover",
+      attempt: 1,
+      tokens: tokens(500, 500),
+      origin: { runId: "run-P", entry: 0 },
+    })
+    for (let i = 0; i < 3; i += 1) {
+      recordTurn(lensed.ledger, { slot: "s", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    }
+    recordTurn(plain.ledger, { slot: "s", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+
+    expect(lensTokenCost(lensed, plain)).toEqual({ tokens: 60, billedTurns: 2 })
+  })
+
   test("IT CARRIES NO DEFECT FIELD — the gain and the cost are two numbers (AD-9)", () => {
     expect(Object.keys(lensTokenCost(record(), record())).sort()).toEqual(["billedTurns", "tokens"])
   })

@@ -445,6 +445,23 @@ describe("ledger provenance in the manifest (story 2.5A, 2-5b)", () => {
     expect(manifest.spend.origin.attributed).toEqual({ tokens: manifest.spend.total, turns: 1, unknown: 0 })
   })
 
+  test("A BLANK PARENT ID IS UNKNOWN, never a known empty string", () => {
+    // `parseManifest` requires a non-empty string, so `known("")` would be a
+    // manifest this writer emits and its own reader refuses. `forkPreparedReview`
+    // cannot mint one, so the shape arrives from a JavaScript caller.
+    for (const blank of ["", "   "]) {
+      const manifest = buildManifest({
+        record: record({ forkedFrom: blank }),
+        change,
+        identity,
+        turnFiles: known(3),
+      })
+      expect(manifest.run.forkedFrom, JSON.stringify(blank)).toEqual(
+        unknownValue("the run was not forked"),
+      )
+    }
+  })
+
   test("a forked run: forkedFrom names the source and the split carries the inherited rows", () => {
     const base = record()
     const manifest = buildManifest({

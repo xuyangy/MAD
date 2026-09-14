@@ -1274,7 +1274,8 @@ describe("story 2.5A (2-5b) — ledger provenance is checked against the rest of
     expect(text).toContain("tokens (attributed, observed)  newly executed (observed)")
     const onRow = text.split("\n").find((line) => line.startsWith("  on "))!
     expect(onRow).toMatch(/30 +12$/)
-    expect(text).toContain("Add newly executed figures")
+    expect(text).toContain("Add NEWLY EXECUTED figures across arms, then")
+    expect(text).toContain("add each distinct INHERITED prefix once")
   })
 
   test("MIXED: a provenance-less arm beside a forked one prints its own total as newly executed", async () => {
@@ -1330,6 +1331,32 @@ describe("story 2.5A (2-5b) — ledger provenance is checked against the rest of
     if ("error" in result) throw new Error(result.error)
     expect(result.unreadable).toEqual([])
     expect(result.comparable).toHaveLength(1)
+  })
+
+  test("INHERITED TOKENS OVER ZERO INHERITED TURNS still label the table", async () => {
+    // THE SHAPE `usageByOrigin` CANNOT BUILD, and the reason the predicate tests
+    // tokens beside the two counts. A split parsed off disk was written by some
+    // other process, and a figure a reader is told to add across arms must not go
+    // unlabelled because its turn count happened to be zero.
+    const root = await bundle(
+      [{ armId: "on", repeatId: 0 }],
+      [
+        {
+          armId: "on",
+          repeatId: 0,
+          forkedFrom: known("run-P"),
+          origin: split({ executedHere: slice(T(4, 8), 2), inherited: slice(T(6, 12), 0) }),
+        },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(1)
+    expect(text).toContain("tokens (attributed, observed)  newly executed (observed)")
+    expect(text).toContain("Add NEWLY EXECUTED figures across arms, then")
+    expect(text).toContain("PER-STAGE SPEND AGAINST CEILING (ATTRIBUTED)")
   })
 
   test("MALFORMED: each broken contract is refused, with its reason", async () => {
@@ -1398,6 +1425,48 @@ describe("story 2.5A (2-5b) — ledger provenance is checked against the rest of
         "inherited usage on a run whose forkedFrom is unknown",
         { forkedFrom: unknownValue("the run was not forked"), origin: split() },
         "`run.forkedFrom` is unknown",
+      ],
+      // The same refusal reached through the TOKEN clause alone: no inherited
+      // turn and no inherited unknown, so only the inherited tokens can carry it.
+      [
+        "inherited tokens alone on a run whose forkedFrom is unknown",
+        {
+          forkedFrom: unknownValue("the run was not forked"),
+          origin: split({ executedHere: slice(T(4, 8), 2), inherited: slice(T(6, 12), 0) }),
+        },
+        "`run.forkedFrom` is unknown",
+      ],
+      // `executedHere.unknown` is conserved against the identities that carry NO
+      // origin. The attributed and inherited counts here are both right, so this
+      // is the only case that reaches that rule.
+      [
+        "an executed-here unknown count the identities do not support",
+        {
+          ...forked,
+          usageCompleteness: "incomplete",
+          unknownUsage: [identityWithOrigin("exec-P", { runId: "run-P" })],
+          unknownUsageCount: 1,
+          exposure: "unquantified",
+          origin: split({
+            attributed: slice(T(10, 20), 2, 1),
+            inherited: slice(T(6, 12), 1, 1),
+            executedHere: slice(T(4, 8), 1, 1),
+          }),
+        },
+        "`spend.origin.executedHere.unknown`",
+      ],
+      // `spend.total` is held to the same non-negative rule as the three slices,
+      // and the message names the field that is actually wrong.
+      [
+        "a negative component in the total itself",
+        { total: { input: -5, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 } },
+        "`spend.total`",
+      ],
+      // A run that is its own prefix conserves perfectly and describes nothing.
+      [
+        "a forkedFrom naming its own run",
+        { forkedFrom: known("run-on-0"), origin: split() },
+        "naming its own run",
       ],
     ]
     for (const [name, over, expected] of cases) {

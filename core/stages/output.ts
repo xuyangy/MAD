@@ -1697,9 +1697,18 @@ export function renderRunRecord(record: RunRecord): string {
     // The label still has to be right for that record, because the whole point of
     // the line is that an attributed figure is never read as a bill — and a
     // parent MAD cannot name is not a reason to withhold the warning.
+    //
+    // AN INHERITED UNKNOWN MOVES NO TOKENS. `hasInheritedUsage` is true for a
+    // branch whose prefix left only an unknown behind, and for that branch the
+    // TOKENS figures really do count what it executed and nothing more. Claiming
+    // otherwise would make the label itself the misreading it exists to prevent.
+    const countsInherited = fromEarlier.turns > 0 || spentTokens(fromEarlier.tokens) > 0
+    const countClause = countsInherited
+      ? "so the TOKENS figures count what it inherited as well as what it executed and are not its own bill"
+      : "so what it inherited is unknown usage that carries no number: the TOKENS figures count only " +
+        "what it executed, and they are still not a bill"
     lines.push(
-      `  ATTRIBUTED: this run was forked from ${record.forkedFrom ?? "an earlier run"}, so the TOKENS ` +
-        `figures count what it inherited as well as what it executed and are not its own bill. ` +
+      `  ATTRIBUTED: this run was forked from ${record.forkedFrom ?? "an earlier run"}, ${countClause}. ` +
         `NEWLY EXECUTED — turns: ${executedHere.turns} | tokens: ${spentTokens(executedHere.tokens)}` +
         `${unknownPart(executedHere.unknown)}. INHERITED — turns: ${fromEarlier.turns} | ` +
         `tokens: ${spentTokens(fromEarlier.tokens)}${unknownPart(fromEarlier.unknown)}.`,
@@ -1782,7 +1791,13 @@ function budgetBlock(record: RunRecord): string[] {
   if (cap === null) return []
 
   const preset = record.preset === undefined ? "no preset" : `preset ${record.preset}`
-  const lines = [`BUDGET (${preset}, token cap ${cap}) — each stage's share of that one cap:`]
+  // AD-15 amended — THE STAGE FIGURES ARE ATTRIBUTED for the same reason the
+  // TOKENS line above is: on a branch the whole inherited prefix sits in the
+  // stage that executed it, so two branches' `discover` rows added together
+  // count that prefix twice. `budgetReport` stays attributed because that is the
+  // figure `mayISpend` holds against the ceiling; only the heading says so.
+  const attributed = hasInheritedUsage(usageByOrigin(record.ledger)) ? ", ATTRIBUTED" : ""
+  const lines = [`BUDGET (${preset}, token cap ${cap}${attributed}) — each stage's share of that one cap:`]
   let overshot = false
   for (const row of budgetReport(record.ledger)) {
     const ceiling = row.ceiling === null ? "no ceiling" : `${row.ceiling}`

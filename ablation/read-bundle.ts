@@ -59,9 +59,11 @@
 import { readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 
+import { inheritsAny } from "../core/budget/ledger.ts"
 import type { Finding } from "../core/domain/finding.ts"
 import { ROUTING_POLICIES, type RoutingPolicy } from "../core/domain/run-record.ts"
 import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
+import { INHERITED_SUM_RULE } from "./report.ts"
 import {
   MANIFEST_FILE,
   MANIFEST_SCHEMA_VERSION,
@@ -654,6 +656,14 @@ function provenanceProblem(
 
   const forkedFrom = maybeOf(run.forkedFrom, isText, "a non-empty string")
   if (forkedFrom !== undefined) return `has a malformed \`run.forkedFrom\`: ${forkedFrom}`
+  // A CYCLE PASSES EVERY OTHER RULE HERE. The split's arithmetic and the unknown
+  // counts are all internal to one manifest, so a run naming itself as its own
+  // parent is conserved, consistent, and describes a prefix that cannot exist.
+  // `forkPreparedReview` mints ids distinct from the source, so this shape
+  // reaches the reader only from another writer or a hand-edited bundle.
+  if ((run.forkedFrom as { kind: string; value?: unknown }).value === run.runId) {
+    return "has a `run.forkedFrom` naming its own run, so it is its own prefix"
+  }
 
   const origin = spend.origin
   if (!isRecord(origin)) return "has an unreadable `spend.origin`"
@@ -963,13 +973,18 @@ export function renderBundle(result: BundleReadResult): string {
       )
     }
     if (attributed) {
-      lines.push(
-        "  An ATTRIBUTED figure counts the prefix a forked run inherited. Add newly executed figures",
-        "  across arms, never attributed ones.",
-      )
+      // SUMMING NEWLY EXECUTED FIGURES ALONE LEAVES THE PREFIX OUT ENTIRELY: it
+      // ran before the fork, so every branch inherits it and none executed it,
+      // and the run that did execute it was consumed at the fork and writes no
+      // arm of its own. The rule names both halves or it is short by a whole
+      // discovery pass (`evaluation-protocol.md` §4).
+      lines.push(...INHERITED_SUM_RULE)
     }
     lines.push("")
-    lines.push("  PER-STAGE SPEND AGAINST CEILING")
+    // AD-15 amended — the stage rows are attributed whenever the column above
+    // them is: an inherited prefix sits whole inside the stage that executed it,
+    // so two branches' `discover` rows added together count it twice.
+    lines.push(`  PER-STAGE SPEND AGAINST CEILING${attributed ? " (ATTRIBUTED)" : ""}`)
     for (const row of result.comparable) {
       for (const stage of row.manifest.spend.perStage) {
         lines.push(
@@ -1241,27 +1256,28 @@ function originOf(manifest: RunManifest): RunManifest["spend"]["origin"] | undef
 }
 
 /**
- * Whether an `inherited` slice holds any usage at all — the ONE definition, used
- * by the validation that refuses inherited usage without a `forkedFrom` and by
- * the table that decides whether to label its columns.
+ * Whether an `inherited` slice read off disk holds any usage at all — used by the
+ * validation that refuses inherited usage without a `forkedFrom` and by the table
+ * that decides whether to label its columns.
  *
- * TOKENS ARE TESTED BESIDE THE TWO COUNTS. A split this reader parses was
- * written by some other process, so it can carry inherited tokens over zero
- * inherited turns in a way `usageByOrigin` never produces. Two predicates, one
- * with the token clause and one without, would accept such a manifest and then
- * print its inherited tokens under an unlabelled column — the one figure this
- * story exists to keep a reader from adding across arms.
+ * TOKENS ARE TESTED BESIDE THE TWO COUNTS, which is why the decision is
+ * `core/budget/ledger.ts`'s `inheritsAny` and not a rule of this module's own. A
+ * split this reader parses was written by some other process, so it can carry
+ * inherited tokens over zero inherited turns in a way `usageByOrigin` never
+ * produces. A second predicate that dropped the token clause would accept such a
+ * manifest and then print its inherited tokens under an unlabelled column — the
+ * one figure this story exists to keep a reader from adding across arms.
  */
 function inheritsAnySlice(inherited: {
   tokens: Record<(typeof TOKEN_FIELDS)[number], number>
   turns: number
   unknown: number
 }): boolean {
-  return (
-    inherited.turns > 0 ||
-    inherited.unknown > 0 ||
-    TOKEN_FIELDS.some((field) => inherited.tokens[field] > 0)
-  )
+  return inheritsAny({
+    tokens: TOKEN_FIELDS.reduce((sum, field) => sum + inherited.tokens[field], 0),
+    turns: inherited.turns,
+    unknown: inherited.unknown,
+  })
 }
 
 /** Whether this arm's run inherited any usage, counted or not. */

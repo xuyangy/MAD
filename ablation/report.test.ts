@@ -27,7 +27,7 @@ function baseArm(id: string, overrides: Partial<AblationReport["arms"][number]> 
       cacheWrite: 0,
       cap: null as number | null,
       // A run that was never forked: everything it counts, it executed.
-      newlyExecuted: { tokens: 180, turns: 6 },
+      newlyExecuted: { tokens: 180, turns: 6, unknown: 0 },
       inherited: { tokens: 0, turns: 0, unknown: 0 },
     },
     fileLevel: 0,
@@ -527,7 +527,7 @@ describe("story 2.5A (2-5b) — a forked arm's token figures are ATTRIBUTED", ()
     const forked = baseArm("a", {
       cost: {
         ...baseArm("a").cost,
-        newlyExecuted: { tokens: 60, turns: 2 },
+        newlyExecuted: { tokens: 60, turns: 2, unknown: 0 },
         inherited: { tokens: 120, turns: 4, unknown: 1 },
       },
     })
@@ -539,7 +539,7 @@ describe("story 2.5A (2-5b) — a forked arm's token figures are ATTRIBUTED", ()
     expect(rendered).toContain("| NEWLY EXECUTED 60 over 2 turn(s) | inherited 120 over 4 turn(s), 1 inherited unknown")
     expect(rendered).toContain("a: 180 token(s) over 6 billed turn(s) ATTRIBUTED | NEWLY EXECUTED 60")
     expect(rendered).toContain("Add NEWLY EXECUTED figures across arms,")
-    expect(rendered).toContain("a difference of ATTRIBUTED totals")
+    expect(rendered).toContain("a difference of NEWLY EXECUTED figures")
     // The unforked arm keeps the plain label.
     expect(rendered).toContain("b (b) [scripted]")
     expect(rendered).toContain("b: 180 token(s) over 6 billed turn(s)\n")

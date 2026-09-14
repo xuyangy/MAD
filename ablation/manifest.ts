@@ -396,8 +396,22 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     identity: { ...identity, changeId: changeIdFor(change) },
     run: {
       runId: record.runId,
+      // A BLANK PARENT ID IS UNKNOWN, NOT KNOWN. `parseManifest` requires a
+      // non-empty string, so `known("")` would be a manifest this writer emits
+      // and its own reader refuses. `forkPreparedReview` cannot mint one — it
+      // refuses an empty run id — so the shape arrives from a JavaScript caller
+      // or a hand-edited dump, and the `Maybe` this builder uses for every other
+      // uncertainty is what states it.
+      //
+      // A record carrying origin-marked ledger rows with NO `forkedFrom` is a
+      // different case and is deliberately left to be refused: the split below
+      // reports its inherited rows, the reader then rejects inherited usage with
+      // no named parent, and that refusal is the correct reading of a record
+      // whose provenance contradicts itself.
       forkedFrom:
-        record.forkedFrom === undefined ? unknownValue("the run was not forked") : known(record.forkedFrom),
+        record.forkedFrom === undefined || record.forkedFrom.trim() === ""
+          ? unknownValue("the run was not forked")
+          : known(record.forkedFrom),
       startedAt: record.startedAt,
       finishedAt:
         record.finishedAt === undefined
