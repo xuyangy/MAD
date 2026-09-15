@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
 import { createLateUsageSink } from "../core/ports/late-usage.ts"
-import { acquireLock, JOURNAL_FILE, LOCK_FILE, openJournal, type PairedJournal } from "./journal.ts"
+import { acquireLock, JOURNAL_FILE, LOCK_FILE, openJournal, type JournalIo, type JournalLine, type PairedJournal } from "./journal.ts"
 import { existsSync } from "node:fs"
 import { createExperimentGovernor, HALT_MARKER_FILE } from "./governor.ts"
 
@@ -220,7 +220,8 @@ describe("admission and settlement", () => {
 })
 
 describe("late usage during an invocation", () => {
-  async function unknownWith(journal: PairedJournal, executionId: string, slot = "discovery-1") {
+  /** An admitted request whose settlement, given by the caller, binds the execution id. */
+  async function admitted(journal: PairedJournal, slot = "discovery-1") {
     const decision = await journal.admission({ block: 1, phase: "on", runId: () => "run-on" }).admit(discover(slot))
     if (!decision.ok) throw new Error(decision.reason)
     return decision
@@ -231,7 +232,7 @@ describe("late usage during an invocation", () => {
     const journal = await opened(root)
     const sink = createLateUsageSink()
     const reporter = journal.reporter(sink)
-    const decision = await unknownWith(journal, "exec-1")
+    const decision = await admitted(journal)
     await decision.settle({ kind: "unknown", why: "timed out", executionId: "exec-1" })
     reporter.report({ executionId: "exec-1", tokens: usage(40) })
     expect(sink.drain()).toEqual([{ executionId: "exec-1", tokens: usage(40) }])
@@ -246,7 +247,7 @@ describe("late usage during an invocation", () => {
     const root = await tempDir()
     const journal = await opened(root)
     const reporter = journal.reporter()
-    const decision = await unknownWith(journal, "exec-7")
+    const decision = await admitted(journal)
     reporter.report({ executionId: "exec-7", tokens: usage(9) })
     expect(journal.bill().unappliedLate).toHaveLength(1)
     await decision.settle({ kind: "unknown", why: "abandoned", executionId: "exec-7" })
@@ -261,7 +262,7 @@ describe("late usage during an invocation", () => {
     const root = await tempDir()
     const journal = await opened(root)
     const reporter = journal.reporter()
-    const decision = await unknownWith(journal, "exec-2")
+    const decision = await admitted(journal)
     await decision.settle({ kind: "unknown", why: "abandoned", executionId: "exec-2" })
     reporter.report({ executionId: "exec-2", tokens: usage(5) })
     reporter.report({ executionId: "exec-2", tokens: usage(5) })
@@ -394,8 +395,13 @@ describe("the journal never rejects, and keeps its disk order (story 2-5c review
     const journal = await opened(root)
     const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())
     if (!decision.ok) throw new Error("refused")
-    const uncloneable = { kind: "unknown", why: "x", executionId: "e", extra: () => 1 } as never
-    await expect(decision.settle(uncloneable)).resolves.toBeUndefined()
+    const unreadable = {
+      kind: "unknown",
+      get why(): string {
+        throw new Error("no reason readable")
+      },
+    } as never
+    await expect(decision.settle(unreadable)).resolves.toBeUndefined()
     expect(journal.bill().stop).toContain("settlement could not be recorded")
     await journal.close()
   })
@@ -491,6 +497,9 @@ describe("replay validation refuses a malformed journal (story 2-5c review)", ()
     ["a Blocks request with no phase", { ...issued, phase: null }],
     ["an unknown settlement with no why", { type: "settled", physicalId: "request-1", settlement: { kind: "unknown" } }],
     ["a usage settlement with bad tokens", { type: "settled", physicalId: "request-1", settlement: { kind: "usage", tokens: { input: -1 } } }],
+    ["another category with a phase", { ...issued, category: "calibration", block: null, phase: "on" }],
+    ["an empty run id", { ...issued, runId: "" }],
+    ["an empty slot", { ...issued, slot: "" }],
   ])("%s", async (_name, line) => {
     const root = await tempDir()
     const rows = line.type === "settled" ? [issued, line] : [line]
@@ -549,6 +558,167 @@ describe("overshoot and the halt marker (story 2-5c review)", () => {
     const journal = await opened(root)
     expect(journal.bill().halt).toContain("halt marker")
     expect(await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())).toMatchObject({ ok: false, cause: "halted" })
+    await journal.close()
+  })
+})
+
+describe("settlements the journal cannot count, failed appends and closing (story 2-5c review)", () => {
+  /** An I/O that appends normally until `fail` is set, then rejects before or after writing. */
+  function flakyIo(): { io: JournalIo; fail: { mode: "before" | "after" | null } } {
+    const fail: { mode: "before" | "after" | null } = { mode: null }
+    return {
+      fail,
+      io: {
+        async appendLine(file: string, line: JournalLine) {
+          if (fail.mode === "before") throw new Error("disk full")
+          await appendFile(file, `${JSON.stringify(line)}\n`)
+          if (fail.mode === "after") throw new Error("sync failed")
+        },
+      },
+    }
+  }
+
+  async function openedWith(root: string, io: JournalIo): Promise<PairedJournal> {
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const journal = await openJournal(root, lock.lock, now, io)
+    if (!journal.ok) throw new Error(journal.reason)
+    return journal.journal
+  }
+
+  test.each([
+    ["a missing field", { input: 1 }],
+    ["a NaN field", { ...usage(1), output: Number.NaN }],
+  ])("usage with %s is billed unknown, halts, and the journal still reopens", async (_name, tokens) => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    await decision.settle({ kind: "usage", tokens: tokens as TokenUsage })
+    // An identical repeat of the same malformed figure is a no-op, not a conflict.
+    await decision.settle({ kind: "usage", tokens: tokens as TokenUsage })
+    await journal.settled()
+    const bill = journal.bill()
+    expect(bill.halt).not.toBeNull()
+    expect(bill.unknown).toHaveLength(1)
+    expect(bill.integrity).toHaveLength(0)
+    expect((await lines(root)).filter((line) => line.type === "settled")).toEqual([
+      { type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "the settled usage figure was not five finite, non-negative numbers" } },
+    ])
+    const { handle } = await journal.close()
+    expect(await handle.flush()).toMatchObject({ ok: true })
+    const reopened = await opened(root)
+    expect(reopened.bill().unknown).toHaveLength(1)
+    expect(reopened.bill().integrity).toHaveLength(0)
+    await reopened.close()
+  })
+
+  test("an append that fails before writing keeps the settlement for flush, which persists it once", async () => {
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "r" })
+    const first = await admission.admit(discover("a"))
+    const second = await admission.admit(discover("b"))
+    if (!first.ok || !second.ok) throw new Error("refused")
+    fail.mode = "before"
+    await first.settle({ kind: "usage", tokens: usage(7) })
+    fail.mode = null
+    // Nothing more is appended during the invocation once an append failed.
+    await second.settle({ kind: "usage", tokens: usage(8) })
+    expect((await lines(root)).filter((line) => line.type === "settled")).toHaveLength(0)
+    expect(journal.bill().stop).toContain("could not be appended")
+    expect(journal.bill().known).toEqual(usage(15))
+    const { handle } = await journal.close()
+    expect(await handle.flush()).toMatchObject({ ok: true, persisted: 2 })
+    const reopened = await opened(root)
+    expect(reopened.bill().uncertain).toHaveLength(0)
+    expect(reopened.bill().known).toEqual(usage(15))
+    await reopened.close()
+  })
+
+  test("an append that fails after writing is not appended twice by flush", async () => {
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    fail.mode = "after"
+    await decision.settle({ kind: "usage", tokens: usage(9) })
+    fail.mode = null
+    expect(journal.bill().stop).toContain("could not be appended")
+    const { handle } = await journal.close()
+    expect(await handle.flush()).toMatchObject({ ok: true, persisted: 0 })
+    expect((await lines(root)).filter((line) => line.type === "settled")).toHaveLength(1)
+  })
+
+  test("flush refuses a journal with a torn last line rather than appending to it", async () => {
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    fail.mode = "before"
+    await decision.settle({ kind: "usage", tokens: usage(9) })
+    const { handle } = await journal.close()
+    await appendFile(join(root, JOURNAL_FILE), '{"type":"sett')
+    const before = await readFile(join(root, JOURNAL_FILE), "utf8")
+    const flushed = await handle.flush()
+    expect(flushed.ok).toBe(false)
+    expect(flushed.failed).toContain("is not JSON")
+    expect(await readFile(join(root, JOURNAL_FILE), "utf8")).toBe(before)
+  })
+
+  test("closing latches no stop; a failure in the last drain does", async () => {
+    const quiet = await opened(await tempDir())
+    const { handle: closed } = await quiet.close()
+    expect(closed.bill().stop).toBeNull()
+    expect(await quiet.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())).toMatchObject({
+      ok: false,
+      cause: "runner-stop",
+    })
+    expect(closed.bill().stop).toBeNull()
+
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    const reporter = journal.reporter()
+    const decision = await journal.admission({ block: 1, phase: "on", runId: () => "r" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    await decision.settle({ kind: "unknown", why: "abandoned", executionId: "exec-1" })
+    await journal.settled()
+    fail.mode = "before"
+    reporter.report({ executionId: "exec-1", tokens: usage(3) })
+    const { handle } = await journal.close()
+    expect(handle.bill().stop).toContain("could not be appended")
+  })
+
+  test("a malformed admission request is refused as a runner stop and never journaled", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "r" })
+    expect(await admission.admit({ stage: "discover", slot: "s", attempt: 0 })).toMatchObject({ ok: false, cause: "runner-stop" })
+    expect(journal.bill().stop).toContain("malformed request")
+    expect(existsSync(join(root, JOURNAL_FILE))).toBe(false)
+    await journal.close()
+  })
+
+  test("every refused admission is kept on the bill with its phase and cause", async () => {
+    const root = await tempDir()
+    await writeFile(
+      join(root, JOURNAL_FILE),
+      [
+        { type: "issued", physicalId: "request-1", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "s", attempt: 1, runId: "p" },
+        { type: "settled", physicalId: "request-1", settlement: { kind: "usage", tokens: usage(60_000) } },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n") + "\n",
+    )
+    const journal = await opened(root)
+    await journal.admission({ block: 1, phase: "prefix", runId: () => "p" }).admit(discover("discovery-2", 2))
+    expect(journal.bill().refused).toEqual([
+      expect.objectContaining({ block: 1, phase: "prefix", runId: "p", stage: "discover", slot: "discovery-2", attempt: 2, cause: "budget" }),
+    ])
     await journal.close()
   })
 })

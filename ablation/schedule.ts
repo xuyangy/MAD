@@ -351,7 +351,12 @@ async function publishSchedule(input: CreateScheduleInput, root: string): Promis
       try {
         await syncDirectory(root)
       } catch (error) {
-        return { ok: false, reason: `the schedule was linked but its directory could not be synced: ${messageOf(error)}` }
+        return {
+          ok: false,
+          reason:
+            `the schedule was published at \`${file}\` and its coin is sealed, but its directory could not be synced ` +
+            `(${messageOf(error)}); it is never re-tossed, so check that the file survived before running it`,
+        }
       }
     } finally {
       if (createdTemporary) await unlink(temporary).catch(() => undefined)
@@ -421,11 +426,28 @@ export async function verifySchedule(bundleRoot: string, binding: ScheduleBindin
 
 export type Started = { ok: true; file: string } | { ok: false; reason: string }
 
-/** Write the start marker without overwrite. A present marker refuses. */
+/**
+ * Write the start marker without overwrite. A present marker refuses.
+ *
+ * Once the file is created the schedule is spent, even if writing or syncing it
+ * then fails, and the refusal says so: a later invocation finds the marker and
+ * refuses.
+ */
 export async function writeStartMarker(bundleRoot: string, scheduleHash: string, startedAt: string): Promise<Started> {
   const file = join(resolve(bundleRoot), START_MARKER_FILE)
+  let handle: Awaited<ReturnType<typeof open>>
   try {
-    const handle = await open(file, "wx", 0o600)
+    handle = await open(file, "wx", 0o600)
+  } catch (error) {
+    return {
+      ok: false,
+      reason:
+        (error as NodeJS.ErrnoException).code === "EEXIST"
+          ? `the schedule was already started (\`${file}\` exists); a started schedule is never executed again`
+          : `the start marker \`${file}\` could not be created: ${messageOf(error)}`,
+    }
+  }
+  try {
     try {
       await handle.writeFile(`${JSON.stringify({ scheduleHash, startedAt, pid: process.pid })}\n`, "utf8")
       await handle.sync()
@@ -438,9 +460,8 @@ export async function writeStartMarker(bundleRoot: string, scheduleHash: string,
     return {
       ok: false,
       reason:
-        (error as NodeJS.ErrnoException).code === "EEXIST"
-          ? `the schedule was already started (\`${file}\` exists); a started schedule is never executed again`
-          : `the start marker \`${file}\` could not be written: ${messageOf(error)}`,
+        `the start marker \`${file}\` was created but could not be written or synced (${messageOf(error)}). ` +
+        `The schedule is spent: nothing was billed, and a later invocation refuses it`,
     }
   }
 }

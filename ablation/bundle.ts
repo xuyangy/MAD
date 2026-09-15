@@ -36,7 +36,7 @@
  * rate.
  */
 
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, open, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 import {
@@ -48,6 +48,7 @@ import {
   type ArtifactOutcome,
   type TurnArtifact,
 } from "../adapters/opencode/artifacts.ts"
+import type { RunRecord } from "../core/domain/run-record.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 import type { ArmRun } from "./arms.ts"
 import {
@@ -181,7 +182,8 @@ export async function writeBundleIndex(input: WriteBundleIndexInput): Promise<In
 
 export interface WriteArmDumpInput {
   bundleRoot: string
-  run: ArmRun
+  /** Only these fields are written; the backend link is not needed here. */
+  run: Pick<ArmRun, "spec" | "repeat" | "record" | "rendered">
   change: ChangeSet
   /** The experiment half of the identity. Arm and repeat come from `run`. */
   identity: Omit<EvaluationIdentity, "armId" | "repeatId">
@@ -225,6 +227,112 @@ export async function writeArmDump(input: WriteArmDumpInput): Promise<ArtifactOu
     worktree: input.worktree,
     env: { [ARTIFACTS_ENV]: armDirectory(input.bundleRoot, run.spec.id, run.repeat) },
   })
+}
+
+/** Story 2-5c — where a paired block's shared prefix is written, beside the arm directories. */
+export const PREFIX_DIRECTORY = "prefix"
+export const PREFIX_FILE = "prefix.json"
+/** Bumped by hand when `PrefixEvidence`'s shape changes. */
+export const PREFIX_EVIDENCE_VERSION = 1
+
+/**
+ * Story 2-5c — what a paired block's shared prefix did, at
+ * `<bundleRoot>/prefix/<block - 1>/prefix.json`.
+ *
+ * A prefix is not an arm: it is neither ON nor OFF, the bundle index does not
+ * declare it, and it has no manifest. This file identifies it by the sealed
+ * schedule, the block and its run id, and says whether it was forked and why
+ * not. When the prefix produced a record, the record's AD-16 dump sits beside
+ * the file, in the directory named by its run id, and `dump` names it. When
+ * `prepareReview` threw before returning a record, nothing is invented: `dump`
+ * is `null` and `failure` holds the exception's message. Its spend is in the
+ * journal either way.
+ */
+export interface PrefixEvidence {
+  prefixEvidenceVersion: number
+  scheduleHash: string
+  block: number
+  /** The prefix's run id, or an unknown when none was minted. */
+  prefixRunId: Maybe<string>
+  forked: boolean
+  reason: string
+  failure?: string
+  /** The dump directory of the prefix record, or `null` when there was no record. */
+  dump: string | null
+}
+
+export interface WritePrefixEvidenceInput {
+  bundleRoot: string
+  worktree: string
+  change: ChangeSet
+  scheduleHash: string
+  block: number
+  /** The prefix record, when `prepareReview` returned one. */
+  record?: RunRecord
+  /** The run id the prefix minted, when there is no record to read it from. */
+  runId?: string
+  forked: boolean
+  reason: string
+  failure?: string
+}
+
+export type PrefixEvidenceWritten = { ok: true; file: string; dump: string | null } | { ok: false; reason: string }
+
+/**
+ * Write a prefix's evidence. NEVER THROWS. Refuses a bundle root inside the
+ * worktree (AD-16), and never overwrites an existing `prefix.json`.
+ */
+export async function writePrefixEvidence(input: WritePrefixEvidenceInput): Promise<PrefixEvidenceWritten> {
+  try {
+    const lexical = refusalFor(input.bundleRoot, input.worktree)
+    if (lexical !== undefined) return { ok: false, reason: lexical }
+    const refusal = await realRefusalFor(input.bundleRoot, input.worktree)
+    if (refusal !== undefined) return { ok: false, reason: refusal }
+
+    const directory = armDirectory(input.bundleRoot, PREFIX_DIRECTORY, input.block - 1)
+    let dump: string | null = null
+    if (input.record !== undefined) {
+      const outcome = await dumpRunArtifacts({
+        record: input.record,
+        change: input.change,
+        rendered:
+          `No report: this is the shared prefix of block ${input.block}. A prefix stops after discovery and ` +
+          `clustering and is continued only by its forks; its findings are in record.json.\n`,
+        worktree: input.worktree,
+        env: { [ARTIFACTS_ENV]: directory },
+      })
+      if (outcome.kind !== "written") {
+        return {
+          ok: false,
+          reason: `the prefix record could not be dumped: ${outcome.kind === "failed" ? outcome.error : outcome.kind === "refused" ? outcome.reason : "artifact writing was off"}`,
+        }
+      }
+      dump = outcome.directory
+    }
+    const runId = input.record?.runId ?? input.runId
+    const evidence: PrefixEvidence = {
+      prefixEvidenceVersion: PREFIX_EVIDENCE_VERSION,
+      scheduleHash: input.scheduleHash,
+      block: input.block,
+      prefixRunId: runId === undefined ? unknownValue("prepareReview threw before a run id was minted") : known(runId),
+      forked: input.forked,
+      reason: input.reason,
+      ...(input.failure === undefined ? {} : { failure: input.failure }),
+      dump,
+    }
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const file = join(directory, PREFIX_FILE)
+    const handle = await open(file, "wx", 0o600)
+    try {
+      await handle.writeFile(`${JSON.stringify(evidence, undefined, 2)}\n`, "utf8")
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    return { ok: true, file, dump }
+  } catch (error) {
+    return { ok: false, reason: `the prefix evidence could not be written: ${error instanceof Error ? error.message : String(error)}` }
+  }
 }
 
 /**

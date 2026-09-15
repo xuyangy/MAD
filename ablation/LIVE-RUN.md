@@ -290,17 +290,48 @@ Two calls, kept apart on purpose:
 2. `runPairedBlocks` takes the bundle root's lock (`paired.lock`), checks the schedule
    against its own inputs, and writes `paired-start.json` before anything can bill. A present
    start marker refuses every later invocation, so a started schedule is never run again.
-   Each block is one prefix, one fork, and the two continuations in the scheduled order.
-   Each arm with a run record gets one manifest carrying an `experiment` block.
+   A journal that is already halted or stopped refuses before the marker is written, so it
+   does not spend the schedule. Each block is one prefix, one fork, and the two
+   continuations in the scheduled order.
+
+Every run that produced a record leaves its evidence in the bundle:
+
+- **Each arm slot whose continuation returned or threw** gets one manifest carrying an
+  `experiment` block. A continuation that threw keeps the record the branch held when it
+  threw, with `experiment.failure` naming the exception; its completion reads `unfinished`
+  and no report or finish time is invented for it.
+- **Each block's shared prefix** gets `prefix/<block - 1>/prefix.json`: the schedule hash, the
+  block, the prefix run id, whether it was forked and why not. When the prefix produced a
+  record, its dump sits beside the file. A prefix is not an arm, so `bundle.json` does not
+  declare it and it has no manifest.
+
+A failed evidence write ends admission, and every remaining slot is `not-attempted`.
 
 Every billable request is written to `paired-journal.jsonl` before it goes out and settled
 there with what it cost. The journal's bill counts each physical execution once, so a shared
 prefix is not counted again for each branch that inherited it. `paired-slots.jsonl` records a
 started and a terminal status, with its reason, for each of the six planned arm slots.
 
+A continuation that returned is `completed` only when nothing was refused. When the run's own
+ledger or an admission gate refused it planned work (discovery slots skipped, findings left
+unresolved, or a refused admission in its phase or its block's prefix), the slot is `failed`
+with what was denied, and the result's `complete` is false. Reaching a threshold with
+nothing refused is not a denial.
+
 Late usage is the caller's to reconcile. The result carries a reconciliation handle. A
 report that arrives after the run returned is held in memory until the caller calls
-`flush()`, and a process that exits first loses it.
+`flush()`, and a process that exits first loses it. Call `flush()` whenever `held()` is
+non-empty or the bill's `stop` names a failed append. `flush()` takes the lock again, replays
+the journal, and appends what is held:
+
+- `persisted` counts the lines it appended. A line the journal already carries with the same
+  payload is not appended again.
+- `conflicts` lists held payloads that disagree with the journal. Each is an integrity failure,
+  and the halt stays.
+- `unmatched` lists late reports no request in the journal carries. They are kept, and the
+  next `flush()` offers them again.
+- `failed` says why it stopped. Everything not persisted is kept. A journal it cannot replay,
+  such as one with a torn last line, is refused and left exactly as it is.
 
 ### What the fake-backed tests do not establish
 
@@ -318,16 +349,24 @@ report that arrives after the run returned is held in memory until the caller ca
 
 ### When a run stops and needs a human
 
-Nothing in the runner resumes on its own. Three states stop it and wait for a person:
+Nothing in the runner resumes on its own. These states stop it and wait for a person:
 
 - **A stale `paired.lock`.** A process that died while it held the lock leaves the file
   behind, and every later writer refuses. Confirm that no runner is still active on that
   bundle root before you remove it.
-- **A latched halt.** Unknown usage, an uncertain request or an integrity failure latches
+- **A latched halt.** Unknown usage, an integrity failure, or an uncertain request latches
   the halt and writes `unknown-usage-halt.json` at the bundle root. The journal and the arm
-  governor both refuse while that file exists.
-- **An uncertain request.** An `issued` line in `paired-journal.jsonl` with no `settled`
-  line was sent by an invocation that did not finish. Its cost is unquantified.
+  governor both refuse while that file exists. An uncertain request is an `issued` line in
+  `paired-journal.jsonl` with no `settled` line: an invocation that did not finish sent it,
+  and its cost is unquantified.
+- **A runner stop.** The runner stops admitting, and names why in the bill's `stop` or the
+  slot reasons, when the journal could not be appended, a slot status or a manifest or prefix
+  evidence could not be written, or the run was cancelled. A failed append leaves lines held
+  for `flush()`.
+- **A refusal before the start marker.** A present start marker or lock, a schedule that does
+  not match the runner's inputs, a bundle index that may not be written, or a journal that is
+  already halted refuses the invocation. Nothing was billed, and a schedule refused before its
+  marker can still be run once the cause is fixed.
 
 In every case, keep `paired-journal.jsonl`, `paired-schedule.json`, `paired-start.json`
 and `paired-slots.jsonl` as they are. They are the evidence of what was scheduled, admitted

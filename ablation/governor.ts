@@ -589,8 +589,13 @@ export function requestGate(
  *   warnings; session cleanups stay on each arm's own record and manifest.
  * - `markerFile` / `markerError` describe the halt marker the journal wrote.
  *
- * A runner stop is not a halt, and a completed invocation always ends with one,
- * so it is carried in its own `runnerStop` field.
+ * A runner stop is not a halt, so it is carried in its own `runnerStop` field. It
+ * is `null` unless the runner actually stopped admitting (a persistence failure,
+ * a cancellation, a halt, a failed status or manifest write); completing an
+ * invocation is not a stop.
+ *
+ * Exposure is `unquantified` while anything is halted, unknown, uncertain or
+ * still in flight, because none of those carries a number.
  */
 export function governorStateFromBill(bill: UniqueExecutionBill): ExperimentGovernorState & { runnerStop: string | null } {
   const unknownRequests = [...bill.unknown, ...bill.uncertain]
@@ -620,7 +625,7 @@ export function governorStateFromBill(bill: UniqueExecutionBill): ExperimentGove
     unresolvedCleanups: [],
     inFlight: bill.inFlight.length,
     observedRuns: new Set(bill.requests.map((request) => request.runId)).size,
-    exposure: bill.halt !== null || unknownRequests.length > 0 ? "unquantified" : "quantified",
+    exposure: bill.halt !== null || unknownRequests.length > 0 || bill.inFlight.length > 0 ? "unquantified" : "quantified",
     markerFile: bill.haltMarker.file,
     markerError: bill.haltMarker.error,
     runnerStop: bill.stop,

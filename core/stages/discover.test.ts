@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
 import type { ZodType } from "zod"
 
@@ -7,8 +7,13 @@ import { emptyLedger, emptyTokenUsage } from "../domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../instructions/coding/discovery.ts"
 import type { BackendCapabilities, Envelope, ModelBackend } from "../ports/model-backend.ts"
 import { selectRoster } from "../roster/select.ts"
-import { candidate, fakeAdmission, fakeClock, FakeBackend, tokens, type SlotScript } from "../test-support/fakes.ts"
+import { candidate, fakeAdmission, fakeClock, settleAudit, FakeBackend, tokens, type SlotScript } from "../test-support/fakes.ts"
 import { discover } from "./discover.ts"
+
+// Story 2-5c — every admitted request in this file was settled exactly once by the stage.
+afterEach(() => {
+  expect(settleAudit()).toEqual([])
+})
 
 function rosterOf(slots: number, models: [string, string][], lenses: readonly string[] = []) {
   return selectRoster(

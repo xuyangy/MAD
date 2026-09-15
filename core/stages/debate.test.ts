@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
 import { z } from "zod"
 
@@ -13,6 +13,7 @@ import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { output } from "./output.ts"
 import {
   fakeAdmission,
+  settleAudit,
   fakeClock,
   FakeBackend,
   materialSpans,
@@ -31,6 +32,11 @@ import {
   MAX_DEBATE_ROUNDS,
   type DebateInput,
 } from "./debate.ts"
+
+// Story 2-5c — every admitted request in this file was settled exactly once by the stage.
+afterEach(() => {
+  expect(settleAudit()).toEqual([])
+})
 
 // ---------------------------------------------------------------------------
 // Fixtures

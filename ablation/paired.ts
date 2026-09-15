@@ -7,25 +7,51 @@
  * 1. take the bundle root's lock; refuse when the start marker exists;
  * 2. verify the schedule against this runner's own protocol, fixture, code
  *    revision, roster, change and config;
- * 3. write the start marker without overwrite, before anything can bill;
- * 4. for each block in order: `prepareReview` (the shared prefix), then
+ * 3. open the journal, and refuse when it is already halted or stopped;
+ * 4. write the start marker without overwrite, before anything can bill;
+ * 5. for each block in order: `prepareReview` (the shared prefix), then
  *    `forkPreparedReview(…, 2)`, then `continueReview` for the two arms in the
  *    scheduled order, `shipped` for ON and `debate-off` for OFF;
- * 5. write one manifest per arm that produced a run record;
- * 6. close the journal and return a reconciliation handle for late usage.
+ * 6. write the evidence of every run that produced a record;
+ * 7. close the journal and return a reconciliation handle for late usage.
  *
  * Every billable request passes the ordinary stage gate (each run's ledger is
  * capped at 255,000 with the shipped shares) and the journal's admission gates:
  * the phase allowance (60,000 prefix, 195,000 per continuation, new consumption
  * only), the Blocks allowance, the global cap and the halt.
  *
+ * ## Evidence
+ *
+ * Every record a run produced is written, including a partial one:
+ *
+ * - each arm slot whose continuation returned or threw gets one manifest with an
+ *   `experiment` block. A thrown continuation's manifest carries the record the
+ *   branch held when it threw and `experiment.failure`; no output or finish time
+ *   is invented for it;
+ * - each block's shared prefix gets `prefix/<block - 1>/prefix.json`, with the
+ *   prefix record's dump beside it when there is a record (see
+ *   `PrefixEvidence`).
+ *
+ * An evidence write that fails ends admission: nothing further runs, and every
+ * remaining slot is `not-attempted` with that reason.
+ *
  * ## What is never done
  *
  * No wrapper retry. No prefix, continuation or block is restarted or replaced.
  * No fork is pretended: a prefix that threw, was cancelled, or ended with a halt,
  * a runner stop or unsettled requests is not forked, and both of its arm slots
- * are recorded `not-attempted` with that reason. No manifest is written for a run
- * that has no record. Every issued request stays in the journal whatever happens.
+ * are recorded `not-attempted` with that reason. Every issued request stays in
+ * the journal whatever happens.
+ *
+ * ## Slot statuses
+ *
+ * A continuation that returned is `completed` only when no gate denied it
+ * planned work. When the run's ledger or an admission gate refused a request —
+ * discovery slots skipped, findings stranded, or any refused admission in its
+ * own phase or its block's prefix — it is `failed`, with what was denied, and the
+ * evaluation is not complete (`evaluation-protocol.md`: a block that cannot
+ * complete is recorded failed). Reaching a threshold with nothing refused is not
+ * a denial.
  *
  * ## When a later block runs
  *
@@ -59,8 +85,8 @@ import {
 } from "../core/run/review.ts"
 import type { ArtifactOutcome } from "../adapters/opencode/artifacts.ts"
 import type { LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
-import type { ArmRun } from "./arms.ts"
-import { writeArmDump, writeBundleIndex } from "./bundle.ts"
+import type { ArmRun, ArmSpec } from "./arms.ts"
+import { writeArmDump, writeBundleIndex, writePrefixEvidence } from "./bundle.ts"
 import { governorStateFromBill, PAIRED_ALLOWANCES, type ExperimentGovernorState, type PairedPhase } from "./governor.ts"
 import {
   acquireLock,
@@ -68,6 +94,7 @@ import {
   type OvershootReport,
   type PairedJournal,
   type ReconciliationHandle,
+  type RefusedAdmission,
   type UniqueExecutionBill,
 } from "./journal.ts"
 import { known, type CodeRevision, type ExperimentBinding, type Maybe } from "./manifest.ts"
@@ -133,6 +160,8 @@ export interface PrefixReport {
   runId?: string
   forked: boolean
   reason: string
+  /** Where the prefix's evidence was written, or why it was not. */
+  evidence: { ok: true; file: string; dump: string | null } | { ok: false; reason: string }
 }
 
 export type PairedBlocksOutcome =
@@ -143,8 +172,9 @@ export type PairedBlocksOutcome =
       /** All six planned slots, in schedule order. */
       slots: SlotReport[]
       prefixes: PrefixReport[]
+      /** Continuations that returned a result. A thrown continuation is only in `slots`. */
       runs: PairedArmRun[]
-      /** The journal's unique-execution bill as the invocation closed. */
+      /** The journal's unique-execution bill after the invocation closed. */
       bill: UniqueExecutionBill
       /**
        * Known spend past each threshold: per block prefix, per continuation, the
@@ -168,56 +198,74 @@ export type PairedBlocksOutcome =
 
 export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<PairedBlocksOutcome> {
   const root = resolve(input.bundleRoot)
-  const taken = await acquireLock(root, input.clock.now())
+  let now: string
+  try {
+    now = input.clock.now()
+  } catch (error) {
+    return { ok: false, reason: `the clock failed before the lock was taken: ${messageOf(error)}` }
+  }
+  const taken = await acquireLock(root, now)
   if (!taken.ok) return { ok: false, reason: taken.reason }
   const lock = taken.lock
+  let journal: PairedJournal | undefined
   const refuse = async (reason: string): Promise<PairedBlocksOutcome> => {
-    const releaseError = await lock.release()
+    const releaseError = journal === undefined ? await lock.release() : (await journal.close()).releaseError
     return { ok: false, reason: releaseError === null ? reason : `${reason}; ${releaseError}` }
   }
 
-  const marker = join(root, START_MARKER_FILE)
+  // Everything between taking the lock and executing is inside one `try`: a
+  // lock left behind by a throw would refuse every later writer.
   try {
-    await readFile(marker)
-    return refuse(`the schedule was already started (\`${marker}\` exists); a started schedule is never executed again`)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      return refuse(`whether \`${marker}\` exists could not be established: ${messageOf(error)}`)
+    const marker = join(root, START_MARKER_FILE)
+    try {
+      await readFile(marker)
+      return await refuse(`the schedule was already started (\`${marker}\` exists); a started schedule is never executed again`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        return await refuse(`whether \`${marker}\` exists could not be established: ${messageOf(error)}`)
+      }
     }
+
+    if ((input.tools === undefined) !== (input.config.tools === undefined)) {
+      return await refuse(
+        input.tools === undefined
+          ? "the config names a Tools identity, but no Tools port was supplied"
+          : "a Tools port was supplied, but the config names no Tools identity for the schedule to bind",
+      )
+    }
+    if (input.config.tools !== undefined && input.config.tools.trim().length === 0) {
+      return await refuse("the config's Tools identity is blank, so the schedule would bind no identifiable Tools configuration")
+    }
+    const verified = await verifySchedule(root, input)
+    if (!verified.ok) return await refuse(verified.reason)
+    const schedule = verified.schedule
+
+    // The bundle index carries AD-16's containment check. It runs before the start
+    // marker, so a bundle root that may not be written does not burn the schedule.
+    const index = await writeBundleIndex({
+      bundleRoot: root,
+      worktree: input.worktree,
+      arms: schedule.slots.map((slot) => ({ armId: slot.arm, repeatId: slot.block - 1 })),
+      createdAt: input.clock.now(),
+    })
+    if (!index.ok) return await refuse(`the bundle index could not be written: ${index.reason}`)
+
+    const opened = await openJournal(root, lock, () => input.clock.now())
+    if (!opened.ok) return await refuse(opened.reason)
+    journal = opened.journal
+
+    // A journal that already refuses every request must not spend the schedule.
+    const before = journal.bill()
+    if (before.halt !== null) return await refuse(`the experiment is already halted, so the schedule was not started: ${before.halt}`)
+    if (before.stop !== null) return await refuse(`the journal already stopped admitting, so the schedule was not started: ${before.stop}`)
+
+    const started = await writeStartMarker(root, schedule.scheduleHash, input.clock.now())
+    if (!started.ok) return await refuse(started.reason)
+
+    return await execute(input, root, schedule, journal)
+  } catch (error) {
+    return await refuse(`the runner failed before the first block: ${messageOf(error)}`)
   }
-
-  if ((input.tools === undefined) !== (input.config.tools === undefined)) {
-    return refuse(
-      input.tools === undefined
-        ? "the config names a Tools identity, but no Tools port was supplied"
-        : "a Tools port was supplied, but the config names no Tools identity for the schedule to bind",
-    )
-  }
-  const verified = await verifySchedule(root, input)
-  if (!verified.ok) return refuse(verified.reason)
-  const schedule = verified.schedule
-
-  // The bundle index carries AD-16's containment check. It runs before the start
-  // marker, so a bundle root that may not be written does not burn the schedule.
-  const index = await writeBundleIndex({
-    bundleRoot: root,
-    worktree: input.worktree,
-    arms: schedule.slots.map((slot) => ({ armId: slot.arm, repeatId: slot.block - 1 })),
-    createdAt: input.clock.now(),
-  })
-  if (!index.ok) return refuse(`the bundle index could not be written: ${index.reason}`)
-
-  const opened = await openJournal(root, lock, () => input.clock.now())
-  if (!opened.ok) return refuse(opened.reason)
-  const journal = opened.journal
-
-  const started = await writeStartMarker(root, schedule.scheduleHash, input.clock.now())
-  if (!started.ok) {
-    const { releaseError } = await journal.close()
-    return { ok: false, reason: releaseError === null ? started.reason : `${started.reason}; ${releaseError}` }
-  }
-
-  return execute(input, root, schedule, journal)
 }
 
 async function execute(
@@ -294,6 +342,73 @@ async function execute(
     codeRevision: schedule.codeRevision,
   }
 
+  const specOf = (slot: PlannedSlot): ArmSpec => ({
+    id: slot.arm,
+    label: slot.arm === "on" ? "debate on" : "debate off",
+    provenance: config.provenance,
+    slots: input.roster.slots.length,
+  })
+
+  /** Write one arm slot's manifest, or the refusal that stopped it. */
+  const writeManifest = async (
+    slot: PlannedSlot,
+    record: RunRecord,
+    rendered: string,
+    prefixId: string,
+    failure?: string,
+  ): Promise<ArtifactOutcome> => {
+    const experiment: ExperimentBinding = {
+      scheduleHash: schedule.scheduleHash,
+      block: slot.block,
+      arm: slot.arm,
+      position: slot.position,
+      prefixRunId: prefixId,
+      ...(failure === undefined ? {} : { failure }),
+    }
+    const problem = bindingProblem(schedule, experiment, record)
+    const manifest: ArtifactOutcome =
+      problem !== null
+        ? { kind: "refused", reason: problem }
+        : await writeArmDump({
+            bundleRoot: root,
+            run: { spec: specOf(slot), repeat: slot.block - 1, record, rendered },
+            change: input.change,
+            identity,
+            worktree: input.worktree,
+            experiment,
+          })
+    if (manifest.kind !== "written") {
+      endWith(`the manifest for block ${slot.block} ${slot.arm.toUpperCase()} was not written: ${manifestReason(manifest)}`)
+    }
+    return manifest
+  }
+
+  /** Write a prefix's evidence and report it; a failed write ends admission. */
+  const recordPrefix = async (
+    block: number,
+    prefix: { record?: RunRecord; runId?: string; forked: boolean; reason: string; failure?: string },
+  ): Promise<PrefixReport> => {
+    const evidence = await writePrefixEvidence({
+      bundleRoot: root,
+      worktree: input.worktree,
+      change: input.change,
+      scheduleHash: schedule.scheduleHash,
+      block,
+      ...prefix,
+    })
+    if (!evidence.ok) endWith(`block ${block}'s prefix evidence was not written: ${evidence.reason}`)
+    const runId = prefix.record?.runId ?? prefix.runId
+    const report: PrefixReport = {
+      block,
+      ...(runId === undefined ? {} : { runId }),
+      forked: prefix.forked,
+      reason: prefix.reason,
+      evidence,
+    }
+    prefixes.push(report)
+    return report
+  }
+
   const runBlocks = async (): Promise<void> => {
     for (const block of [...new Set(schedule.slots.map((slot) => slot.block))]) {
       const planned = schedule.slots.filter((slot) => slot.block === block)
@@ -344,9 +459,15 @@ async function execute(
             ? `the run was cancelled during block ${block}'s shared prefix`
             : blocked
       if (noFork !== null) {
-        prefixes.push({ block, ...(prepared === undefined ? {} : { runId: prepared.record.runId }), forked: false, reason: noFork })
         if (stopped) endWith(`the run was cancelled during block ${block}'s shared prefix`)
         if (blocked !== null) endWith(blocked)
+        await recordPrefix(block, {
+          ...(prepared === undefined ? {} : { record: prepared.record }),
+          ...(prefixRunId === undefined ? {} : { runId: prefixRunId }),
+          forked: false,
+          reason: noFork,
+          ...(threw === undefined ? {} : { failure: threw }),
+        })
         for (const slot of planned) await mark(slot, "not-attempted", noFork)
         continue
       }
@@ -356,12 +477,16 @@ async function execute(
         branches = forkPreparedReview(prepared!, input.clock, 2)
       } catch (error) {
         const reason = `block ${block}'s shared prefix could not be forked: ${messageOf(error)}`
-        prefixes.push({ block, runId: prepared!.record.runId, forked: false, reason })
-        for (const slot of planned) await mark(slot, "not-attempted", reason)
+        await recordPrefix(block, { record: prepared!.record, forked: false, reason, failure: messageOf(error) })
+        for (const slot of planned) await mark(slot, "not-attempted", ended ?? reason)
         continue
       }
       const prefixId = prepared!.record.runId
-      prefixes.push({ block, runId: prefixId, forked: true, reason: "forked into the scheduled ON and OFF continuations" })
+      await recordPrefix(block, {
+        record: prepared!.record,
+        forked: true,
+        reason: "forked into the scheduled ON and OFF continuations",
+      })
 
       // ---- the two continuations, in scheduled order ----
       for (const [position, slot] of planned.entries()) {
@@ -403,39 +528,38 @@ async function execute(
 
         if (result === undefined) {
           if (input.signal?.aborted) endWith(`the run was cancelled during block ${block}`)
-          await mark(slot, "failed", `the ${slot.arm.toUpperCase()} continuation threw: ${failure}`)
+          // The record is what the branch held when it threw: the inherited
+          // prefix plus whatever the continuation reached.
+          const manifest = await writeManifest(
+            slot,
+            branch.record,
+            `No report: the ${slot.arm.toUpperCase()} continuation of block ${block} threw before its output was ` +
+              `assembled (${failure}). The record is what the branch held when it threw.\n`,
+            prefixId,
+            failure ?? "the continuation threw",
+          )
+          await mark(slot, "failed", `the ${slot.arm.toUpperCase()} continuation threw: ${failure}`, { manifest })
         } else {
           const run: ArmRun = {
-            spec: { id: slot.arm, label: slot.arm === "on" ? "debate on" : "debate off", provenance: config.provenance, slots: input.roster.slots.length },
+            spec: specOf(slot),
             repeat: block - 1,
             record: result.record,
             rendered: result.rendered,
             backend: backend!,
           }
           runs.push({ slot, run, prefixRunId: prefixId })
-          const experiment: ExperimentBinding = {
-            scheduleHash: schedule.scheduleHash,
-            block,
-            arm: slot.arm,
-            position: slot.position,
-            prefixRunId: prefixId,
-          }
-          const problem = bindingProblem(schedule, experiment, result.record)
-          const manifest: ArtifactOutcome =
-            problem !== null
-              ? { kind: "refused", reason: problem }
-              : await writeArmDump({ bundleRoot: root, run, change: input.change, identity, worktree: input.worktree, experiment })
+          const manifest = await writeManifest(slot, result.record, result.rendered, prefixId)
           const cancelled = result.record.cancelled !== undefined
           if (cancelled || input.signal?.aborted) endWith(`the run was cancelled during block ${block}`)
-          if (manifest.kind !== "written") {
-            endWith(`the manifest for block ${block} ${slot.arm.toUpperCase()} was not written: ${manifestReason(manifest)}`)
-          }
+          const denied = cancelled ? null : deniedWork(result.record, journal.bill().refused, block, slot.arm)
           await mark(
             slot,
-            cancelled ? "cancelled" : "completed",
+            cancelled ? "cancelled" : denied !== null ? "failed" : "completed",
             cancelled
               ? `the run was cancelled during the ${result.record.cancelled!.stage} stage of block ${block}'s ${slot.arm.toUpperCase()} continuation`
-              : `the ${slot.arm.toUpperCase()} continuation of block ${block} finished`,
+              : denied !== null
+                ? `the ${slot.arm.toUpperCase()} continuation of block ${block} returned, but a gate denied it planned work: ${denied}`
+                : `the ${slot.arm.toUpperCase()} continuation of block ${block} finished`,
             { manifest },
           )
         }
@@ -460,9 +584,11 @@ async function execute(
     else if (report.status === "started") await mark(slot, "failed", ended ?? "the runner ended while this slot was running")
   }
 
-  const bill = journal.bill()
+  // The bill is read after `close()` drained every queued append, so a failure
+  // in that last drain is in `bill.stop`. Closing itself latches nothing.
   const { handle, releaseError } = await journal.close()
   if (releaseError !== null) warnings.push(releaseError)
+  const bill = handle.bill()
   const slots = schedule.slots.map((slot) => reports.get(keyOf(slot))!)
   const complete =
     slots.every((slot) => slot.status === "completed") &&
@@ -484,6 +610,43 @@ async function execute(
     reconciliation: handle,
     warnings,
   }
+}
+
+/**
+ * What a gate denied a returned continuation, or `null` when nothing was denied.
+ *
+ * Read from both authorities, because neither sees every refusal: the run's own
+ * ledger refuses before an admission is asked (`mayISpend`), which only the
+ * record shows, and an admission may refuse a request whose consequence the
+ * record does not name (a refused retry, a refused logic evaluation). A prefix
+ * denial counts for both of its branches, which inherit the prefix record.
+ */
+export function deniedWork(
+  record: RunRecord,
+  refused: readonly RefusedAdmission[],
+  block: number,
+  arm: "on" | "off",
+): string | null {
+  const parts: string[] = []
+  const skipped = record.skippedForBudget ?? []
+  if (skipped.length > 0) parts.push(`discovery skipped ${skipped.join(", ")} for budget`)
+  const stranded = record.findings.filter((finding) => finding.unresolved !== undefined).length
+  if (stranded > 0) parts.push(`${stranded} finding(s) were left unresolved`)
+  const refusals = refused.filter(
+    (refusal) =>
+      refusal.cause === "budget" &&
+      refusal.block === block &&
+      // One invocation runs one continuation per arm per block, so the phase names the run.
+      (refusal.phase === "prefix" || refusal.phase === arm),
+  )
+  if (refusals.length > 0) {
+    const first = refusals[0]!
+    parts.push(
+      `${refusals.length} admission(s) were refused, beginning with ${first.phase} ${first.stage}/${first.slot} ` +
+        `attempt ${first.attempt}: ${first.reason}`,
+    )
+  }
+  return parts.length === 0 ? null : parts.join("; ")
 }
 
 /** The dials every prefix receives; continuations inherit them from the prefix record. */

@@ -273,6 +273,12 @@ export interface ExperimentBinding {
   position: "first" | "second"
   /** The shared prefix run both arms of the block were forked from. Equal to `run.forkedFrom`. */
   prefixRunId: string
+  /**
+   * Present only when the continuation threw. The exception's message, exactly;
+   * the record beside it is what the branch held when it threw, so its
+   * `finishedAt` is unknown and its completion reads `unfinished`.
+   */
+  failure?: string
 }
 
 export interface RunManifest {

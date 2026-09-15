@@ -107,8 +107,9 @@ import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { AdmissionSettlement, RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import { settlementOf } from "./settlement.ts"
 import type { Tools } from "../ports/tools.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
@@ -370,22 +371,6 @@ async function runJudgeTurn<T>(
     last = envelope
   }
   return { refused: false, envelope: last!, attempts: 2 }
-}
-
-/**
- * Story 2-5c — what an admitted, issued attempt cost. `core/stages/discover.ts`'s
- * `settlementOf` carries the rule: the unknown marker first, else `tokens`, else
- * unknown, because an issued request with no figure may have billed.
- */
-function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
-  if (envelope.usageUnknown) {
-    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
-  }
-  if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
-  return {
-    kind: "unknown",
-    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -957,7 +942,9 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) ${retryRefused ? "failed once, and its retry was refused," : "failed twice"} on the ${role} step and ` +
         `the run continued without it. Any finding it was asked about is decided on what the other ` +
         `steps produced, which is less than it should have been. (${message})`,
-      detail: { slot, model: modelOf(slot), role, message, attempts: retryRefused ? 1 : 2 },
+      // `attempts` only when a retry was refused, which only an admission can do:
+      // an ordinary run's warning keeps its shape.
+      detail: { slot, model: modelOf(slot), role, message, ...(retryRefused ? { attempts: 1 } : {}) },
     })
   }
 
@@ -1484,17 +1471,28 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       logicOutcome = logicResult
     }
     // A refused FACT-CHECK strands the finding on the budget path, after keeping
-    // the logic evaluation that came back beside it.
+    // what the logic evaluation beside it came to: its assessment, or its
+    // model's failure. A cancelled logic evaluation strands the finding as
+    // cancelled instead, because the user's stop outranks the refusal.
     if (factResult.refused) {
-      if (logicOutcome?.envelope.ok) {
-        finding.logicEval = logicOutcome.envelope.value.assessment
+      const logicEnvelope = logicOutcome?.envelope
+      if (logicEnvelope?.ok) {
+        finding.logicEval = logicEnvelope.value.assessment
         appendEntry(finding, {
           stage: "judge",
           actor: logicSlot,
           at: clock.now(),
           kind: "judge-logic-eval",
-          body: logicOutcome.envelope.value.assessment,
+          body: logicEnvelope.value.assessment,
         })
+      } else if (logicEnvelope !== undefined) {
+        if (logicEnvelope.failure === "cancelled") {
+          if (factResult.attempts === 0) counts.turns -= 1
+          noteRefusedFailure(factResult, factSlot, "fact-check")
+          stoppedHere(finding, logicEnvelope)
+          continue
+        }
+        noteDropOut(logicSlot, "logic-eval", logicEnvelope.message)
       }
       refuseTurn(finding, factResult, factSlot, "fact-check")
       continue

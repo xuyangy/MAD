@@ -72,6 +72,7 @@ import {
   type Maybe,
   type RunManifest,
 } from "./manifest.ts"
+import { PAIRED_BLOCKS } from "./schedule.ts"
 
 /**
  * The four fields cross-arm comparability is decided on.
@@ -576,18 +577,22 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
       !/^sha256:[0-9a-f]{64}$/.test(experiment.scheduleHash) ||
       !isCount(experiment.block) ||
       experiment.block < 1 ||
-      experiment.block > 3 ||
+      experiment.block > PAIRED_BLOCKS.length ||
       (experiment.arm !== "on" && experiment.arm !== "off") ||
       (experiment.position !== "first" && experiment.position !== "second") ||
-      !isText(experiment.prefixRunId)
+      !isText(experiment.prefixRunId) ||
+      ("failure" in experiment && typeof experiment.failure !== "string")
     ) {
       return fail("has a malformed `experiment`")
     }
     // The arm IS the routing policy: ON runs the shipped pathway, OFF the
     // evaluation-only debate-off policy. A disagreement is two claims about the
-    // intervention.
+    // intervention. The one exception is a continuation that threw before it
+    // routed: no policy was applied, so its record names none.
     const policyForArm = experiment.arm === "on" ? "shipped" : "debate-off"
-    if (dials.routingPolicy !== policyForArm) {
+    const neverRouted =
+      "failure" in experiment && isRecord(status.routeCounts) && status.routeCounts.kind === "did-not-run"
+    if (!neverRouted && dials.routingPolicy !== policyForArm) {
       return fail(
         `has an \`experiment.arm\` of ${experiment.arm}, but its \`dials.routingPolicy\` is ` +
           `${JSON.stringify(dials.routingPolicy)} (arm ${experiment.arm} runs ${policyForArm})`,

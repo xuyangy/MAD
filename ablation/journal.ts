@@ -44,6 +44,7 @@ import { spentTokens } from "../core/budget/ledger.ts"
 import { addTokens, emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
 import type {
   AdmissionDecision,
+  AdmissionRefusalCause,
   AdmissionRequest,
   AdmissionSettlement,
   RequestAdmission,
@@ -246,6 +247,12 @@ export interface UniqueExecutionBill {
    */
   unappliedLate: LateUsageReport[]
   /**
+   * Every admission this invocation refused, in order. Held in memory only: a
+   * refused request issues nothing, so the journal file has no line for it. The
+   * paired runner records the consequence durably in the slot status.
+   */
+  refused: RefusedAdmission[]
+  /**
    * Known spend past each configured threshold. Admitted in-flight work may
    * overshoot a threshold; the overshoot is reported here and never borrowed from
    * another allowance. Zero means no overshoot.
@@ -253,6 +260,19 @@ export interface UniqueExecutionBill {
   overshoot: OvershootReport
   /** Where the halt marker was written for a latched halt, or why it could not be. */
   haltMarker: { file: string | null; error: string | null }
+}
+
+/** One refused admission: where it would have been spent, and why it was not. */
+export interface RefusedAdmission {
+  block: number
+  phase: PairedPhase
+  /** Absent when the run had no id yet. */
+  runId?: string
+  stage: string
+  slot: string
+  attempt: number
+  cause: AdmissionRefusalCause
+  reason: string
 }
 
 export interface OvershootReport {
@@ -296,6 +316,49 @@ function tokensOf(tokens: TokenUsage): TokenUsage {
     cacheRead: tokens.cacheRead,
     cacheWrite: tokens.cacheWrite,
   }
+}
+
+const UNCOUNTABLE_USAGE = "the settled usage figure was not five finite, non-negative numbers"
+
+/**
+ * A settlement in the one form the journal records, compares and replays.
+ *
+ * A stage passes a backend's figure through as it came, so a `usage` settlement
+ * may carry tokens MAD cannot count. It becomes the `unknown` it is billed as
+ * BEFORE it is compared or written: the line on disk is then one replay accepts,
+ * and an identical repeat of the same malformed figure compares equal to it.
+ * Reading a field may throw (a getter); the caller records that as a runner stop.
+ */
+function normalizedSettlement(settlement: AdmissionSettlement): AdmissionSettlement {
+  if (settlement === null || typeof settlement !== "object") {
+    return { kind: "unknown", why: "the settlement was not an object" }
+  }
+  if (settlement.kind === "usage") {
+    return countable(settlement.tokens)
+      ? { kind: "usage", tokens: tokensOf(settlement.tokens) }
+      : { kind: "unknown", why: UNCOUNTABLE_USAGE }
+  }
+  if (settlement.kind === "not-issued") return { kind: "not-issued" }
+  if (settlement.kind === "unknown") {
+    const { why, executionId } = settlement
+    return {
+      kind: "unknown",
+      why: typeof why === "string" ? why : "the unknown settlement carried no reason",
+      ...(typeof executionId === "string" ? { executionId } : {}),
+    }
+  }
+  return { kind: "unknown", why: "the settlement named no recognised outcome" }
+}
+
+const ADMISSION_STAGES: readonly string[] = ["discover", "debate", "judge"]
+
+/** Why an admission request could not be journaled as given, or `null`. */
+function requestProblem(request: AdmissionRequest): string | null {
+  if (request === null || typeof request !== "object") return "the request was not an object"
+  if (!ADMISSION_STAGES.includes(request.stage)) return `its stage ${JSON.stringify(request.stage)} is not discover, debate or judge`
+  if (typeof request.slot !== "string" || request.slot.length === 0) return "it names no slot"
+  if (!isWhole(request.attempt, 1)) return `its attempt ${JSON.stringify(request.attempt)} is not a whole number from 1`
+  return null
 }
 
 /**
@@ -361,8 +424,7 @@ class JournalState {
       return
     }
     request.state = "unknown"
-    request.why =
-      settlement.kind === "unknown" ? settlement.why : "the settled usage figure was not five finite, non-negative numbers"
+    request.why = settlement.kind === "unknown" ? settlement.why : UNCOUNTABLE_USAGE
     this.latch(
       `request \`${request.physicalId}\` (block ${request.block ?? "-"} ${request.phase ?? request.category}, ` +
         `${request.stage}/${request.slot} attempt ${request.attempt}) billed an UNKNOWN amount: ${request.why}`,
@@ -460,7 +522,7 @@ class JournalState {
     return total
   }
 
-  bill(unappliedLate: readonly LateUsageReport[]): UniqueExecutionBill {
+  bill(unappliedLate: readonly LateUsageReport[], refused: readonly RefusedAdmission[] = []): UniqueExecutionBill {
     const requests = [...this.requests.values()].map((request) => structuredClone(request))
     let known = emptyTokenUsage()
     const byCategory: Partial<Record<AllowanceCategory, TokenUsage>> = {}
@@ -501,6 +563,7 @@ class JournalState {
       halt: this.halt,
       stop: this.stop,
       unappliedLate: unappliedLate.map((report) => structuredClone(report)),
+      refused: refused.map((refusal) => ({ ...refusal })),
       overshoot: overshootOf(known, byCategory.blocks, [...phases.values()]),
       haltMarker: { ...this.haltMarker },
     }
@@ -546,15 +609,18 @@ function isLine(value: unknown): value is JournalLine {
     if (!CATEGORIES.includes(line.category as AllowanceCategory)) return false
     if (!PHASES.includes(line.phase as PairedPhase | null)) return false
     const blocks = line.category === "blocks"
-    // A Blocks request always names its block and phase; another category may not.
-    if (blocks ? !isWhole(line.block, 1) || line.phase === null : !(line.block === null || isWhole(line.block, 1))) {
+    // A Blocks request always names its block and phase. Another category has no
+    // phase, and may name a block.
+    if (blocks ? !isWhole(line.block, 1) || line.phase === null : !(line.block === null || isWhole(line.block, 1)) || line.phase !== null) {
       return false
     }
     return (
       typeof line.stage === "string" &&
       typeof line.slot === "string" &&
+      line.slot.length > 0 &&
       isWhole(line.attempt, 1) &&
-      typeof line.runId === "string"
+      typeof line.runId === "string" &&
+      line.runId.length > 0
     )
   }
   if (line.type === "settled") {
@@ -611,6 +677,17 @@ export interface AdmissionBinding {
    */
   runId: () => string | undefined
 }
+
+/**
+ * How the journal appends a line. Injected for tests; the default appends and
+ * syncs the file. It may reject before or after the bytes reached the file, and
+ * the journal treats both alike (see `openJournal`).
+ */
+export interface JournalIo {
+  appendLine(file: string, line: JournalLine): Promise<void>
+}
+
+const FILE_IO: JournalIo = { appendLine }
 
 export interface FlushOutcome {
   /** True when every held report and settlement was persisted or classified. */
@@ -673,8 +750,23 @@ export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; 
  * root (`HALT_MARKER_FILE`, written by this journal or by the arm governor)
  * latches the halt too. When this journal latches a halt it writes that marker,
  * so the arm governor on the same root refuses as well.
+ *
+ * ## A failed append
+ *
+ * An append can fail before its bytes reach the file or after (a failed sync),
+ * and possibly with a partial line. So once one fails, nothing more is appended
+ * during the invocation: a line appended after a torn tail would corrupt the
+ * journal. The runner stops, and every settlement or late line from then on is
+ * kept in memory, in order, for `flush()`. `flush()` replays the file first,
+ * skips a line already there with the same payload, and refuses a journal it
+ * cannot replay rather than appending to it or truncating it.
  */
-export async function openJournal(bundleRoot: string, lock: HeldLock, now: () => string): Promise<JournalOpened> {
+export async function openJournal(
+  bundleRoot: string,
+  lock: HeldLock,
+  now: () => string,
+  io: JournalIo = FILE_IO,
+): Promise<JournalOpened> {
   const root = resolve(bundleRoot)
   const file = join(root, JOURNAL_FILE)
   const markerPath = join(root, HALT_MARKER_FILE)
@@ -702,8 +794,16 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
   let pending: LateUsageReport[] = []
   /** Reports received after close, for `flush()`. */
   let held: LateUsageReport[] = []
-  /** Settlements received after close, for `flush()`. */
-  let heldSettlements: SettledLine[] = []
+  /**
+   * Settlement and late lines not on disk, in the order they were applied: every
+   * line received after close, and every line from the first failed append on.
+   * `flush()` appends them.
+   */
+  let unpersisted: (SettledLine | LateLine)[] = []
+  /** Set by the first failed append; nothing is appended during the invocation after it. */
+  let appendBroken = false
+  /** Admissions refused during this invocation. */
+  const refused: RefusedAdmission[] = []
 
   /** Serializes a task. The returned promise never rejects: a throw becomes `onError`'s value. */
   const enqueue = <T>(task: () => Promise<T>, onError: (error: unknown) => T): Promise<T> => {
@@ -715,20 +815,37 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
     return run
   }
 
-  const stopOn = (what: string) => (error: unknown): void => {
-    state.stop ??= `${what}: ${messageOf(error)}`
-  }
-
   const writeLine = async (line: JournalLine): Promise<void> => {
-    await appendLine(file, line)
-    if (!fileExists) {
-      await syncDirectory(root)
-      fileExists = true
+    try {
+      await io.appendLine(file, line)
+      if (!fileExists) {
+        await syncDirectory(root)
+        fileExists = true
+      }
+    } catch (error) {
+      appendBroken = true
+      throw error
     }
   }
 
-  const append = (line: JournalLine): Promise<void> =>
-    enqueue(() => writeLine(line), stopOn(`the journal \`${file}\` could not be appended`))
+  const append = (line: SettledLine | LateLine): Promise<void> =>
+    enqueue(
+      async () => {
+        if (appendBroken) {
+          unpersisted.push(line)
+          return
+        }
+        try {
+          await writeLine(line)
+        } catch (error) {
+          unpersisted.push(line)
+          state.stop ??= `the journal \`${file}\` could not be appended: ${messageOf(error)}`
+        }
+      },
+      (error) => {
+        state.stop ??= `the journal \`${file}\` could not be appended: ${messageOf(error)}`
+      },
+    )
 
   /** Write the halt marker once, the first time a halt is latched. */
   const watchHalt = (): void => {
@@ -796,15 +913,53 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
     admission(binding) {
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
+          /** Record a refusal in `refused`, whatever its cause, and return it. */
+          const refuse = (decision: AdmissionDecision & { ok: false }): AdmissionDecision => {
+            let where: Pick<RefusedAdmission, "stage" | "slot" | "attempt">
+            let runId: string | undefined
+            try {
+              where = { stage: String(request?.stage), slot: String(request?.slot), attempt: Number(request?.attempt) }
+            } catch {
+              where = { stage: "unreadable", slot: "unreadable", attempt: 0 }
+            }
+            try {
+              const id = binding.runId()
+              if (typeof id === "string" && id.length > 0) runId = id
+            } catch {
+              // The run id is context for the refusal; its absence is recorded as absence.
+            }
+            refused.push({
+              block: binding.block,
+              phase: binding.phase,
+              ...(runId === undefined ? {} : { runId }),
+              ...where,
+              cause: decision.cause,
+              reason: decision.reason,
+            })
+            return decision
+          }
           return enqueue(
             async (): Promise<AdmissionDecision> => {
-              if (closed) state.stop ??= "the invocation has completed and admits nothing further"
+              // A completed invocation refuses as a runner stop without latching
+              // `stop`: `stop` reports a failure, and completing is not one.
+              if (closed) {
+                return refuse({
+                  ok: false,
+                  cause: "runner-stop",
+                  reason: "the paired runner stopped admitting: the invocation has completed and admits nothing further. No model failed.",
+                })
+              }
               const gate = requestGate(state.view(), { block: binding.block, phase: binding.phase })
-              if (!gate.ok) return gate
+              if (!gate.ok) return refuse(gate)
+              const problem = requestProblem(request)
+              if (problem !== null) {
+                state.stop ??= `block ${binding.block}'s ${binding.phase} asked to admit a malformed request: ${problem}`
+                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
+              }
               const runId = binding.runId()
               if (typeof runId !== "string" || runId.length === 0) {
                 state.stop ??= `block ${binding.block}'s ${binding.phase} asked to admit a request before its run id existed`
-                return refuseAsStop()
+                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
               }
               const line: IssuedLine = {
                 type: "issued",
@@ -821,14 +976,14 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
                 await writeLine(line)
               } catch (error) {
                 state.stop ??= `the journal \`${file}\` could not record an admission: ${messageOf(error)}`
-                return refuseAsStop()
+                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
               }
               state.apply(line)
               return { ok: true, settle: settleFor(line.physicalId) }
             },
             (error) => {
               state.stop ??= `an admission could not be decided: ${messageOf(error)}`
-              return refuseAsStop()
+              return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
             },
           )
         },
@@ -856,13 +1011,12 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
       state.stop ??= reason
     },
 
-    bill: () => state.bill(pending),
+    bill: () => state.bill(pending, refused),
 
     settled: () => enqueue(async () => undefined, () => undefined),
 
     async close() {
       closed = true
-      state.stop ??= "the invocation has completed and admits nothing further"
       await enqueue(async () => undefined, () => undefined)
       const releaseError = heldLock === null ? null : await heldLock.release()
       heldLock = null
@@ -879,15 +1033,16 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
    * held for `flush()`, which appends it under a freshly taken lock.
    */
   function settleFor(physicalId: string): (settlement: AdmissionSettlement) => Promise<void> {
-    return async (settlement) => {
+    return async (given) => {
       try {
+        const settlement = normalizedSettlement(given)
         const request = state.requests.get(physicalId)!
         const previous = state.settlementOf(request)
         if (previous !== undefined && sameJson(previous, settlement)) return
-        const line: SettledLine = { type: "settled", physicalId, settlement: structuredClone(settlement) }
+        const line: SettledLine = { type: "settled", physicalId, settlement }
         state.apply(line)
         if (closed) {
-          heldSettlements.push(line)
+          unpersisted.push(line)
           watchHalt()
           return
         }
@@ -904,10 +1059,10 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
   function reconciliationHandle(): ReconciliationHandle {
     return {
       held: () => held.map((report) => structuredClone(report)),
-      bill: () => state.bill(held),
+      bill: () => state.bill(held, refused),
       async flush(): Promise<FlushOutcome> {
         const outcome: FlushOutcome = { ok: true, persisted: 0, conflicts: [], unmatched: [], failed: null }
-        if (held.length === 0 && heldSettlements.length === 0) return outcome
+        if (held.length === 0 && unpersisted.length === 0) return outcome
         const taken = await acquireLock(root, now())
         if (!taken.ok) return { ...outcome, ok: false, failed: taken.reason }
         const fail = (reason: string): FlushOutcome => {
@@ -920,7 +1075,7 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
           if (!disk.ok) return fail(disk.reason)
           const persist = async (line: JournalLine): Promise<boolean> => {
             try {
-              await appendLine(file, line)
+              await io.appendLine(file, line)
             } catch (error) {
               fail(`the journal \`${file}\` could not be appended: ${messageOf(error)}`)
               return false
@@ -935,14 +1090,18 @@ export async function openJournal(bundleRoot: string, lock: HeldLock, now: () =>
             return true
           }
 
-          while (heldSettlements.length > 0) {
-            const line = heldSettlements[0]!
+          // Lines already applied in memory. One the disk already carries with the
+          // same payload (an append that failed after its bytes were written) is
+          // not appended again.
+          while (unpersisted.length > 0) {
+            const line = unpersisted[0]!
             const request = disk.state.requests.get(line.physicalId)
-            const previous = request === undefined ? undefined : disk.state.settlementOf(request)
-            if (previous === undefined || !sameJson(previous, line.settlement)) {
-              if (!(await persist(line))) return outcome
-            }
-            heldSettlements.shift()
+            const onDisk =
+              line.type === "settled"
+                ? request !== undefined && sameJson(disk.state.settlementOf(request), line.settlement)
+                : request?.late !== undefined && sameJson(request.late, line.tokens)
+            if (!onDisk && !(await persist(line))) return outcome
+            unpersisted.shift()
           }
 
           const keep: LateUsageReport[] = []

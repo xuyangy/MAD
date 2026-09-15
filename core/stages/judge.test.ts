@@ -7,7 +7,7 @@
  * AD-18 spans under a hostile change.
  */
 
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
 import type { BudgetLedger } from "../budget/ledger.ts"
 import { emptyLedger, emptyTokenUsage, recordTurn } from "../domain/run-record.ts"
@@ -20,6 +20,7 @@ import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
   DEFAULT_JUDGE_ANSWERS,
   fakeAdmission,
+  settleAudit,
   fakeClock,
   FakeBackend,
   judgeRoleOf,
@@ -31,6 +32,11 @@ import {
 import { MAX_BLAME_ROWS } from "../judge/blame.ts"
 import { assignJudgeSlots } from "../judge/slots.ts"
 import { judge, type JudgeInput } from "./judge.ts"
+
+// Story 2-5c — every admitted request in this file was settled exactly once by the stage.
+afterEach(() => {
+  expect(settleAudit()).toEqual([])
+})
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1636,8 +1642,39 @@ describe("judge — the per-request admission seam (story 2-5c)", () => {
     const result = await run([first, second], { admission: admission.admission })
     expect(first.unresolved?.diedAtStage).toBe("judge")
     expect(second.unresolved?.diedAtStage).toBe("judge")
+    // The later finding is stranded by the latch, and still names the admission.
+    expect(second.unresolved?.reason).toContain("refused by the fake admission")
+    expect(second.unresolved?.reason).not.toContain("token budget")
     expect(result.turns).toBe(0)
     expect(admission.asked).toHaveLength(1)
+  })
+
+  test("a refused fact-check keeps the failure of the logic evaluation beside it", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "fact-check")
+    const result = await run([subject], { admission: admission.admission, roster: roster(FIVE), backend: failingRoles("logic-eval") })
+    expect(subject.unresolved?.diedAtStage).toBe("judge")
+    expect(subject.unresolved?.reason).toContain("refused by the fake admission")
+    const lost = result.warnings.filter((warning) => warning.code === "model-dropped-out")
+    expect(lost.map((warning) => warning.detail?.["role"])).toEqual(["logic-eval"])
+  })
+
+  test("a refused fact-check beside a cancelled logic evaluation strands the finding as cancelled", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "fact-check")
+    const backend = new FakeBackend({}, {}, { "logic-eval": [{ kind: "fail", failure: "cancelled", message: "stopped" }] })
+    const result = await run([subject], { admission: admission.admission, roster: roster(FIVE), backend })
+    expect(subject.unresolved?.reason).toContain("cancelled")
+    expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+  })
+
+  test("the settle audit names an admitted request a stage never settled", async () => {
+    const admission = fakeAdmission()
+    const decision = await admission.admission.admit({ stage: "judge", slot: "discovery-1", attempt: 1 })
+    expect(decision.ok).toBe(true)
+    expect(settleAudit()).toEqual(["judge/discovery-1 attempt 1 was settled 0 time(s)"])
   })
 })
 
@@ -1715,5 +1752,14 @@ describe("judge — admission refusals name their cause and keep real failures (
       expect(settlements.length).toBeGreaterThan(0)
       expect(settlements.every((settlement) => settlement.kind === expected)).toBe(true)
     }
+  })
+})
+
+describe("judge — an ordinary run's drop-out warning keeps its shape (story 2-5c review)", () => {
+  test("two failures with no admission record no `attempts` in the detail", async () => {
+    const result = await run([finding({ route: "judge" })], { backend: failingRoles("fact-check") })
+    const lost = result.warnings.find((warning) => warning.code === "model-dropped-out")
+    expect(lost).toBeDefined()
+    expect(Object.keys(lost!.detail ?? {}).sort()).toEqual(["message", "model", "role", "slot"])
   })
 })

@@ -631,6 +631,7 @@ describe("the optional `experiment` block (story 2-5c)", () => {
     ["block 4", { ...experiment, block: 4 }],
     ["a schedule hash not in sha256:<64 hex> form", { ...experiment, scheduleHash: "sha256:schedule" }],
     ["an uppercase schedule hash", { ...experiment, scheduleHash: `sha256:${"A".repeat(64)}` }],
+    ["a failure that is not a string", { ...experiment, failure: 42 }],
   ])("a malformed experiment (%s) is refused", (_name, malformed) => {
     const manifest = { ...buildManifest({ record: forked(), change, identity, turnFiles: known(0) }), experiment: malformed }
     const parsed = roundTrip(manifest)
@@ -662,6 +663,39 @@ describe("the `experiment` arm agrees with the routing policy (story 2-5c review
     const manifest = buildManifest({ record: run, change, identity, turnFiles: known(0), experiment: binding(arm) })
     const parsed = parseManifest(JSON.parse(JSON.stringify(manifest)))
     expect(parsed.ok).toBe(readable)
+    if (!parsed.ok) expect(parsed.reason).toContain("routingPolicy")
+  })
+})
+
+describe("a continuation that threw keeps its manifest (story 2-5c review)", () => {
+  const binding = (arm: "on" | "off") => ({
+    scheduleHash: `sha256:${"c".repeat(64)}`,
+    block: 1,
+    arm,
+    position: "second" as const,
+    prefixRunId: "run-prefix",
+    failure: "capabilities unavailable",
+  })
+  const partial = (over: Partial<RunRecord> = {}) =>
+    record({ runId: "run-branch", forkedFrom: "run-prefix", finishedAt: undefined, ...over })
+  const read = (value: unknown) => parseManifest(JSON.parse(JSON.stringify(value)))
+
+  test("the failure reads back, and the record reads as unfinished", () => {
+    const parsed = read(buildManifest({ record: partial(), change, identity, turnFiles: known(0), experiment: binding("on") }))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.experiment?.failure).toBe("capabilities unavailable")
+    expect(parsed.value.status.completion).toBe("unfinished")
+  })
+
+  test("an OFF continuation that threw before routing names no policy, and reads back", () => {
+    expect(read(buildManifest({ record: partial(), change, identity, turnFiles: known(0), experiment: binding("off") })).ok).toBe(true)
+  })
+
+  test("an OFF continuation that routed under the shipped policy is still refused", () => {
+    const routed = partial({ routeCounts: { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 } })
+    const parsed = read(buildManifest({ record: routed, change, identity, turnFiles: known(0), experiment: binding("off") }))
+    expect(parsed.ok).toBe(false)
     if (!parsed.ok) expect(parsed.reason).toContain("routingPolicy")
   })
 })

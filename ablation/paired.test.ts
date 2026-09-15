@@ -22,6 +22,8 @@ import { cancelledTurn, type BackendCapabilities, type Envelope, type ModelBacke
 import { selectRoster } from "../core/roster/select.ts"
 import { candidate, DEFAULT_JUDGE_ANSWERS, fakeChange, fakeClock, judgeRoleOf } from "../core/test-support/fakes.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
+import { PREFIX_FILE } from "./bundle.ts"
+import { HALT_MARKER_FILE } from "./governor.ts"
 import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
 import { known, MANIFEST_FILE, type RunManifest } from "./manifest.ts"
 import { bindingProblem, runPairedBlocks, type PairedPhaseContext, type RunPairedBlocksInput } from "./paired.ts"
@@ -218,6 +220,19 @@ describe("runPairedBlocks — the happy path", () => {
     const prefixTurns = bill.byPhase.filter((phase) => phase.phase === "prefix").reduce((sum, phase) => sum + phase.requests, 0)
     expect(executedHere + prefixTurns).toBe(calls.length)
 
+    // Each forked prefix has its evidence file and its record's dump.
+    for (const prefix of outcome.prefixes) {
+      expect(prefix.evidence.ok).toBe(true)
+      if (!prefix.evidence.ok) continue
+      const evidence = JSON.parse(await readFile(prefix.evidence.file, "utf8"))
+      expect(evidence).toMatchObject({ prefixEvidenceVersion: 1, scheduleHash: schedule.scheduleHash, block: prefix.block, forked: true })
+      expect(evidence.prefixRunId).toEqual(known(prefix.runId!))
+      expect(existsSync(join(evidence.dump, "record.json"))).toBe(true)
+      expect(existsSync(join(evidence.dump, MANIFEST_FILE))).toBe(false)
+    }
+    expect(outcome.governor.runnerStop).toBeNull()
+    expect(outcome.bill.stop).toBeNull()
+
     expect(existsSync(join(root, LOCK_FILE))).toBe(false)
   })
 
@@ -263,6 +278,10 @@ describe("runPairedBlocks — gates", () => {
     expect(first.skippedForBudget).toEqual(["discovery-3"])
     expect(first.warnings.map((warning) => warning.code)).toContain("discovery-truncated")
     expect(outcome.bill.halt).toBeNull()
+    // Both branches inherit the truncated prefix, so both slots of block 1 record the denial.
+    expect(outcome.slots.slice(0, 2).map((slot) => slot.status)).toEqual(["failed", "failed"])
+    expect(outcome.slots[0]!.reason).toContain("discovery skipped discovery-3 for budget")
+    expect(outcome.complete).toBe(false)
   })
 
   test("persisted spend at the global cap, from another category, refuses every request", async () => {
@@ -281,6 +300,25 @@ describe("runPairedBlocks — gates", () => {
     expect(calls).toHaveLength(0)
     expect(outcome.bill.requests.filter((request) => request.category === "blocks")).toHaveLength(0)
     expect(outcome.runs[0]!.run.record.skippedForBudget).toEqual(["discovery-1", "discovery-2"])
+    // Every slot's planned work was refused, so none of them completed.
+    expect(outcome.complete).toBe(false)
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array(6).fill("failed"))
+    expect(outcome.slots[0]!.reason).toContain("global cap is exhausted")
+    const statuses = await readSlotStatuses(root)
+    expect(statuses.filter((line) => line.status === "failed")).toHaveLength(6)
+  })
+
+  test("reaching a threshold with nothing refused is not a denial", async () => {
+    const { input } = await sealed({
+      script: { usage: (call) => ({ ...emptyTokenUsage(), input: call.phase === "prefix" ? 30_000 : 10 }) },
+    })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    // Two discovery slots at 30,000 each reach the 60,000 prefix threshold exactly, and nothing was refused.
+    expect(outcome.overshoot.phases.find((row) => row.block === 1 && row.phase === "prefix")!.spent).toBe(60_000)
+    expect(outcome.bill.refused).toEqual([])
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array(6).fill("completed"))
+    expect(outcome.complete).toBe(true)
   })
 })
 
@@ -307,7 +345,9 @@ describe("runPairedBlocks — incomplete evaluations stay visible", () => {
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(outcome.complete).toBe(false)
     expectEverySlotExplained(outcome.slots)
-    expect(outcome.slots[0]!.status).toBe("completed")
+    // The unknown stops the run's own ledger, so the rest of its work was denied.
+    expect(outcome.slots[0]!.status).toBe("failed")
+    expect(outcome.slots[0]!.reason).toContain("denied it planned work")
     expect(outcome.slots.slice(1).map((slot) => slot.status)).toEqual(Array(5).fill("not-attempted"))
     expect(outcome.slots[1]!.reason).toContain("halted")
     expect(outcome.bill.unknown).toHaveLength(1)
@@ -370,6 +410,10 @@ describe("runPairedBlocks — incomplete evaluations stay visible", () => {
     expect(outcome.prefixes[0]).toMatchObject({ block: 1, forked: false })
     // No manifest for the unforked block: its arm directories were never written.
     expect(existsSync(join(root, "on", "0"))).toBe(false)
+    // Its prefix evidence says what happened; no record existed, so none is invented.
+    const evidence = JSON.parse(await readFile(join(root, "prefix", "0", PREFIX_FILE), "utf8"))
+    expect(evidence).toMatchObject({ block: 1, forked: false, failure: "the clock broke", dump: null })
+    expect(evidence.prefixRunId.kind).toBe("known")
     expect(outcome.bill.requests.filter((request) => request.block === 1)).toHaveLength(2)
     expect(outcome.complete).toBe(false)
   })
@@ -575,6 +619,17 @@ describe("runPairedBlocks — review patches (story 2-5c review)", () => {
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(outcome.slots[0]).toMatchObject({ status: "failed" })
     expect(outcome.slots[0]!.reason).toContain("capabilities unavailable")
+    // The partial record is published: the failure is named, and nothing is invented for it.
+    expect(outcome.slots[0]!.manifest?.kind).toBe("written")
+    if (outcome.slots[0]!.manifest?.kind === "written") {
+      const manifest = await manifestOf(outcome.slots[0]!.manifest.directory)
+      expect(manifest.experiment?.failure).toContain("capabilities unavailable")
+      expect(manifest.status.completion).toBe("unfinished")
+      expect(manifest.run.finishedAt.kind).toBe("unknown")
+      expect(manifest.dials.routingPolicy).toBe("shipped")
+      expect(spentTokens(manifest.spend.origin.executedHere.tokens)).toBeGreaterThan(0)
+    }
+    expect(outcome.runs.some((entry) => entry.slot.block === 1 && entry.slot.arm === "on")).toBe(false)
     expect(calls.some((call) => call.block === 1 && call.phase === "on" && call.stage === "debate")).toBe(true)
     expect(outcome.bill.requests.some((request) => request.block === 1 && request.phase === "on")).toBe(true)
     expect(outcome.slots[1]).toMatchObject({ status: "completed" })
@@ -627,6 +682,15 @@ describe("runPairedBlocks — review patches (story 2-5c review)", () => {
     expect(outcome.slots.every((slot) => slot.status === "not-attempted")).toBe(true)
     expect(outcome.slots[0]!.reason).toContain("could not be forked")
     expect(outcome.runs).toHaveLength(0)
+    // The unforked prefix's record is still written, with its evidence file.
+    const first = outcome.prefixes[0]!
+    expect(first.evidence.ok).toBe(true)
+    if (first.evidence.ok) {
+      expect(first.evidence.dump).not.toBeNull()
+      const evidence = JSON.parse(await readFile(first.evidence.file, "utf8"))
+      expect(evidence).toMatchObject({ forked: false, prefixRunId: known(first.runId!) })
+      expect(evidence.failure).toContain("cannot be copied")
+    }
     expect(outcome.bill.requests.filter((request) => request.phase === "prefix").length).toBeGreaterThan(0)
   })
 
@@ -645,7 +709,9 @@ describe("runPairedBlocks — review patches (story 2-5c review)", () => {
   })
 
   test("the Blocks allowance exhausted in block 1 refuses block 2's requests, and its overshoot is reported", async () => {
+    // Both discovery slots of block 1 run at once, so both are admitted before either settles.
     const { input, calls } = await sealed({
+      maxConcurrency: 2,
       script: { usage: (call) => ({ ...emptyTokenUsage(), input: call.stage === "discover" ? 750_000 : 10 }) },
     })
     const outcome = await runPairedBlocks(input)
@@ -657,16 +723,77 @@ describe("runPairedBlocks — review patches (story 2-5c review)", () => {
     expect(truncated?.message).toContain("Blocks allowance is exhausted")
     expect(truncated?.message).not.toContain("taken the run past")
     expect(outcome.overshoot.blocks).toEqual({ limit: 1_400_000, spent: 1_500_000, overshoot: 100_000 })
+    expect(outcome.slots.filter((slot) => slot.block > 1).map((slot) => slot.status)).toEqual(Array(4).fill("failed"))
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("prefix evidence that cannot be written ends admission before any continuation runs", async () => {
+    const { input, root, calls } = await sealed()
+    await writeFile(join(root, "prefix"), "in the way\n")
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.prefixes[0]!.evidence.ok).toBe(false)
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array(6).fill("not-attempted"))
+    expect(outcome.slots[0]!.reason).toContain("prefix evidence was not written")
+    expect(calls.every((call) => call.block === 1 && call.phase === "prefix")).toBe(true)
+    expect(outcome.complete).toBe(false)
   })
 })
 
-describe("runPairedBlocks — the tools port must match the sealed tools identity (story 2-5c review)", () => {
+describe("runPairedBlocks — a Tools port and a sealed Tools identity come together (story 2-5c review)", () => {
   test("a Tools port with no identity in the config is refused before anything bills", async () => {
     const { input, root, calls } = await sealed()
     const tools = {} as NonNullable<RunPairedBlocksInput["tools"]>
     const outcome = await runPairedBlocks({ ...input, tools })
     expect(outcome.ok).toBe(false)
     expect(calls).toHaveLength(0)
+    expect(existsSync(join(root, START_MARKER_FILE))).toBe(false)
+  })
+
+  test("an identity with no port, or a blank identity, is refused before anything bills", async () => {
+    const tools = {} as NonNullable<RunPairedBlocksInput["tools"]>
+    for (const alter of [
+      (input: RunPairedBlocksInput) => ({ ...input, config: { ...input.config, tools: "opencode tools in /scratch" } }),
+      (input: RunPairedBlocksInput) => ({ ...input, tools, config: { ...input.config, tools: "  " } }),
+    ]) {
+      const { input, root, calls } = await sealed()
+      const outcome = await runPairedBlocks(alter(input))
+      expect(outcome.ok).toBe(false)
+      expect(calls).toHaveLength(0)
+      expect(existsSync(join(root, START_MARKER_FILE))).toBe(false)
+      expect(existsSync(join(root, LOCK_FILE))).toBe(false)
+    }
+  })
+})
+
+describe("runPairedBlocks — refusals after the lock release it and spend nothing (story 2-5c review)", () => {
+  test("a halt already latched when the journal opens refuses before the start marker", async () => {
+    const { input, root, calls } = await sealed()
+    await writeFile(join(root, HALT_MARKER_FILE), "{}\n")
+    const outcome = await runPairedBlocks(input)
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) expect(outcome.reason).toContain("already halted")
+    expect(calls).toHaveLength(0)
+    expect(existsSync(join(root, START_MARKER_FILE))).toBe(false)
+    expect(existsSync(join(root, LOCK_FILE))).toBe(false)
+  })
+
+  test("a clock that throws after the lock was taken releases the lock", async () => {
+    const base = fakeClock()
+    let calls = 0
+    const clock: Clock = {
+      id: base.id,
+      now: () => {
+        calls += 1
+        if (calls === 2) throw new Error("the clock broke")
+        return base.now()
+      },
+    }
+    const { input, root } = await sealed({ clock })
+    const outcome = await runPairedBlocks(input)
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) expect(outcome.reason).toContain("the clock broke")
+    expect(existsSync(join(root, LOCK_FILE))).toBe(false)
     expect(existsSync(join(root, START_MARKER_FILE))).toBe(false)
   })
 })

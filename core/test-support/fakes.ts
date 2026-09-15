@@ -433,13 +433,44 @@ export function occurrencesOf(haystack: string, needle: string): number[] {
   return found
 }
 
+/** One admitted request a `fakeAdmission` handed out, and every `settle` call it received. */
+export interface AdmittedByFake {
+  request: AdmissionRequest
+  settles: AdmissionSettlement[]
+}
+
+/** Every admission handed out by a `fakeAdmission` since the last `settleAudit()`. */
+let audited: AdmittedByFake[] = []
+
+/**
+ * Story 2-5c — which admitted requests a stage did not settle exactly once, since
+ * the last call; clears the record.
+ *
+ * This audits the STAGE's call contract (`core/ports/admission.ts`: settle once
+ * per admitted attempt, before returning or retrying). It says nothing about the
+ * port's treatment of a repeat, where an identical repeat is a no-op: the fake
+ * still accepts every call. A test file checks it after each test.
+ */
+export function settleAudit(): string[] {
+  const problems = audited
+    .filter((entry) => entry.settles.length !== 1)
+    .map(
+      (entry) =>
+        `${entry.request.stage}/${entry.request.slot} attempt ${entry.request.attempt} was settled ` +
+        `${entry.settles.length} time(s)`,
+    )
+  audited = []
+  return problems
+}
+
 /**
  * Story 2-5c — a scripted `RequestAdmission` that records every request it was
  * asked and every settlement it received.
  *
  * `refuse` decides per request (with its 0-based position among all requests).
  * `whileAdmitting` runs before the decision resolves, standing in for the I/O a
- * real journal awaits, so a test can abort a signal in that window.
+ * real journal awaits, so a test can abort a signal in that window. Every
+ * admission it hands out is also recorded for `settleAudit()`.
  */
 export function fakeAdmission(
   refuse: (request: AdmissionRequest, index: number) => boolean = () => false,
@@ -448,21 +479,28 @@ export function fakeAdmission(
   admission: RequestAdmission
   asked: AdmissionRequest[]
   settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[]
+  admitted: AdmittedByFake[]
 } {
   const asked: AdmissionRequest[] = []
   const settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[] = []
+  const admitted: AdmittedByFake[] = []
   return {
     asked,
     settlements,
+    admitted,
     admission: {
       async admit(request) {
         const index = asked.length
         asked.push({ ...request })
         if (whileAdmitting) await whileAdmitting(request)
         if (refuse(request, index)) return { ok: false, cause: "budget", reason: "refused by the fake admission" }
+        const entry: AdmittedByFake = { request: { ...request }, settles: [] }
+        admitted.push(entry)
+        audited.push(entry)
         return {
           ok: true,
           settle: async (settlement) => {
+            entry.settles.push(settlement)
             settlements.push({ request: { ...request }, settlement })
           },
         }

@@ -553,6 +553,10 @@ describe("the ordinary stage ceiling and the experiment gate, together (story 2-
     })
     expect(backend.calls).toHaveLength(0)
     expect(finding.unresolved?.diedAtStage).toBe("judge")
+    // The ON continuation allowance refused it, not the run's cap or another gate.
+    expect(journal.bill().refused).toEqual([expect.objectContaining({ phase: "on", cause: "budget" })])
+    expect(finding.unresolved?.reason).toContain("ON continuation allowance is exhausted: 195000 of 195000")
+    expect(finding.unresolved?.reason).not.toContain("token budget")
     await journal.close()
   })
 
@@ -634,6 +638,21 @@ describe("two branches of one prefix bill it once (story 2-5c)", () => {
     expect(state.halted).toBe(false)
     expect(state.exposure).toBe("quantified")
     await journal.close()
+  })
+
+  test("a request still in flight leaves exposure unquantified", async () => {
+    const root = await tempDir("mad-bill-")
+    const lock = await acquireLock(root, "t")
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, () => "t")
+    if (!opened.ok) throw new Error(opened.reason)
+    const decision = await opened.journal.admission({ block: 1, phase: "prefix", runId: () => "run-p" }).admit({ stage: "discover", slot: "discovery-1", attempt: 1 })
+    expect(decision.ok).toBe(true)
+    const state = governorStateFromBill(opened.journal.bill())
+    expect(state.halted).toBe(false)
+    expect(state.inFlight).toBe(1)
+    expect(state.exposure).toBe("unquantified")
+    await opened.journal.close()
   })
 
   test("the halt presentation names each unknown execution from the bill, and exposure is unquantified", async () => {

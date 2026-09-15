@@ -102,9 +102,10 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
-import type { AdmissionSettlement, RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import { settlementOf } from "./settlement.ts"
 
 /**
  * AD-11 / AD-12 — the schema constrains ONLY the fields MAD computes on:
@@ -477,23 +478,6 @@ async function runWithOneRetry(
     last = envelope
   }
   return { skippedForBudget: false, envelope: last!, attempts: 2 }
-}
-
-/**
- * Story 2-5c — what an admitted, issued attempt cost, in the ledger's order:
- * the unknown marker first, else `tokens`, else unknown. A request that went out
- * and came back with no usage figure, or whose `runTurn` threw, may have billed,
- * so it is never settled as free.
- */
-function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
-  if (envelope.usageUnknown) {
-    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
-  }
-  if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
-  return {
-    kind: "unknown",
-    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
-  }
 }
 
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
