@@ -24,8 +24,16 @@
  * window between the two reads in which the directory could change, and the two
  * reports printed under one heading would then describe two different states of
  * it — a difference an operator would read as a finding.
+ *
+ * Story 2-6 — A PAIRED BUNDLE GETS A THIRD REPORT, the labelled reader's: CAP-1
+ * recall and CAP-11 lens gain from each block's prefix record, and each arm's
+ * upheld findings against the planted labels, or the refusal that says why this
+ * bundle is not the sealed labelled change. It consumes the paired result and
+ * reads no bundle file the paired reader already read. An ordinary bundle is
+ * unchanged.
  */
 
+import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
 import { readSchedule } from "../ablation/schedule.ts"
@@ -73,7 +81,19 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
     // `readBundle` above already succeeded and is handed straight through, so
     // `error` is unreachable on this path. It is printed rather than asserted
     // away because this script's whole contract is that it prints and returns 0.
-    console.log("error" in paired ? `MAD paired reader — ${paired.error}` : renderPairedBundle(paired))
+    if ("error" in paired) {
+      console.log(`MAD paired reader — ${paired.error}`)
+    } else {
+      console.log(renderPairedBundle(paired))
+      // The labelled reader promises not to throw. If it ever does, the reports
+      // above already printed, and this script still prints and returns 0.
+      try {
+        const labelled = await readLabelledBundle(paired)
+        if (labelled.kind !== "not-applicable") console.log(renderLabelledBundle(labelled))
+      } catch (error) {
+        console.log(`MAD labelled reader — ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   }
   return 0
 }

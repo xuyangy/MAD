@@ -81,7 +81,7 @@ import { countText } from "./cross-arm-rates.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import type { Completion, ExperimentBinding, Maybe, RunManifest } from "./manifest.ts"
 import { disclosures, readBundle, type ArmRow, type BundleReadOutcome, type BundleReadResult } from "./read-bundle.ts"
-import { INHERITED_SUM_RULE } from "./report.ts"
+import { INHERITED_SUM_RULE, LABELLED_READER_MODULE } from "./report.ts"
 import {
   PAIRED_BLOCKS,
   readSchedule,
@@ -1125,8 +1125,10 @@ export function renderPairedBundle(result: PairedReadResult): string {
   lines.push(
     "WHAT THIS REPORT DOES NOT MEASURE. No truth label enters it, so it states no precision, no false",
     "positives, no final recall, none of the four labelled verdict transitions, and no earned /",
-    "did-not-earn reading. Those need the labelled change and belong to story 2.8. Nothing here is a",
-    "product-value claim, and three blocks were bought as DESCRIPTIVE evidence with no significance",
+    "did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's",
+    `(\`${LABELLED_READER_MODULE}\`), printed after this one. Verdict-direction labels and false-positive`,
+    "counts are adjudication, story 2-6b. Precision, final recall and cost contrasts belong to story 2.8.",
+    "Nothing here is a product-value claim, and three blocks were bought as DESCRIPTIVE evidence with no significance",
     "claim available from them (`evaluation-protocol.md` §4).",
   )
   return `${lines.join("\n")}\n`

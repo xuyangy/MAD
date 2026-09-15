@@ -81,6 +81,9 @@ function splitText(cost: ArmCost): string {
  */
 export const PAIRED_READER_MODULE = "ablation/paired-read.ts"
 
+/** The module that reads CAP-1 and CAP-11 from a labelled paired bundle, named here for the same reason. */
+export const LABELLED_READER_MODULE = "ablation/labelled-read.ts"
+
 export const INHERITED_SUM_RULE = [
   "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then",
   "  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.",

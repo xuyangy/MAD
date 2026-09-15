@@ -425,6 +425,80 @@ the lock again, replays the journal, and appends what is held:
 - `failed` says why it stopped. Everything not persisted is kept. A journal it cannot replay,
   such as one with a torn last line, is refused and left exactly as it is.
 
+### The labelled report (story 2-6): CAP-1 recall and CAP-11 lens gain
+
+When the bundle carries a sealed paired schedule, `bun run eval-read` prints a third report
+after the paired contrast, produced by `ablation/labelled-read.ts`. It reads what the paired
+reader already read, plus each block's prefix `record.json`. It bills nothing, runs nothing,
+and always exits 0. A bundle with no sealed schedule prints exactly what it printed before.
+
+**When it refuses.** The schedule's fixture must be `labelled-change-1` with the sealed
+material and labels hashes. Every arm the paired reader bound must carry the sealed material
+hash as `identity.fixtureHash`, and the schedule's protocol version and hash as
+`identity.protocolVersion` and `identity.protocolHash`; with no arm bound at all, the report
+refuses too. Otherwise it prints `REFUSED: THIS BUNDLE IS NOT THE SEALED LABELLED CHANGE.`
+with each field that differs, and computes no number. An arm the paired reader did not bind is
+listed with that reader's reason and refuses nothing. A schedule the paired reader refused
+keeps that refusal.
+
+**Where the pool comes from.** The prefix record is the only unmutated discovery pool. Each
+arm's `manifest.findings.pool` was touched by debate and judge after the fork, so CAP-1 and
+CAP-11 never read it. The reader finds the record from the bundle root, at
+`prefix/<block - 1>/<prefixRunId>/record.json`, so a copied or moved bundle still reads. The
+`dump` path in `prefix.json` was written where the bundle was made and is only a cross-check:
+its last directory name must be the prefix run id. By real path, the block directory must be
+inside the bundle root, and the dump directory and `record.json` inside the block directory.
+The record's `runId` must be the block's prefix run id and its `roster` the schedule's. Any
+other record is refused with both values named.
+
+**What each block prints.**
+
+- Every pool and lens slot, and whether it answered. A slot that did not answer is listed with
+  its reason (`model-dropped-out` or `skippedForBudget`), never as a zero. A salvaged answer
+  counts as answered and shows its `partial-envelope` disclosure.
+- **CAP-1**: the pool union, each answered pool slot, and the best answered pool slot by name,
+  each as `x of 13` with the defect ids. With no answered pool slot there is no best member
+  and no comparison.
+- **CAP-11**: the lens-only defects, over `n of m` lens slots answered, and each lens's own
+  count. With no lens slot or no answered lens slot it is unavailable. A record cancelled at
+  `discover` has unknown lens coverage, so CAP-11 is withheld.
+- **Each arm's upheld findings**: planted-label matches with the defect ids, and `U`, the upheld
+  findings no planted label claimed, unmatched duplicates included. `U` is not a truth label.
+  False positives read `not established — adjudication is story 2-6b`.
+
+The answered slot ids are derived (pool slots minus discover-stage drop-outs minus budget
+skips) and checked against `record.answered`, against every finding's `author`, and against
+the slot evidence itself. A mismatch withholds the quantity it affects, with both sides named.
+Contradictory evidence is a mismatch: a slot both dropped and skipped, a dropped or skipped slot
+that is also a `partial-envelope` answer, two drop-out warnings for one slot, or a drop-out
+warning with no slot or an unknown one. A lens finding whose author is a pool slot withholds
+CAP-1 and CAP-11; a finding by a dropped or skipped lens slot withholds CAP-11. A roster with
+no pool slot, or no answered pool slot, gives CAP-11 no baseline, so it is unavailable.
+
+**The estimands.** CAP-1 is within-prefix attribution: the union of one discovery pass against
+the best single answered pool slot of the same pass, not an independently executed
+single-model run. CAP-11 is the defects answered lens slots raised that no answered pool slot
+raised in that pass, not a causal run effect. Both are nonnegative by construction and say
+nothing about precision.
+
+**The summary.** Each quantity reads `observed n/3`, each missing block with its reason, and
+mean, min and max over complete observations only, labelled descriptive and not the planned
+three-block result. One observation reads `spread unavailable`; none reads unavailable. The
+partial-diagnostic rule applies to the prefix quantities, CAP-1 and CAP-11: a block with a
+dropped or skipped slot is reported, and kept outside their summary. The arm quantities count
+every block the paired reader measured. The two arms of a block share one prefix, so that
+prefix is one observation; two blocks naming one prefix run are also counted once, as a
+defensive check.
+
+**Protocol identity and status.** The report prints the protocol the schedule was sealed under
+(id, version, hash) and each bound arm's `protocolVersion` and `protocolHash`. Every number is
+descriptive. `evaluation-protocol-v2.md` proposes both endpoints and is a draft, so no number is
+v2-preregistered. The measurement status is read from the bundle: `pending` only when no
+quantity has a complete observation.
+
+**What it does not own.** Verdict-direction labels and false-positive counts are story 2-6b.
+Precision and cost contrasts are story 2.8.
+
 ### What the fake-backed tests do not establish
 
 - **The runner's semantics, and nothing about a host.** Every test drives port calls on

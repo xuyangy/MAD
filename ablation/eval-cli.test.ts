@@ -261,6 +261,36 @@ describe("the evaluation reader CLI", () => {
 })
 
 /**
+ * Story 2-6 — the labelled report through `main`, on its two refusal paths. Each
+ * prints after the paired report, and the script still returns 0.
+ */
+describe("eval-read — the labelled report's refusals", () => {
+  test("a bundle that is not the sealed labelled change prints the labelled refusal after the paired report", async () => {
+    const root = await tempDir("mad-eval-cli-labelled-refused-")
+    await pairedBundleAt(root)
+
+    const { code, text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
+    expect(code).toBe(0)
+    const paired = text.indexOf("MAD PAIRED CONTRAST")
+    const refusal = text.indexOf("REFUSED: THIS BUNDLE IS NOT THE SEALED LABELLED CHANGE.")
+    expect(paired).toBeGreaterThan(-1)
+    expect(refusal).toBeGreaterThan(paired)
+  })
+
+  test("a refused schedule prints `MAD LABELLED RECALL — NOT READ` after the paired report", async () => {
+    const root = await tempDir("mad-eval-cli-labelled-not-read-")
+    await writeBundle(root, [{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    await writeFile(join(root, SCHEDULE_FILE), JSON.stringify({ scheduleVersion: 1 }))
+
+    const { code, text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
+    expect(code).toBe(0)
+    const paired = text.indexOf("MAD PAIRED CONTRAST")
+    expect(paired).toBeGreaterThan(-1)
+    expect(text.indexOf("MAD LABELLED RECALL — NOT READ")).toBeGreaterThan(paired)
+  })
+})
+
+/**
  * The recheck's CLI regression (2026-09-10).
  *
  * Making a failed mandatory dump stop the evaluation (finding 6) was right, and

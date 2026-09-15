@@ -18,7 +18,8 @@ import { fileURLToPath } from "node:url"
 
 import { selectRoster } from "../core/roster/select.ts"
 import { candidate, fakeChange } from "../core/test-support/fakes.ts"
-import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
+import type { Roster } from "../core/domain/roster.ts"
+import { LABELLED_CHANGE_SEAL, type LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_DIRECTORY, PREFIX_EVIDENCE_VERSION, PREFIX_FILE, type BundleArm } from "./bundle.ts"
 import { known } from "./manifest.ts"
 import { writeBundle, type Fake } from "./read-bundle.fixture.ts"
@@ -55,10 +56,17 @@ export function scheduleInput(root: string, roster = rosterOf().roster) {
   }
 }
 
+/** What a labelled bundle seals differently: the roster its prefix records carry, or a fixture that is not the seal. */
+export interface SealOverrides {
+  roster?: Roster
+  fixture?: LabelledChangeSeal
+}
+
 /** Seal a real schedule at an existing root. Nothing is billed and nothing runs. */
-export async function sealSchedule(root: string, coin: CoinFace = "heads"): Promise<PairedSchedule> {
+export async function sealSchedule(root: string, coin: CoinFace = "heads", seal: SealOverrides = {}): Promise<PairedSchedule> {
   const created = await createSchedule({
-    ...scheduleInput(root),
+    ...scheduleInput(root, seal.roster),
+    ...(seal.fixture === undefined ? {} : { fixture: seal.fixture }),
     createdAt: "2026-09-14T00:00:00.000Z",
     coin: () => coin,
   })
@@ -215,11 +223,16 @@ export interface PairedBundleOptions {
   prefixes?: number[]
   prefixOver?: Record<number, Record<string, unknown>>
   slots?: "complete" | "started-only" | "absent"
+  roster?: Roster
+  fixture?: LabelledChangeSeal
 }
 
 /** A complete, healthy paired bundle at an existing root, unless a test asks for less. */
 export async function pairedBundleAt(root: string, options: PairedBundleOptions = {}): Promise<PairedSchedule> {
-  const schedule = await sealSchedule(root, options.coin)
+  const schedule = await sealSchedule(root, options.coin, {
+    ...(options.roster === undefined ? {} : { roster: options.roster }),
+    ...(options.fixture === undefined ? {} : { fixture: options.fixture }),
+  })
   await writeBundle(root, options.declared ?? DECLARED, options.written?.(schedule) ?? sixArms(schedule, options.arms ?? []))
   for (const block of options.prefixes ?? [1, 2, 3]) {
     await writePrefix(root, schedule, block, options.prefixOver?.[block] ?? {})
