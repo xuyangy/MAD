@@ -692,6 +692,16 @@ describe("a continuation that threw keeps its manifest (story 2-5c review)", () 
     expect(read(buildManifest({ record: partial(), change, identity, turnFiles: known(0), experiment: binding("off") })).ok).toBe(true)
   })
 
+  test("a failure on a finished run, an empty failure, or an unrouted ON arm naming debate-off is refused", () => {
+    const finished = read(buildManifest({ record: record({ runId: "run-branch", forkedFrom: "run-prefix" }), change, identity, turnFiles: known(0), experiment: binding("on") }))
+    expect(finished.ok).toBe(false)
+    if (!finished.ok) expect(finished.reason).toContain("reads as finished")
+    const empty = read(buildManifest({ record: partial(), change, identity, turnFiles: known(0), experiment: { ...binding("on"), failure: "" } }))
+    expect(empty.ok).toBe(false)
+    const wrongPolicy = read(buildManifest({ record: partial({ routingPolicy: "debate-off" }), change, identity, turnFiles: known(0), experiment: binding("on") }))
+    expect(wrongPolicy.ok).toBe(false)
+  })
+
   test("an OFF continuation that routed under the shipped policy is still refused", () => {
     const routed = partial({ routeCounts: { toDebate: 1, toJudge: 0, toJudgeAtThreshold: 0, toJudgeNoPrior: 0 } })
     const parsed = read(buildManifest({ record: routed, change, identity, turnFiles: known(0), experiment: binding("off") }))

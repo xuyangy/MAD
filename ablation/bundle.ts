@@ -51,6 +51,7 @@ import {
 import type { RunRecord } from "../core/domain/run-record.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 import type { ArmRun } from "./arms.ts"
+import { syncDirectory } from "./journal.ts"
 import {
   buildManifest,
   known,
@@ -245,8 +246,8 @@ export const PREFIX_EVIDENCE_VERSION = 1
  * not. When the prefix produced a record, the record's AD-16 dump sits beside
  * the file, in the directory named by its run id, and `dump` names it. When
  * `prepareReview` threw before returning a record, nothing is invented: `dump`
- * is `null` and `failure` holds the exception's message. Its spend is in the
- * journal either way.
+ * is `null`. `failure` holds the exception that stopped the prefix, from
+ * `prepareReview` or from the fork. Its spend is in the journal either way.
  */
 export interface PrefixEvidence {
   prefixEvidenceVersion: number
@@ -289,7 +290,15 @@ export async function writePrefixEvidence(input: WritePrefixEvidenceInput): Prom
     const refusal = await realRefusalFor(input.bundleRoot, input.worktree)
     if (refusal !== undefined) return { ok: false, reason: refusal }
 
+    // THE DESTINATION IS CHECKED, NOT ONLY THE ROOT. A `prefix` entry under a
+    // contained root may itself be a symlink into the worktree, and a prefix with
+    // no record reaches `open` below without passing through the dump's own check.
+    // Checked again once the directory exists, when its real path is exact.
     const directory = armDirectory(input.bundleRoot, PREFIX_DIRECTORY, input.block - 1)
+    const destination = async (): Promise<string | undefined> =>
+      refusalFor(directory, input.worktree) ?? (await realRefusalFor(directory, input.worktree))
+    const before = await destination()
+    if (before !== undefined) return { ok: false, reason: before }
     let dump: string | null = null
     if (input.record !== undefined) {
       const outcome = await dumpRunArtifacts({
@@ -320,19 +329,32 @@ export async function writePrefixEvidence(input: WritePrefixEvidenceInput): Prom
       ...(input.failure === undefined ? {} : { failure: input.failure }),
       dump,
     }
-    await mkdir(directory, { recursive: true, mode: 0o700 })
-    const file = join(directory, PREFIX_FILE)
-    const handle = await open(file, "wx", 0o600)
     try {
-      await handle.writeFile(`${JSON.stringify(evidence, undefined, 2)}\n`, "utf8")
-      await handle.sync()
-    } finally {
-      await handle.close()
+      await mkdir(directory, { recursive: true, mode: 0o700 })
+      const after = await destination()
+      if (after !== undefined) return { ok: false, reason: after }
+      const file = join(directory, PREFIX_FILE)
+      const handle = await open(file, "wx", 0o600)
+      try {
+        await handle.writeFile(`${JSON.stringify(evidence, undefined, 2)}\n`, "utf8")
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await syncDirectory(directory)
+      return { ok: true, file, dump }
+    } catch (error) {
+      // A record already dumped stays where it is, and the reason names it.
+      const left = dump === null ? "" : `; the prefix record's dump was written to \`${dump}\``
+      return { ok: false, reason: `the prefix evidence could not be written: ${messageOf(error)}${left}` }
     }
-    return { ok: true, file, dump }
   } catch (error) {
-    return { ok: false, reason: `the prefix evidence could not be written: ${error instanceof Error ? error.message : String(error)}` }
+    return { ok: false, reason: `the prefix evidence could not be written: ${messageOf(error)}` }
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**

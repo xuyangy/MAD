@@ -9,10 +9,12 @@ import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-supp
 import { runAblation, type ArmRun } from "./arms.ts"
 import {
   BUNDLE_FILE,
+  PREFIX_FILE,
   armDirectory,
   codeRevisionFrom,
   writeArmDump,
   writeBundleIndex,
+  writePrefixEvidence,
 } from "./bundle.ts"
 import { MANIFEST_FILE, known, unknownValue, type EvaluationIdentity } from "./manifest.ts"
 
@@ -443,5 +445,49 @@ describe("the writer refuses a duplicate slot too", () => {
       createdAt: "2026-09-10T00:00:00.000Z",
     })
     expect(written.ok).toBe(true)
+  })
+})
+
+describe("prefix evidence stays outside the reviewed worktree (story 2-5c review)", () => {
+  test.each([
+    ["with no record", false],
+    ["with a record", true],
+  ])("a `prefix` directory symlinked into the worktree is refused %s, and nothing is written there", async (_name, withRecord) => {
+    const worktree = await tempDir("mad-prefix-worktree-")
+    const bundle = await tempDir("mad-prefix-bundle-")
+    await symlink(worktree, join(bundle, "prefix"))
+    const outcome = await writePrefixEvidence({
+      bundleRoot: bundle,
+      worktree,
+      change: fakeChange(),
+      scheduleHash: `sha256:${"d".repeat(64)}`,
+      block: 1,
+      ...(withRecord ? { record: fakeRecord("run-prefix") } : { runId: "run-prefix" }),
+      forked: false,
+      reason: "the shared prefix failed before it could be forked",
+      failure: "boom",
+    })
+    expect(outcome.ok).toBe(false)
+    expect(await readdir(worktree)).toEqual([])
+  })
+
+  test("an ordinary bundle root gets the file and, with a record, its dump", async () => {
+    const worktree = await tempDir("mad-prefix-worktree-")
+    const bundle = await tempDir("mad-prefix-bundle-")
+    const outcome = await writePrefixEvidence({
+      bundleRoot: bundle,
+      worktree,
+      change: fakeChange(),
+      scheduleHash: `sha256:${"d".repeat(64)}`,
+      block: 2,
+      record: fakeRecord("run-prefix"),
+      forked: true,
+      reason: "forked",
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.file).toBe(join(bundle, "prefix", "1", PREFIX_FILE))
+    expect(outcome.dump).toBe(join(bundle, "prefix", "1", "run-prefix"))
+    expect((await stat(join(outcome.dump!, "record.json"))).isFile()).toBe(true)
   })
 })

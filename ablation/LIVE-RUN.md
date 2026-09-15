@@ -320,9 +320,11 @@ nothing refused is not a denial.
 
 Late usage is the caller's to reconcile. The result carries a reconciliation handle. A
 report that arrives after the run returned is held in memory until the caller calls
-`flush()`, and a process that exits first loses it. Call `flush()` whenever `held()` is
-non-empty or the bill's `stop` names a failed append. `flush()` takes the lock again, replays
-the journal, and appends what is held:
+`flush()`, and a process that exits first loses it. Call `flush()` after every invocation,
+and again whenever a late report may have arrived: besides the reports `held()` lists, it
+appends settlements that arrived after the run returned and lines held back by a failed
+append, which `held()` does not list. With nothing to write it does nothing. `flush()` takes
+the lock again, replays the journal, and appends what is held:
 
 - `persisted` counts the lines it appended. A line the journal already carries with the same
   payload is not appended again.
@@ -363,10 +365,23 @@ Nothing in the runner resumes on its own. These states stop it and wait for a pe
   slot reasons, when the journal could not be appended, a slot status or a manifest or prefix
   evidence could not be written, or the run was cancelled. A failed append leaves lines held
   for `flush()`.
-- **A refusal before the start marker.** A present start marker or lock, a schedule that does
-  not match the runner's inputs, a bundle index that may not be written, or a journal that is
-  already halted refuses the invocation. Nothing was billed, and a schedule refused before its
-  marker can still be run once the cause is fixed.
+- **A refusal before the start marker.** The invocation is refused, nothing is billed, and the
+  lock is released when: the start marker or the lock is present; a Tools port and a Tools
+  identity are not supplied together, or the identity is blank; the schedule does not match
+  the runner's inputs; the bundle index may not be written; the journal cannot be opened, or
+  is already halted or stopped; the clock fails; or the start marker cannot be created. A
+  schedule refused before its marker exists can still be run once the cause is fixed.
+- **A spent start marker.** If `paired-start.json` was created but could not be written or
+  synced, the refusal says the schedule is spent. The file may be empty or partial. It still
+  refuses every later invocation, so start a new evaluation from a new bundle root.
+- **A journal `flush()` cannot replay.** A torn or malformed line makes `flush()` refuse and
+  leave the file exactly as it is, with every held line kept in memory. Do not edit the
+  journal to make it replay; keep it as evidence, record what the held lines were, and treat
+  the requests after the damaged line as unquantified.
+- **`conflicts` or `unmatched` from `flush()`.** A conflict is an integrity failure: two
+  payloads disagree for one request, both are kept, and the halt stays. An unmatched report
+  names an execution id no request in the journal carries; it is kept and offered again, and
+  it means a backend reported an execution this journal never admitted.
 
 In every case, keep `paired-journal.jsonl`, `paired-schedule.json`, `paired-start.json`
 and `paired-slots.jsonl` as they are. They are the evidence of what was scheduled, admitted

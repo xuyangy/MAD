@@ -711,6 +711,10 @@ export interface FlushOutcome {
  * the lock again, reads the journal's execution mappings and payloads back from
  * disk, appends, and releases. No report writes through a released lock. The
  * halt stays latched.
+ *
+ * Call \`flush()\` after every invocation: besides the reports \`held()\` lists, it
+ * appends settlements that arrived after close and lines held back by a failed
+ * append, which \`held()\` does not list. With nothing to write it does nothing.
  */
 export interface ReconciliationHandle {
   flush(): Promise<FlushOutcome>
@@ -918,7 +922,8 @@ export async function openJournal(
             let where: Pick<RefusedAdmission, "stage" | "slot" | "attempt">
             let runId: string | undefined
             try {
-              where = { stage: String(request?.stage), slot: String(request?.slot), attempt: Number(request?.attempt) }
+              const attempt = Number(request?.attempt)
+              where = { stage: String(request?.stage), slot: String(request?.slot), attempt: Number.isFinite(attempt) ? attempt : 0 }
             } catch {
               where = { stage: "unreadable", slot: "unreadable", attempt: 0 }
             }
@@ -941,13 +946,14 @@ export async function openJournal(
           return enqueue(
             async (): Promise<AdmissionDecision> => {
               // A completed invocation refuses as a runner stop without latching
-              // `stop`: `stop` reports a failure, and completing is not one.
+              // `stop`: `stop` reports a failure, and completing is not one. Nor is
+              // it recorded in `refused`, which describes the invocation.
               if (closed) {
-                return refuse({
+                return {
                   ok: false,
                   cause: "runner-stop",
                   reason: "the paired runner stopped admitting: the invocation has completed and admits nothing further. No model failed.",
-                })
+                }
               }
               const gate = requestGate(state.view(), { block: binding.block, phase: binding.phase })
               if (!gate.ok) return refuse(gate)
@@ -975,6 +981,11 @@ export async function openJournal(
               try {
                 await writeLine(line)
               } catch (error) {
+                // The line may have reached the file before the failure. A
+                // \`not-issued\` settlement is held for \`flush()\`, which appends it
+                // only if the journal carries this \`issued\` line, so a request that
+                // never went out is not read back as uncertain.
+                unpersisted.push({ type: "settled", physicalId: line.physicalId, settlement: { kind: "not-issued" } })
                 state.stop ??= `the journal \`${file}\` could not record an admission: ${messageOf(error)}`
                 return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
               }
@@ -1096,6 +1107,12 @@ export async function openJournal(
           while (unpersisted.length > 0) {
             const line = unpersisted[0]!
             const request = disk.state.requests.get(line.physicalId)
+            // A refused admission whose \`issued\` line never reached the file has
+            // nothing to settle.
+            if (request === undefined && line.type === "settled" && line.settlement.kind === "not-issued") {
+              unpersisted.shift()
+              continue
+            }
             const onDisk =
               line.type === "settled"
                 ? request !== undefined && sameJson(disk.state.settlementOf(request), line.settlement)

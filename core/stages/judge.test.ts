@@ -1623,6 +1623,7 @@ describe("judge — the per-request admission seam (story 2-5c)", () => {
     expect(subject.unresolved?.diedAtStage).toBe("judge")
     expect(subject.logicEval).toBeDefined()
     expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+    expect(result.turns).toBe(2)
   })
 
   test("a refused logic evaluation does not strand: the aggregator still rules", async () => {
@@ -1668,6 +1669,9 @@ describe("judge — the per-request admission seam (story 2-5c)", () => {
     const result = await run([subject], { admission: admission.admission, roster: roster(FIVE), backend })
     expect(subject.unresolved?.reason).toContain("cancelled")
     expect(result.warnings.map((warning) => warning.code)).not.toContain("model-dropped-out")
+    // Evidence extraction and the logic evaluation were turns; the refused fact-check issued nothing and is not one.
+    expect(result.turns).toBe(2)
+    expect(result.unresolved).toBe(1)
   })
 
   test("the settle audit names an admitted request a stage never settled", async () => {

@@ -652,6 +652,47 @@ describe("settlements the journal cannot count, failed appends and closing (stor
     expect((await lines(root)).filter((line) => line.type === "settled")).toHaveLength(1)
   })
 
+  test.each([
+    ["before", 1],
+    ["after", 0],
+  ] as const)("a late line whose append fails %s writing is persisted exactly once by flush", async (mode, persisted) => {
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    const reporter = journal.reporter()
+    const decision = await journal.admission({ block: 1, phase: "on", runId: () => "r" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    await decision.settle({ kind: "unknown", why: "abandoned", executionId: "exec-1" })
+    await journal.settled()
+    fail.mode = mode
+    reporter.report({ executionId: "exec-1", tokens: usage(6) })
+    await journal.settled()
+    fail.mode = null
+    const { handle } = await journal.close()
+    expect(await handle.flush()).toMatchObject({ ok: true, persisted })
+    expect((await lines(root)).filter((line) => line.type === "late")).toHaveLength(1)
+    const reopened = await opened(root)
+    expect(reopened.bill().requests[0]!.late).toEqual(usage(6))
+    expect(reopened.bill().integrity).toHaveLength(0)
+    await reopened.close()
+  })
+
+  test.each(["before", "after"] as const)("an issued line whose append fails %s writing never reads back as uncertain after flush", async (mode) => {
+    const root = await tempDir()
+    const { io, fail } = flakyIo()
+    const journal = await openedWith(root, io)
+    fail.mode = mode
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "r" }).admit(discover())
+    fail.mode = null
+    expect(decision).toMatchObject({ ok: false, cause: "runner-stop" })
+    const { handle } = await journal.close()
+    expect(await handle.flush()).toMatchObject({ ok: true, persisted: mode === "after" ? 1 : 0 })
+    const reopened = await opened(root)
+    expect(reopened.bill().uncertain).toHaveLength(0)
+    expect(reopened.bill().halt).toBeNull()
+    await reopened.close()
+  })
+
   test("flush refuses a journal with a torn last line rather than appending to it", async () => {
     const root = await tempDir()
     const { io, fail } = flakyIo()
@@ -678,6 +719,7 @@ describe("settlements the journal cannot count, failed appends and closing (stor
       cause: "runner-stop",
     })
     expect(closed.bill().stop).toBeNull()
+    expect(closed.bill().refused).toEqual([])
 
     const root = await tempDir()
     const { io, fail } = flakyIo()

@@ -590,8 +590,9 @@ export function requestGate(
  * - `markerFile` / `markerError` describe the halt marker the journal wrote.
  *
  * A runner stop is not a halt, so it is carried in its own `runnerStop` field. It
- * is `null` unless the runner actually stopped admitting (a persistence failure,
- * a cancellation, a halt, a failed status or manifest write); completing an
+ * is `null` unless the runner actually stopped admitting: a persistence failure,
+ * a cancellation, a failed status or evidence write, or the runner ending
+ * admission because the journal halted (then both fields are set). Completing an
  * invocation is not a stop.
  *
  * Exposure is `unquantified` while anything is halted, unknown, uncertain or

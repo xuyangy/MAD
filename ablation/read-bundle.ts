@@ -581,7 +581,7 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
       (experiment.arm !== "on" && experiment.arm !== "off") ||
       (experiment.position !== "first" && experiment.position !== "second") ||
       !isText(experiment.prefixRunId) ||
-      ("failure" in experiment && typeof experiment.failure !== "string")
+      ("failure" in experiment && !isText(experiment.failure))
     ) {
       return fail("has a malformed `experiment`")
     }
@@ -590,8 +590,19 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     // intervention. The one exception is a continuation that threw before it
     // routed: no policy was applied, so its record names none.
     const policyForArm = experiment.arm === "on" ? "shipped" : "debate-off"
+    // A thrown continuation's record is what it held: it never finished.
+    if ("failure" in experiment) {
+      const finished = run.finishedAt as { kind?: unknown } | undefined
+      if (status.completion !== "unfinished" || finished?.kind !== "unknown") {
+        return fail("has an `experiment.failure`, but its run reads as finished")
+      }
+    }
+    // An unrouted record names no policy, which reads as `shipped`, and nothing else.
     const neverRouted =
-      "failure" in experiment && isRecord(status.routeCounts) && status.routeCounts.kind === "did-not-run"
+      "failure" in experiment &&
+      isRecord(status.routeCounts) &&
+      status.routeCounts.kind === "did-not-run" &&
+      dials.routingPolicy === "shipped"
     if (!neverRouted && dials.routingPolicy !== policyForArm) {
       return fail(
         `has an \`experiment.arm\` of ${experiment.arm}, but its \`dials.routingPolicy\` is ` +

@@ -26,7 +26,8 @@ import { PREFIX_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
 import { known, MANIFEST_FILE, type RunManifest } from "./manifest.ts"
-import { bindingProblem, runPairedBlocks, type PairedPhaseContext, type RunPairedBlocksInput } from "./paired.ts"
+import { bindingProblem, deniedWork, runPairedBlocks, type PairedPhaseContext, type RunPairedBlocksInput } from "./paired.ts"
+import type { RefusedAdmission } from "./journal.ts"
 import { parseManifest } from "./read-bundle.ts"
 import {
   createSchedule,
@@ -735,6 +736,10 @@ describe("runPairedBlocks — review patches (story 2-5c review)", () => {
     expect(outcome.prefixes[0]!.evidence.ok).toBe(false)
     expect(outcome.slots.map((slot) => slot.status)).toEqual(Array(6).fill("not-attempted"))
     expect(outcome.slots[0]!.reason).toContain("prefix evidence was not written")
+    expect(outcome.bill.stop).toContain("prefix evidence was not written")
+    expect(outcome.governor.runnerStop).toContain("prefix evidence was not written")
+    const statuses = await readSlotStatuses(root)
+    expect(statuses.every((line) => line.status === "not-attempted")).toBe(true)
     expect(calls.every((call) => call.block === 1 && call.phase === "prefix")).toBe(true)
     expect(outcome.complete).toBe(false)
   })
@@ -795,5 +800,59 @@ describe("runPairedBlocks — refusals after the lock release it and spend nothi
     if (!outcome.ok) expect(outcome.reason).toContain("the clock broke")
     expect(existsSync(join(root, LOCK_FILE))).toBe(false)
     expect(existsSync(join(root, START_MARKER_FILE))).toBe(false)
+  })
+})
+
+describe("deniedWork — which refusals fail which slot (story 2-5c review)", () => {
+  const clean = { skippedForBudget: [], findings: [] } as unknown as RunRecord
+  const refusal = (over: Partial<RefusedAdmission>): RefusedAdmission => ({
+    block: 1,
+    phase: "on",
+    stage: "judge",
+    slot: "discovery-1",
+    attempt: 1,
+    cause: "budget",
+    reason: "allowance exhausted",
+    ...over,
+  })
+
+  test("a refusal in the other arm, or in another block, is not this slot's denial", () => {
+    expect(deniedWork(clean, [refusal({ phase: "on" })], 1, "off")).toBeNull()
+    expect(deniedWork(clean, [refusal({ block: 2, phase: "prefix" })], 1, "on")).toBeNull()
+  })
+
+  test("a refusal in its own arm or its block's prefix is, whatever the cause", () => {
+    expect(deniedWork(clean, [refusal({ phase: "prefix" })], 1, "off")).toContain("(budget)")
+    expect(deniedWork(clean, [refusal({ cause: "halted" })], 1, "on")).toContain("(halted)")
+    expect(deniedWork(clean, [refusal({ cause: "runner-stop", phase: "off" })], 1, "off")).toContain("(runner-stop)")
+  })
+
+  test("a finding left unresolved by a cancellation is not a denial; one stranded by budget is", () => {
+    const cancelled = { skippedForBudget: [], findings: [{ unresolved: { diedAtStage: "judge", reason: "the run was cancelled while it was being judged" } }] } as unknown as RunRecord
+    const stranded = { skippedForBudget: [], findings: [{ unresolved: { diedAtStage: "judge", reason: "the token budget (255000) ran out" } }] } as unknown as RunRecord
+    expect(deniedWork(cancelled, [], 1, "on")).toBeNull()
+    expect(deniedWork(stranded, [], 1, "on")).toContain("1 finding(s)")
+  })
+})
+
+describe("runPairedBlocks — a denial fails only the slot it denied (story 2-5c review)", () => {
+  test("block 1's ON continuation over its allowance fails; its OFF arm and later blocks complete", async () => {
+    const { input } = await sealed({
+      coin: "heads",
+      script: {
+        usage: (call) => ({ ...emptyTokenUsage(), input: call.block === 1 && call.phase === "on" && call.stage === "debate" ? 196_000 : 10 }),
+      },
+    })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.slots.map((slot) => `${slot.block}:${slot.arm}:${slot.status}`)).toEqual([
+      "1:on:failed",
+      "1:off:completed",
+      "2:off:completed",
+      "2:on:completed",
+      "3:on:completed",
+      "3:off:completed",
+    ])
+    expect(outcome.complete).toBe(false)
   })
 })

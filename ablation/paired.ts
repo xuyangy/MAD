@@ -208,6 +208,7 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
   if (!taken.ok) return { ok: false, reason: taken.reason }
   const lock = taken.lock
   let journal: PairedJournal | undefined
+  let prepared: { schedule: PairedSchedule; journal: PairedJournal }
   const refuse = async (reason: string): Promise<PairedBlocksOutcome> => {
     const releaseError = journal === undefined ? await lock.release() : (await journal.close()).releaseError
     return { ok: false, reason: releaseError === null ? reason : `${reason}; ${releaseError}` }
@@ -261,11 +262,14 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
 
     const started = await writeStartMarker(root, schedule.scheduleHash, input.clock.now())
     if (!started.ok) return await refuse(started.reason)
-
-    return await execute(input, root, schedule, journal)
+    prepared = { schedule, journal }
   } catch (error) {
-    return await refuse(`the runner failed before the first block: ${messageOf(error)}`)
+    return await refuse(`the runner failed before the start marker was written: ${messageOf(error)}`)
   }
+  // Outside the `try` above: once the schedule is started, `execute` owns the
+  // journal, gives every slot a terminal status and returns the reconciliation
+  // handle whatever happens inside it.
+  return execute(input, root, prepared.schedule, prepared.journal)
 }
 
 async function execute(
@@ -287,6 +291,8 @@ async function execute(
     ended ??= reason
     journal.stopAdmitting(reason)
   }
+  /** A slot reason that keeps its own cause and, when different, why admission ended. */
+  const withEnded = (reason: string): string => (ended === null || ended === reason ? reason : `${reason}; ${ended}`)
 
   /**
    * Record a slot status, in memory and durably. A status that cannot be
@@ -468,7 +474,7 @@ async function execute(
           reason: noFork,
           ...(threw === undefined ? {} : { failure: threw }),
         })
-        for (const slot of planned) await mark(slot, "not-attempted", noFork)
+        for (const slot of planned) await mark(slot, "not-attempted", withEnded(noFork))
         continue
       }
 
@@ -478,7 +484,7 @@ async function execute(
       } catch (error) {
         const reason = `block ${block}'s shared prefix could not be forked: ${messageOf(error)}`
         await recordPrefix(block, { record: prepared!.record, forked: false, reason, failure: messageOf(error) })
-        for (const slot of planned) await mark(slot, "not-attempted", ended ?? reason)
+        for (const slot of planned) await mark(slot, "not-attempted", withEnded(reason))
         continue
       }
       const prefixId = prepared!.record.runId
@@ -522,7 +528,7 @@ async function execute(
             slot.arm === "on" ? "shipped" : "debate-off",
           )
         } catch (error) {
-          failure = messageOf(error)
+          failure = messageOf(error) || "the continuation threw an error with no message"
         }
         await journal.settled()
 
@@ -536,7 +542,7 @@ async function execute(
             `No report: the ${slot.arm.toUpperCase()} continuation of block ${block} threw before its output was ` +
               `assembled (${failure}). The record is what the branch held when it threw.\n`,
             prefixId,
-            failure ?? "the continuation threw",
+            failure,
           )
           await mark(slot, "failed", `the ${slot.arm.toUpperCase()} continuation threw: ${failure}`, { manifest })
         } else {
@@ -619,7 +625,8 @@ async function execute(
  * ledger refuses before an admission is asked (`mayISpend`), which only the
  * record shows, and an admission may refuse a request whose consequence the
  * record does not name (a refused retry, a refused logic evaluation). A prefix
- * denial counts for both of its branches, which inherit the prefix record.
+ * denial counts for both of its branches, which inherit the prefix record. A
+ * finding left unresolved by a cancellation is not a denial.
  */
 export function deniedWork(
   record: RunRecord,
@@ -630,11 +637,14 @@ export function deniedWork(
   const parts: string[] = []
   const skipped = record.skippedForBudget ?? []
   if (skipped.length > 0) parts.push(`discovery skipped ${skipped.join(", ")} for budget`)
-  const stranded = record.findings.filter((finding) => finding.unresolved !== undefined).length
+  const stranded = record.findings.filter(
+    (finding) => finding.unresolved !== undefined && !finding.unresolved.reason.startsWith("the run was cancelled"),
+  ).length
   if (stranded > 0) parts.push(`${stranded} finding(s) were left unresolved`)
+  // Every cause counts: a halted or stopped admission denied the work as surely as
+  // an exhausted allowance did.
   const refusals = refused.filter(
     (refusal) =>
-      refusal.cause === "budget" &&
       refusal.block === block &&
       // One invocation runs one continuation per arm per block, so the phase names the run.
       (refusal.phase === "prefix" || refusal.phase === arm),
@@ -643,7 +653,7 @@ export function deniedWork(
     const first = refusals[0]!
     parts.push(
       `${refusals.length} admission(s) were refused, beginning with ${first.phase} ${first.stage}/${first.slot} ` +
-        `attempt ${first.attempt}: ${first.reason}`,
+        `attempt ${first.attempt} (${first.cause}): ${first.reason}`,
     )
   }
   return parts.length === 0 ? null : parts.join("; ")
