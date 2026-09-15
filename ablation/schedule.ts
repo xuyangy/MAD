@@ -424,6 +424,116 @@ export async function verifySchedule(bundleRoot: string, binding: ScheduleBindin
   return { ok: true, schedule }
 }
 
+export type ScheduleRead = { ok: true; schedule: PairedSchedule; file: string } | { ok: false; reason: string }
+
+/**
+ * Read the published schedule and check ONLY what the document says about
+ * itself: its version, its own hash, and that its order follows from its coin.
+ *
+ * `verifySchedule` above answers a different question — *is this the schedule my
+ * inputs were sealed against?* — and it needs a `ScheduleBinding` to answer it:
+ * the protocol file, the fixture seal, the code revision, the roster and the
+ * config the runner is about to use. A READER HAS NONE OF THOSE. It has a
+ * directory somebody handed it, and demanding a binding would mean either
+ * refusing every schedule or inventing the inputs it is supposed to be checking
+ * against, which is a reader asserting the very thing it cannot know.
+ *
+ * What is left when the binding is removed is still worth checking, and the
+ * order of the checks is the order a refusal is most informative in:
+ *
+ *   1. `scheduleVersion`, before any field is read — a document this reader does
+ *      not know the shape of is refused for that, not for a field it then fails.
+ *   2. The fields every later check and the report itself dereference:
+ *      `createdAt` and the `protocol` identity.
+ *   3. `scheduleHash`: ABSENT and MISMATCHED are two refusals, not one. A
+ *      document that never carried the field was never sealed; a document that
+ *      carries one it does not hash to was sealed and then edited. Saying
+ *      "edited after it was sealed" about the first accuses a writer of
+ *      something the evidence does not show.
+ *   4. `coin → firstArms → slots`, one chain: the coin decides the first arms
+ *      and the first arms decide the six slots, so each link is compared against
+ *      what the link before it gives rather than against a literal. An order its
+ *      own coin does not give is a realized order written after the fact.
+ *
+ * Never throws. An absent, unreadable or unparsable file is a typed refusal.
+ */
+export async function readSchedule(bundleRoot: string): Promise<ScheduleRead> {
+  const file = join(resolve(bundleRoot), SCHEDULE_FILE)
+  let raw: unknown
+  try {
+    raw = JSON.parse(await readFile(file, "utf8"))
+  } catch (error) {
+    return { ok: false, reason: `no readable schedule at \`${file}\`: ${messageOf(error)}` }
+  }
+  const refuse = (why: string): ScheduleRead => ({ ok: false, reason: `the schedule at \`${file}\` ${why}` })
+
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return refuse("is not an object")
+  const document = raw as Record<string, unknown>
+
+  if (document.scheduleVersion !== SCHEDULE_VERSION) {
+    return refuse(`has schedule version ${JSON.stringify(document.scheduleVersion)}, and this reader knows ${SCHEDULE_VERSION}`)
+  }
+  // EVERY FIELD THE READER OR ITS RENDERER TOUCHES IS CHECKED HERE, for
+  // `read-bundle.ts`'s reason: a cast at the end is honest only when the checked
+  // set is the touched set. The paired reader prints the coin, the order, the
+  // creation time, the protocol identity and the hash, and cross-checks each
+  // arm's `experiment.scheduleHash` against `scheduleHash`.
+  if (typeof document.createdAt !== "string") return refuse("carries no string `createdAt`")
+  const protocol = document.protocol
+  if (
+    protocol === null ||
+    typeof protocol !== "object" ||
+    typeof (protocol as Record<string, unknown>).id !== "string" ||
+    typeof (protocol as Record<string, unknown>).version !== "number" ||
+    typeof (protocol as Record<string, unknown>).hash !== "string"
+  ) {
+    return refuse("carries no readable `protocol` identity")
+  }
+  if (typeof document.scheduleHash !== "string") {
+    return refuse("carries no string `scheduleHash`, so it was never sealed")
+  }
+  if (scheduleHashOf(document as unknown as PairedSchedule) !== document.scheduleHash) {
+    return refuse("does not match its own scheduleHash, so it was edited after it was sealed")
+  }
+  if (document.coin !== "heads" && document.coin !== "tails") {
+    return refuse(`carries no coin (it says ${JSON.stringify(document.coin)})`)
+  }
+  const expectedFirst = firstArmsFor(document.coin)
+  if (canonicalJson(document.firstArms) !== canonicalJson(expectedFirst)) {
+    return refuse(
+      `orders its first arms ${JSON.stringify(document.firstArms)}, which the coin ${document.coin} does not give ` +
+        `(it gives ${JSON.stringify(expectedFirst)})`,
+    )
+  }
+  const expectedSlots = plannedSlots(expectedFirst)
+  if (canonicalJson(document.slots) !== canonicalJson(expectedSlots)) {
+    return refuse(`plans slots its first arms ${JSON.stringify(expectedFirst)} do not give`)
+  }
+  return { ok: true, schedule: document as unknown as PairedSchedule, file }
+}
+
+/**
+ * Whether a sealed schedule sits at this bundle root — the one bit that decides
+ * whether a bundle is read as paired at all.
+ *
+ * UNREADABLE IS NOT ABSENT. Only `ENOENT` is `false`. Every other error — a
+ * permission denied, an I/O failure, a directory where the file should be —
+ * answers `true`, because the honest reading of "I could not look" is not
+ * "there is nothing there": treating it as absent would silently downgrade a
+ * paired bundle to an ordinary one and drop the paired report altogether, which
+ * is the loudest possible failure turned into the quietest. Answering `true`
+ * hands the question to `readSchedule`, which refuses the file by name and says
+ * why. Never throws.
+ */
+export async function hasSealedSchedule(bundleRoot: string): Promise<boolean> {
+  try {
+    await readFile(join(resolve(bundleRoot), SCHEDULE_FILE))
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT"
+  }
+}
+
 export type Started = { ok: true; file: string } | { ok: false; reason: string }
 
 /**

@@ -58,8 +58,16 @@ export function verdictState(finding: Finding): VerdictState {
   return "unjudged"
 }
 
-/** Whether a state is a DECISION rather than an absence of one. */
-function decided(state: VerdictState): boolean {
+/**
+ * Whether a state is a DECISION rather than an absence of one.
+ *
+ * EXPORTED FOR THE PAIRED READER (story 2-5d). It builds the same
+ * `differing of n` from direct id pairs instead of from an `Alignment`, and the
+ * rule that decides which pairs are in that denominator has to be the SAME rule:
+ * a second predicate that counted `unresolved` as a decision would report a
+ * candidate the budget stranded as a verdict the two arms agreed on.
+ */
+export function decided(state: VerdictState): boolean {
   return state !== "unresolved" && state !== "unjudged"
 }
 

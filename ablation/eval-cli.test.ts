@@ -17,6 +17,10 @@ import { main as ablationMain, stringFlag } from "../scripts/ablation.ts"
 import { main as evalReadMain } from "../scripts/eval-read.ts"
 import { BUNDLE_FILE, BUNDLE_SCHEMA_VERSION, EvaluationBundleError } from "./bundle.ts"
 import { MANIFEST_FILE, MANIFEST_SCHEMA_VERSION, known, unknownValue } from "./manifest.ts"
+import { pairedBundleAt } from "./paired-read.fixture.ts"
+import { writeBundle } from "./read-bundle.fixture.ts"
+import { PAIRED_READER_MODULE } from "./report.ts"
+import { SCHEDULE_FILE } from "./schedule.ts"
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 
@@ -206,6 +210,53 @@ describe("the evaluation reader CLI", () => {
     expect(text).toContain("on repeat 0 — INCOMPLETE: 1 execution(s)")
     expect(text).toContain("exec-1 (discover/discovery-1, attempt 1)")
     expect(text).toContain("tokens (observed)")
+    // FR8 (story 2-5d) — no sealed schedule, so there is nothing to pair and the
+    // reader prints exactly what it printed before.
+    expect(text).not.toContain("MAD PAIRED CONTRAST")
+    expect(text).toContain("NO FINDING WAS COMPARED ACROSS ARMS. This reader establishes")
+  })
+
+  test("a bundle carrying a REFUSED schedule still prints the paired report, and still returns 0", async () => {
+    const root = await tempDir("mad-eval-cli-paired-")
+    await writeBundle(root, [{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    // The second report has to PRINT its refusal rather than be skipped, and the
+    // exit code stays 0 either way — this script reports and never gates.
+    await writeFile(join(root, SCHEDULE_FILE), JSON.stringify({ scheduleVersion: 1 }))
+
+    const { code, text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
+    expect(code).toBe(0)
+    expect(text).toContain("COMPARABLE ARMS")
+    expect(text).toContain("NO FINDING WAS COMPARED ACROSS ARMS IN THIS TABLE.")
+    expect(text).toContain("MAD PAIRED CONTRAST")
+    expect(text).toContain("NO PAIRED RESULT: THE SCHEDULE IS REFUSED AS A WHOLE.")
+    expect(text.indexOf("COMPARABLE ARMS")).toBeLessThan(text.indexOf("MAD PAIRED CONTRAST"))
+  })
+
+  test("A HEALTHY PAIRED BUNDLE prints both reports, with a real contrast in the second", async () => {
+    // THE SEAM ON ITS SUCCESS PATH. Tested only against a refused schedule, this
+    // case would pass with a paired reader that could render a refusal and
+    // nothing else.
+    const root = await tempDir("mad-eval-cli-paired-ok-")
+    await pairedBundleAt(root)
+
+    const { code, text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
+    expect(code).toBe(0)
+
+    // Report one: the arm table, pointing at report two.
+    expect(text).toContain("COMPARABLE ARMS")
+    expect(text).toContain("NO FINDING WAS COMPARED ACROSS ARMS IN THIS TABLE.")
+    expect(text).toContain(PAIRED_READER_MODULE)
+
+    // Report two: three blocks, each with a measured contrast and its confounds.
+    const paired = text.slice(text.indexOf("MAD PAIRED CONTRAST"))
+    expect(paired).toContain("SLOT COVERAGE — all six planned slots")
+    expect(paired).toContain("paired candidates, of the distinct candidate id(s) across the two arms: 3 of 5")
+    expect(paired).toContain("verdict-state differences, over the paired candidates where BOTH arms decided: 1 of 2")
+    expect(paired).toContain("treatment opportunity, of the candidate(s) the OFF arm sent to the judge: 3 of 4")
+    expect(paired).toContain("paired candidates: 3/3")
+    for (const block of [1, 2, 3]) expect(paired).toContain(`CONFOUNDS, BESIDE THIS RESULT — block ${block}`)
+    expect(paired).toContain("RUN ID / JUDGE ANONYMIZER")
+    expect(paired).not.toContain("NO PAIRED RESULT")
   })
 })
 

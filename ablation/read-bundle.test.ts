@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { BUNDLE_FILE, BUNDLE_SCHEMA_VERSION, type BundleArm } from "./bundle.ts"
-import { MANIFEST_FILE, MANIFEST_SCHEMA_VERSION, known, unknownValue } from "./manifest.ts"
+import { MANIFEST_FILE, known, unknownValue } from "./manifest.ts"
+import { manifestFor, writeBundle, type Fake } from "./read-bundle.fixture.ts"
 import { readBundle, renderBundle } from "./read-bundle.ts"
+import { PAIRED_READER_MODULE } from "./report.ts"
+import { SCHEDULE_FILE } from "./schedule.ts"
 
 const scratch: string[] = []
 
@@ -21,168 +25,8 @@ afterEach(async () => {
   }
 })
 
-interface Fake {
-  armId: string
-  repeatId: number
-  protocolHash?: unknown
-  fixtureHash?: unknown
-  codeRevision?: unknown
-  diffHash?: string
-  schemaVersion?: number
-  completion?: string
-  threshold?: number
-  warnings?: unknown[]
-  skippedForBudget?: string[]
-  findings?: unknown
-  perStage?: unknown
-  total?: unknown
-  shares?: unknown
-  /**
-   * AC5 (story 2.3) — the usage-audit half of `spend`, overridable field by
-   * field so a malformed one can be written without hand-rolling a whole
-   * manifest.
-   *
-   * THE DEFAULTS CHANGED WITH THE WRITER, and deliberately: this fixture wrote
-   * `usageCompleteness: "unaudited"` because story 2.2's builder could write
-   * nothing else. `buildManifest` now audits the ledger, so a fixture frozen at
-   * `unaudited` would be a reader tested against a manifest MAD no longer
-   * produces. The default here is what a clean run produces — `complete`, no
-   * identities, exposure `quantified` — and every test that wants another state
-   * asks for it.
-   */
-  usageCompleteness?: unknown
-  unknownUsage?: unknown
-  unknownUsageCount?: unknown
-  exposure?: unknown
-  /** Story 2.5A — absent writes the field ABSENT, the pre-2.5A shape. */
-  routingPolicy?: unknown
-  cap?: number
-  /**
-   * Story 2.5A, child 2-5b — `run.forkedFrom` and `spend.origin`.
-   *
-   * THE DEFAULTS ARE WHAT THE WRITER PRODUCES, for the `usageCompleteness`
-   * reason above: `buildManifest` writes both fields on EVERY manifest, so a
-   * fixture that omitted them by default would test this reader against a
-   * manifest MAD no longer produces, and would route every other case in this
-   * file down the pre-2.5b compatibility path. The default is an unforked run —
-   * `forkedFrom` unknown, an all-inherited-zero split over `total` — and a test
-   * that wants the legacy shape passes `undefined`, which `JSON.stringify`
-   * drops.
-   */
-  forkedFrom?: unknown
-  origin?: unknown
-}
-
-/**
- * The split an UNFORKED run's manifest carries: everything attributed, all of it
- * executed here, nothing inherited.
- *
- * DERIVED FROM THE FAKE'S OWN `total` AND `unknownUsage`, never a frozen literal,
- * because `provenanceProblem` refuses a split that does not conserve against
- * them. A test that overrides either field and says nothing about provenance
- * would otherwise write a manifest that is malformed for a reason it never
- * meant to test. A test writing a malformed `total` still gets the message that
- * names `spend.total`, which is checked first.
- */
-function unforkedOrigin(total: unknown, unknownUsage: unknown): unknown {
-  const zero = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
-  const unknown = Array.isArray(unknownUsage) ? unknownUsage.length : 0
-  return {
-    attributed: { tokens: total, turns: 1, unknown },
-    executedHere: { tokens: total, turns: 1, unknown },
-    inherited: { tokens: zero, turns: 0, unknown: 0 },
-  }
-}
-
-function manifestFor(fake: Fake): unknown {
-  const total = fake.total ?? { input: 10, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
-  const unknownUsage = "unknownUsage" in fake ? fake.unknownUsage : []
-  return {
-    schemaVersion: fake.schemaVersion ?? MANIFEST_SCHEMA_VERSION,
-    identity: {
-      protocolVersion: known(1),
-      protocolHash: fake.protocolHash ?? known("sha256:protocol"),
-      fixtureVersion: known("fixture-1"),
-      fixtureHash: fake.fixtureHash ?? known("sha256:fixture"),
-      codeRevision: fake.codeRevision ?? known({ commit: "13eadc6", dirty: false }),
-      armId: fake.armId,
-      repeatId: fake.repeatId,
-      changeId: {
-        description: "HEAD~1..HEAD",
-        files: ["src/a.ts"],
-        diffHash: fake.diffHash ?? "sha256:diff",
-      },
-    },
-    run: {
-      runId: `run-${fake.armId}-${fake.repeatId}`,
-      ...("forkedFrom" in fake
-        ? { forkedFrom: fake.forkedFrom }
-        : { forkedFrom: unknownValue("the run was not forked") }),
-      startedAt: "2026-09-10T00:00:00.000Z",
-      finishedAt: known("2026-09-10T00:01:00.000Z"),
-    },
-    roster: {
-      requested: 3,
-      filled: 3,
-      answered: 3,
-      distinctLineages: 3,
-      providers: ["anthropic"],
-      slots: [],
-      lensSlots: [],
-      skippedForBudget: fake.skippedForBudget ?? [],
-    },
-    dials: {
-      threshold: fake.threshold ?? 0.5,
-      maxRounds: 2,
-      maxConcurrency: 4,
-      cap: fake.cap ?? 1000,
-      shares: fake.shares ?? { discover: 0.3, debate: 0.65, judge: 1 },
-      preset: unknownValue("the caller named no preset"),
-      // `in` for `usageCompleteness`' reason: absent must be writable as absent.
-      ...("routingPolicy" in fake ? { routingPolicy: fake.routingPolicy } : { routingPolicy: "shipped" }),
-    },
-    spend: {
-      perStage: fake.perStage ?? [{ stage: "discover", spent: 30, total: 30, ceiling: 300 }],
-      total,
-      // `in` RATHER THAN `??`, for these four only. A test that wants to write a
-      // manifest with the field ABSENT — the pre-2.3 shape a reader will meet on
-      // disk — passes `undefined`, which `JSON.stringify` drops; `??` would
-      // silently substitute the healthy default and the test would pin nothing.
-      usageCompleteness: "usageCompleteness" in fake ? fake.usageCompleteness : "complete",
-      unknownUsage,
-      unknownUsageCount: "unknownUsageCount" in fake ? fake.unknownUsageCount : 0,
-      exposure: "exposure" in fake ? fake.exposure : "quantified",
-      ...("origin" in fake ? { origin: fake.origin } : { origin: unforkedOrigin(total, unknownUsage) }),
-    },
-    status: {
-      completion: fake.completion ?? "completed",
-      cancelledAt: unknownValue("the run was never cancelled"),
-      warnings: fake.warnings ?? [],
-      routeCounts: { kind: "did-not-run" },
-      debateCounts: { kind: "did-not-run" },
-      judgeCounts: { kind: "did-not-run" },
-    },
-    findings: fake.findings ?? { pool: [], canonicalIds: [], lensInstructions: [] },
-    stageOutputs: { recordFile: "record.json", turnFiles: known(2) },
-  }
-}
-
 async function bundle(arms: readonly BundleArm[], written: readonly Fake[]): Promise<string> {
-  const root = await tempDir("mad-read-bundle-")
-  await writeFile(
-    join(root, BUNDLE_FILE),
-    JSON.stringify(
-      { schemaVersion: BUNDLE_SCHEMA_VERSION, createdAt: "2026-09-10T00:00:00.000Z", arms },
-      undefined,
-      2,
-    ),
-  )
-  for (const fake of written) {
-    const dir = join(root, fake.armId, String(fake.repeatId), `run-${fake.armId}-${fake.repeatId}`)
-    await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, MANIFEST_FILE), JSON.stringify(manifestFor(fake), undefined, 2))
-  }
-  return root
+  return writeBundle(await tempDir("mad-read-bundle-"), arms, written)
 }
 
 describe("a bundle whose arms agree", () => {
@@ -1476,5 +1320,144 @@ describe("story 2.5A (2-5b) — ledger provenance is checked against the rest of
       expect(result.comparable, name).toEqual([])
       expect(result.unreadable[0]?.reason, name).toContain(expected)
     }
+  })
+})
+
+/**
+ * Story 2-5d. The two things a paired bundle changes about THIS report: the
+ * inherited-sum guidance is guarded by the prefixes it silently assumed, and the
+ * closing sentence stops claiming the whole bundle's findings went uncompared.
+ */
+describe("story 2-5d — the inherited-sum guidance names each arm's prefix", () => {
+  const T = (input: number, output: number) => ({ input, output, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  const slice = (tokens: ReturnType<typeof T>, turns: number, unknown = 0) => ({ tokens, turns, unknown })
+  const split = () => ({
+    attributed: slice(T(10, 20), 2),
+    executedHere: slice(T(4, 8), 1),
+    inherited: slice(T(6, 12), 1),
+  })
+
+  test("ONE SHARED PREFIX: the prefixes are named and the cancellation rule is offered", async () => {
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("EACH ARM'S PREFIX:")
+    expect(text).toContain("on/0: forked from `run-P`")
+    expect(text).toContain("off/0: forked from `run-P`")
+    expect(text).toContain("Add NEWLY EXECUTED figures across arms, then")
+    expect(text).not.toContain("THE INHERITED-SUM RULE IS WITHHELD")
+  })
+
+  test("TWO PREFIXES: the rule is WITHHELD with its reason, and both prefixes are named", async () => {
+    // The ledger entry filed against 2-5b: `COMPARABILITY_FIELDS` holds no
+    // `forkedFrom`, so these two arms are one cohort and used to receive the
+    // "add each distinct INHERITED prefix once" line as though they shared one.
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0, forkedFrom: known("run-Q"), origin: split() },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(result.comparable).toHaveLength(2)
+    expect(text).toContain("on/0: forked from `run-P`")
+    expect(text).toContain("off/0: forked from `run-Q`")
+    expect(text).toContain("THE INHERITED-SUM RULE IS WITHHELD")
+    expect(text).toContain("run-P, run-Q")
+    expect(text).toContain("An inherited part cancels only between runs that inherited the SAME")
+    expect(text).not.toContain("Add NEWLY EXECUTED figures across arms, then")
+  })
+
+  test("A MODERN UNFORKED ARM reads NOT forked WITH ITS REASON, not as a missing field", async () => {
+    // THE SHAPE `buildManifest` WRITES FOR EVERY UNFORKED RUN: `forkedFrom` is a
+    // `Maybe` carrying an explicit `why`, never absent. It had no test, so the
+    // two `NOT forked` wordings — this one and the provenance-less one below it
+    // — could be swapped and nothing would fail.
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0 },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("on/0: forked from `run-P`")
+    expect(text).toContain("off/0: NOT forked (the run was not forked)")
+    // Distinct from the pre-provenance wording, which says why it is READ that way.
+    expect(text).not.toContain("off/0: no ledger provenance")
+  })
+
+  test("AN ARM THAT INHERITED NOTHING IS NOT A DISAGREEMENT ABOUT PREFIXES", async () => {
+    // Only one arm inherited, so only one prefix can be double-counted and the
+    // rule is still sound. Its neighbour's absence of a prefix is stated anyway.
+    const root = await bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, forkedFrom: known("run-P"), origin: split() },
+        { armId: "off", repeatId: 0, forkedFrom: undefined, origin: undefined },
+      ],
+    )
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const text = renderBundle(result)
+
+    expect(text).toContain("off/0: no ledger provenance, so it is read as NOT FORKED")
+    expect(text).toContain("Add NEWLY EXECUTED figures across arms, then")
+  })
+})
+
+describe("story 2-5d — the closing sentence is scoped to this table", () => {
+  test("NO SCHEDULE: the sentence and every existing assertion are unchanged", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.sealedSchedule).toBe(false)
+    const text = renderBundle(result)
+    expect(text).toContain("NO FINDING WAS COMPARED ACROSS ARMS. This reader establishes that the arms are comparable;")
+    expect(text).toContain("pairing their findings is story 2.5/2.5A's work and is not attempted here.")
+  })
+
+  test("A SEALED SCHEDULE: the table still compares nothing, and says where the pairing is", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    await writeFile(join(root, SCHEDULE_FILE), JSON.stringify({ scheduleVersion: 1 }))
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    expect(result.sealedSchedule).toBe(true)
+    const text = renderBundle(result)
+    expect(text).toContain("NO FINDING WAS COMPARED ACROSS ARMS IN THIS TABLE.")
+    // THE POINTER IS PINNED TO THE FILE, NOT TO THE STRING. Asserting the literal
+    // here would keep passing after the module was renamed and the report started
+    // pointing at nothing, which is the one failure a pointer can have.
+    expect(text).toContain(PAIRED_READER_MODULE)
+    expect(existsSync(join(import.meta.dir, "..", PAIRED_READER_MODULE))).toBe(true)
+    // The claim is unchanged; only the pointer is added. Nothing here pairs.
+    expect(text).not.toContain("is not attempted here.")
   })
 })

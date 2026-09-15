@@ -136,8 +136,12 @@ under-merge hides a real pair in `only in`. Read `only in` and `ambiguous` besid
 the difference, never the difference alone. (A labelled run is the one exception;
 see *What a labelled run gives you: cross-arm counts for that change only* below.)
 
-**A degraded arm is not a measurement.** If any arm reports `DEGRADED`, the
-report draws no experimental line from it. Fix the roster and run again.
+**A degraded arm is not a measurement — in THIS report.** If any arm reports `DEGRADED`, the
+ablation report draws no experimental line from it. Fix the roster and run again. The paired
+reader takes the other route on the same rule: it measures the block and NAMES the
+degradation beside the result, because withholding it would discard planned data. Both
+satisfy AD-6, which asks that a degraded run never *look* like a good one, not that it be
+thrown away. See *Reading a paired bundle* below.
 
 **Recall is not available on an UNLABELLED live change.** Recall is measured against a
 known defect set and a real change has none — nobody labelled its bugs. The report prints
@@ -307,6 +311,92 @@ Every run that produced a record leaves its evidence in the bundle:
 
 A failed evidence write ends admission, and every remaining slot is `not-attempted`.
 
+### Reading a paired bundle
+
+```
+bun run eval-read --bundle /scratch/mad-eval-2026-09-14
+```
+
+When the bundle root carries `paired-schedule.json`, this prints the ordinary arm table and
+then a second report, the paired contrast, produced by `ablation/paired-read.ts`. It reads;
+it bills nothing, runs nothing, and always exits 0.
+
+**What prints above every number.**
+
+- **The halt, in three states.** A latched `unknown-usage-halt.json` prints
+  `THIS EXPERIMENT IS HALTED.` with the reason it recorded, above the results, which are
+  still read from what was written. A marker that could not be read at all prints
+  `WHETHER THIS EXPERIMENT IS HALTED COULD NOT BE ESTABLISHED.` instead — that is its own
+  state, not a halt and not the absence of one. No marker prints no banner.
+- **Slot coverage.** All six planned slots, each folded to one terminal status with its
+  reason, `not-attempted` and never-recorded included. `paired-slots.jsonl` is appended
+  without consulting the schedule, so these print **even when the schedule is refused**; with
+  no readable schedule each slot's position reads `position unknown` rather than being
+  guessed. A line in the file this reader cannot read as a slot status is counted and named,
+  never dropped.
+- **Prefix evidence**, one line per block, and **ARMS**: what `bundle.json` declared, how many
+  arms the bundle reader admitted to its cohort, which block and slot each arm bound to with
+  its run id and prefix, and then every arm that is `KEPT, NAMED, AND OUT OF EVERY PAIR` with
+  the reason it is out.
+- **Availability**, `n/3` **separately for each quantity**, each missing block naming its
+  exact reason. A block supplies a quantity only when that quantity's own denominator is
+  non-zero, so a block can supply four of the five.
+
+**What it checks before it pairs anything.** It re-reads the sealed schedule without any
+binding — the version, the schedule's own hash recomputed, and that the order follows from
+the coin — and then cross-checks every arm against it: the schedule hash, the block (which
+must be `repeatId + 1`), the arm, the position, and the schedule hash and block on that
+block's `prefix/<block - 1>/prefix.json`. A manifest with no `experiment` block is not a
+paired arm, and its absence never makes one. Anything that fails a check is kept, named, and
+left out of its pair with the reason; a refused block never voids the other two.
+
+**A block yields a paired quantity only when all of this holds.** Otherwise it is withheld
+and every reason is printed:
+
+- exactly two arms, one `on` and one `off`, both bound to this block;
+- **neither arm is partial or crashed** — an arm carrying `experiment.failure`, or whose
+  `status.completion` is `unfinished` or `cancelled`, has the findings it HELD when it
+  stopped, and joining those against a whole arm would report the truncation as a difference
+  between the arms. **A `degraded` arm is not one of these.** It ran to the end and something
+  reduced it, so its block is measured and its degradation — with the warnings that caused it,
+  or the fact that none is recorded — is named beside that block's result. AD-6 asks that a
+  degraded run never *look* like a good one, which naming satisfies; discarding it would throw
+  away planned data the protocol says is never dropped;
+- **both arms name ONE `experiment.prefixRunId`** — two prefixes are two populations;
+- **the prefix evidence records that the fork happened** — `forked: false`, a `failure`, or a
+  prefix that minted no run id each withhold the block, because the fork is what makes the id
+  join legitimate;
+- **the prefix evidence and the arms name the same prefix run** — when the two files
+  disagree, neither is preferred and both values are printed.
+
+**How the arms are paired.** Within a block the two arms pair by `Finding.id`, with no
+aligner: one prepared review was forked into both, so the ids are the same candidates.
+**Ids are comparable only inside one block** — across blocks discovery is re-sampled, so an
+equal id string names two different candidates and is never paired.
+
+**What it prints per measured block**, in the words the availability table uses for the same
+five quantities: **paired candidates** over the distinct candidate ids across the two arms;
+**verdict-state differences** over the paired candidates where both arms decided;
+**undecided transitions** over the paired candidates, counted on their own and in neither
+half of the line above; **only-in counts**, one per arm; and the **treatment opportunity**,
+read from **the OFF arm's** `status.routeCounts.intervention` and never re-derived — the ON
+arm ran the shipped policy and writes no `intervention` block at all. Every rate names its
+numerator and denominator; a zero denominator reads `not measurable (0 cases)`. A long list
+of differing candidates is capped at five with the rest counted, so the confounds are not
+pushed off the end of the block.
+
+**What sits beside every MEASURED result**, per block and never in a footnote: the
+run-id/anonymizer confound above, the within-block position order, the sentence saying what
+the contrast identifies, and the dial disclosures. A **withheld** block has no result to
+qualify, so it prints its reasons and its arms instead.
+
+**What it still does not measure.** No truth label enters it. It states no precision, no
+false positives, no final recall, none of the four labelled verdict transitions, and no
+earned / did-not-earn reading — those need the labelled change and belong to story 2.8. An
+arm that upheld nothing is reported as undefined, never as 100% and never as a clean list. A
+candidate left unresolved by the budget is counted and shown, never treated as removed noise.
+It does not re-derive the unique-execution bill: that is the journal's.
+
 Every billable request is written to `paired-journal.jsonl` before it goes out and settled
 there with what it cost. The journal's bill counts each physical execution once, so a shared
 prefix is not counted again for each branch that inherited it. `paired-slots.jsonl` records a
@@ -346,8 +436,9 @@ the lock again, replays the journal, and appends what is held:
   its own run id, and the judge's anonymizer seeds its order from the run id and the finding
   id (`core/run/review.ts`, the `runId` passed to `judge`). So the two arms can show the judge
   the same exchange in different anonymized orders. That difference is part of every paired
-  contrast, and it is not removed. It is documented here. Story 2-5d, the pairing reader,
-  owns reporting it beside each paired result; nothing reports it beside a result yet.
+  contrast, and it is not removed. The paired reader states it beside every MEASURED block's
+  result, with that block's two run ids, so it is never read as a footnote to one number of
+  three. A withheld block has no result to qualify and prints its reasons instead.
 
 ### When a run stops and needs a human
 

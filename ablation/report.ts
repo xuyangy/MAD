@@ -67,6 +67,20 @@ function splitText(cost: ArmCost): string {
  * reports print. Exported because `ablation/read-bundle.ts` prints the same rule
  * over the same figures, and two wordings of one rule read as two rules.
  */
+/**
+ * The module that pairs a sealed paired bundle's arms, as both readers name it
+ * in their own output.
+ *
+ * IT LIVES HERE, WITH `INHERITED_SUM_RULE`, FOR THAT CONSTANT'S REASON: two
+ * reports say it, so it is written once. `read-bundle.ts` points a reader at the
+ * paired report and `paired-read.ts` is the paired report, and a literal in each
+ * would be two spellings of one file name — the one that goes stale silently
+ * when the file is renamed, because a report's prose is not typechecked.
+ * `ablation/report.ts` is the module both of them already import, and it imports
+ * neither, so naming it here costs no cycle.
+ */
+export const PAIRED_READER_MODULE = "ablation/paired-read.ts"
+
 export const INHERITED_SUM_RULE = [
   "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then",
   "  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.",

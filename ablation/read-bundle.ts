@@ -63,7 +63,7 @@ import { inheritsAny } from "../core/budget/ledger.ts"
 import type { Finding } from "../core/domain/finding.ts"
 import { ROUTING_POLICIES, type RoutingPolicy } from "../core/domain/run-record.ts"
 import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
-import { INHERITED_SUM_RULE } from "./report.ts"
+import { INHERITED_SUM_RULE, PAIRED_READER_MODULE } from "./report.ts"
 import {
   MANIFEST_FILE,
   MANIFEST_SCHEMA_VERSION,
@@ -72,7 +72,7 @@ import {
   type Maybe,
   type RunManifest,
 } from "./manifest.ts"
-import { PAIRED_BLOCKS } from "./schedule.ts"
+import { hasSealedSchedule, PAIRED_BLOCKS } from "./schedule.ts"
 
 /**
  * The four fields cross-arm comparability is decided on.
@@ -129,6 +129,22 @@ export interface UnreadableRow {
 export interface BundleReadResult {
   root: string
   index: BundleIndex
+  /**
+   * Whether a sealed paired schedule sits at the bundle root (story 2-5d).
+   *
+   * It changes nothing this reader measures — the four-field cohort, the table
+   * and every disclosure are identical either way. It changes only what the
+   * report's closing sentence is entitled to say: *no finding was compared here*
+   * is the whole truth for an ordinary bundle and half of it for a paired one,
+   * where the paired reader pairs the same arms by `Finding.id` within each
+   * block. A reader who saw only the unqualified sentence would conclude the
+   * contrast had not been drawn at all.
+   *
+   * UNREADABLE IS NOT ABSENT: `hasSealedSchedule` answers `true` for a schedule
+   * it could not open, so a permission or I/O failure surfaces as a paired
+   * report refusing the file by name rather than as a silently ordinary bundle.
+   */
+  sealedSchedule: boolean
   /** The agreed values, when a cohort was found. */
   cohort: Maybe<Record<ComparabilityField, string>>
   cohortSize: number
@@ -177,7 +193,14 @@ export async function readBundle(root: string): Promise<BundleReadOutcome> {
   }
 
   const partition = partitionByCohort(loaded)
-  return { root, index: index.value, ...partition, missing, unreadable }
+  return {
+    root,
+    index: index.value,
+    sealedSchedule: await hasSealedSchedule(root),
+    ...partition,
+    missing,
+    unreadable,
+  }
 }
 
 function message(error: unknown): string {
@@ -1024,14 +1047,7 @@ export function renderBundle(result: BundleReadResult): string {
             : String(totalTokens(manifest))),
       )
     }
-    if (attributed) {
-      // SUMMING NEWLY EXECUTED FIGURES ALONE LEAVES THE PREFIX OUT ENTIRELY: it
-      // ran before the fork, so every branch inherits it and none executed it,
-      // and the run that did execute it was consumed at the fork and writes no
-      // arm of its own. The rule names both halves or it is short by a whole
-      // discovery pass (`evaluation-protocol.md` §4).
-      lines.push(...INHERITED_SUM_RULE)
-    }
+    if (attributed) lines.push(...inheritedSumGuidance(result.comparable))
     lines.push("")
     // AD-15 amended — the stage rows are attributed whenever the column above
     // them is: an inherited prefix sits whole inside the stage that executed it,
@@ -1050,11 +1066,94 @@ export function renderBundle(result: BundleReadResult): string {
   }
 
   lines.push(...usageCompleteness(result))
-  lines.push(
-    "NO FINDING WAS COMPARED ACROSS ARMS. This reader establishes that the arms are comparable;",
-  )
-  lines.push("pairing their findings is story 2.5/2.5A's work and is not attempted here.")
+  // THE SENTENCE IS SCOPED TO THIS TABLE, NOT TO THE BUNDLE (story 2-5d). The
+  // unqualified form was exactly true while nothing paired anything; on a bundle
+  // carrying a sealed schedule it now understates what was done, and a reader who
+  // stopped here would take "no finding was compared" as the evaluation's verdict
+  // rather than as a fact about this table. The claim itself is unchanged — this
+  // reader still compares nothing — and only the pointer is added.
+  if (result.sealedSchedule) {
+    lines.push(
+      "NO FINDING WAS COMPARED ACROSS ARMS IN THIS TABLE. This bundle carries a sealed paired schedule,",
+      `so its arms ARE paired — by \`Finding.id\`, within each block, by \`${PAIRED_READER_MODULE}\`, which`,
+      "`bun run eval-read` prints below this report. This table establishes only that the arms are",
+      "comparable; the paired contrast and its confounds are that report's.",
+    )
+  } else {
+    lines.push(
+      "NO FINDING WAS COMPARED ACROSS ARMS. This reader establishes that the arms are comparable;",
+    )
+    lines.push("pairing their findings is story 2.5/2.5A's work and is not attempted here.")
+  }
   return `${lines.join("\n")}\n`
+}
+
+/**
+ * The inherited-sum guidance, WITH EACH ARM'S PREFIX NAMED AND THE CANCELLATION
+ * RULE GUARDED BY IT (story 2-5d; the ledger entry filed against 2-5b).
+ *
+ * `INHERITED_SUM_RULE` tells a reader to add each distinct inherited prefix
+ * ONCE. That is sound only when the reader can tell which arms share a prefix,
+ * and until now nothing printed said: `COMPARABILITY_FIELDS` holds four fields,
+ * none of them `forkedFrom`, so two arms forked from DIFFERENT prefixes form one
+ * comparable cohort and received the same "add each distinct INHERITED prefix
+ * once" line as two branches of one fork. Under that line a reader adds one
+ * prefix where two ran, which is the double-count the rule exists to prevent,
+ * inverted.
+ *
+ * So the prefixes are named first, and the rule is offered only when the arms
+ * that actually INHERITED name one prefix between them. An arm that inherited
+ * nothing has no prefix to cancel and cannot put the rule at risk, which is why
+ * the guard counts inheriting arms rather than every arm: a legacy manifest
+ * beside a forked one is not a disagreement about prefixes.
+ */
+function inheritedSumGuidance(comparable: readonly ArmRow[]): string[] {
+  const lines = ["  EACH ARM'S PREFIX:"]
+  for (const row of comparable) {
+    lines.push(`    ${row.armId}/${row.repeatId}: ${prefixText(row.manifest)}`)
+  }
+
+  const prefixes = new Set<string>()
+  for (const row of comparable) {
+    if (!inheritsUsage(row.manifest)) continue
+    const parent = row.manifest.run.forkedFrom
+    // An inheriting arm whose parent is unknown never reaches here:
+    // `provenanceProblem` refuses that manifest. Named rather than assumed.
+    prefixes.add(parent.kind === "known" ? parent.value : "an unnamed prefix")
+  }
+  if (prefixes.size <= 1) {
+    // SUMMING NEWLY EXECUTED FIGURES ALONE LEAVES THE PREFIX OUT ENTIRELY: it
+    // ran before the fork, so every branch inherits it and none executed it,
+    // and the run that did execute it was consumed at the fork and writes no
+    // arm of its own. The rule names both halves or it is short by a whole
+    // discovery pass (`evaluation-protocol.md` §4).
+    lines.push(...INHERITED_SUM_RULE)
+    return lines
+  }
+  lines.push(
+    `  THE INHERITED-SUM RULE IS WITHHELD: these arms inherited from ${prefixes.size} DIFFERENT prefixes`,
+    `  (${[...prefixes].join(", ")}). An inherited part cancels only between runs that inherited the SAME`,
+    "  prefix, so no rule for adding these figures across arms is offered here. Add each prefix once, on",
+    "  its own, and treat none of them as shared.",
+  )
+  return lines
+}
+
+/**
+ * How one arm's prefix reads in the report: named, explicitly not forked, or
+ * predating ledger provenance.
+ *
+ * PAST THE `origin === undefined` CHECK, `run.forkedFrom` IS ALWAYS THERE.
+ * `provenanceProblem` refuses a manifest carrying `spend.origin` and no
+ * `run.forkedFrom` — the two are written together — so a third branch for that
+ * shape was unreachable, and an unreachable branch in a function whose job is to
+ * name what a reader is looking at is a branch nobody can check the wording of.
+ */
+function prefixText(manifest: RunManifest): string {
+  if (originOf(manifest) === undefined) return "no ledger provenance, so it is read as NOT FORKED"
+  const parent = manifest.run.forkedFrom
+  if (parent.kind === "known") return `forked from \`${parent.value}\``
+  return `NOT forked (${parent.why})`
 }
 
 /**
@@ -1073,8 +1172,14 @@ export function renderBundle(result: BundleReadResult): string {
  *
  * A degradation is also spelled out rather than left as the single word
  * `degraded` in a status column: AD-6's honesty rule is about naming the cause.
+ *
+ * EXPORTED FOR THE PAIRED READER (story 2-5d), which puts these same lines
+ * beside each block's paired result over that block's two arms. Re-deriving them
+ * there would give one bundle two wordings of one disclosure, and the dial key
+ * that keeps `routingPolicy` out of it — because it IS the intervention — is the
+ * kind of rule that must not exist twice.
  */
-function disclosures(comparable: readonly ArmRow[]): string[] {
+export function disclosures(comparable: readonly ArmRow[]): string[] {
   const lines: string[] = ["  DISCLOSURES"]
 
   // THE ROUTING POLICY IS KEPT OUT OF THE DIAL KEY (story 2.5A). It is the

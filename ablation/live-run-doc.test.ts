@@ -19,6 +19,11 @@ import { describe, expect, test } from "bun:test"
 
 import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
+import { PREFIX_FILE } from "./bundle.ts"
+import { HALT_MARKER_FILE } from "./governor.ts"
+import { PAIRED_QUANTITIES } from "./paired-read.ts"
+import { PAIRED_READER_MODULE } from "./report.ts"
+import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
 
@@ -93,5 +98,80 @@ describe("LIVE-RUN.md documents the sealed fixture identity that is actually in 
       expect(command).not.toContain("--fixture-version")
       expect(command).not.toContain("--fixture-hash")
     }
+  })
+})
+
+/**
+ * FR8 (story 2-5d) — the paired reader's procedure, tied to the reader.
+ *
+ * This section tells an operator what `bun run eval-read` prints from a paired
+ * bundle, and every claim in it is a claim about code in this tree. The file
+ * names, the module, the quantity list and the slot count are all values some
+ * module exports, so the document is bound to them here for the reason the
+ * fixture identity above is bound: a renamed file or a renamed quantity would
+ * otherwise leave a confidently wrong procedure behind with the suite green.
+ */
+describe("LIVE-RUN.md documents the paired reader that is actually shipped", () => {
+  test("it names the module that produces the paired report", async () => {
+    expect(await liveRunDoc()).toContain(PAIRED_READER_MODULE)
+  })
+
+  test("every quantity the reader tracks availability for is named in the procedure", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    for (const quantity of PAIRED_QUANTITIES) {
+      expect(doc, quantity).toContain(quantity)
+    }
+  })
+
+  test("the files it tells an operator to look at are the files the code writes", async () => {
+    const doc = await liveRunDoc()
+    for (const file of [SCHEDULE_FILE, SLOT_STATUS_FILE, PREFIX_FILE, HALT_MARKER_FILE]) {
+      expect(doc, file).toContain(file)
+    }
+  })
+
+  test("the slot count it promises is the number of slots the protocol plans", async () => {
+    const planned = PAIRED_BLOCKS.length * 2
+    expect(planned).toBe(6)
+    expect((await liveRunDoc()).replace(/\s+/g, " ")).toContain(`All ${planned === 6 ? "six" : String(planned)} planned slots`)
+  })
+
+  /**
+   * THE CONFOUND CLAIM IS SCOPED, and it was not. The document said the
+   * anonymizer confound is stated beside EVERY block's result while a withheld
+   * block gets its reasons and no confounds section — a procedure promising an
+   * operator something they would then not find.
+   */
+  test("the confound claim is scoped to a measured block", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("What sits beside every MEASURED result")
+    expect(doc).toContain("A **withheld** block has no result to qualify")
+  })
+
+  /**
+   * THE SPLIT BETWEEN A PARTIAL ARM AND A DEGRADED ONE, both halves. The document
+   * said an arm whose completion is anything but `completed` withholds its block,
+   * which would have told an operator that a degraded block yields nothing — the
+   * opposite of what the reader does, and a reason to discard planned data.
+   */
+  test("the partial-versus-degraded split is documented in both directions", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("`status.completion` is `unfinished` or `cancelled`")
+    expect(doc).toContain("**A `degraded` arm is not one of these.**")
+    expect(doc).toContain("its block is measured and its degradation")
+    // And the ablation report's own opposite rule is scoped to that report.
+    expect(doc).toContain("**A degraded arm is not a measurement — in THIS report.**")
+  })
+
+  test("the treatment opportunity is documented as the OFF arm's own figure", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("read from **the OFF arm's** `status.routeCounts.intervention` and never re-derived")
+  })
+
+  test("the halt banner and the arm listing are documented", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("THIS EXPERIMENT IS HALTED.")
+    expect(doc).toContain("WHETHER THIS EXPERIMENT IS HALTED COULD NOT BE ESTABLISHED.")
+    expect(doc).toContain("KEPT, NAMED, AND OUT OF EVERY PAIR")
   })
 })

@@ -12,9 +12,23 @@
  * A SEGREGATED ARM IS NOT AN ERROR HERE. It is the finding. `readBundle` keeps
  * it, `renderBundle` prints it above the table with its reason, and this script
  * hands both to the operator without deciding anything on their behalf.
+ *
+ * FR8 (story 2-5d) — A BUNDLE CARRYING A SEALED PAIRED SCHEDULE GETS A SECOND
+ * REPORT. `renderBundle` establishes that the arms are comparable; the paired
+ * reader pairs them by `Finding.id` within each block and prints the contrast
+ * with its confounds. Both print, in that order, and an ordinary bundle is
+ * unchanged — it has no schedule, so there is nothing to pair.
+ *
+ * ONE READ, TWO REPORTS. The bundle and the schedule are read HERE and handed to
+ * the paired reader, which reads neither again. Reading them twice would put a
+ * window between the two reads in which the directory could change, and the two
+ * reports printed under one heading would then describe two different states of
+ * it — a difference an operator would read as a finding.
  */
 
+import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
+import { readSchedule } from "../ablation/schedule.ts"
 
 function flagIndex(argv: readonly string[], name: string): number {
   return argv.findIndex((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`))
@@ -50,6 +64,17 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
   }
 
   console.log(renderBundle(result))
+
+  if (result.sealedSchedule) {
+    const paired = await readPairedBundle(root.trim(), {
+      bundle: result,
+      schedule: await readSchedule(root.trim()),
+    })
+    // `readBundle` above already succeeded and is handed straight through, so
+    // `error` is unreachable on this path. It is printed rather than asserted
+    // away because this script's whole contract is that it prints and returns 0.
+    console.log("error" in paired ? `MAD paired reader — ${paired.error}` : renderPairedBundle(paired))
+  }
   return 0
 }
 
