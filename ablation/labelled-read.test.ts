@@ -16,16 +16,18 @@
  */
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import { cp, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { Roster } from "../core/domain/roster.ts"
+import type { SlotScript } from "../core/test-support/fakes.ts"
 import type { Finding } from "../core/domain/finding.ts"
 import type { RunRecord } from "../core/domain/run-record.ts"
-import { lensRecallGain, missedDefects, pooledOnly } from "../fixtures/recall.ts"
+import { lensRecallGain, lexicalDefectMatcher, missedDefects, pooledOnly } from "../fixtures/recall.ts"
 import { adjudicate } from "../fixtures/seeded-defects/adjudicate.ts"
-import { LENSES, seededArm } from "../fixtures/seeded-defects/arms.ts"
+import { LENSES, REFUND, seededArm } from "../fixtures/seeded-defects/arms.ts"
 import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
@@ -33,6 +35,7 @@ import { main as evalReadMain } from "../scripts/eval-read.ts"
 import { PREFIX_DIRECTORY, writePrefixEvidence } from "./bundle.ts"
 import {
   FALSE_POSITIVES_TEXT,
+  PROTOCOL_V2_DRAFT,
   readLabelledBundle,
   renderLabelledBundle,
   type LabelledBlock,
@@ -44,6 +47,7 @@ import { known } from "./manifest.ts"
 import { readPairedBundle, renderPairedBundle, type PairedReadResult } from "./paired-read.ts"
 import { pairedBundleAt, PROTOCOL_FILE, WORKTREE, type ArmSpec, type PairedBundleOptions } from "./paired-read.fixture.ts"
 import { readBundle, renderBundle } from "./read-bundle.ts"
+import { LABELLED_READER_MODULE } from "./report.ts"
 import { writeBundle } from "./read-bundle.fixture.ts"
 import { readFrozenProtocol, SCHEDULE_FILE } from "./schedule.ts"
 
@@ -164,7 +168,9 @@ async function labelledBundle(options: LabelledOptions = {}): Promise<{ root: st
       if (!written.ok) throw new Error(written.reason)
       continue
     }
-    const directory = dumpDir(root, block, record.runId as string)
+    // A record whose `runId` is not a string is one of the malformed classes
+    // below, and it still has to be WRITTEN somewhere the reader looks.
+    const directory = dumpDir(root, block, typeof record.runId === "string" ? record.runId : `run-prefix-${block}`)
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, "record.json"), JSON.stringify(record))
   }
@@ -318,8 +324,18 @@ describe("the happy path — three blocks over seeded prefixes", () => {
     expect(text).toContain("say nothing about precision")
     expect(text).toContain("implementation: complete")
     expect(text).toContain("protocol v2: a DRAFT that pre-registers nothing")
-    expect(text).toContain("measurements: 8 of 8 quantities have at least one complete observation in this bundle")
-    expect(text).not.toContain("measurements: pending")
+    // WORDING CHANGED BY A RECORDED DECISION (2026-09-17), not to make a failing
+    // assertion pass: the count is over QUANTITIES, so one complete block alone
+    // prints `8 of 8`, which read as experiment completeness. The number and the
+    // refusal checks are unchanged; the label and the caveat are new.
+    expect(text).toContain(
+      "bundle observations: 8 of 8 quantities have at least one complete observation in this bundle " +
+        "(a count of QUANTITIES; one complete block can supply all of them)",
+    )
+    expect(text).toContain("planned live evaluation: completion is NOT established by this report")
+    expect(text).toContain("matcher: the shipped lexical defect matcher")
+    expect(text).toContain(`labelled change ${LABELLED_CHANGE_SEAL.version}, ${SEEDED_DEFECTS.length} planted defects`)
+    expect(text).toContain(`labels   ${LABELLED_CHANGE_SEAL.labelsHash}`)
     expect(text).toContain("No number here is v2-preregistered, because v2 is a draft.")
     expect(text).toContain(`this bundle's schedule was sealed under protocol PROTOCOL-mad-evaluation-v1 v1 (${protocolHash})`)
     expect(text).toContain(`on/0: protocolVersion 1, protocolHash ${protocolHash}`)
@@ -338,7 +354,7 @@ describe("the happy path — three blocks over seeded prefixes", () => {
     )
   })
 
-  test("with nothing observed, the measurement status reads pending", async () => {
+  test("with nothing observed, the status reads no bundle observation, and the live caveat still prints", async () => {
     const { root } = await labelledBundle({ dump: { 1: null, 2: null, 3: null }, noRecord: [1, 2, 3], lenses: false })
     // No prefix record exists, and a matcher that throws leaves every arm unavailable.
     const text = renderLabelledBundle(
@@ -348,7 +364,24 @@ describe("the happy path — three blocks over seeded prefixes", () => {
         },
       }),
     )
-    expect(text).toContain("measurements: pending — no quantity has a complete observation in this bundle")
+    expect(text).toContain("bundle observations: none — no quantity has a complete observation in this bundle")
+    // The caveat is unconditional: it is what carries the frozen "measurements
+    // pending" meaning once the count itself became a derived number.
+    expect(text).toContain("planned live evaluation: completion is NOT established by this report")
+    // An injected matcher must not pass as the shipped one the draft proposes.
+    expect(text).toContain("matcher: INJECTED")
+  })
+
+  test("ONE COMPLETE BLOCK gives every quantity an observation, and the count says so rather than reading as completeness", async () => {
+    const { root } = await labelledBundle({ paired: { prefixes: [1] } })
+    const result = await labelled(root)
+    const text = renderLabelledBundle(result)
+    // Eight of eight, off a single block. This is the reading the caveat exists for.
+    expect(summaryOf(result, "CAP-1 pool union").observed).toBe(1)
+    expect(text).toContain("bundle observations: 8 of 8 quantities have at least one complete observation")
+    expect(text).toContain("(a count of QUANTITIES; one complete block can supply all of them)")
+    expect(text).toContain("planned live evaluation: completion is NOT established by this report")
+    expect(text).toContain("spread unavailable")
   })
 
   test("the ZERO-GAIN control for CAP-1: one slot carries the pool, and the zero-finding slots read 0 of 13", async () => {
@@ -399,7 +432,85 @@ describe("the happy path — three blocks over seeded prefixes", () => {
 // The runner's writer, and a relocated bundle
 // ---------------------------------------------------------------------------
 
+/**
+ * Two degraded turns, scripted for the producer contract below.
+ *
+ * `discovery-3` fails its turn and its one retry, which is what the stage calls a
+ * drop-out. `discovery-2` answers with one valid finding and one that carries no
+ * `claim`, so the envelope fails schema validation twice and the stage salvages
+ * the valid item — a partial envelope, not a drop-out.
+ *
+ * EACH STEP IS WRITTEN TWICE, and that is load-bearing. A script is read by
+ * attempt number, so a one-step script hands the RETRY whatever step comes next —
+ * which is the debate abstention `abstainingInDebate` appends. The partial
+ * envelope would then arrive as a drop-out, and the test would be about the
+ * fixture's step ordering rather than about the stage.
+ */
+const PARTIAL_ANSWER: SlotScript[number] = {
+  kind: "ok",
+  value: {
+    findings: [
+      {
+        claim: "The charges lookup interpolates `req.orderId` straight into the SQL text.",
+        reasoning: "A crafted order id rewrites the statement. Bind it as a parameterized value instead.",
+        severity: "critical",
+        file: REFUND,
+        startLine: 20,
+        endLine: 22,
+      },
+      { claim: "", reasoning: "an item with no claim at all", severity: "high", file: REFUND },
+    ],
+  },
+}
+
+const DEAD_TURN: SlotScript[number] = { kind: "fail", failure: "transport-error", message: "the socket closed mid-turn" }
+
+const DEGRADED_SCRIPTS: Record<string, SlotScript> = {
+  "discovery-3": [DEAD_TURN, DEAD_TURN],
+  "discovery-2": [PARTIAL_ANSWER, PARTIAL_ANSWER],
+}
+
 describe("the runner-to-reader contract", () => {
+  test("THE PRODUCER'S OWN WARNINGS: a real degraded run carries `detail.slot`, and the reader reads it", async () => {
+    // WHY A REAL RUN. Every other slot-state test here hands the reader a
+    // hand-written warning, so all of them would still pass if the discover stage
+    // stopped writing `detail.slot` tomorrow. This one takes the warnings from the
+    // stage that emits them.
+    const degraded = (await seededArm({ slots: 3, lenses: LENSES, scripts: DEGRADED_SCRIPTS })).record
+    const emitted = degraded.warnings.filter(
+      (warning) => warning.stage === "discover" && (warning.code === "model-dropped-out" || warning.code === "partial-envelope"),
+    )
+    expect(emitted.map((warning) => warning.code).sort()).toEqual(["model-dropped-out", "partial-envelope"])
+    const rosterIds = new Set([...degraded.roster.slots, ...degraded.roster.lensSlots].map((slot) => slot.slot))
+    for (const warning of emitted) {
+      expect(typeof warning.detail?.slot).toBe("string")
+      expect(rosterIds.has(warning.detail!.slot as string)).toBe(true)
+    }
+    const partial = emitted.find((warning) => warning.code === "partial-envelope")!
+    expect(partial.detail?.slot).toBe("discovery-2")
+    expect(partial.detail?.kept).toBe(1)
+    expect(partial.detail?.dropped).toBe(1)
+
+    // The same record, read back: the stage's words become the reader's states.
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        record.answered = degraded.answered
+        record.pool = clone(degraded.pool) as unknown as RecordJson["pool"]
+        for (const finding of record.pool) delete finding.verdict
+        record.warnings = clone(degraded.warnings) as unknown as RecordJson["warnings"]
+        record.skippedForBudget = [...(degraded.skippedForBudget ?? [])]
+      },
+    })
+    const block = blockOf(await labelled(root), 1)
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    expect(block.record.slots.find((slot) => slot.slot === "discovery-3")).toMatchObject({ state: "dropped" })
+    const salvaged = block.record.slots.find((slot) => slot.slot === "discovery-2")!
+    expect(salvaged.state).toBe("answered")
+    expect(salvaged.note).toContain("salvaged answer")
+    expect(block.cap1.kind).toBe("measured")
+  })
+
   test("prefixes written by `writePrefixEvidence` read, and every block's CAP-1 is measured", async () => {
     const { root } = await labelledBundle({ realWriter: true })
     const result = await labelled(root)
@@ -470,11 +581,32 @@ describe("applicability, the seal and the protocol", () => {
 
   test("an arm whose `identity.fixtureHash` differs is refused, naming the arm and the field", async () => {
     const { root } = await labelledBundle({ fixtureHash: known("sha256:fixture") })
-    const outcome = await readLabelledBundle(await pairedOf(root))
+    let calls = 0
+    const outcome = await readLabelledBundle(await pairedOf(root), {
+      matcher: (...args) => {
+        calls += 1
+        return lexicalDefectMatcher(...args)
+      },
+    })
     if (outcome.kind !== "refused") throw new Error(JSON.stringify(outcome))
     expect(outcome.problems).toHaveLength(6)
     expect(outcome.problems[0]).toMatchObject({ field: "identity.fixtureHash", actual: "sha256:fixture" })
-    expect(renderLabelledBundle(outcome)).toContain("on/0: `identity.fixtureHash` is sha256:fixture")
+    const text = renderLabelledBundle(outcome)
+    expect(text).toContain("on/0: `identity.fixtureHash` is sha256:fixture")
+
+    // A REFUSED REPORT STILL CARRIES ITS STATUS, and the status has to say which
+    // kind of nothing it holds. "none read — this report is refused" is a
+    // different fact from "none — no quantity has a complete observation", which
+    // a bundle that WAS scored can report.
+    expect(text).toContain("bundle observations: none read — this report is refused")
+    expect(text).not.toContain("no quantity has a complete observation")
+    // The caveat is unconditional, refusal included.
+    expect(text).toContain("planned live evaluation: completion is NOT established by this report")
+    // NO MATCHER IS NAMED, because none was used. Naming one would claim a
+    // number was computed under it, and identity is refused before any scoring —
+    // which the call count, not the absent line, is what actually proves.
+    expect(text).not.toContain("matcher:")
+    expect(calls).toBe(0)
   })
 
   test("a missing field and an unknown value read in one format, always a string", async () => {
@@ -637,15 +769,102 @@ describe("prefix record binding", () => {
     expect(reasonsOf(record)).toContain("which is not inside the bundle root")
   })
 
-  test("a malformed record is unavailable, naming the field", async () => {
-    const { root } = await labelledBundle({
-      record: (record, block) => {
-        if (block === 1) delete (record.pool[0] as Record<string, unknown>).locus
-      },
+  // EVERY FIELD THE PARSER GUARDS, one row each. A record the reader accepts is
+  // a record every later rule may assume the shape of, so a guard that quietly
+  // stopped guarding would not fail anywhere else in this file: the malformed
+  // value would simply flow on and be read as a number, an id or a slot state.
+  const malformed: { name: string; mutate: (record: RecordJson) => void; reason: string }[] = [
+    { name: "`runId`", mutate: (record) => (record.runId = 7), reason: "`runId` is not a string" },
+    { name: "`roster`", mutate: (record) => (record.roster = "the roster"), reason: "`roster` is not an object" },
+    {
+      name: "`roster.slots`",
+      mutate: (record) => ((record.roster as { slots: unknown }).slots = [{ slot: 1 }]),
+      reason: "`roster.slots` is not a list of slots with string `slot` ids",
+    },
+    {
+      name: "`roster.lensSlots`",
+      mutate: (record) => ((record.roster as { lensSlots: unknown }).lensSlots = [{ slot: "discovery-lens-tests" }]),
+      reason: "`roster.lensSlots` is not a list of lens slots with string `slot` and `lens`",
+    },
+    { name: "`answered`", mutate: (record) => (record.answered = -1), reason: "`answered` is not a nonnegative integer" },
+    {
+      name: "`pool`",
+      mutate: (record) => (record.pool = {} as unknown as RecordJson["pool"]),
+      reason: "`pool` is not a list",
+    },
+    {
+      name: "a `pool` entry that is not an object",
+      mutate: (record) => (record.pool[0] = 5 as unknown as RecordJson["pool"][number]),
+      reason: "`pool[0]` is not an object",
+    },
+    { name: "`pool[].id`", mutate: (record) => delete record.pool[0]!.id, reason: "`pool[0]` has no string `id`" },
+    { name: "`pool[].claim`", mutate: (record) => delete record.pool[0]!.claim, reason: "`pool[0]` has no string `claim`" },
+    {
+      name: "`pool[].reasoning`",
+      mutate: (record) => delete record.pool[0]!.reasoning,
+      reason: "`pool[0]` has no string `reasoning`",
+    },
+    { name: "`pool[].locus`", mutate: (record) => delete record.pool[0]!.locus, reason: "`pool[0]` has no `locus.file`" },
+    {
+      name: "`pool[].locus.startLine`",
+      mutate: (record) => ((record.pool[0]!.locus as { startLine: unknown }).startLine = "20"),
+      reason: "`pool[0]` has a non-numeric `locus.startLine`",
+    },
+    {
+      name: "`pool[].source`",
+      mutate: (record) => (record.pool[0]!.source = "pooled"),
+      reason: "`pool[0].source` is neither `pool` nor `lens`",
+    },
+    {
+      name: "`pool[].author`",
+      mutate: (record) => delete record.pool[0]!.author,
+      reason: "`pool[0].author` is not a string",
+    },
+    {
+      name: "`warnings`",
+      mutate: (record) => (record.warnings = "none" as unknown as RecordJson["warnings"]),
+      reason: "`warnings` is not a list",
+    },
+    {
+      name: "`warnings[].code` and `warnings[].stage`",
+      mutate: (record) => record.warnings.unshift({ message: "a warning that says nothing about itself" }),
+      reason: "`warnings[0]` has no string `code` and `stage`",
+    },
+    {
+      name: "`warnings[].detail`",
+      mutate: (record) => record.warnings.unshift({ code: "model-dropped-out", stage: "discover", detail: 5 }),
+      reason: "`warnings[0].detail` is not an object",
+    },
+    {
+      name: "`cancelled`",
+      mutate: (record) => (record.cancelled = {}),
+      reason: "`cancelled` is present and has no string `stage`",
+    },
+    {
+      name: "`skippedForBudget`",
+      mutate: (record) => (record.skippedForBudget = [7]),
+      reason: "`skippedForBudget` is present and is not a list of strings",
+    },
+  ]
+  for (const entry of malformed) {
+    test(`MALFORMED RECORD: ${entry.name} leaves the block unavailable, naming the field`, async () => {
+      const { root } = await labelledBundle({
+        record: (record, block) => {
+          if (block === 1) entry.mutate(record)
+        },
+      })
+      const record = blockOf(await labelled(root), 1).record
+      if (record.kind !== "unavailable") throw new Error(JSON.stringify(record))
+      expect(reasonsOf(record)).toContain(`is malformed: ${entry.reason}`)
     })
+  }
+
+  test("MALFORMED RECORD: a `record.json` holding a JSON array is unavailable", async () => {
+    const { root } = await labelledBundle()
+    await writeFile(join(dumpDir(root, 1), "record.json"), "[]")
     const record = blockOf(await labelled(root), 1).record
     if (record.kind !== "unavailable") throw new Error(JSON.stringify(record))
-    expect(reasonsOf(record)).toContain("`pool[0]` has no `locus.file`")
+    expect(reasonsOf(record)).toContain("is malformed: it is not a JSON object")
   })
 
   test("a `record.json` that is not JSON is unavailable", async () => {
@@ -672,8 +891,23 @@ describe("prefix record binding", () => {
       expect(summary.observed).toBe(2)
       expect(summary.missing.map((gap) => gap.block)).toEqual([2])
     }
-    // The arms are read from their manifests, so they are unaffected.
+    // The arms are read from their manifests, so a MISSING RECORD does not reach
+    // them. That is narrower than "a dead prefix does not reach them": a prefix
+    // failure the paired reader itself withholds the block for takes the arms with
+    // it, which the `forked: false` test below asserts.
     expect(summaryOf(partial, "on upheld planted-label matches").observed).toBe(3)
+
+    // ONE FACT, PRINTED ONCE. The record's reasons used to repeat verbatim under
+    // CAP-1 and CAP-11, with the kind doubled into "the prefix record is
+    // unavailable: ...". The structured `reasons` still carry it in full.
+    const blockTwo = renderLabelledBundle(partial).split("BLOCK 2")[1]!.split("BLOCK 3")[0]!
+    expect(blockTwo).toContain("CAP-1: WITHHELD — the PREFIX RECORD UNAVAILABLE above")
+    expect(blockTwo).toContain("CAP-11: UNAVAILABLE — the PREFIX RECORD UNAVAILABLE above")
+    expect(blockTwo).not.toContain("the prefix record is unavailable:")
+    expect(blockTwo.match(/dump: null/g)).toHaveLength(1)
+    const withheld = blockOf(partial, 2).cap1
+    if (withheld.kind !== "unavailable") throw new Error("expected unavailable")
+    expect(withheld.reasons.join(" ")).toContain("`dump: null`")
   })
 
   test("CANCELLED PREFIX (runner): a `forked: false` prefix is withheld, CAP-1 included", async () => {
@@ -694,10 +928,51 @@ describe("prefix record binding", () => {
         if (block === 1) record.cancelled = { stage: "discover" }
       },
     })
-    const block = blockOf(await labelled(root), 1)
+    const result = await labelled(root)
+    const block = blockOf(result, 1)
     expect(block.cap1.kind).toBe("measured")
     if (block.cap11.kind !== "unavailable") throw new Error("expected CAP-11 withheld")
     expect(block.cap11.reasons.join(" ")).toContain("lens coverage is unknown")
+
+    // UNKNOWN IS NOT UNANSWERED, and the difference is the whole point of the
+    // state. A cancelled turn leaves no drop-out and no skip entry, so a lens
+    // slot that LOOKS answered is one nothing is known about. Printed as
+    // UNANSWERED it would accuse a model of not answering; printed as answered it
+    // would credit one that may never have been asked.
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    const lens = block.record.slots.find((slot) => slot.slot === "discovery-lens-tests")!
+    expect(lens.state).toBe("unknown")
+    expect(lens.note).toContain("leaves no trace of a cancelled slot")
+    expect(renderLabelledBundle(result)).toContain("lens slot `discovery-lens-tests` lens `tests`: STATE UNKNOWN")
+    // Pool slots keep their states: this record's cancellation is read for lens
+    // coverage alone, and CAP-1 above still stands on its own checks.
+    expect(block.record.slots.find((slot) => slot.slot === "discovery-1")!.state).toBe("answered")
+  })
+
+  test("CANCELLED PREFIX: a lens slot with KNOWN evidence keeps its state; only the silent ones go unknown", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        withoutAuthors(record, ["discovery-lens-tests", "discovery-lens-privacy-a11y"])
+        dropOut(record, "discovery-lens-tests")
+        record.skippedForBudget = ["discovery-lens-privacy-a11y"]
+        record.cancelled = { stage: "discover" }
+      },
+    })
+    const result = await labelled(root)
+    const block = blockOf(result, 1)
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    const slots = block.record.slots
+    const stateOf = (slot: string) => slots.find((entry) => entry.slot === slot)!.state
+    // A drop-out and a budget skip are EVIDENCE. Cancellation does not erase them,
+    // and a rule that overwrote every lens slot would throw both away.
+    expect(stateOf("discovery-lens-tests")).toBe("dropped")
+    expect(stateOf("discovery-lens-privacy-a11y")).toBe("skipped-for-budget")
+    expect(stateOf("discovery-lens-performance")).toBe("unknown")
+    expect(stateOf("discovery-lens-security")).toBe("unknown")
+    const text = renderLabelledBundle(result)
+    expect(text).toContain("lens slot `discovery-lens-tests` lens `tests`: UNANSWERED (dropped)")
+    expect(text).toContain("lens slot `discovery-lens-performance` lens `performance`: STATE UNKNOWN")
   })
 
   test("A SHARED PREFIX IS ONE OBSERVATION, even when two blocks name it", async () => {
@@ -907,6 +1182,25 @@ describe("slot identity and coverage", () => {
       cap1: false,
     },
     {
+      name: "`skippedForBudget` naming one pool slot twice",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-3"])
+        record.skippedForBudget = ["discovery-3", "discovery-3"]
+        record.answered = 2
+      },
+      reason: "`skippedForBudget` names `discovery-3` more than once",
+      cap1: false,
+    },
+    {
+      name: "`skippedForBudget` naming one lens slot twice",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-lens-tests"])
+        record.skippedForBudget = ["discovery-lens-tests", "discovery-lens-tests"]
+      },
+      reason: "`skippedForBudget` names `discovery-lens-tests` more than once",
+      cap1: true,
+    },
+    {
       name: "a drop-out warning with no `detail.slot`",
       mutate: (record) => dropOut(record, undefined),
       reason: "a discover-stage `model-dropped-out` warning carries no string `detail.slot`",
@@ -1079,5 +1373,75 @@ describe("slot identity and coverage", () => {
     const on = blockOf(await labelled(root), 1).arms.find((arm) => arm.arm === "on")!
     if (on.result.kind !== "unavailable") throw new Error("expected unavailable")
     expect(on.result.reason).toContain("has no `locus.file`")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The two paths the report prints as provenance
+// ---------------------------------------------------------------------------
+
+/**
+ * THE POINTERS ARE PINNED TO THEIR FILES, NOT TO THEIR STRINGS, for the reason
+ * `read-bundle.test.ts` pins `PAIRED_READER_MODULE`: a renamed file leaves the
+ * report pointing at nothing, and a string assertion keeps passing through it.
+ *
+ * `existsSync` is necessary and not sufficient. A path present in the working
+ * tree and absent from the repository resolves here and resolves nowhere else,
+ * which is how the draft protocol shipped ignored by `.gitignore` while this
+ * suite was green. The packaging half is held by `.gitignore`'s own exception
+ * list, one line per cited file.
+ */
+// ---------------------------------------------------------------------------
+// When scoring itself fails
+// ---------------------------------------------------------------------------
+
+describe("when scoring itself fails", () => {
+  test("A THROWING MATCHER: every quantity is unavailable with the error, and nothing is rendered as zero", async () => {
+    // THREE INDEPENDENT HANDLERS, one read. CAP-1, CAP-11 and the arms each
+    // catch their own scoring error, so each could fail open on its own — and a
+    // quantity that failed open would print `0`, which reads as "the models found
+    // nothing" rather than "this reader could not score". The existing
+    // throwing-matcher test above writes NO prefix record, so it reaches the arm
+    // handler only; this bundle is complete and reaches all three.
+    const { root } = await labelledBundle()
+    const result = await labelled(root, {
+      matcher: () => {
+        throw new Error("the matcher failed")
+      },
+    })
+    for (const block of result.blocks) {
+      expect(block.record.kind).toBe("read")
+      for (const quantity of [block.cap1, block.cap11]) {
+        if (quantity.kind !== "unavailable") throw new Error(JSON.stringify(quantity))
+        expect(quantity.reasons.join(" ")).toContain("scoring failed: the matcher failed")
+      }
+      for (const arm of block.arms) {
+        if (arm.result.kind !== "unavailable") throw new Error(JSON.stringify(arm.result))
+        expect(arm.result.reason).toContain("scoring failed: the matcher failed")
+      }
+    }
+    for (const summary of result.summaries) {
+      expect(summary.observed).toBe(0)
+      expect(summary.values).toEqual([])
+      expect(summary.missing.map((gap) => gap.block)).toEqual([1, 2, 3])
+      for (const gap of summary.missing) expect(gap.reason).toContain("scoring failed: the matcher failed")
+    }
+    const text = renderLabelledBundle(result)
+    expect(text).toContain("scoring failed: the matcher failed")
+    expect(text).toContain("bundle observations: none — no quantity has a complete observation in this bundle")
+  })
+})
+
+describe("every path the labelled report prints as provenance resolves", () => {
+  test("the module that produces the report", async () => {
+    const { root } = await labelledBundle()
+    expect(renderLabelledBundle(await labelled(root))).toContain(LABELLED_READER_MODULE)
+    expect(existsSync(join(import.meta.dir, "..", LABELLED_READER_MODULE))).toBe(true)
+  })
+
+  test("the draft protocol that proposes the endpoints", async () => {
+    const { root } = await labelledBundle()
+    expect(renderLabelledBundle(await labelled(root))).toContain(PROTOCOL_V2_DRAFT)
+    expect(existsSync(join(import.meta.dir, "..", PROTOCOL_V2_DRAFT))).toBe(true)
   })
 })

@@ -22,7 +22,7 @@ import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import { PAIRED_QUANTITIES } from "./paired-read.ts"
-import { PAIRED_READER_MODULE } from "./report.ts"
+import { LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
@@ -114,6 +114,10 @@ describe("LIVE-RUN.md documents the sealed fixture identity that is actually in 
 describe("LIVE-RUN.md documents the paired reader that is actually shipped", () => {
   test("it names the module that produces the paired report", async () => {
     expect(await liveRunDoc()).toContain(PAIRED_READER_MODULE)
+  })
+
+  test("it names the module that produces the labelled report", async () => {
+    expect(await liveRunDoc()).toContain(LABELLED_READER_MODULE)
   })
 
   test("every quantity the reader tracks availability for is named in the procedure", async () => {

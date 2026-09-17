@@ -380,24 +380,27 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   }
 
   // NO LENS RECALL GAIN ON A LIVE RUN — ON EITHER PATH, AND FOR TWO DIFFERENT
-  // REASONS (review finding P5, 2026-09-11).
+  // REASONS.
   //
   // On an UNLABELLED run its absence is a fact rather than a gap: recall is
   // measured against a KNOWN defect set, and a change read out of a real worktree
   // has none — nobody has labelled its bugs.
   //
-  // On a LABELLED run (`options.change`, story 2.4) that sentence is FALSE — the
-  // set is `SEEDED_DEFECTS` and its thirteen loci are written down. `gain` is
-  // still `undefined` here, so `report.ts` still prints "not applicable — no
-  // seeded defect set for this change", and on that path the words are wrong
-  // while the NUMBER is honest. Measuring live recall is story 2.6: it needs the
-  // arm's findings matched against the labels through `recall()`, which is a
-  // measurement this story was told not to take. Until 2.6 wires it, a labelled
-  // run reports no recall either, and `LIVE-RUN.md` says so in those words rather
-  // than promising one.
+  // On a LABELLED run (`options.change`) the set is `SEEDED_DEFECTS` and its
+  // thirteen loci are written down, so the number is unmeasured here rather than
+  // unmeasurable. `report.ts` therefore says "not measured in this report" and
+  // gives no reason it cannot know: naming a missing defect set would be false on
+  // this path.
   //
-  // Either way the report renders "not applicable" rather than `0`, because an
-  // unknown recall is not a recall of zero.
+  // WHAT SCORES THE LABELS, AND WHAT DOES NOT. `ablation/labelled-read.ts` scores
+  // a PERSISTED PAIRED BUNDLE's shared discovery prefix against the thirteen
+  // labels, for CAP-1 and CAP-11. This single-run path is not a paired bundle and
+  // writes no prefix `record.json`, so that reader cannot serve it, and a dated
+  // scope decision (2026-09-17) leaves `gain` undefined here rather than adding a
+  // second scoring pipeline. No story owns single-run scoring.
+  //
+  // Either way the report renders the unknown rather than `0`, because an unknown
+  // recall is not a recall of zero.
   return buildReport(runs, {
     pairings: pairs,
     ...(lensed === undefined

@@ -39,6 +39,10 @@ _bmad
 # leaving it ignored would recreate exactly the defect commit 7de62b7 fixed: a design
 # document the contract cites by name that no clone can resolve.
 !/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md
+# Added 2026-09-17 (epic 2, story 2-6). `ablation/labelled-read.ts` exports this path as
+# `PROTOCOL_V2_DRAFT` and every labelled report prints it as the provenance for CAP-1 and
+# CAP-11, so the same rule applies to the draft as to the frozen protocol above.
+!/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md
 
 node_modules
 *.tsbuildinfo

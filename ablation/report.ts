@@ -303,17 +303,24 @@ export function renderAblation(report: AblationReport): string[] {
   lines.push("3. LENS RECALL GAIN — a count of DEFECTS.")
   lines.push("4. LENS TOKEN COST — a count of TOKENS. These are two numbers (AD-9).")
   if (report.lens === undefined) {
+    // THE REASON HAS TO BE TRUE ON BOTH PATHS. This branch is reached because no
+    // lens arm ran, which is knowable here; whether the change carries a seeded
+    // defect set is not, and asserting it does was false on a labelled run.
     lines.push(
-      "  not applicable — no seeded defect set for this change, so recall is UNKNOWN.",
+      "  not applicable — this run had no lens arm, so there is no lens recall gain to measure.",
       "  Unknown is not zero and is not rendered as zero.",
     )
   } else {
     const gain = report.lens.gain
     if (gain === undefined) {
-      // A live change has no LABELLED defect set — nobody wrote down its bugs —
-      // so recall is UNKNOWN. Unknown is not zero and is not rendered as zero.
+      // Recall is UNKNOWN here, and unknown is not zero and is not rendered as
+      // zero. The report does not state WHY: on an unlabelled change nobody wrote
+      // the bugs down, but on a labelled one the set exists and its thirteen loci
+      // are written — so "no seeded defect set for this change" was a false clause
+      // on the one path where the set is real. A persisted paired bundle is scored
+      // against those labels by `ablation/labelled-read.ts`.
       lines.push(
-        "  gain: not applicable — no seeded defect set for this change, so recall is UNKNOWN.",
+        "  gain: not measured in this report. Unknown is not zero and is not rendered as zero.",
       )
     } else {
       lines.push(

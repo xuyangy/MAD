@@ -394,20 +394,29 @@ describe("a NEGATIVE result renders as a RESULT, not as a failure", () => {
 })
 
 describe("an UNKNOWN is never rendered as a zero", () => {
-  test("no seeded defect set renders 'not applicable', and the other blocks still print", () => {
+  // WORDING CHANGED BY A RECORDED DECISION (2026-09-17). Both lines used to give
+  // "no seeded defect set for this change" as the reason, which is FALSE on a
+  // `--labelled-change` run: the set exists and its thirteen loci are written
+  // down. Each branch now states only what it can know. The unknown-is-not-zero
+  // contract and the surrounding blocks are asserted unchanged.
+  test("with no lens arm, the reason names the missing arm and the other blocks still print", () => {
     const rendered = text(report())
-    expect(rendered).toContain("not applicable — no seeded defect set")
+    expect(rendered).toContain("not applicable — this run had no lens arm")
     expect(rendered).toContain("Unknown is not zero")
+    // The reason must not claim something this branch cannot know.
+    expect(rendered).not.toContain("no seeded defect set")
     // The verdict-difference and token-cost blocks still print in full.
     expect(rendered).toContain("1. VERDICT DIFFERENCE")
     expect(rendered).toContain("2. TOKEN COST")
   })
 
-  test("a live run with lenses but no labelled defects prints the cost and not a zero gain", () => {
+  test("a lensed run with no gain prints the cost, not a zero gain, and asserts no reason it cannot know", () => {
     const rendered = text(
       report({ lens: { gain: undefined, cost: { tokens: 270, billedTurns: 9 } } }),
     )
-    expect(rendered).toContain("gain: not applicable")
+    expect(rendered).toContain("gain: not measured in this report")
+    expect(rendered).toContain("Unknown is not zero and is not rendered as zero")
+    expect(rendered).not.toContain("no seeded defect set")
     expect(rendered).toContain("270 token(s) over 9 extra turn(s)")
   })
 })

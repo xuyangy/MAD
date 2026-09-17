@@ -157,14 +157,17 @@ worktree. That is what makes recall computable AT ALL — there is now a fixed r
 to measure against, never an asserted exhaustive set of every defect in the change
 (`evaluation-protocol.md:73-79`).
 
-**It is not computed yet, and the report says so.** A labelled run's report still prints
-`not applicable — no seeded defect set for this change` for lens recall gain, because
-`ablation/live.ts` passes `gain: undefined` on both paths. Matching a live arm's findings
-against the thirteen labels is story 2.6; story 2.4 built the labelled change and the
-withheld answer key, and deliberately took no measurement. Read that line as *not measured
-yet*, not as *zero* and not as *impossible* — what changed is that the number now HAS a
-reference set to be measured against, and the wording in the report will change with 2.6
-rather than before it.
+**A single labelled run does not score itself.** `ablation/live.ts` passes `gain: undefined`
+on both paths, so a labelled run's report prints `gain: not measured in this report` for lens
+recall gain. It gives no reason beyond that, because the reason differs by path and only one
+of them is knowable there: on an unlabelled change nobody wrote the bugs down, while on a
+labelled one the set exists. Read the line as *not measured*, not as *zero* and not as
+*impossible*.
+
+What DOES score the thirteen labels is the labelled report below, over a **persisted paired
+bundle**. A single run is not a paired bundle and writes no prefix `record.json`, so that
+reader cannot serve it, and a dated scope decision (2026-09-17) leaves it unscored rather
+than adding a second scoring pipeline. **No story owns single-run scoring.**
 
 **It is still LIVE evidence.** The labels are scripted; the backend is not. "Scripted"
 versus "live" is a property of the **backend and the evidence provenance**, not of the
@@ -392,7 +395,9 @@ qualify, so it prints its reasons and its arms instead.
 
 **What it still does not measure.** No truth label enters it. It states no precision, no
 false positives, no final recall, none of the four labelled verdict transitions, and no
-earned / did-not-earn reading — those need the labelled change and belong to story 2.8. An
+earned / did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's,
+printed after this one. Verdict-direction labels and false-positive counts are adjudication,
+story 2-6b. Precision, final recall and cost contrasts belong to story 2.8. An
 arm that upheld nothing is reported as undefined, never as 100% and never as a clean list. A
 candidate left unresolved by the budget is counted and shown, never treated as removed noise.
 It does not re-derive the unique-execution bill: that is the journal's.
@@ -430,7 +435,8 @@ the lock again, replays the journal, and appends what is held:
 When the bundle carries a sealed paired schedule, `bun run eval-read` prints a third report
 after the paired contrast, produced by `ablation/labelled-read.ts`. It reads what the paired
 reader already read, plus each block's prefix `record.json`. It bills nothing, runs nothing,
-and always exits 0. A bundle with no sealed schedule prints exactly what it printed before.
+and always exits 0. A bundle with no sealed schedule gets no labelled report at all: the run
+and paired reports are the whole output.
 
 **When it refuses.** The schedule's fixture must be `labelled-change-1` with the sealed
 material and labels hashes. Every arm the paired reader bound must carry the sealed material
@@ -470,8 +476,9 @@ The answered slot ids are derived (pool slots minus discover-stage drop-outs min
 skips) and checked against `record.answered`, against every finding's `author`, and against
 the slot evidence itself. A mismatch withholds the quantity it affects, with both sides named.
 Contradictory evidence is a mismatch: a slot both dropped and skipped, a dropped or skipped slot
-that is also a `partial-envelope` answer, two drop-out warnings for one slot, or a drop-out
-warning with no slot or an unknown one. A lens finding whose author is a pool slot withholds
+that is also a `partial-envelope` answer, two drop-out warnings for one slot, a slot named twice
+in `skippedForBudget`, or a discover-stage `model-dropped-out` OR `partial-envelope` warning with
+no slot or an unknown one. A lens finding whose author is a pool slot withholds
 CAP-1 and CAP-11; a finding by a dropped or skipped lens slot withholds CAP-11. A roster with
 no pool slot, or no answered pool slot, gives CAP-11 no baseline, so it is unavailable.
 
@@ -490,11 +497,26 @@ every block the paired reader measured. The two arms of a block share one prefix
 prefix is one observation; two blocks naming one prefix run are also counted once, as a
 defensive check.
 
+**Identity in the header.** The labelled change's version, its planted-defect count, its
+material hash and its **labels hash**. The material hash is what the schedule's fixture and every
+bound arm's `identity.fixtureHash` are checked against; the labels hash is what every number
+below is scored against, and the schedule's fixture is checked on it too.
+
 **Protocol identity and status.** The report prints the protocol the schedule was sealed under
 (id, version, hash) and each bound arm's `protocolVersion` and `protocolHash`. Every number is
 descriptive. `evaluation-protocol-v2.md` proposes both endpoints and is a draft, so no number is
-v2-preregistered. The measurement status is read from the bundle: `pending` only when no
-quantity has a complete observation.
+v2-preregistered.
+
+The status block states four things separately, and the third and fourth are easy to confuse:
+
+- `bundle observations` counts **quantities**, not blocks: each of the eight is counted once if
+  ANY block gave it a complete observation, so **one complete block alone prints `8 of 8`**.
+- `planned live evaluation` therefore says, unconditionally, that completion is **not**
+  established by this report — bundle observation counts alone establish neither live provenance
+  nor completion of the planned three blocks.
+- `matcher` names which matcher produced the numbers. The shipped lexical matcher is the one the
+  draft protocol (A2) proposes; an injected one is labelled `INJECTED` and the report says the
+  numbers are not that proposal's quantity.
 
 **What it does not own.** Verdict-direction labels and false-positive counts are story 2-6b.
 Precision and cost contrasts are story 2.8.

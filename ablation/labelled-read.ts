@@ -254,7 +254,13 @@ export interface LabelledReadResult {
   root: string
   schedule: ScheduleProtocol
   protocol: ProtocolIdentity[]
-  seal: { version: string; materialHash: string }
+  seal: { version: string; materialHash: string; labelsHash: string; labels: number }
+  /**
+   * Which matcher produced every number below. The draft protocol (A2) proposes
+   * the shipped lexical matcher, so a report scored with an injected one is not
+   * a report of the same quantity and says so rather than passing as one.
+   */
+  matcher: "shipped-lexical" | "injected"
   excluded: LabelledExclusion[]
   blocks: LabelledBlock[]
   summaries: LabelledSummary[]
@@ -314,7 +320,13 @@ export async function readLabelledBundle(
     root: paired.root,
     schedule: scheduleProtocol,
     protocol,
-    seal: { version: LABELLED_CHANGE_SEAL.version, materialHash: LABELLED_CHANGE_SEAL.materialHash },
+    seal: {
+      version: LABELLED_CHANGE_SEAL.version,
+      materialHash: LABELLED_CHANGE_SEAL.materialHash,
+      labelsHash: LABELLED_CHANGE_SEAL.labelsHash,
+      labels: SEEDED_DEFECTS.length,
+    },
+    matcher: options.matcher === undefined ? "shipped-lexical" : "injected",
     excluded,
     blocks,
     summaries: summarize(blocks),
@@ -1071,22 +1083,47 @@ const ESTIMANDS = [
   "",
 ]
 
-/** `observed` is how many quantities have a complete observation, or `null` when the report is refused. */
-function statusLines(observed: { quantities: number; of: number } | null): string[] {
-  const measurements =
+/**
+ * `observed` is how many quantities have a complete observation, or `null` when
+ * the report is refused. `matcher` is `null` on the refused path, which computes
+ * no number for a matcher to have produced.
+ *
+ * THE COUNT IS OVER QUANTITIES, NOT BLOCKS, and the two are easy to confuse in
+ * the direction that flatters the epic: each of the eight quantities is counted
+ * once if ANY block gave it a complete observation, so ONE complete block prints
+ * `8 of 8`. That number establishes neither the planned three blocks nor live
+ * provenance, and the caveat below says so beside it rather than in a footnote.
+ */
+function statusLines(
+  observed: { quantities: number; of: number } | null,
+  matcher: LabelledReadResult["matcher"] | null,
+): string[] {
+  const bundleObservations =
     observed === null
-      ? "measurements: none read — this report is refused"
+      ? "bundle observations: none read — this report is refused"
       : observed.quantities === 0
-        ? "measurements: pending — no quantity has a complete observation in this bundle"
-        : `measurements: ${observed.quantities} of ${observed.of} quantities have at least one complete observation in this bundle`
-  return [
+        ? "bundle observations: none — no quantity has a complete observation in this bundle"
+        : `bundle observations: ${observed.quantities} of ${observed.of} quantities have at least one complete ` +
+          "observation in this bundle (a count of QUANTITIES; one complete block can supply all of them)"
+  const lines = [
     "STATUS, STATED SEPARATELY",
     `  implementation: complete (\`${LABELLED_READER_MODULE}\`)`,
     `  protocol v2: a DRAFT that pre-registers nothing (\`${PROTOCOL_V2_DRAFT}\`); it proposes CAP-1 and CAP-11 as ` +
       "secondary descriptive endpoints",
-    `  ${measurements}`,
-    "",
+    `  ${bundleObservations}`,
+    "  planned live evaluation: completion is NOT established by this report. Bundle observation counts alone",
+    "    establish neither live provenance nor completion of the planned three blocks.",
   ]
+  if (matcher !== null) {
+    lines.push(
+      matcher === "shipped-lexical"
+        ? "  matcher: the shipped lexical defect matcher, which is the one the draft protocol (A2) proposes"
+        : "  matcher: INJECTED — not the shipped lexical matcher the draft protocol (A2) proposes, so these numbers" +
+          " are not that proposal's quantity",
+    )
+  }
+  lines.push("")
+  return lines
 }
 
 function protocolLines(schedule: ScheduleProtocol, protocol: readonly ProtocolIdentity[]): string[] {
@@ -1129,19 +1166,22 @@ export function renderLabelledBundle(outcome: LabelledReadOutcome): string {
       lines.push(`  ${problem.subject}: \`${problem.field}\` is ${problem.actual}, and this report requires ${problem.expected}`)
     }
     lines.push("  The paired report above is unchanged by this refusal.", "")
-    lines.push(...statusLines(null), ...protocolLines(outcome.schedule, outcome.protocol), ...exclusionLines(outcome.excluded))
+    lines.push(...statusLines(null, null), ...protocolLines(outcome.schedule, outcome.protocol), ...exclusionLines(outcome.excluded))
     return `${lines.join("\n")}\n`
   }
 
   lines.push(
     `MAD LABELLED RECALL — ${outcome.root}`,
-    `labelled change ${outcome.seal.version} (material ${outcome.seal.materialHash}); the schedule's fixture and every ` +
-      "bound arm's `identity.fixtureHash` match it",
+    `labelled change ${outcome.seal.version}, ${outcome.seal.labels} planted defects`,
+    `  material ${outcome.seal.materialHash}`,
+    `  labels   ${outcome.seal.labelsHash}`,
+    "  The schedule's fixture and every bound arm's `identity.fixtureHash` match the material hash. The labels hash is",
+    "  what every number below is scored against, and the schedule's fixture is checked on it too.",
     "",
   )
   const observed = outcome.summaries.filter((summary) => summary.observed > 0).length
   lines.push(
-    ...statusLines({ quantities: observed, of: outcome.summaries.length }),
+    ...statusLines({ quantities: observed, of: outcome.summaries.length }, outcome.matcher),
     ...protocolLines(outcome.schedule, outcome.protocol),
     ...exclusionLines(outcome.excluded),
     ...ESTIMANDS,
@@ -1177,6 +1217,11 @@ export function renderLabelledBundle(outcome: LabelledReadOutcome): string {
 function renderBlock(block: LabelledBlock): string[] {
   const lines = [`BLOCK ${block.block}`]
   const record = block.record
+  // A record that did not load takes both quantities with it, so its reasons are
+  // ONE fact about the block, printed once. `cap1.reasons` and `cap11.reasons`
+  // still carry it in full for a machine reading the result rather than the page.
+  const recordFailed = record.kind !== "read"
+  const pointsAtRecord = recordFailed ? ` — the PREFIX RECORD ${record.kind.toUpperCase()} above` : ""
   if (record.kind !== "read") {
     lines.push(`  PREFIX RECORD ${record.kind.toUpperCase()}:`)
     for (const reason of record.reasons) lines.push(`    ${reason}`)
@@ -1186,15 +1231,20 @@ function renderBlock(block: LabelledBlock): string[] {
     for (const slot of record.slots) {
       const lens = slot.lens === undefined ? "" : ` lens \`${slot.lens}\``
       const note = slot.note === undefined ? "" : ` — ${slot.note}`
-      const state = slot.state === "answered" ? "answered" : `UNANSWERED (${slot.state})`
+      const state =
+        slot.state === "answered"
+          ? "answered"
+          : slot.state === "unknown"
+            ? "STATE UNKNOWN"
+            : `UNANSWERED (${slot.state})`
       lines.push(`  ${slot.kind} slot \`${slot.slot}\`${lens}: ${state}, ${slot.findings} finding(s)${note}`)
     }
   }
 
   const cap1 = block.cap1
   if (cap1.kind === "unavailable") {
-    lines.push("  CAP-1: WITHHELD")
-    for (const reason of cap1.reasons) lines.push(`    ${reason}`)
+    lines.push(`  CAP-1: WITHHELD${pointsAtRecord}`)
+    if (!recordFailed) for (const reason of cap1.reasons) lines.push(`    ${reason}`)
   } else {
     lines.push(
       `  CAP-1 (within-prefix attribution), pool coverage ${countText(cap1.pool.answered, cap1.pool.of)} answered` +
@@ -1213,8 +1263,8 @@ function renderBlock(block: LabelledBlock): string[] {
 
   const cap11 = block.cap11
   if (cap11.kind === "unavailable") {
-    lines.push("  CAP-11: UNAVAILABLE")
-    for (const reason of cap11.reasons) lines.push(`    ${reason}`)
+    lines.push(`  CAP-11: UNAVAILABLE${pointsAtRecord}`)
+    if (!recordFailed) for (const reason of cap11.reasons) lines.push(`    ${reason}`)
   } else {
     lines.push(
       `  CAP-11 (lens-only defects), over ${countText(cap11.lens.answered, cap11.lens.of)} lens slots answered, pool ` +
@@ -1244,9 +1294,15 @@ function renderBlock(block: LabelledBlock): string[] {
     const result = arm.result
     lines.push(
       `${head}: ${result.upheld} upheld finding(s)`,
-      `      planted-label matches: ${countText(result.matches.length, result.upheld)}` +
+      // COUNTS, NOT RATES, and the denominator is named because it is not CAP-1's.
+      // CAP-1 above counts planted defects out of 13; these count upheld findings.
+      // An arm that upheld nothing has a KNOWN zero on both lines — `countText`'s
+      // "not measurable (0 cases)" is right for a rate and wrong for a count, and
+      // it also disagreed with the 0 this block's own summary records.
+      `      planted-label matches: ${result.matches.length} of ${result.upheld} upheld finding(s)` +
         (result.matches.length === 0 ? "" : ` (${result.matches.map((match) => `\`${match.defectId}\``).join(", ")})`),
-      `      U (no planted label claimed it, unmatched duplicates included): ${countText(result.unlabelled.length, result.upheld)}`,
+      `      U (no planted label claimed it, unmatched duplicates included): ${result.unlabelled.length} of ` +
+        `${result.upheld} upheld finding(s)`,
       `      false positives: ${FALSE_POSITIVES_TEXT}`,
     )
   }

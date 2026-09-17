@@ -336,8 +336,19 @@ export function seededArm(options: {
   lenses?: readonly string[]
   pins?: readonly Pin[]
   tokenCap?: number
+  /**
+   * Scripts layered over the fixture's own, by slot id. NO ARM PASSES THIS and
+   * none may: an arm that also moved a script would contrast the models as well
+   * as the roster, which is the confound the doc above exists to prevent.
+   *
+   * It is here for the CONTRACT TESTS, which need a turn that degrades — a model
+   * that never answers, or one whose answer is only partly usable — so that the
+   * warnings a downstream reader parses come from the stage that emits them
+   * rather than from a hand-written copy of what it is believed to emit.
+   */
+  scripts?: Record<string, SlotScript>
 }) {
-  const { slots, lenses = [], pins = [], tokenCap } = options
+  const { slots, lenses = [], pins = [], tokenCap, scripts = {} } = options
   const resolved = selectRoster(SEEDED_CANDIDATES, {
     slots,
     lenses,
@@ -346,7 +357,7 @@ export function seededArm(options: {
   })
   return review({
     roster: resolved.roster,
-    backend: new FakeBackend(abstainingInDebate({ ...SCRIPTS, ...LENS_SCRIPTS })),
+    backend: new FakeBackend(abstainingInDebate({ ...SCRIPTS, ...LENS_SCRIPTS, ...scripts })),
     clock: fakeClock(),
     change: SEEDED_CHANGE,
     priorWarnings: resolved.warnings,
