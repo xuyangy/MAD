@@ -29,6 +29,8 @@
  * told about is the AD-6 failure in miniature.
  */
 
+import type { ToolTerminalOutcome } from "../ports/tool-observation.ts"
+import { toolFailureEvidence } from "../ports/tool-observation.ts"
 import { oneLine } from "../prompt/material.ts"
 
 /** One blamed line, as porcelain reports it. */
@@ -75,6 +77,80 @@ export const BLAME_KIND = {
   noLocus: "judge-blame-no-locus",
   noPort: "judge-blame-no-port",
 } as const
+
+/**
+ * THE SAME FOUR OUTCOMES, READ AS TOOL-ACTION FACTS (story 2-7a).
+ *
+ * `BLAME_KIND` above says what a HUMAN reads in the run record. This says what
+ * `evaluation-protocol.md` §5 counts, and the two are not the same statement: a
+ * `judge-blame-executed` entry tells a reader a citation was produced, while the
+ * protocol asks the narrower question of whether `git blame` ran at all.
+ *
+ * It lives here, beside the kinds, for the reason the kinds live here: the
+ * mapping is written once and imported, so the stage that emits it and any
+ * reader that consumes it cannot drift by a typo. `core/stages/judge.ts` chooses
+ * the branch; it does not phrase the reading.
+ *
+ * `ToolTerminalOutcome` is a typed union, deliberately rather than a detail bag:
+ * an execution count read off free-form fields is a count of whatever the last
+ * author happened to spell.
+ */
+export const BLAME_OUTCOME = {
+  /** No `Tools` port — AD-13's second route. Nothing was asked and nothing ran. */
+  noPort: (): ToolTerminalOutcome => ({
+    kind: "not-executed",
+    refusedAt: "core",
+    why: "no repository tool port was available to this run",
+  }),
+  /** The finding names no line range, so there was nothing to blame. */
+  noLocus: (): ToolTerminalOutcome => ({
+    kind: "not-executed",
+    refusedAt: "core",
+    why: "the finding names no line range",
+  }),
+  /**
+   * The call returned porcelain the parser could read. ONE EXECUTION, whether or
+   * not the citation it produced was useful.
+   */
+  executed: (): ToolTerminalOutcome => ({ kind: "executed" }),
+  /**
+   * The call returned, and returned nothing usable. Still one execution: the
+   * command ran. The failure is recorded BESIDE it, never instead of it.
+   */
+  noRows: (): ToolTerminalOutcome => ({
+    kind: "executed-failed",
+    failure: "git blame produced no blamed lines",
+  }),
+} as const
+
+/**
+ * The failing half of the same mapping, in one place.
+ *
+ * A `Tools` implementation may attach `ToolFailureEvidence` to what it throws,
+ * because only the adapter knows whether a shell ran. Without that evidence the
+ * reading is `unknown` — a thrown call establishes that MAD did not get an
+ * answer, and nothing whatever about whether git executed. Reading it as "no
+ * execution" would turn a blind spot into a measurement.
+ */
+export function blameFailureOutcome(error: unknown, why: string): ToolTerminalOutcome {
+  const evidence = toolFailureEvidence(error)
+  if (evidence === undefined) return { kind: "unknown", why }
+  // Nothing was launched at, so nothing executed. `not-attempted` says that of
+  // its own accord; `pre-shell` says it by naming where the call died.
+  if (evidence.stage === "pre-shell") return { kind: "not-executed", refusedAt: "pre-shell", why }
+  if (evidence.launch === "not-attempted") return { kind: "not-executed", refusedAt: "pre-shell", why }
+  if (evidence.launch === "failed") return { kind: "not-executed", refusedAt: "launch", why }
+  // A PROVED LAUNCH THAT THEN FAILED IS STILL ONE EXECUTION. The command ran;
+  // what it did afterwards is a separate fact, recorded beside the execution and
+  // never instead of it. Reading this as `invoked-unknown` would discard an
+  // execution the evidence establishes — the same undercount, one step along,
+  // that this mapping exists to prevent. Unreachable from the opencode adapter,
+  // where a proved launch means a zero exit and a zero exit does not throw;
+  // reachable from any other `Tools` implementation.
+  if (evidence.launch === "proved") return { kind: "executed-failed", failure: why }
+  if (evidence.exitCode === undefined) return { kind: "unknown", why }
+  return { kind: "invoked-unknown", exitCode: evidence.exitCode, why }
+}
 
 /** Length of the abbreviated sha in a rendered row. Git's own default. */
 const SHA_WIDTH = 8

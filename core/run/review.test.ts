@@ -5,6 +5,7 @@ import { DISCLOSURE_CODES } from "../domain/warning.ts"
 import { recordTurn, recordUnknownTurn, type RunRecord } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
+import type { ToolObservation } from "../ports/tool-observation.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { selectRoster } from "../roster/select.ts"
 import { DEFAULT_MAX_ROUNDS } from "../stages/debate.ts"
@@ -3068,5 +3069,103 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
     expect(offRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(false)
     expect(onRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(true)
     expect(onRecord!.runId).not.toBe(offRecord!.runId)
+  })
+})
+
+/**
+ * STORY 2-7a — THE OBSERVER CROSSES THE `review()` SEAM.
+ *
+ * `ReviewDeps.toolObservation` and `JudgeInput.toolObservation` are both
+ * OPTIONAL, which is what makes the line that joins them deletable in silence:
+ * remove it and typecheck stays clean, because absence is a supported value, and
+ * every test that exercises the observer injects it straight into `judge()`.
+ * That is the same shape as the CAP-8 regression this repo already shipped once,
+ * where `tools,` was deleted from the very same literal with 1146 tests green.
+ *
+ * So this drives the whole pipeline and asserts the trace arrived, carrying the
+ * RUN's own id — which only the seam can supply, since a test injecting into the
+ * stage would have had to invent one.
+ */
+describe("review — the tool-action observer reaches the judge (story 2-7a)", () => {
+  const PORCELAIN = [
+    "3333333333333333333333333333333333333333 12 12 1",
+    "author Ada",
+    "author-time 1700000000",
+    "author-tz +0000",
+    "summary the rate check",
+    "\tconst total = fee * rate",
+  ].join("\n")
+
+  test("a `request` event arrives, carrying the run's id and the finding's", async () => {
+    const resolved = setup([
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ])
+    const requests: { runId: string; findingId: string; state: string }[] = []
+    const observer: ToolObservation = {
+      async request(event) {
+        requests.push({
+          runId: event.context.runId,
+          findingId: event.context.findingId,
+          state: event.request.kind,
+        })
+      },
+      async outcome() {},
+      async invoked() {},
+      async shellOutcome() {},
+      failed() {},
+      takeFailures: () => [],
+    }
+
+    const { record } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tools: { blame: async () => PORCELAIN } as never,
+      toolObservation: observer,
+    })
+
+    expect(record.findings).toHaveLength(1)
+    expect(requests).toHaveLength(1)
+    // THE RUN'S OWN ID. Nothing below the seam could have supplied it.
+    expect(requests[0]!.runId).toBe(record.runId)
+    expect(requests[0]!.findingId).toBe(record.findings[0]!.id)
+    expect(requests[0]!.state).toBe("made")
+  })
+
+  test("AND WITHOUT THE PORT IT IS STILL OBSERVED — as `unavailable`, not as silence", async () => {
+    // The non-vacuous sibling: the seam carries the observer even on the route
+    // where MAD runs nothing itself, which is the row a reader most needs, since
+    // "no port" and "did not ask" are different facts.
+    const resolved = setup([
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+      ["google", "gemini-2.5-pro"],
+    ])
+    const states: string[] = []
+    const observer: ToolObservation = {
+      async request(event) {
+        states.push(event.request.kind)
+      },
+      async outcome() {},
+      async invoked() {},
+      async shellOutcome() {},
+      failed() {},
+      takeFailures: () => [],
+    }
+
+    await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({ "discovery-1": [{ kind: "ok", value: ENVELOPE }] }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      toolObservation: observer,
+    })
+
+    expect(states).toEqual(["unavailable"])
   })
 })

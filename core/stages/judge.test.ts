@@ -15,7 +15,16 @@ import type { Entry, Finding, Severity } from "../domain/finding.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { CODING_LENSES } from "../instructions/coding/lenses.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
+import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
+import type {
+  ToolObservation,
+  ToolObservationFailure,
+  ToolOutcomeEvent,
+  ToolRequestEvent,
+  ToolRequestState,
+  ToolTerminalOutcome,
+} from "../ports/tool-observation.ts"
 import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
   DEFAULT_JUDGE_ANSWERS,
@@ -1765,5 +1774,478 @@ describe("judge — an ordinary run's drop-out warning keeps its shape (story 2-
     const lost = result.warnings.find((warning) => warning.code === "model-dropped-out")
     expect(lost).toBeDefined()
     expect(Object.keys(lost!.detail ?? {}).sort()).toEqual(["message", "model", "role", "slot"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7a — the tool-action trace (`evaluation-protocol.md` §5)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT A MEMORY OBSERVER CAN AND CANNOT PROVE, stated before the assertions.
+ *
+ * It proves the CORE's half: which branch was taken, what was asked for, in
+ * which order, and that a failing observer changes nothing. It proves nothing
+ * about whether git ran — a fake `Tools` that returns a string is not an
+ * execution, and the protocol says so in as many words. The adapter's half is
+ * `adapters/opencode/tools-observation.test.ts`, over real git.
+ */
+describe("the tool-action trace — the four blame outcomes, observed (story 2-7a)", () => {
+  const PORCELAIN = [
+    "2222222222222222222222222222222222222222 1 12 1",
+    "author Grace",
+    "author-time 1700000000",
+    "author-tz +0000",
+    "summary the rate check",
+    "\tconst total = fee * rate",
+  ].join("\n")
+
+  type Recorded =
+    | { type: "request"; event: ToolRequestEvent }
+    | { type: "outcome"; event: ToolOutcomeEvent }
+    | { type: "invoked" }
+    | { type: "shell" }
+    | { type: "failed"; failure: ToolObservationFailure }
+
+  interface Memory {
+    events: Recorded[]
+    observer: ToolObservation
+    requests: ToolRequestState[]
+    outcomes: ToolTerminalOutcome[]
+  }
+
+  /** `rejectOn` names the methods that throw, so the isolation rows are real. */
+  function memory(...rejectOn: ("request" | "outcome")[]): Memory {
+    const events: Recorded[] = []
+    const refuse = new Set(rejectOn)
+    // What an ADAPTER reported it could not write. The judge drains this, which
+    // is the only way an adapter-side trace failure reaches a reader.
+    let reported: ToolObservationFailure[] = []
+    const observer: ToolObservation = {
+      async request(event) {
+        if (refuse.has("request")) throw new Error("the trace sink is full")
+        events.push({ type: "request", event })
+      },
+      async outcome(event) {
+        if (refuse.has("outcome")) throw new Error("the trace sink is full")
+        events.push({ type: "outcome", event })
+      },
+      async invoked() {
+        events.push({ type: "invoked" })
+      },
+      async shellOutcome() {
+        events.push({ type: "shell" })
+      },
+      failed(failure) {
+        events.push({ type: "failed", failure })
+        reported.push(failure)
+      },
+      takeFailures() {
+        const taken = reported
+        reported = []
+        return taken
+      },
+    }
+    return {
+      events,
+      observer,
+      get requests() {
+        return events.flatMap((e) => (e.type === "request" ? [e.event.request] : []))
+      },
+      get outcomes() {
+        return events.flatMap((e) => (e.type === "outcome" ? [e.event.outcome] : []))
+      },
+    }
+  }
+
+  function withLocus(startLine: number, endLine: number): Finding {
+    const f = finding({ route: "judge" })
+    f.locus = { file: "src/pay.ts", startLine, endLine }
+    return f
+  }
+
+  function noLocus(): Finding {
+    const f = finding({ route: "judge" })
+    f.locus = { file: "src/pay.ts" }
+    return f
+  }
+
+  /** A `Tools` whose `blame` throws the given value. */
+  function throwing(error: unknown) {
+    return {
+      blame: async () => {
+        throw error
+      },
+    } as never
+  }
+
+  const returning = (porcelain: string) => ({ blame: async () => porcelain }) as never
+
+  test("NO OBSERVER: the record is unchanged, byte for byte, and no id is drawn", async () => {
+    // The story's first acceptance clause. Both halves matter: an observer that
+    // appended an entry would be visible in the findings, and one that drew an
+    // id from the clock would shift every id minted after it — a record that
+    // differs from the unobserved one in a field nobody was looking at.
+    let ids = 0
+    const counting: Clock = { now: () => "2026-08-13T00:00:00.000Z", id: (p) => `${p}-${(ids += 1)}` }
+
+    const bare = await run([withLocus(12, 14)], { tools: returning(PORCELAIN), clock: counting })
+    const withoutObserver = ids
+    expect(withoutObserver).toBe(0)
+
+    const observed = await run([withLocus(12, 14)], {
+      tools: returning(PORCELAIN),
+      clock: counting,
+      toolObservation: memory().observer,
+    })
+
+    expect(JSON.stringify(observed.findings)).toBe(JSON.stringify(bare.findings))
+    expect(JSON.stringify(observed.warnings)).toBe(JSON.stringify(bare.warnings))
+    expect(observed.factChecksMadExecuted).toBe(bare.factChecksMadExecuted)
+    // And the non-vacuous half: an id IS drawn once an observer is present, so
+    // the zero above is a fact about the absent path and not about the clock.
+    expect(ids).toBeGreaterThan(withoutObserver)
+  })
+
+  test("NO PORT: the request is UNAVAILABLE, and no invocation is claimed", async () => {
+    // Not the same fact as "MAD chose not to ask". AD-13's second route is valid
+    // and a count that merged the two would report a run with no port as a run
+    // that had one and declined.
+    const trace = memory()
+    await run([withLocus(12, 14)], { toolObservation: trace.observer })
+
+    expect(trace.requests).toEqual([{ kind: "unavailable", why: "no-port" }])
+    expect(trace.outcomes).toEqual([
+      { kind: "not-executed", refusedAt: "core", why: "no repository tool port was available to this run" },
+    ])
+    expect(trace.events.some((e) => e.type === "invoked")).toBe(false)
+  })
+
+  test("NO LOCUS: the request was NOT MADE, which is a third thing again", async () => {
+    const trace = memory()
+    await run([noLocus()], { tools: returning(PORCELAIN), toolObservation: trace.observer })
+
+    expect(trace.requests).toEqual([{ kind: "not-made", why: "no-locus" }])
+    expect(trace.outcomes).toEqual([
+      { kind: "not-executed", refusedAt: "core", why: "the finding names no line range" },
+    ])
+    expect(trace.events.some((e) => e.type === "invoked")).toBe(false)
+  })
+
+  test("A CALL: the request carries run, finding, call and the RAW arguments", async () => {
+    const trace = memory()
+    await run([withLocus(12, 14)], { tools: returning(PORCELAIN), toolObservation: trace.observer })
+
+    const request = trace.events.find((e) => e.type === "request")!
+    expect(request.event.context.runId).toBe("run-1")
+    expect(request.event.context.findingId).toBe("f-1")
+    expect(request.event.context.tool).toBe("blame")
+    expect(request.event.context.observationId.length).toBeGreaterThan(0)
+    expect(request.event.request).toEqual({
+      kind: "made",
+      args: { path: "src/pay.ts", startLine: 12, endLine: 14 },
+    })
+    // The terminal reading shares the call's identity, which is the whole point
+    // of minting one: a reader joins a request to its outcome by the id rather
+    // than by adjacency in a file.
+    const outcome = trace.events.find((e) => e.type === "outcome")!
+    expect(outcome.event.context.observationId).toBe(request.event.context.observationId)
+    expect(outcome.event.outcome).toEqual({ kind: "executed" })
+  })
+
+  test("THE RANGE RECORDED IS THE RANGE ASKED OF GIT, clamp applied", async () => {
+    // A trace naming the finding's own end line would name a range git was never
+    // asked about — the same false sentence the citation head avoids.
+    //
+    // THE START LINE IS NOT 1, deliberately. The clamp is
+    // `startLine + MAX_BLAME_ROWS - 1`, so a locus starting at line 1 makes the
+    // clamped end equal to `MAX_BLAME_ROWS` itself — and an assertion against
+    // that constant would pass for an implementation that ignored the start line
+    // entirely. Starting at 7 separates the two answers.
+    const trace = memory()
+    await run([withLocus(7, 20000)], { tools: returning(PORCELAIN), toolObservation: trace.observer })
+
+    const request = trace.requests[0]!
+    expect(request.kind).toBe("made")
+    expect(request.kind === "made" ? request.args.startLine : -1).toBe(7)
+    expect(request.kind === "made" ? request.args.endLine : -1).toBe(7 + MAX_BLAME_ROWS - 1)
+    expect(request.kind === "made" ? request.args.endLine : -1).not.toBe(MAX_BLAME_ROWS)
+  })
+
+  test("THE REQUEST IS RECORDED BEFORE THE DELEGATION, not after it returns", async () => {
+    // Ordering, not wording. A request written after the call cannot distinguish
+    // a call that was never made from one whose answer never came back.
+    const order: string[] = []
+    const trace: ToolObservation = {
+      async request() {
+        order.push("request")
+      },
+      async outcome() {
+        order.push("outcome")
+      },
+      async invoked() {},
+      async shellOutcome() {},
+      failed() {},
+      takeFailures: () => [],
+    }
+    const tools = {
+      blame: async () => {
+        order.push("blame")
+        return PORCELAIN
+      },
+    } as never
+
+    await run([withLocus(12, 14)], { tools, toolObservation: trace })
+
+    expect(order).toEqual(["request", "blame", "outcome"])
+  })
+
+  test("ZERO ROWS: one EXECUTION and one failure, never a non-execution", async () => {
+    // The row the protocol is most easily got wrong on. The command ran; what it
+    // returned was unusable. Counting it as "did not execute" would discount a
+    // real execution, and `factChecksMadExecuted` keeps its own, narrower
+    // meaning — usable citations — untouched.
+    const trace = memory()
+    const result = await run([withLocus(12, 14)], {
+      tools: returning("nothing a parser can read"),
+      toolObservation: trace.observer,
+    })
+
+    expect(trace.outcomes).toEqual([
+      { kind: "executed-failed", failure: "git blame produced no blamed lines" },
+    ])
+    expect(result.factChecksMadExecuted).toBe(0)
+    expect(result.warnings.some((w) => w.code === "blame-unavailable")).toBe(true)
+  })
+
+  test("A THROW WITH NO EVIDENCE: the execution reading is UNKNOWN, never false", async () => {
+    // An interruption, or a port this tree did not write. MAD got no answer, and
+    // that says nothing whatever about whether git ran. Reading it as "no
+    // execution" would turn a blind spot into a measurement.
+    const trace = memory()
+    await run([withLocus(12, 14)], {
+      tools: throwing(new Error("the call never came back")),
+      toolObservation: trace.observer,
+    })
+
+    expect(trace.outcomes).toHaveLength(1)
+    expect(trace.outcomes[0]!.kind).toBe("unknown")
+  })
+
+  test("A PRE-SHELL REFUSAL: request observed, execution DID NOT OCCUR", async () => {
+    // The adapter refused the range before any shell ran, so there is no
+    // invocation to record and nothing an execution count may take from it.
+    const error = Object.assign(new Error("refusing to blame over that range"), {
+      toolFailure: { stage: "pre-shell", launch: "unproved" },
+    })
+    const trace = memory()
+    await run([withLocus(12, 14)], { tools: throwing(error), toolObservation: trace.observer })
+
+    expect(trace.outcomes[0]!.kind).toBe("not-executed")
+    expect(trace.outcomes[0]).toMatchObject({ refusedAt: "pre-shell" })
+    expect(trace.events.some((e) => e.type === "invoked")).toBe(false)
+  })
+
+  test("A NON-ZERO EXIT: invocation observed, execution UNKNOWN, exit retained", async () => {
+    const error = Object.assign(new Error("fatal: no such path"), {
+      toolFailure: { stage: "shell", exitCode: 128, launch: "unproved" },
+    })
+    const trace = memory()
+    await run([withLocus(12, 14)], { tools: throwing(error), toolObservation: trace.observer })
+
+    expect(trace.outcomes[0]).toMatchObject({ kind: "invoked-unknown", exitCode: 128 })
+  })
+
+  test("A LAUNCH THE HOST ITSELF REFUSED: execution did not occur", async () => {
+    // The one positive launch-failure signal the pinned host gives. Where it is
+    // present, "unknown" would be needlessly weak.
+    const error = Object.assign(new Error("bun: command not found: git"), {
+      toolFailure: { stage: "shell", exitCode: 1, launch: "failed" },
+    })
+    const trace = memory()
+    await run([withLocus(12, 14)], { tools: throwing(error), toolObservation: trace.observer })
+
+    expect(trace.outcomes[0]).toMatchObject({ kind: "not-executed", refusedAt: "launch" })
+  })
+
+  test("AN OBSERVER THAT REJECTS changes no verdict and is NOT a blame failure", async () => {
+    // The isolation clause. A trace that could not be written must not be
+    // readable as "the repository's history was missing from this verdict".
+    const bare = await run([withLocus(12, 14)], { tools: returning(PORCELAIN) })
+    const broken = await run([withLocus(12, 14)], {
+      tools: returning(PORCELAIN),
+      toolObservation: memory("request", "outcome").observer,
+    })
+
+    expect(JSON.stringify(broken.findings)).toBe(JSON.stringify(bare.findings))
+    expect(broken.factChecksMadExecuted).toBe(bare.factChecksMadExecuted)
+    expect(broken.warnings.some((w) => w.code === "blame-unavailable")).toBe(false)
+
+    const raised = broken.warnings.find((w) => w.code === "tool-observation-failed")
+    expect(raised).toBeDefined()
+    // Both writes for the one call failed and both are named, because a count
+    // read from this run is short by two events and not by one.
+    expect((raised!.detail as { failures: string[] }).failures).toHaveLength(2)
+  })
+
+  test("AND IT STILL RAN THE BLAME — the observer decides nothing", async () => {
+    let calls = 0
+    const tools = { blame: async () => ((calls += 1), PORCELAIN) } as never
+    const result = await run([withLocus(12, 14)], {
+      tools,
+      toolObservation: memory("request", "outcome").observer,
+    })
+
+    expect(calls).toBe(1)
+    expect(result.factChecksMadExecuted).toBe(1)
+  })
+
+  test("THE JOIN IS BY ORDER, AND THIS IS WHAT PINS IT (story 2-7a)", async () => {
+    // The port says an adapter fact belongs to the last request written. That is
+    // true because this loop is SEQUENTIAL and awaits its request before
+    // delegating — not because the arguments identify the call: both findings
+    // below carry the same path and the same range, which is legal and ordinary.
+    //
+    // A change that ran findings concurrently would interleave these events and
+    // fail here, rather than silently mis-joining a trace whose halves then
+    // describe different calls.
+    const events: string[] = []
+    const observer: ToolObservation = {
+      async request(event) {
+        events.push(`request ${event.context.findingId}`)
+      },
+      async outcome(event) {
+        events.push(`outcome ${event.context.findingId}`)
+      },
+      async invoked() {
+        events.push("invoked")
+      },
+      async shellOutcome() {
+        events.push("shell")
+      },
+      failed() {},
+      takeFailures: () => [],
+    }
+    // A `Tools` that writes the adapter's half through the same sink, as the
+    // real one does, so the interleaving under test is the real interleaving.
+    const tools = {
+      blame: async () => {
+        await observer.invoked({
+          tool: "blame",
+          args: { path: "src/pay.ts", startLine: 12, endLine: 14 },
+          argv: ["git", "blame"],
+          at: "2026-08-13T00:00:00.000Z",
+        })
+        await observer.shellOutcome({
+          tool: "blame",
+          args: { path: "src/pay.ts", startLine: 12, endLine: 14 },
+          exitCode: 0,
+          launch: "proved",
+          stderr: "",
+          at: "2026-08-13T00:00:00.000Z",
+        })
+        return PORCELAIN
+      },
+    } as never
+
+    const first = withLocus(12, 14)
+    const second = withLocus(12, 14)
+    second.id = "f-2"
+
+    await run([first, second], { tools, toolObservation: observer })
+
+    expect(events).toEqual([
+      "request f-1",
+      "invoked",
+      "shell",
+      "outcome f-1",
+      "request f-2",
+      "invoked",
+      "shell",
+      "outcome f-2",
+    ])
+  })
+
+  test("EVERY OBSERVATION GETS ITS OWN ID, so two identical calls are two rows", async () => {
+    const trace = memory()
+    const first = withLocus(12, 14)
+    const second = withLocus(12, 14)
+    second.id = "f-2"
+
+    await run([first, second], { tools: returning(PORCELAIN), toolObservation: trace.observer })
+
+    const ids = trace.events.flatMap((e) =>
+      e.type === "request" ? [e.event.context.observationId] : [],
+    )
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  test("A TRACE FAILURE NAMES THE OBSERVATION IT BELONGED TO, and the count stays exact", async () => {
+    // "Twenty writes failed" and "which twenty" are different facts, and only the
+    // second says what the trace is missing. The list is bounded and the total is
+    // not, so a reader is never left inferring one from the other.
+    const first = withLocus(12, 14)
+    const second = withLocus(12, 14)
+    second.id = "f-2"
+
+    const result = await run([first, second], {
+      tools: returning(PORCELAIN),
+      toolObservation: memory("request", "outcome").observer,
+    })
+
+    const raised = result.warnings.find((w) => w.code === "tool-observation-failed")!
+    const detail = raised.detail as {
+      total: number
+      unlisted: number
+      failures: { where: string; write: string; observationId?: string }[]
+    }
+    expect(detail.total).toBe(4)
+    expect(detail.unlisted).toBe(0)
+    expect(detail.failures.every((f) => f.where === "core")).toBe(true)
+    expect(detail.failures.every((f) => typeof f.observationId === "string")).toBe(true)
+    // Two observations, two ids, so the four failures name which call each
+    // belonged to rather than reading as four copies of one sentence.
+    expect(new Set(detail.failures.map((f) => f.observationId)).size).toBe(2)
+  })
+
+  test("THE DETAIL IS BOUNDED AND THE TOTAL IS NOT — one broken sink, many findings", async () => {
+    // A sink that rejects fails EVERY write of EVERY finding, so an uncapped
+    // detail grows with the size of the run and carries the same sentence over
+    // and over. The count is what a reader needs in full; the list is what they
+    // need a sample of.
+    const many = Array.from({ length: 25 }, (_, index) => {
+      const f = withLocus(12, 14)
+      f.id = `f-${index + 1}`
+      return f
+    })
+
+    const result = await run(many, {
+      tools: returning(PORCELAIN),
+      toolObservation: memory("request", "outcome").observer,
+    })
+
+    const detail = result.warnings.find((w) => w.code === "tool-observation-failed")!.detail as {
+      total: number
+      unlisted: number
+      failures: unknown[]
+    }
+    expect(detail.total).toBe(50)
+    expect(detail.failures).toHaveLength(20)
+    expect(detail.unlisted).toBe(30)
+    expect(detail.failures.length + detail.unlisted).toBe(detail.total)
+  })
+
+  test("A REAL BLAME FAILURE AND A TRACE FAILURE ARE TWO WARNINGS, not one", async () => {
+    // The non-vacuous sibling of the isolation row: when the blame really does
+    // fail AND the observer really does reject, both codes appear, each saying
+    // its own thing.
+    const result = await run([withLocus(12, 14)], {
+      tools: throwing(new Error("not a git repository")),
+      toolObservation: memory("outcome").observer,
+    })
+
+    expect(result.warnings.some((w) => w.code === "blame-unavailable")).toBe(true)
+    expect(result.warnings.some((w) => w.code === "tool-observation-failed")).toBe(true)
   })
 })

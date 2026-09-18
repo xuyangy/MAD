@@ -23,6 +23,7 @@ import {
 import type { Warning } from "../../core/domain/warning.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
+import type { ToolObservation } from "../../core/ports/tool-observation.ts"
 import { oneLine } from "../../core/prompt/material.ts"
 import { frameForHostAgent, review } from "../../core/run/review.ts"
 import { NoCandidatesError, type Pin } from "../../core/roster/select.ts"
@@ -393,7 +394,20 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // built here beside `Repo` because they take the same two inputs and
           // have the same read-only guarantee. `git blame` needs `$` and
           // `worktree` and nothing else the plugin holds.
-          const tools = opencodeTools({ $, worktree })
+          //
+          // STORY 2-7a — THE OBSERVER GOES TO BOTH HALVES FROM ONE VALUE. The
+          // judge owns the decision to ask for a tool call; only this adapter
+          // knows whether a shell ran. A caller that wired one and not the other
+          // would get half a trace and no error, so the same variable is handed
+          // to the factory here and to `review()` below.
+          //
+          // NO ORDINARY RUN SUPPLIES ONE, and none is built here: the
+          // implementation belongs to the evaluation harness (story 2-7b), which
+          // constructs ITS tools through this same `opencodeTools` factory rather
+          // than through a second imitation of this wiring. `undefined` is a
+          // supported value and the record it produces is the unobserved one.
+          const toolObservation: ToolObservation | undefined = undefined
+          const tools = opencodeTools({ $, worktree, toolObservation })
           let change
           try {
             change = await repo.change(args.target)
@@ -483,6 +497,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // The core DRIVES it; the core never constructs one (AD-1). This is
             // the only place in the tree a `Tools` implementation is built.
             tools,
+            // Story 2-7a — the core half of the same observer. See its
+            // construction above; the two must come from one value.
+            toolObservation,
             // AD-6 — the adapter's OWN truncations ride in beside the roster's.
             // `review()` copies `priorWarnings` onto the record verbatim, so this
             // is the supported way for this layer to be heard at all.

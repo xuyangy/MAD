@@ -32,8 +32,12 @@ describe("the warning vocabulary (AD-6)", () => {
     // split with nobody deciding which side it belonged on. IT DID IT AGAIN
     // (2026-09-10, story 2.3): the two codes below arrived together and land on
     // OPPOSITE sides of the split, which is precisely the decision a count pin
-    // exists to force somebody to make out loud.
-    expect(WARNING_CODES).toHaveLength(18)
+    // exists to force somebody to make out loud. AND AGAIN (story 2-7a):
+    // `tool-observation-failed` had to be argued against `blame-unavailable`
+    // here, in this file, before it could reach the renderer — which is exactly
+    // the argument a reader needs, because the two codes are about the same
+    // block of the judge and mean opposite things about the evidence.
+    expect(WARNING_CODES).toHaveLength(19)
   })
 
   test("`usage-unquantified` IS A DEGRADATION, not a disclosure (story 2.3)", () => {
@@ -85,6 +89,28 @@ describe("the warning vocabulary (AD-6)", () => {
     // safe default, and this asserts the default was the intended answer.
     expect(WARNING_CODES).toContain("blame-unavailable")
     expect(DISCLOSURE_CODES.has("blame-unavailable")).toBe(false)
+  })
+
+  test("`tool-observation-failed` IS A DEGRADATION, not a disclosure (story 2-7a)", () => {
+    // The classification the count pin above forced. A run that could not record
+    // what it did with its tools is worth less than it looks to anyone counting
+    // those actions — the trace is short and missing is not zero — and "worth
+    // less than it looks" is what AD-6 governs. Filing it as a disclosure would
+    // put an incomplete record of MAD's own actions under a heading that says
+    // the run is fine.
+    expect(WARNING_CODES).toContain("tool-observation-failed")
+    expect(DISCLOSURE_CODES.has("tool-observation-failed")).toBe(false)
+  })
+
+  test("IT IS NOT `blame-unavailable`, and the two are not interchangeable (story 2-7a)", () => {
+    // The distinction the judge keeps in control flow, asserted in the
+    // vocabulary too. `blame-unavailable` says a verdict was reached without the
+    // repository's history; `tool-observation-failed` says the run's record of
+    // its own actions is short. A run can raise either without the other, and a
+    // reader who conflated them would read a trace bug as missing evidence.
+    expect(new Set(WARNING_CODES).has("blame-unavailable")).toBe(true)
+    expect(new Set(WARNING_CODES).has("tool-observation-failed")).toBe(true)
+    expect("tool-observation-failed").not.toBe("blame-unavailable")
   })
 
   test("every code is unique", () => {

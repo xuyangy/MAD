@@ -630,10 +630,22 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
 
   test("THE PORT IS BUILT, and from the same two inputs `Repo` is built from", async () => {
     const source = await pluginSource()
-    expect(source).toContain("opencodeTools({ $, worktree })")
+    // Story 2-7a widened the construction site by one field. The two inputs this
+    // test has always been about are still both here and still the same two
+    // `Repo` gets; what is new is that the observer rides along with them.
+    expect(source).toContain("opencodeTools({ $, worktree, toolObservation })")
     // Beside `Repo`, not somewhere else: both ports describe the same worktree,
     // and a run whose blame reads a different tree than its diff is nonsense.
     expect(source).toContain("opencodeRepo({ $, worktree })")
+  })
+
+  test("AND IT IS BUILT ONCE — one factory, not a second imitation of it (story 2-7a)", async () => {
+    // `opencodeTools` is the shared factory: the evaluation harness constructs
+    // its tools through the SAME function, so a trace gathered by the harness is
+    // gathered from the same code path a user's run takes. A second construction
+    // site here is how those two quietly become two different adapters.
+    const source = await pluginSource()
+    expect(source.split("opencodeTools(").length - 1).toBe(1)
   })
 
   test("AND IT REACHES `review()` — the line whose deletion nothing else notices", async () => {
@@ -655,6 +667,77 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     const call = withoutIt.slice(withoutIt.indexOf("await review({"))
     const literal = call.slice(0, call.indexOf("\n          })"))
     expect(literal).not.toMatch(/^\s*tools,\s*$/m)
+  })
+
+  /**
+   * STORY 2-7a — THE OBSERVER REACHES BOTH HALVES, FROM ONE VALUE.
+   *
+   * The same gap as the one above, one layer along and worse: the observer has
+   * to arrive at the FACTORY (which alone knows whether a shell ran) and at
+   * `review()` (whose judge alone knows which finding asked). Both fields are
+   * optional by design, so deleting either leaves typecheck clean and every test
+   * that injects its own port green — and the consequence is a trace that is
+   * half-present and reads as though the missing half did not happen. Missing is
+   * not zero, which is the one thing the protocol's tool endpoints must not get
+   * wrong.
+   *
+   * STRUCTURAL, for this file's stated reason: every run here uses an
+   * unreachable server URL, so no finding is ever raised and the judge's blame
+   * block is never entered. The behavioural half is
+   * `adapters/opencode/tools-observation.test.ts`, over real git.
+   */
+  test("THE OBSERVER REACHES `review()` TOO — the second line nothing else notices", async () => {
+    const source = await pluginSource()
+    const call = source.slice(source.indexOf("await review({"))
+    const literal = call.slice(0, call.indexOf("\n          })"))
+    expect(literal).toMatch(/^\s*toolObservation,\s*$/m)
+  })
+
+  test("and that assertion can FAIL too — the negative control for the observer", async () => {
+    const withoutIt = (await pluginSource()).replace(/\n\s*toolObservation,\n/, "\n")
+    const call = withoutIt.slice(withoutIt.indexOf("await review({"))
+    const literal = call.slice(0, call.indexOf("\n          })"))
+    expect(literal).not.toMatch(/^\s*toolObservation,\s*$/m)
+  })
+
+  /**
+   * ONE VALUE, NOT TWO.
+   *
+   * Two separately-built observers would satisfy both assertions above and
+   * produce a trace whose core half and adapter half belong to different
+   * objects — every request in one sink, every invocation in another, and a join
+   * between them that can never be made. What makes the join real is that ONE
+   * binding is declared and both call sites read it, so that is what is pinned:
+   * exactly one declaration, and both uses spelled as the bare identifier.
+   */
+  const declarations = (source: string) =>
+    source.split(/\bconst toolObservation\b/).length - 1
+
+  test("ONE VALUE, NOT TWO — one binding, read by both call sites", async () => {
+    const source = await pluginSource()
+
+    expect(declarations(source)).toBe(1)
+    expect(source).toContain("const toolObservation: ToolObservation | undefined")
+    // Both readers, by the bare name. A second `const toolObservation` anywhere
+    // in the file would make the two sites able to refer to different objects.
+    expect(source).toContain("opencodeTools({ $, worktree, toolObservation })")
+    const call = source.slice(source.indexOf("await review({"))
+    expect(call.slice(0, call.indexOf("\n          })"))).toMatch(/^\s*toolObservation,\s*$/m)
+  })
+
+  test("and THAT can fail — a second binding is what the count is for", async () => {
+    // The negative control the substring count never had: a file with two
+    // declarations still contains every string the assertions above look for,
+    // and is exactly the shape that silently splits the trace in half.
+    const split = (await pluginSource()).replace(
+      "const tools = opencodeTools({ $, worktree, toolObservation })",
+      "const toolObservation2: ToolObservation | undefined = undefined\n" +
+        "          const toolObservation = toolObservation2\n" +
+        "          const tools = opencodeTools({ $, worktree, toolObservation })",
+    )
+
+    expect(split).toContain("opencodeTools({ $, worktree, toolObservation })")
+    expect(declarations(split)).not.toBe(1)
   })
 })
 

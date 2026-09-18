@@ -10,7 +10,14 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { MAX_BLAME_ROWS, parseBlamePorcelain, renderBlameCitation } from "./blame.ts"
+import { TOOL_FAILURE_EVIDENCE } from "../ports/tool-observation.ts"
+import {
+  BLAME_OUTCOME,
+  blameFailureOutcome,
+  MAX_BLAME_ROWS,
+  parseBlamePorcelain,
+  renderBlameCitation,
+} from "./blame.ts"
 
 const SHA_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 const SHA_B = "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567"
@@ -189,5 +196,109 @@ describe("renderBlameCitation", () => {
     const citation = renderBlameCitation("src/pay.ts", 1, 3, [])
     expect(citation).toContain("no blamed lines")
     expect(citation.toLowerCase()).not.toContain("contradict")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7a — the terminal readings, mapped once and tested here
+// ---------------------------------------------------------------------------
+
+/**
+ * `core/stages/judge.test.ts` drives these through the stage, which is where the
+ * BRANCHES are chosen. This block tests the MAPPING itself — the sentence each
+ * branch turns into — because two of its readings are unreachable from the
+ * opencode adapter and reachable from any other `Tools` implementation, and a
+ * reading only the stage can reach is a reading nothing checks.
+ */
+describe("the five terminal readings (story 2-7a)", () => {
+  /** A thrown value carrying an adapter's structural evidence. */
+  function thrown(evidence: unknown): unknown {
+    return Object.assign(new Error("boom"), { [TOOL_FAILURE_EVIDENCE]: evidence })
+  }
+
+  test("NO PORT and NO LOCUS are both `not-executed`, and say WHICH", () => {
+    // Two different facts with one reading: nothing ran either way, and the
+    // `why` is what stops a count reading "MAD had no port" as "MAD declined".
+    expect(BLAME_OUTCOME.noPort()).toEqual({
+      kind: "not-executed",
+      refusedAt: "core",
+      why: "no repository tool port was available to this run",
+    })
+    expect(BLAME_OUTCOME.noLocus()).toEqual({
+      kind: "not-executed",
+      refusedAt: "core",
+      why: "the finding names no line range",
+    })
+    const noPort = BLAME_OUTCOME.noPort()
+    const noLocus = BLAME_OUTCOME.noLocus()
+    expect(noPort.kind === "not-executed" ? noPort.why : "").not.toBe(
+      noLocus.kind === "not-executed" ? noLocus.why : "",
+    )
+  })
+
+  test("A PARSED RESULT IS ONE EXECUTION; ZERO ROWS IS ONE EXECUTION AND ONE FAILURE", () => {
+    // The row the protocol is most easily got wrong on. Both ran.
+    expect(BLAME_OUTCOME.executed()).toEqual({ kind: "executed" })
+    expect(BLAME_OUTCOME.noRows()).toEqual({
+      kind: "executed-failed",
+      failure: "git blame produced no blamed lines",
+    })
+  })
+
+  test("NO EVIDENCE IS `unknown` — including from a port this tree did not write", () => {
+    expect(blameFailureOutcome(new Error("the call never came back"), "why")).toEqual({
+      kind: "unknown",
+      why: "why",
+    })
+    expect(blameFailureOutcome("a string", "why")).toEqual({ kind: "unknown", why: "why" })
+    expect(blameFailureOutcome(undefined, "why")).toEqual({ kind: "unknown", why: "why" })
+  })
+
+  test("A PRE-SHELL REFUSAL IS `not-executed`, and so is `not-attempted`", () => {
+    expect(blameFailureOutcome(thrown({ stage: "pre-shell", launch: "not-attempted" }), "why")).toEqual({
+      kind: "not-executed",
+      refusedAt: "pre-shell",
+      why: "why",
+    })
+    // The same claim arriving on the other field. A shell stage that reports
+    // nothing was attempted is a contradiction in the evidence, and the safe
+    // reading of it is still "nothing ran" rather than an execution.
+    expect(blameFailureOutcome(thrown({ stage: "shell", launch: "not-attempted" }), "why")).toEqual({
+      kind: "not-executed",
+      refusedAt: "pre-shell",
+      why: "why",
+    })
+  })
+
+  test("A HOST-REFUSED LAUNCH IS `not-executed`, at the launch", () => {
+    expect(
+      blameFailureOutcome(thrown({ stage: "shell", exitCode: 1, launch: "failed" }), "why"),
+    ).toEqual({ kind: "not-executed", refusedAt: "launch", why: "why" })
+  })
+
+  test("A PROVED LAUNCH THAT FAILED IS ONE EXECUTION, not an unknown", () => {
+    // UNREACHABLE FROM THE OPENCODE ADAPTER, where a proved launch means a zero
+    // exit and a zero exit does not throw — and reachable from any other `Tools`
+    // implementation. Reading it as `invoked-unknown` would discard an execution
+    // the evidence establishes, which is an undercount of the endpoint this
+    // whole seam exists to measure.
+    expect(
+      blameFailureOutcome(thrown({ stage: "shell", exitCode: 128, launch: "proved" }), "the rate check"),
+    ).toEqual({ kind: "executed-failed", failure: "the rate check" })
+  })
+
+  test("A NON-ZERO EXIT WITH NO LAUNCH EVIDENCE IS `invoked-unknown`, exit retained", () => {
+    expect(
+      blameFailureOutcome(thrown({ stage: "shell", exitCode: 128, launch: "unproved" }), "why"),
+    ).toEqual({ kind: "invoked-unknown", exitCode: 128, why: "why" })
+  })
+
+  test("A SHELL STAGE WITH NO USABLE EXIT CODE IS `unknown`, never `invoked-unknown`", () => {
+    // `invoked-unknown` carries an exit code as a required field. Without one
+    // there is nothing to report, and inventing a zero would read as a success.
+    expect(blameFailureOutcome(thrown({ stage: "shell", launch: "unproved" }), "why")).toEqual({
+      kind: "unknown",
+      why: "why",
+    })
   })
 })

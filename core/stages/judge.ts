@@ -102,15 +102,30 @@ import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { JudgeCounts } from "../domain/run-record.ts"
 import type { Warning } from "../domain/warning.ts"
 import { anonymize, type AnonymizedTranscript } from "../judge/anonymize.ts"
-import { BLAME_KIND, MAX_BLAME_ROWS, parseBlamePorcelain, renderBlameCitation } from "../judge/blame.ts"
+import {
+  BLAME_KIND,
+  BLAME_OUTCOME,
+  blameFailureOutcome,
+  MAX_BLAME_ROWS,
+  parseBlamePorcelain,
+  renderBlameCitation,
+} from "../judge/blame.ts"
 import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "../judge/slots.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
-import type { Clock } from "../ports/clock.ts"
 import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
-import { settlementOf } from "./settlement.ts"
+import type {
+  ToolCallContext,
+  ToolObservation,
+  ToolObservationFailure,
+  ToolObservationWrite,
+  ToolRequestState,
+  ToolTerminalOutcome,
+} from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
+import { settlementOf } from "./settlement.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
 
@@ -241,6 +256,19 @@ export interface JudgeInput {
    * attempt also asks `mayISpend` and then this port. See `runJudgeTurn`.
    */
   admission?: RequestAdmission
+  /**
+   * Story 2-7a — the tool-action observer (`core/ports/tool-observation.ts`).
+   *
+   * Optional. ABSENT, this stage takes exactly the branches it takes without it,
+   * mints no id, raises no warning, and every byte of the record and the
+   * rendered run is unchanged. Present, the four blame decision points below are
+   * recorded as tool-action facts beside — never instead of — the history
+   * entries a human reads.
+   *
+   * It observes; it decides nothing. No verdict, no count and no citation reads
+   * it, and `factChecksMadExecuted` is untouched by it.
+   */
+  toolObservation?: ToolObservation
 }
 
 export interface JudgeStageResult extends JudgeCounts {
@@ -751,15 +779,36 @@ function buildAggregatePrompt(
 // ---------------------------------------------------------------------------
 
 /**
- * How many blame failures the warning MESSAGE names before it stops listing and
- * starts counting. The full set is always in the warning's `detail`.
+ * How many failures a warning MESSAGE names before it stops listing and starts
+ * counting. Shared by the two accumulating warnings this stage raises — the
+ * blame failures and the trace failures — because the reason is the same one in
+ * both: a message that lists fifty of anything teaches the reader to skip the
+ * block. Named for failures rather than for blame, since it is no longer only
+ * blame's.
  */
-const MAX_BLAME_FAILURES_SHOWN = 5
+const MAX_FAILURES_SHOWN = 5
 
-function blameExamples(failures: readonly string[]): string {
-  const shown = failures.slice(0, MAX_BLAME_FAILURES_SHOWN)
+function failureExamples(failures: readonly string[]): string {
+  const shown = failures.slice(0, MAX_FAILURES_SHOWN)
   const rest = failures.length - shown.length
   return `${shown.join("; ")}${rest > 0 ? ` (+${rest} more, all of them in this warning's detail).` : "."}`
+}
+
+/**
+ * How many trace failures the warning's DETAIL keeps.
+ *
+ * Unlike the blame failures, this list is bounded: one broken sink fails every
+ * write of every finding, so an unbounded detail would grow with the size of the
+ * run and carry fifty copies of one sentence. The TOTAL is always exact and is
+ * reported separately — a capped list plus an exact count says more than an
+ * uncapped list of duplicates.
+ */
+const MAX_OBSERVATION_FAILURES_KEPT = 20
+
+/** One trace failure, as the warning's message names it. */
+function observationFailureLine(failure: ToolObservationFailure): string {
+  const where = failure.observationId === undefined ? failure.where : `${failure.where} ${failure.observationId}`
+  return `${where}/${failure.write} — ${oneLine(failure.why)}`
 }
 
 /** MAD's own words for what a check without tools is worth (AD-13). */
@@ -863,6 +912,60 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * scanning one row sees it there.
    */
   const blameFailures: string[] = []
+
+  /**
+   * Story 2-7a — every observation this stage could not write, folded into ONE
+   * `tool-observation-failed` warning.
+   *
+   * SEPARATE FROM `blameFailures` IN CONTROL FLOW, not merely in wording. An
+   * observer that rejects has said nothing about git: reporting it under
+   * `blame-unavailable` would tell a reader the repository's history was missing
+   * from a verdict it was in fact present for, and would put a trace bug in
+   * MAD's voice as a repository fact.
+   */
+  const observationFailures: ToolObservationFailure[] = []
+  /** Exact, even where the list above stopped keeping examples. */
+  let observationFailureCount = 0
+
+  /**
+   * Keep a trace failure: the count always, the failure itself up to the bound.
+   *
+   * The core's own failures are kept HERE rather than pushed through the
+   * observer's `failed`, because the observer is the thing that just failed and
+   * a record that depends on it would be lost exactly when it is needed. The
+   * adapter has no such fallback — it holds no run record — so its failures come
+   * back through `takeFailures` below and land in this same list.
+   */
+  const keepObservationFailure = (failure: ToolObservationFailure): void => {
+    observationFailureCount += 1
+    if (observationFailures.length < MAX_OBSERVATION_FAILURES_KEPT) observationFailures.push(failure)
+  }
+
+  /**
+   * Write one tool-action fact, or record that it could not be written.
+   *
+   * AWAITED BY EVERY CALLER. The request event has to be durable before the
+   * delegation it describes, so that a trace carrying an invocation with no
+   * request in front of it is an integrity failure rather than a race.
+   */
+  const observe = async (
+    write: ToolObservationWrite,
+    observationId: string,
+    send: (sink: ToolObservation) => Promise<void>,
+  ): Promise<void> => {
+    const sink = input.toolObservation
+    if (sink === undefined) return
+    try {
+      await send(sink)
+    } catch (error) {
+      keepObservationFailure({
+        where: "core",
+        write,
+        observationId,
+        why: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 
   // AD-6b — the MODEL behind a slot id. ONE helper, in `core/domain/roster.ts`,
   // shared with `core/stages/debate.ts` rather than copied into it (story 7, code
@@ -1312,7 +1415,37 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         ? `(no locus)`
         : `${oneLine(locus.file)}:${locus.startLine ?? "?"}-${locus.endLine ?? "?"}`
 
+    // THE SAME FOUR OUTCOMES, ALSO RECORDED AS TOOL-ACTION FACTS (story 2-7a).
+    //
+    // `evaluation-protocol.md` §5 counts tool REQUESTS and tool EXECUTIONS
+    // separately, and neither is readable from the entries below: the path and
+    // the range survive only inside their English prose, and an entry saying a
+    // citation was produced is not the same claim as "git ran". So each branch
+    // also writes a request event and one terminal reading, phrased in
+    // `core/judge/blame.ts` so this block chooses a branch and not a wording.
+    //
+    // NOTHING HERE IS MINTED WHEN NO OBSERVER IS PRESENT — not an id, not a
+    // timestamp — because an id drawn from the clock would move every id after
+    // it and the run's bytes with it.
+    const callContext: ToolCallContext | undefined =
+      input.toolObservation === undefined
+        ? undefined
+        : { runId, findingId: finding.id, observationId: clock.id("observation"), tool: "blame" }
+    const observeRequest = async (request: ToolRequestState): Promise<void> => {
+      if (callContext === undefined) return
+      await observe("request", callContext.observationId, (sink) =>
+        sink.request({ context: callContext, request, at: clock.now() }),
+      )
+    }
+    const observeOutcome = async (outcome: ToolTerminalOutcome): Promise<void> => {
+      if (callContext === undefined) return
+      await observe("outcome", callContext.observationId, (sink) =>
+        sink.outcome({ context: callContext, outcome, at: clock.now() }),
+      )
+    }
+
     if (input.tools === undefined) {
+      await observeRequest({ kind: "unavailable", why: "no-port" })
       // AD-13's SECOND route, unchanged and still valid — this is not a
       // degradation and raises no warning. It is recorded because it is the ONLY
       // place the record says which of the two routes ran.
@@ -1326,7 +1459,9 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           `check below is whatever the checking model did with its own tools and reported ` +
           `having done. That is a valid route and it is not proof.`,
       })
+      await observeOutcome(BLAME_OUTCOME.noPort())
     } else if (locus === undefined || locus.startLine === undefined || locus.endLine === undefined) {
+      await observeRequest({ kind: "not-made", why: "no-locus" })
       // A legal state, not an error: `core/domain/finding.ts` says a finding with
       // no single site carries `file` only. Recorded distinguishably from "blame
       // ran and found no contradiction", which is the whole point of the entry.
@@ -1340,6 +1475,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           `\`git blame\` to be run over. Nothing was checked against the repository's history ` +
           `and nothing was contradicted — those are different facts and this is the first.`,
       })
+      await observeOutcome(BLAME_OUTCOME.noLocus())
     } else {
       // NO CANCELLATION CHECK HERE, and that is a measured answer rather than an
       // omission (ledger triage 2026-09-09). The review filed "a cancelled run
@@ -1350,17 +1486,34 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // envelope, which `stoppedHere` strands on. A guard added here was probed
       // and could not be reached from either direction, so it was removed rather
       // than left as a branch no run can enter.
+
+      // THE RANGE ASKED OF GIT IS BOUNDED, not only the citation rendered from
+      // it (ledger triage 2026-09-09). `MAX_BLAME_ROWS` trimmed the OUTPUT, so
+      // a finding citing lines 1-20000 still asked git to blame twenty thousand
+      // lines and `parseBlamePorcelain` still parsed all of it, to throw away
+      // all but forty. No new dial: this is the existing constant applied one
+      // step earlier, where it is the same answer for the same reason — a
+      // finding whose locus spans more lines than this is not pointing at a
+      // line. The citation states the narrowing, because a head that names a
+      // range git was never asked about is a false sentence.
+      const askedEnd = Math.min(locus.endLine, locus.startLine + MAX_BLAME_ROWS - 1)
+
+      // BEFORE THE DELEGATION, AND AWAITED. The trace has to be able to tell a
+      // call that was never made from one whose answer never came back, which it
+      // cannot do if the request is written after the call returns. The range
+      // recorded is the one ASKED OF GIT, clamp applied: a trace naming the
+      // finding's own end line would name a range git was never asked about.
+      await observeRequest({
+        kind: "made",
+        args: { path: locus.file, startLine: locus.startLine, endLine: askedEnd },
+      })
+
+      // ONE TERMINAL READING PER CALL, EMITTED BELOW THE `catch` RATHER THAN
+      // INSIDE EITHER ARM. An observation failure must not be able to enter the
+      // blame failure path, and the two are kept apart here in control flow
+      // rather than by wording.
+      let terminal: ToolTerminalOutcome | undefined
       try {
-        // THE RANGE ASKED OF GIT IS BOUNDED, not only the citation rendered from
-        // it (ledger triage 2026-09-09). `MAX_BLAME_ROWS` trimmed the OUTPUT, so
-        // a finding citing lines 1-20000 still asked git to blame twenty thousand
-        // lines and `parseBlamePorcelain` still parsed all of it, to throw away
-        // all but forty. No new dial: this is the existing constant applied one
-        // step earlier, where it is the same answer for the same reason — a
-        // finding whose locus spans more lines than this is not pointing at a
-        // line. The citation states the narrowing, because a head that names a
-        // range git was never asked about is a false sentence.
-        const askedEnd = Math.min(locus.endLine, locus.startLine + MAX_BLAME_ROWS - 1)
         const porcelain = await input.tools.blame(locus.file, locus.startLine, askedEnd)
         const blamed = parseBlamePorcelain(porcelain)
         if (blamed.length === 0) {
@@ -1377,6 +1530,11 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
               `blamed lines. No citation was produced, so nothing here was contradicted OR ` +
               `confirmed by the repository's history.`,
           })
+          // ONE EXECUTION AND ONE FAILURE, not a non-execution. The command ran;
+          // what it returned was unusable. `factChecksMadExecuted` keeps its own
+          // meaning — usable citations — and is deliberately not reconciled with
+          // this number.
+          terminal = BLAME_OUTCOME.noRows()
         } else {
           blameCitation = renderBlameCitation(locus.file, locus.startLine, askedEnd, blamed)
           madExecuted = true
@@ -1395,6 +1553,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
             kind: BLAME_KIND.executed,
             body: blameCitation,
           })
+          terminal = BLAME_OUTCOME.executed()
         }
       } catch (error) {
         // A bad path, a line past end of file, an uncommitted line, a shallow
@@ -1414,7 +1573,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
             `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
             `from every verdict below.`,
         })
+        // WHAT THE ADAPTER KNEW, WHERE IT SAID SO. A `Tools` implementation may
+        // attach the evidence the core cannot see — whether a shell ran at all —
+        // and without it the reading is `unknown`. A thrown call is never read
+        // as "git did not execute": that would turn a blind spot into a
+        // measurement.
+        terminal = blameFailureOutcome(error, oneLine(why))
       }
+      if (terminal !== undefined) await observeOutcome(terminal)
     }
 
     const factSlot = slots.byRole["fact-check"]
@@ -1762,7 +1928,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         `findings were decided without the repository's own record of who last changed the lines ` +
         `they cite. THIS IS NOT "the history contradicts nothing" — nothing was read either way. ` +
         `A bad path, a line past the end of a file, an uncommitted line and a shallow clone all ` +
-        `land here. Failures: ${blameExamples(blameFailures)}`,
+        `land here. Failures: ${failureExamples(blameFailures)}`,
       // THE FULL LIST LIVES HERE, and only here (code review 2026-09-09). The
       // message used to join every failure into itself, so a run over a
       // non-git worktree printed one line per finding inside a single warning
@@ -1771,6 +1937,64 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // level down. `detail` is the field for the whole set; the message shows
       // enough to recognise the shape and says how many it did not show.
       detail: { failures: [...blameFailures] },
+    })
+  }
+
+  // STORY 2-7a — A TRACE THAT COULD NOT BE WRITTEN, UNDER ITS OWN CODE.
+  //
+  // Its own code rather than `blame-unavailable` for that warning's own reason,
+  // one layer up: `blame-unavailable` asserts that the repository's history is
+  // missing from a verdict, which on a run where every blame ran and only the
+  // OBSERVER failed would be a falsehood in MAD's own voice. What failed here is
+  // MAD's record of what it did, and the fact a reader needs is that the run's
+  // tool-action trace is incomplete — never that the run's evidence is.
+  //
+  // It says nothing about what an incomplete trace does to an evaluation's
+  // coverage. That is the reader's judgement (story 2-7b), and a stage that
+  // guessed at it would be computing a denominator here.
+  //
+  // THE ADAPTER'S FAILURES COME BACK HERE, and they have to: this stage is the
+  // only layer with a run record to raise a warning into, and the adapter is the
+  // only layer that knows whether a shell ran. Without this drain, a run whose
+  // every `invoked` and `shellOutcome` write failed would render byte-identical
+  // to a fully traced one — a trace with a hole in exactly the half that carries
+  // the executions, and nothing anywhere saying so.
+  //
+  // `takeFailures` is contracted not to throw, and is guarded anyway: an
+  // observer that breaks on the way to reporting its own breakage is still a
+  // fact about this run's trace.
+  if (input.toolObservation !== undefined) {
+    try {
+      for (const failure of input.toolObservation.takeFailures()) keepObservationFailure(failure)
+    } catch (error) {
+      keepObservationFailure({
+        where: "core",
+        write: "outcome",
+        why:
+          `the observer could not report its own failures: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+
+  if (observationFailureCount > 0) {
+    const lines = observationFailures.map(observationFailureLine)
+    const unlisted = observationFailureCount - observationFailures.length
+    warnings.push({
+      code: "tool-observation-failed",
+      stage: "judge",
+      message:
+        `MAD COULD NOT RECORD WHAT IT DID WITH ITS TOOLS: ${observationFailureCount} ` +
+        `tool-action observation(s) failed to write. THE VERDICTS ARE UNAFFECTED and so is ` +
+        `every citation — this is the run's TRACE, not its evidence. A tool-action count read ` +
+        `from this run is missing at least that many events, and missing is not zero. ` +
+        `Failures: ${failureExamples(lines)}`,
+      // THE COUNT IS EXACT AND THE LIST IS BOUNDED, and the two are separate
+      // fields so a reader is never left inferring one from the other. Each
+      // kept failure names the layer, the write and the observation it belonged
+      // to, because "twenty writes failed" and "which twenty" are different
+      // facts and only the second tells a reader what the trace is missing.
+      detail: { total: observationFailureCount, unlisted, failures: [...observationFailures] },
     })
   }
 

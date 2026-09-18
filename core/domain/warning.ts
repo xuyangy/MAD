@@ -214,6 +214,36 @@ export const WARNING_CODES = [
    */
   "blame-unavailable",
   /**
+   * AD-6 / `evaluation-protocol.md` §5 (story 2-7a) — MAD COULD NOT RECORD WHAT
+   * IT DID WITH ITS TOOLS.
+   *
+   * The nineteenth code. A tool-action observer was injected and rejected, so at
+   * least one request or terminal reading is missing from the run's trace. The
+   * verdicts, the citations and the evidence are untouched — the observer
+   * decides nothing — and a count drawn from this run's trace is short by at
+   * least that many events.
+   *
+   * WHY IT MEETS THE BAR THE LAST SIX CODES SET. **No existing code can carry
+   * the fact without lying.** `blame-unavailable` asserts that the repository's
+   * history is missing from a verdict, which on a run where every blame ran and
+   * only the trace failed is a falsehood in MAD's own voice, and the two
+   * failures are kept apart in the judge's control flow for that reason.
+   * `partial-envelope` is about a model's answer; nothing here involves a model.
+   * **And it is a fact about what was reviewed, not a decision MAD made:** an
+   * observation that was asked for and did not happen is a gap in what this run
+   * can be read to have done.
+   *
+   * IT MUST NEVER READ AS "THE TOOL DID NOT RUN". Missing is not zero. That is
+   * the whole of it, and it is the same sentence the protocol's tool endpoints
+   * are written around: a missing trace never becomes a negative event.
+   *
+   * A DEGRADATION, NOT A DISCLOSURE — deliberately absent from
+   * `DISCLOSURE_CODES` below. A run whose record of its own actions is
+   * incomplete is worth less than it looks to anyone measuring those actions,
+   * which is what AD-6 governs.
+   */
+  "tool-observation-failed",
+  /**
    * AD-6 / AD-15 / FR10 (story 2.3) — MAD BILLED FOR A TURN IT COULD NOT COUNT.
    *
    * The seventeenth code. A turn was cancelled in flight, timed out, or settled

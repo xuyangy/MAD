@@ -36,6 +36,7 @@ import type { Clock } from "../ports/clock.ts"
 import type { LateUsageSink } from "../ports/late-usage.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
+import type { ToolObservation } from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
 import { fenceFor, listCell, material, oneLine } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
@@ -258,6 +259,21 @@ export interface ReviewDeps {
    * Only the paired runner (`ablation/paired.ts`) supplies one.
    */
   admission?: RequestAdmission
+  /**
+   * Story 2-7a — the tool-action observer (`core/ports/tool-observation.ts`).
+   *
+   * Optional, and beside `admission` because it is the same shape of thing: an
+   * orthogonal, core-owned, evaluation-supplied port that observes and decides
+   * nothing. Absent — which every ordinary run is — the record and the rendered
+   * run are unchanged byte for byte.
+   *
+   * It reaches TWO places and must reach both from one value: the judge, which
+   * owns the decision to ask for a tool call, and the `Tools` implementation
+   * itself, which is the only layer that knows whether a shell ran. The adapter
+   * takes its copy at construction (`adapters/opencode/tools.ts`), so a caller
+   * that passes one here and not there gets half a trace.
+   */
+  toolObservation?: ToolObservation
 }
 
 export interface ReviewResult {
@@ -513,7 +529,10 @@ export interface PreparedReview {
  * What a continuation needs from its caller: runtime ports only. See
  * `PreparedReview` for why nothing that decides the review is in this list.
  */
-export type ContinueDeps = Pick<ReviewDeps, "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission">
+export type ContinueDeps = Pick<
+  ReviewDeps,
+  "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission" | "toolObservation"
+>
 
 /**
  * Records already continued or forked. Keyed on the RECORD rather than the
@@ -1011,6 +1030,10 @@ export async function continueReview(
     // the seam that hands it over. `undefined` is a supported value, not a hole.
     tools: deps.tools,
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
+    // Story 2-7a — SPREAD RATHER THAN PASSED AS `undefined`, like `admission`
+    // above: the judge mints no id and writes no event when the key is absent,
+    // and that is what keeps an unobserved run's bytes identical.
+    ...(deps.toolObservation === undefined ? {} : { toolObservation: deps.toolObservation }),
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the
