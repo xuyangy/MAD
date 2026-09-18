@@ -396,8 +396,9 @@ qualify, so it prints its reasons and its arms instead.
 **What it still does not measure.** No truth label enters it. It states no precision, no
 false positives, no final recall, none of the four labelled verdict transitions, and no
 earned / did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's,
-printed after this one. Verdict-direction labels and false-positive counts are adjudication,
-story 2-6b. Precision, final recall and cost contrasts belong to story 2.8. An
+printed after this one. The four labelled verdict transitions and the per-arm false positives
+are the adjudication report's, printed after that one, from a human truth sheet.
+Precision, final recall and cost contrasts belong to story 2.8. An
 arm that upheld nothing is reported as undefined, never as 100% and never as a clean list. A
 candidate left unresolved by the budget is counted and shown, never treated as removed noise.
 It does not re-derive the unique-execution bill: that is the journal's.
@@ -470,7 +471,8 @@ other record is refused with both values named.
   `discover` has unknown lens coverage, so CAP-11 is withheld.
 - **Each arm's upheld findings**: planted-label matches with the defect ids, and `U`, the upheld
   findings no planted label claimed, unmatched duplicates included. `U` is not a truth label.
-  False positives read `not established — adjudication is story 2-6b`.
+  False positives are the adjudication report's, below, and are counted from the human truth
+  sheet rather than from `U`.
 
 The answered slot ids are derived (pool slots minus discover-stage drop-outs minus budget
 skips) and checked against `record.answered`, against every finding's `author`, and against
@@ -518,8 +520,100 @@ The status block states four things separately, and the third and fourth are eas
   draft protocol (A2) proposes; an injected one is labelled `INJECTED` and the report says the
   numbers are not that proposal's quantity.
 
-**What it does not own.** Verdict-direction labels and false-positive counts are story 2-6b.
-Precision and cost contrasts are story 2.8.
+**What it does not own.** The four labelled verdict transitions and the per-arm false positives
+are the adjudication report's, below. Precision and cost contrasts are story 2.8.
+
+### The adjudication report (story 2-6b): the four verdict directions and false positives
+
+`bun run eval-read` prints a fourth report after the labelled one, produced by
+`ablation/adjudication-read.ts`. It reads what the paired reader already read, each block's
+prefix `record.json` through the labelled reader's own `loadPrefixRecord`, and one
+human-authored file: `<bundle>/adjudication.json`. It bills nothing, runs nothing, prints and
+gates nothing, and always exits 0. A bundle with no sealed schedule gets no adjudication
+report at all.
+
+**It is the only reader here that consumes a human-authored input**, so the sheet is bound like
+evidence rather than trusted like config. Its `scheduleHash` says which PLAN, its `block` says
+which block, and its `prefixRunId` says which EXECUTION — `PairedSchedule` carries no candidate
+identity, so the schedule hash alone cannot tell a copied plan from the run that produced these
+candidates. The file must also resolve, by real path, inside the bundle root, exactly as every
+file the labelled reader opens must. `fixtures/seeded-defects/ADJUDICATION.md` holds the sheet's
+fields, a command that prints a blank page for one block, and the rules for filling it. Copy
+`prefixRunId.value` from `prefix.json`, not `prefixRunId`: the field there is a `Maybe`. The
+reader never parses `adjudication.md` and never falls back to it.
+
+A filled sheet is kept out of this repository by a `.gitignore` entry on `adjudication.json`.
+
+**The truth pool is the shared prefix.** Every canonical candidate in the block's prefix
+`record.json` gets one label slot — not the intersection of the surviving arms, not the upheld
+ones, and not a per-arm list. A pool defined by what survived would let a candidate's
+disappearance decide whether it is ever truth-labelled.
+
+**A planted-label match is suggested evidence, never a truth label.** The report prints one line
+per candidate — the human label, the matcher's association and the bucket the candidate landed in
+— and the association enters no count; every number is identical under an injected matcher. A
+human label that contradicts a suggestion is **kept**, and the contradictions are listed again on
+their own. A label of `not-a-defect` or `unresolved` against a matched planted defect is a
+contradiction; a candidate with no row at all is not, because nobody labelled it.
+
+**The four directions, each counted separately, OFF → ON**, over the candidates both arms raised
+and both arms decided as upheld or rejected:
+
+- **false upheld → rejected** — OFF upheld a candidate the sheet calls not-a-defect, ON rejected it.
+- **true rejected → upheld** — OFF rejected a real defect, ON upheld it.
+- **true upheld → rejected** — OFF upheld a real defect, ON rejected it.
+- **false rejected → upheld** — OFF rejected a candidate the sheet calls not-a-defect, ON upheld it.
+
+`upheld` is `upheld`; `rejected` is `withdrawn-by-author` or `judge-ruled-invalid`.
+**`not-adjudicated`, `unresolved` and `unjudged` are each named separately and are never
+rejected** — `not-adjudicated` is the judge saying the evidence does not settle the claim, and the
+aggregator also writes it on drop-out, so `upheld → not-adjudicated` is not noise removal.
+**Truth-`unresolved` and verdict-`unresolved` are different facts** and print apart.
+
+**Every candidate is accounted for once**, and the buckets sum to the prefix pool: a transition,
+unchanged, undecided, label missing, truth unresolved, or missing from an arm. A candidate one arm
+never raised is **missing**, with the side named, and is never a transition. A candidate with no
+row is `label missing`; one the sheet labels `unresolved` is kept under its own name. Both are
+excluded from the four directions and neither is a false positive.
+
+**False positives** are upheld findings the sheet calls `not-a-defect`, per arm, as `k of n upheld
+finding(s)`. They are never derived from the labelled report's `U` and are never a default for an
+unlabelled finding.
+
+**What the sheet's absence costs, in distinct states that never collapse.** No sheet: every
+truth-dependent quantity is unavailable with the reason `no adjudication sheet`, and the
+verdict-only counts — undecided transitions and candidates missing from an arm — still read. A
+sheet this process could not open reads `THE TRUTH SHEET COULD NOT BE READ`, which is not the same
+fact as nobody having written one. A malformed sheet is named as malformed with the field. A sheet
+about another plan, or resolving outside the bundle, is refused. A page naming an unplanned block
+refuses itself alone: the block it was meant for reads `carries no page`, the stray is named, and
+the other blocks still read. A sheet present with no row for one candidate is that candidate's
+`label missing`, not a sheet state.
+
+**The block itself has three states too.** A prefix record bound to another run id or another
+roster, or one escaping the bundle root, is **refused**; a record that is not there, or that
+nothing could parse, is **unavailable**. The report prints them under their own headings.
+
+**The lost true candidates are named in full.** `true upheld → rejected` prints every id; the
+other three lists are capped at five with the rest counted.
+
+**The partition checks itself.** The line saying every candidate is accounted for once compares
+the six buckets against the pool size before printing. When they disagree the report says so
+loudly and tells the reader not to trust the counts above it.
+
+**One prefix run is one observation.** Two blocks naming one `prefixRunId` contribute one value
+to each summary, and the second names that reason.
+
+**The summary** reads `observed n/3` per quantity, each missing block with its reason, and mean, min
+and max over complete observations only, labelled descriptive and not the planned three-block result.
+One observation reads `spread unavailable`; none reads unavailable, never 0. The quantities are the
+four directions — `false upheld → rejected`, `true rejected → upheld`, `true upheld → rejected`,
+`false rejected → upheld` — plus `unchanged`, `label missing`, `truth unresolved`,
+`on false positives`, `off false positives`, `undecided transitions` and
+`candidates missing from an arm`. The last two need no sheet; the rest do.
+
+**What it does not own.** No precision, no precision bound, no final recall, no cost contrast and no
+earned / did-not-earn reading. Those are story 2.8's, under the frozen protocol's bound arithmetic.
 
 ### What the fake-backed tests do not establish
 

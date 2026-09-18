@@ -55,8 +55,14 @@
  * named. An arm the paired reader did not bind is listed as excluded with the
  * paired reader's reason and refuses nothing.
  *
- * Verdict-direction labels and false-positive counts are adjudication and belong
- * to story 2-6b. Precision and cost contrasts belong to story 2.8.
+ * Verdict-direction labels and false-positive counts are adjudication:
+ * `ablation/adjudication-read.ts` reads them from the human truth sheet and
+ * prints them after this report. This module's `U` is not a truth label and
+ * never becomes one. Precision and cost contrasts belong to story 2.8.
+ *
+ * The prefix record this module resolves, binds and validates is also the
+ * adjudication reader's truth pool, so `loadPrefixRecord` is exported and that
+ * reader consumes its result rather than re-deriving the path or the checks.
  *
  * Every entry point returns a typed result and nothing throws.
  */
@@ -83,13 +89,22 @@ import { PREFIX_DIRECTORY } from "./bundle.ts"
 import { verdictState } from "./compare.ts"
 import { countText } from "./cross-arm-rates.ts"
 import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-read.ts"
-import { LABELLED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE } from "./report.ts"
 import { canonicalJson, PAIRED_BLOCKS, type Arm, type ArmPosition, type PairedSchedule } from "./schedule.ts"
 
 /** The draft protocol that proposes the endpoints this reader prints. */
 export const PROTOCOL_V2_DRAFT = "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md"
-/** What every false-positive line reads. */
-export const FALSE_POSITIVES_TEXT = "not established — adjudication is story 2-6b"
+/**
+ * What every false-positive line reads.
+ *
+ * It says where the count LIVES, and it does not say that one exists: the
+ * adjudication report counts false positives only from a human truth sheet, and
+ * a bundle with no sheet on disk — today's ordinary state — produces none. A
+ * line promising a count below would be false in exactly the state this
+ * repository is usually in.
+ */
+export const FALSE_POSITIVES_TEXT =
+  "not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not"
 /** The file a prefix dump holds its record in. */
 export const PREFIX_RECORD_FILE = "record.json"
 
@@ -447,7 +462,24 @@ async function readBlock(
   }
 
   const { record, file } = loaded
-  const identity = accountSlots(record)
+  // CAP-1 and CAP-11 score `pool` and nothing else, so a `pool` this reader
+  // cannot parse is this reader's refusal to state — exactly as it was when the
+  // record as a whole failed on it, and independently of `findings`, which only
+  // the adjudication reader scores.
+  if (record.pool.kind !== "read") {
+    const raw = [`the prefix record \`${file}\` is malformed: ${record.pool.why}`]
+    const reasons = raw.map((reason) => `the prefix record is unavailable: ${reason}`)
+    return {
+      block: block.block,
+      record: { kind: "unavailable", reasons: raw },
+      cap1: { kind: "unavailable", reasons },
+      cap11: { kind: "unavailable", reasons },
+      arms,
+    }
+  }
+
+  const scorable: ScorableRecord = { ...record, pool: record.pool.findings }
+  const identity = accountSlots(scorable)
   return {
     block: block.block,
     record: {
@@ -457,24 +489,44 @@ async function readBlock(
       slots: identity.slots,
       ...(record.cancelled === undefined ? {} : { cancelledAt: record.cancelled.stage }),
     },
-    cap1: measureCap1(record, identity, matcher),
-    cap11: measureCap11(record, identity, matcher),
+    cap1: measureCap1(scorable, identity, matcher),
+    cap11: measureCap11(scorable, identity, matcher),
     arms,
   }
 }
 
-/** The parts of a prefix `record.json` this reader touches, validated. */
-interface PrefixRecord {
+/** One finding list of a prefix record, or why it cannot be scored. */
+export type FindingList = { kind: "read"; findings: Finding[] } | { kind: "malformed"; why: string }
+
+/**
+ * The parts of a prefix `record.json` a reader of this bundle touches, validated.
+ *
+ * THE TWO FINDING LISTS ARE VALIDATED APART, BOTH WAYS, because two readers want
+ * different ones. `pool` is the pre-cluster union and is what CAP-1 and CAP-11
+ * score. `canonical` is `record.findings` after clustering — the set
+ * `forkPreparedReview` clones into both arms, so it is the only pool whose ids
+ * both arms can carry, and it is the adjudication reader's truth pool.
+ *
+ * A malformed `findings` must not withhold two quantities that never read it,
+ * and a malformed `pool` must not withhold a truth pool that never reads THAT.
+ * So neither failure fails the record: each consumer refuses on the list it
+ * actually scores, and says which one.
+ */
+export interface PrefixRecord {
   runId: string
   roster: Roster
   answered: number
-  pool: Finding[]
+  pool: FindingList
+  canonical: FindingList
   warnings: { code: string; stage: string; detail?: Record<string, unknown> }[]
   cancelled?: { stage: string }
   skippedForBudget: string[]
 }
 
-type Loaded =
+/** A record whose `pool` parsed, which is what CAP-1 and CAP-11 need. */
+type ScorableRecord = Omit<PrefixRecord, "pool"> & { pool: Finding[] }
+
+export type Loaded =
   | { kind: "loaded"; record: PrefixRecord; file: string }
   | { kind: "unavailable" | "refused"; reasons: string[] }
 
@@ -486,7 +538,16 @@ async function resolved(path: string): Promise<{ ok: true; real: string } | { ok
   }
 }
 
-async function loadPrefixRecord(root: string, schedule: PairedSchedule, block: PairedBlock): Promise<Loaded> {
+/**
+ * Resolve, bind and validate one block's prefix `record.json`.
+ *
+ * EXPORTED FOR THE ADJUDICATION READER (story 2-6b), which needs the same
+ * record's canonical findings as its truth pool. A second resolver would be a
+ * second answer to *which file is this block's prefix record?* — and the
+ * containment, run-id and roster checks below are exactly what makes the answer
+ * binding rather than a path guess.
+ */
+export async function loadPrefixRecord(root: string, schedule: PairedSchedule, block: PairedBlock): Promise<Loaded> {
   const prefix = block.prefix
   if (prefix.problem !== null) return { kind: "unavailable", reasons: [prefix.problem] }
   const evidence = prefix.evidence
@@ -617,14 +678,6 @@ function parsePrefixRecord(raw: unknown): PrefixRecord | string {
     return "`roster.lensSlots` is not a list of lens slots with string `slot` and `lens`"
   }
   if (!isCount(raw.answered)) return "`answered` is not a nonnegative integer"
-  if (!Array.isArray(raw.pool)) return "`pool` is not a list"
-  for (const [index, finding] of raw.pool.entries()) {
-    const problem = findingProblem(finding)
-    if (problem !== null) return `\`pool[${index}]\` ${problem}`
-    const entry = finding as Record<string, unknown>
-    if (entry.source !== "pool" && entry.source !== "lens") return `\`pool[${index}].source\` is neither \`pool\` nor \`lens\``
-    if (typeof entry.author !== "string") return `\`pool[${index}].author\` is not a string`
-  }
   if (!Array.isArray(raw.warnings)) return "`warnings` is not a list"
   for (const [index, warning] of raw.warnings.entries()) {
     if (!isRecord(warning) || typeof warning.code !== "string" || typeof warning.stage !== "string") {
@@ -643,11 +696,53 @@ function parsePrefixRecord(raw: unknown): PrefixRecord | string {
     runId: raw.runId,
     roster: roster as unknown as Roster,
     answered: raw.answered,
-    pool: raw.pool as Finding[],
+    pool: parsePool(raw.pool),
+    canonical: parseCanonicalPool(raw.findings),
     warnings: raw.warnings as PrefixRecord["warnings"],
     ...(raw.cancelled === undefined ? {} : { cancelled: raw.cancelled as { stage: string } }),
     skippedForBudget: (skipped as string[] | undefined) ?? [],
   }
+}
+
+/**
+ * `record.pool`, the pre-cluster union, or why CAP-1 and CAP-11 cannot score it.
+ *
+ * Each entry carries a `source` and an `author` because both quantities are
+ * derived per slot: `pooledOnly`/`lensOnly` split on `source`, and every member
+ * recall counts by `author`.
+ */
+function parsePool(raw: unknown): FindingList {
+  if (!Array.isArray(raw)) return { kind: "malformed", why: "`pool` is not a list" }
+  for (const [index, finding] of raw.entries()) {
+    const problem = findingProblem(finding)
+    if (problem !== null) return { kind: "malformed", why: `\`pool[${index}]\` ${problem}` }
+    const entry = finding as Record<string, unknown>
+    if (entry.source !== "pool" && entry.source !== "lens") {
+      return { kind: "malformed", why: `\`pool[${index}].source\` is neither \`pool\` nor \`lens\`` }
+    }
+    if (typeof entry.author !== "string") return { kind: "malformed", why: `\`pool[${index}].author\` is not a string` }
+  }
+  return { kind: "read", findings: raw as Finding[] }
+}
+
+/**
+ * `record.findings`, or why it cannot serve as a truth pool.
+ *
+ * A duplicate id is MALFORMED and not deduplicated: one id would then carry two
+ * candidates, and the sheet's one label per id could not say which of them it
+ * was about.
+ */
+function parseCanonicalPool(raw: unknown): FindingList {
+  if (!Array.isArray(raw)) return { kind: "malformed", why: "`findings` is not a list" }
+  const seen = new Set<string>()
+  for (const [index, finding] of raw.entries()) {
+    const problem = findingProblem(finding)
+    if (problem !== null) return { kind: "malformed", why: `\`findings[${index}]\` ${problem}` }
+    const id = (finding as Record<string, unknown>).id as string
+    if (seen.has(id)) return { kind: "malformed", why: `\`findings\` carries two entries with id \`${id}\`` }
+    seen.add(id)
+  }
+  return { kind: "read", findings: raw as Finding[] }
 }
 
 /** What the lexical matcher reads off a finding, or `null` when all of it is there. */
@@ -685,7 +780,7 @@ function quoted(ids: Iterable<string>): string {
   return list.length === 0 ? "none" : list.map((id) => `\`${id}\``).join(", ")
 }
 
-function accountSlots(record: PrefixRecord): SlotIdentity {
+function accountSlots(record: ScorableRecord): SlotIdentity {
   const both: string[] = []
   const lensProblems: string[] = []
   const pool = record.roster.slots.map((slot) => slot.slot)
@@ -839,7 +934,7 @@ function foundCount(defects: readonly SeededDefect[], findings: readonly Finding
   return { found: ids.length, total: defects.length, ids }
 }
 
-function measureCap1(record: PrefixRecord, identity: SlotIdentity, matcher: DefectMatcher): Cap1Result {
+function measureCap1(record: ScorableRecord, identity: SlotIdentity, matcher: DefectMatcher): Cap1Result {
   if (identity.both.length > 0) return { kind: "unavailable", reasons: [...identity.both] }
   if (identity.answeredPool.length === 0) {
     return {
@@ -883,7 +978,7 @@ function measureCap1(record: PrefixRecord, identity: SlotIdentity, matcher: Defe
   }
 }
 
-function measureCap11(record: PrefixRecord, identity: SlotIdentity, matcher: DefectMatcher): Cap11Result {
+function measureCap11(record: ScorableRecord, identity: SlotIdentity, matcher: DefectMatcher): Cap11Result {
   if (identity.both.length > 0 || identity.lensOnly.length > 0) {
     return { kind: "unavailable", reasons: [...identity.both, ...identity.lensOnly] }
   }
@@ -1208,8 +1303,10 @@ export function renderLabelledBundle(outcome: LabelledReadOutcome): string {
 
   lines.push(
     "WHAT THIS REPORT DOES NOT MEASURE. U is not a truth label: an upheld finding no planted label claimed is",
-    `unlabelled, never a false positive. False positives: ${FALSE_POSITIVES_TEXT}, which also owns`,
-    "verdict-direction labels. Precision and cost contrasts belong to story 2.8. Nothing here is a product-value claim.",
+    `unlabelled, never a false positive. False positives and the four labelled verdict transitions are the`,
+    `adjudication report's (\`${ADJUDICATION_READER_MODULE}\`), printed after this one, and they come from a human`,
+    "truth sheet rather than from any number above. Precision and cost contrasts belong to story 2.8. Nothing here",
+    "is a product-value claim.",
   )
   return `${lines.join("\n")}\n`
 }

@@ -39,12 +39,14 @@ set, not the model.
 
 ## From a bundle to this sheet
 
-`adjudicate()` is a function, and AC3 is a PROCEDURE. Nothing in `scripts/`, `ablation/` or
-`eval-read.ts` calls it, and until 2.6/2.8 own scoring nothing will — so these are the steps
-by hand, written down so the path from a written bundle to a filled worksheet exists rather
-than being inferred. No reader is built here on purpose: reading a bundle for a SCORE is
-story 2.6's and 2.8's, and a half-reader written early is the thing they would have to
-unpick.
+`adjudicate()` is a function, and AC3 is a PROCEDURE. These are the steps by hand, for a
+SINGLE labelled run, written down so the path from a written bundle to a filled worksheet
+exists rather than being inferred. `ablation/labelled-read.ts` calls `adjudicate()` for a
+paired bundle and prints the same partition; it computes no truth label, and neither does
+this procedure. Precision is story 2.8's, under the protocol's bound arithmetic.
+
+**For a PAIRED bundle, use the JSON sheet below instead.** These steps are per arm and per
+run; a paired block needs one label per candidate ACROSS the two arms.
 
 **1. Find the arm's findings.** A live run with `--out <bundle>` writes
 
@@ -138,6 +140,130 @@ evidence column is empty is an `unresolved` row however confident the labeller f
 
 **One claim, one row.** If a finding bundles two claims, split it into two rows and label
 each. A bundled row cannot carry one label honestly.
+
+---
+
+## The paired JSON sheet (`<bundle>/adjudication.json`)
+
+The worksheet above is per arm and per run, and it is the sheet a human fills for a single
+labelled run. A **paired** bundle needs a different sheet, because the question is different:
+the paired reader compares the SAME candidate across the two arms of one block, so a truth
+label has to be about the candidate and not about an arm.
+
+`ablation/adjudication-read.ts` is the only reader in this repository that consumes a
+human-authored file. It parses this one. It never parses `adjudication.md` and never falls
+back to it.
+
+**`:78-80`'s matched-needs-no-row shortcut does not apply here.** Over there, a finding a
+planted label already covers needs no row. Over here **every** canonical candidate in the
+block's shared discovery prefix gets a row, matched ones included. Two reasons, and both are
+about what the matcher is:
+
+- `lexicalDefectMatcher` is `sameFile && nearEnough && marker substring of claim+reasoning`.
+  A marker sitting inside a NEGATION matches, and the claim need not allege the planted
+  mechanism at all. The key proves a planted DEFECT is real; it never proves that a candidate
+  matched to it makes a true claim.
+- A pool defined by what a matcher covered, or by what survived into an arm, would let a
+  candidate's DISAPPEARANCE decide whether it is ever truth-labelled. The reader therefore
+  takes the whole prefix pool and reports a candidate with no row as `label missing`.
+
+The reader prints one line per candidate under `LABEL AND SUGGESTION, PER CANDIDATE`, carrying
+your label, the matcher's association and the bucket the candidate landed in. The suggestion
+enters no count. **A label of yours that contradicts a suggestion is kept**, and a contradiction
+— `not-a-defect` or `unresolved` against a matched planted defect — is also listed on its own
+below, for inspection. Nothing is refused over it.
+
+**Where it lives.** `<bundle>/adjudication.json` — beside the evidence it is about, never in
+this repository. A filled sheet inside MAD's own tree would be an answer-key-adjacent document
+sitting next to the fixture.
+
+**What it holds.**
+
+```json
+{
+  "adjudicationSheetVersion": 1,
+  "scheduleHash": "sha256:…",
+  "blocks": [
+    {
+      "block": 1,
+      "prefixRunId": "run-…",
+      "rows": [
+        { "candidateId": "f-…", "truth": "true-defect", "evidence": "src/billing/refund.ts:33 — …" }
+      ]
+    }
+  ]
+}
+```
+
+- **`adjudicationSheetVersion`** — read before any other field, so a sheet of a shape this
+  reader does not know is named as such rather than parsed into silence.
+- **`scheduleHash`** — copy it from `<bundle>/paired-schedule.json`, or from any
+  `<bundle>/prefix/<block - 1>/prefix.json`, which carries the same value. It says WHICH PLAN.
+- **`block`** — 1, 2 or 3. A page naming anything else refuses itself and nothing else: the
+  block it was meant for reads `carries no page`, the stray is named, and the other blocks are
+  read as normal.
+- **`prefixRunId`** — it says WHICH EXECUTION. `PairedSchedule` carries no candidate identity,
+  so the schedule hash alone cannot tell a copied plan from the run that produced these
+  candidates. **Copy `prefixRunId.value`, not `prefixRunId`.** In `prefix.json` the field is a
+  `Maybe`, so it reads `{"kind":"known","value":"run-…"}`; the sheet wants the bare string.
+- **`rows`** — one per canonical candidate in `<bundle>/prefix/<block - 1>/<prefixRunId>/record.json`'s
+  `findings`. `truth` takes the same three values as the table above: `true-defect`,
+  `not-a-defect`, `unresolved`. `evidence` is optional in the schema and is the column that
+  makes the label checkable; rule 2 above still applies, so a row with nothing behind it is an
+  `unresolved` row.
+
+**Getting the three identity values and the candidate ids**, run outside the reviewed worktree:
+
+```bash
+bun -e '
+  const root = process.argv[1], block = Number(process.argv[2])
+  const prefix = await Bun.file(`${root}/prefix/${block - 1}/prefix.json`).json()
+  const runId = prefix.prefixRunId.value
+  const record = await Bun.file(`${root}/prefix/${block - 1}/${runId}/record.json`).json()
+  console.log(JSON.stringify({
+    adjudicationSheetVersion: 1,
+    scheduleHash: prefix.scheduleHash,
+    blocks: [{ block, prefixRunId: runId, rows: record.findings.map((f) => ({
+      candidateId: f.id, truth: "unresolved", evidence: "",
+    })) }],
+  }, null, 2))
+' <bundle> <block>
+```
+
+It prints a page with every row present and every label `unresolved`, which is the honest
+starting state: a row you have not looked at is not a label. Read each candidate's `claim`,
+`reasoning` and `locus` from the same `record.json`, then replace the label and fill the
+evidence. Merge the three blocks' pages into one `blocks` list.
+
+**One claim, one row — and what the paired sheet does instead.** The legacy table above says to
+split a finding that bundles two claims into two rows. This sheet cannot: it refuses two rows
+for one `candidateId`, because the reader joins the arms on that id and two rows would be one
+candidate wearing two truth states. So label the candidate **as the arms decided it**: one
+label for the whole finding. Where the claims disagree in truth — one right, one wrong — the
+label is `unresolved` and the evidence column says which part was which. That is a preserved
+uncertainty, which rule 2 asks for, rather than a coin flip between two real answers.
+
+**Why there is no `fixtureVersion` column here.** The legacy table binds each row to a run's
+`identity.fixtureVersion`, because its rows name a run and nothing else ties them to a change.
+This sheet's `scheduleHash` subsumes it: the sealed schedule carries `fixture` — the whole
+`LABELLED_CHANGE_SEAL`, version and material hash and labels hash — inside the canonical JSON
+the hash is taken over, so a sheet matching this bundle's `scheduleHash` is a sheet about this
+bundle's labelled change. `prefixRunId` then pins the execution. The labelled report checks the
+seal against every bound arm separately and refuses visibly when it does not match.
+
+**What refuses the sheet, or one block of it.** A `scheduleHash` from another plan. A sheet file
+that resolves, by real path, outside the bundle root. A `prefixRunId` that is not that block's
+verified prefix run. Two rows for one candidate — never overwritten and never dropped, because a
+second row is two people disagreeing. A row for an id the block's prefix pool does not hold. In
+each case the reader names both values and computes no truth-dependent quantity for that block;
+the verdict-only counts still read.
+
+**A filled sheet never enters this repository.** `.gitignore` holds `adjudication.json` at every
+depth, so a bundle written under this tree cannot carry one in by accident.
+
+**Rules 1 and 2 at the top of this file bind this sheet too.** Label the candidate from the
+prefix pool first, then look at what either arm did with it. `unresolved` is a real outcome and
+the reader counts it under its own name.
 
 ---
 

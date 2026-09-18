@@ -31,8 +31,17 @@
  * bundle is not the sealed labelled change. It consumes the paired result and
  * reads no bundle file the paired reader already read. An ordinary bundle is
  * unchanged.
+ *
+ * Story 2-6b — AND A FOURTH, the adjudication reader's, after the labelled one:
+ * the four verdict directions and the per-arm false positives, read from
+ * `<bundle>/adjudication.json`, the human truth sheet. It prints fourth because
+ * it is the only report resting on a human-authored input, so an operator has
+ * seen what the machine read before seeing what a person labelled. A bundle with
+ * no sheet still gets the report, with every truth-dependent quantity
+ * unavailable and the verdict-only counts read.
  */
 
+import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/adjudication-read.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
@@ -92,6 +101,14 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
         if (labelled.kind !== "not-applicable") console.log(renderLabelledBundle(labelled))
       } catch (error) {
         console.log(`MAD labelled reader — ${error instanceof Error ? error.message : String(error)}`)
+      }
+      // The adjudication reader makes the same promise, in its own `try` so that
+      // a labelled reader that broke it does not take this report with it.
+      try {
+        const adjudication = await readAdjudicationBundle(paired)
+        if (adjudication.kind !== "not-applicable") console.log(renderAdjudicationBundle(adjudication))
+      } catch (error) {
+        console.log(`MAD adjudication reader — ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }

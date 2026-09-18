@@ -46,8 +46,12 @@
  * per arm, and the treatment opportunity READ from the OFF arm's own
  * `status.routeCounts.intervention` (`RouteCounts` in
  * `core/domain/run-record.ts`) rather than re-derived. The four labelled verdict
- * transitions, precision, recall and every earned / did-not-earn reading need
- * truth labels and belong to story 2.8.
+ * transitions and the per-arm false positives need truth labels, so they are
+ * `ablation/adjudication-read.ts`'s, read from the human truth sheet bound to
+ * this bundle's schedule and prefix runs. `differences` below says only THAT two
+ * arms decided a candidate differently; which way, and whether that was the
+ * right way, is that reader's. Precision, recall and every earned /
+ * did-not-earn reading belong to story 2.8.
  *
  * Every rate names its numerator and its denominator as `x of y`. There is no
  * float, no percentage and no fused score, and a zero denominator reads
@@ -81,7 +85,7 @@ import { countText } from "./cross-arm-rates.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import type { Completion, ExperimentBinding, Maybe, RunManifest } from "./manifest.ts"
 import { disclosures, readBundle, type ArmRow, type BundleReadOutcome, type BundleReadResult } from "./read-bundle.ts"
-import { INHERITED_SUM_RULE, LABELLED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, INHERITED_SUM_RULE, LABELLED_READER_MODULE } from "./report.ts"
 import {
   PAIRED_BLOCKS,
   readSchedule,
@@ -1126,8 +1130,9 @@ export function renderPairedBundle(result: PairedReadResult): string {
     "WHAT THIS REPORT DOES NOT MEASURE. No truth label enters it, so it states no precision, no false",
     "positives, no final recall, none of the four labelled verdict transitions, and no earned /",
     "did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's",
-    `(\`${LABELLED_READER_MODULE}\`), printed after this one. Verdict-direction labels and false-positive`,
-    "counts are adjudication, story 2-6b. Precision, final recall and cost contrasts belong to story 2.8.",
+    `(\`${LABELLED_READER_MODULE}\`), printed after this one. The four labelled verdict transitions and the`,
+    `per-arm false positives are the adjudication report's (\`${ADJUDICATION_READER_MODULE}\`), printed after that`,
+    "one, from a human truth sheet. Precision, final recall and cost contrasts belong to story 2.8.",
     "Nothing here is a product-value claim, and three blocks were bought as DESCRIPTIVE evidence with no significance",
     "claim available from them (`evaluation-protocol.md` §4).",
   )

@@ -44,5 +44,13 @@ _bmad
 # CAP-11, so the same rule applies to the draft as to the frozen protocol above.
 !/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md
 
+# Added 2026-09-17 (epic 2, story 2-6b). A FILLED adjudication sheet must never enter this
+# repository: it is a truth-labelled document that belongs beside its own bundle, it would be
+# one sheet for runs that have to stay distinguishable, and it would sit next to the answer
+# key in `fixtures/seeded-defects/`. `ablation/adjudication-read.ts` exports the name as
+# `ADJUDICATION_SHEET_FILE` and reads it only from a bundle root. Ignored everywhere, at every
+# depth, because a bundle written under this tree is exactly the accident this prevents.
+adjudication.json
+
 node_modules
 *.tsbuildinfo

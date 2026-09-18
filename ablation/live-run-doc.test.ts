@@ -21,8 +21,14 @@ import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
+import {
+  ADJUDICATION_QUANTITIES,
+  ADJUDICATION_SHEET_FILE,
+  ADJUDICATION_SHEET_VERSION,
+  TRUTH_LABELS,
+} from "./adjudication-read.ts"
 import { PAIRED_QUANTITIES } from "./paired-read.ts"
-import { LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
@@ -177,5 +183,59 @@ describe("LIVE-RUN.md documents the paired reader that is actually shipped", () 
     expect(doc).toContain("THIS EXPERIMENT IS HALTED.")
     expect(doc).toContain("WHETHER THIS EXPERIMENT IS HALTED COULD NOT BE ESTABLISHED.")
     expect(doc).toContain("KEPT, NAMED, AND OUT OF EVERY PAIR")
+  })
+})
+
+/**
+ * Story 2-6b — the adjudication reader's contract, tied to the reader.
+ *
+ * This is the ONLY reader in the tree that consumes a human-authored file, and
+ * the shape of that file is specified nowhere but in prose. Renaming
+ * `ADJUDICATION_SHEET_FILE` or bumping `ADJUDICATION_SHEET_VERSION` left the whole
+ * suite green while both operator documents went on telling a human to write
+ * `adjudication.json` version 1 — a sheet the reader would then refuse, or never
+ * look for, with nothing failing anywhere.
+ *
+ * Both documents are bound, because both instruct: `LIVE-RUN.md` says what the
+ * report prints, `ADJUDICATION.md` says what to write.
+ */
+describe("the adjudication sheet's contract is the one both documents state", () => {
+  const adjudicationDoc = () =>
+    Bun.file(new URL("../fixtures/seeded-defects/ADJUDICATION.md", import.meta.url)).text()
+
+  test("both documents name the file the reader actually opens", async () => {
+    expect(await liveRunDoc()).toContain(ADJUDICATION_SHEET_FILE)
+    expect(await adjudicationDoc()).toContain(ADJUDICATION_SHEET_FILE)
+  })
+
+  test("the sheet version the worksheet tells an operator to write is the one the reader knows", async () => {
+    const doc = await adjudicationDoc()
+    expect(doc).toContain(`"adjudicationSheetVersion": ${ADJUDICATION_SHEET_VERSION}`)
+    expect(doc).toContain(`adjudicationSheetVersion: ${ADJUDICATION_SHEET_VERSION},`)
+  })
+
+  test("LIVE-RUN.md names the module that produces the adjudication report", async () => {
+    expect(await liveRunDoc()).toContain(ADJUDICATION_READER_MODULE)
+  })
+
+  test("every truth label the parser accepts is documented, and no other", async () => {
+    const doc = await adjudicationDoc()
+    for (const label of TRUTH_LABELS) expect(doc, label).toContain(`\`${label}\``)
+    expect(TRUTH_LABELS).toEqual(["true-defect", "not-a-defect", "unresolved"])
+  })
+
+  test("every quantity the reader summarises is named in LIVE-RUN.md", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    for (const quantity of ADJUDICATION_QUANTITIES) {
+      // The summary labels carry their own parenthetical gloss; the document
+      // names the quantity, which is the label up to it.
+      const named = quantity.label.replace(/ \(.*\)$/, "")
+      expect(doc, named).toContain(named)
+    }
+  })
+
+  test("the `Maybe` trap in `prefixRunId` is called out where an operator would hit it", async () => {
+    const doc = (await adjudicationDoc()).replace(/\s+/g, " ")
+    expect(doc).toContain("Copy `prefixRunId.value`, not `prefixRunId`.")
   })
 })

@@ -306,6 +306,13 @@ describe("the happy path — three blocks over seeded prefixes", () => {
       expect(off.result.upheld).toBe(upheldOn.length - 1)
     }
     expect(text).toContain(`false positives: ${FALSE_POSITIVES_TEXT}`)
+    // THE SENTENCE, AS A LITERAL. The line above interpolates the constant it is
+    // checking, so it passes for any wording at all — including one that promises
+    // a count this report never produces.
+    expect(text).toContain(
+      "false positives: not counted here — the adjudication report below counts them per arm from the human " +
+        "truth sheet, or names why it could not",
+    )
     expect(text).toContain(`planted-label matches: ${expectedOn.matched.length} of ${upheldOn.length}`)
   })
 
@@ -858,6 +865,25 @@ describe("prefix record binding", () => {
       expect(reasonsOf(record)).toContain(`is malformed: ${entry.reason}`)
     })
   }
+
+  /**
+   * THE OTHER HALF OF THE ISOLATION. `record.findings` is the adjudication
+   * reader's truth pool and is scored by nothing here, so a `findings` this
+   * process cannot parse must leave CAP-1 and CAP-11 exactly where they were.
+   * The converse — a malformed `pool` withholding both — is the table above.
+   */
+  test("a malformed `findings` leaves CAP-1 and CAP-11 whole", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block === 1) (record as Record<string, unknown>).findings = 5
+      },
+    })
+    const block = blockOf(await labelled(root), 1)
+    expect(block.record.kind).toBe("read")
+    if (block.cap1.kind !== "measured") throw new Error(JSON.stringify(block.cap1))
+    expect(block.cap1.pooled.found).toBe(7)
+    expect(block.cap11.kind).toBe("measured")
+  })
 
   test("MALFORMED RECORD: a `record.json` holding a JSON array is unavailable", async () => {
     const { root } = await labelledBundle()
