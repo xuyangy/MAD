@@ -39,9 +39,28 @@
  * seen what the machine read before seeing what a person labelled. A bundle with
  * no sheet still gets the report, with every truth-dependent quantity
  * unavailable and the verdict-only counts read.
+ *
+ * Story 2-7b — AN EXPERIMENT ROOT CARRYING AN ADVERSARIAL SCHEDULE GETS THE
+ * ADVERSARIAL REPORT, last, from `<root>/adversarial/`. It is reached whether or
+ * not the root holds a `bundle.json`: an experiment root may hold only the
+ * adversarial subtree, and then the ordinary reader's refusal is printed and the
+ * adversarial report still follows. A root with neither prints the ordinary
+ * reader's refusal alone, as before.
+ *
+ * On a root with an adversarial schedule and no `bundle.json`, one line says
+ * so in place of the ordinary reader's refusal. A `--bundle` that names the
+ * adversarial directory itself (`<root>/adversarial`, holding
+ * `adversarial-schedule.json`) is read as its parent, the experiment root, and
+ * the report says so.
  */
 
 import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/adjudication-read.ts"
+import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adversarial-read.ts"
+import { existsSync } from "node:fs"
+import { basename, dirname, join, resolve } from "node:path"
+
+import { ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE, hasAdversarialSchedule } from "../ablation/adversarial-schedule.ts"
+import { BUNDLE_FILE } from "../ablation/bundle.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
@@ -74,18 +93,35 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
     return 0
   }
 
-  const result = await readBundle(root.trim())
+  let target = root.trim()
+  const named = resolve(target)
+  if (basename(named) === ADVERSARIAL_DIRECTORY && existsSync(join(named, ADVERSARIAL_SCHEDULE_FILE))) {
+    target = dirname(named)
+    console.log(
+      `MAD evaluation reader — \`${named}\` is an adversarial directory; reading its experiment root \`${target}\` instead.`,
+    )
+  }
+  const adversarial = await hasAdversarialSchedule(target)
+  if (adversarial && !existsSync(join(resolve(target), BUNDLE_FILE))) {
+    console.log(
+      `MAD evaluation reader — \`${target}\` holds no paired or ordinary bundle (no \`${BUNDLE_FILE}\`); the adversarial report follows.`,
+    )
+    await printAdversarial(target)
+    return 0
+  }
+  const result = await readBundle(target)
   if ("error" in result) {
     console.log(`MAD evaluation reader — ${result.error}`)
+    if (adversarial) await printAdversarial(target)
     return 0
   }
 
   console.log(renderBundle(result))
 
   if (result.sealedSchedule) {
-    const paired = await readPairedBundle(root.trim(), {
+    const paired = await readPairedBundle(target, {
       bundle: result,
-      schedule: await readSchedule(root.trim()),
+      schedule: await readSchedule(target),
     })
     // `readBundle` above already succeeded and is handed straight through, so
     // `error` is unreachable on this path. It is printed rather than asserted
@@ -112,7 +148,18 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
       }
     }
   }
+  if (adversarial) await printAdversarial(target)
   return 0
+}
+
+/** The adversarial reader promises not to throw; it gets its own `try` anyway, like the readers above. */
+async function printAdversarial(root: string): Promise<void> {
+  try {
+    const outcome = await readAdversarialBundle(root)
+    if (outcome.kind !== "not-applicable") console.log(renderAdversarialBundle(outcome))
+  } catch (error) {
+    console.log(`MAD adversarial reader — ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 // Only run (and only exit) when invoked as the CLI, so the reader can be tested.

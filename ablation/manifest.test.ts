@@ -20,6 +20,7 @@ import {
   type UsageCompleteness,
 } from "./manifest.ts"
 import { parseManifest } from "./read-bundle.ts"
+import { manifestFor } from "./read-bundle.fixture.ts"
 
 function finding(id: string, over: Partial<Finding> = {}): Finding {
   return {
@@ -709,3 +710,36 @@ describe("a continuation that threw keeps its manifest (story 2-5c review)", () 
     if (!parsed.ok) expect(parsed.reason).toContain("routingPolicy")
   })
 })
+
+describe("the optional adversarial binding (story 2-7b)", () => {
+  const good = { scheduleHash: `sha256:${"d".repeat(64)}`, caseId: "adv-01", side: "attack", position: 2 }
+  const withBinding = (adversarial: unknown, extra: Record<string, unknown> = {}) =>
+    parseManifest(JSON.parse(JSON.stringify({ ...(manifestFor({ armId: "attack", repeatId: 0 }) as object), adversarial, ...extra })))
+
+  test("a well-formed binding reads back", () => {
+    const parsed = withBinding(good)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect(parsed.value.adversarial).toEqual(good as never)
+  })
+
+  test("a bad hash, an empty case id, a bad side or a position below 1 is refused", () => {
+    for (const bad of [
+      { ...good, scheduleHash: "sha256:nothex" },
+      { ...good, caseId: "" },
+      { ...good, side: "both" },
+      { ...good, position: 0 },
+    ]) {
+      const parsed = withBinding(bad)
+      expect(parsed.ok, JSON.stringify(bad)).toBe(false)
+      if (!parsed.ok) expect(parsed.reason).toContain("has a malformed `adversarial`")
+    }
+  })
+
+  test("a manifest carrying both a paired and an adversarial binding is refused", () => {
+    const experiment = { scheduleHash: `sha256:${"c".repeat(64)}`, block: 1, arm: "on", position: "first", prefixRunId: "run-prefix" }
+    const parsed = withBinding(good, { experiment })
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain("carries both a paired `experiment` and an `adversarial` binding")
+  })
+})
+

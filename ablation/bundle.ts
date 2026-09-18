@@ -56,6 +56,7 @@ import {
   buildManifest,
   known,
   unknownValue,
+  type AdversarialBinding,
   type CodeRevision,
   type EvaluationIdentity,
   type ExperimentBinding,
@@ -193,6 +194,8 @@ export interface WriteArmDumpInput {
   worktree: string
   /** Story 2-5c — the paired runner's slot binding. Checked by the runner before this is called. */
   experiment?: ExperimentBinding
+  /** Story 2-7b — the adversarial runner's slot binding, likewise. */
+  adversarial?: AdversarialBinding
 }
 
 /**
@@ -217,6 +220,7 @@ export async function writeArmDump(input: WriteArmDumpInput): Promise<ArtifactOu
         ? unknownValue("the caller did not wrap the backend with a turn recorder")
         : known(input.turns.length),
     ...(input.experiment === undefined ? {} : { experiment: input.experiment }),
+    ...(input.adversarial === undefined ? {} : { adversarial: input.adversarial }),
   })
 
   return dumpRunArtifacts({

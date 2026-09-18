@@ -17,10 +17,11 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
 import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_FILE } from "./bundle.ts"
-import { HALT_MARKER_FILE } from "./governor.ts"
+import { ADVERSARIAL_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import {
   ADJUDICATION_QUANTITIES,
   ADJUDICATION_SHEET_FILE,
@@ -29,7 +30,15 @@ import {
   TRUTH_LABELS,
 } from "./adjudication-read.ts"
 import { PAIRED_QUANTITIES } from "./paired-read.ts"
-import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
+import { ADVERSARIAL_QUANTITIES, BOUNDED_EVIDENCE } from "./adversarial-read.ts"
+import {
+  ADVERSARIAL_SCHEDULE_FILE,
+  ADVERSARIAL_SLOT_STATUS_FILE,
+  ADVERSARIAL_START_MARKER_FILE,
+} from "./adversarial-schedule.ts"
+import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
+import { ADJUDICATION_READER_MODULE, ADVERSARIAL_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
+import { TOOL_TRACE_FILE } from "./tool-trace.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
@@ -49,6 +58,8 @@ describe("LIVE-RUN.md names the cross-arm case set that is actually in force", (
       LABELLED_CHANGE_SEAL.materialHash,
       CROSS_ARM_PAIRS_SEAL.datasetHash,
       CROSS_ARM_PAIRS_SEAL.sourceDiffHash,
+      ADVERSARIAL_SEAL.materialHash,
+      ADVERSARIAL_SEAL.assertionsHash,
     ])
     const named = [...(await liveRunDoc()).matchAll(/sha256:[0-9a-f]{64}/g)].map((match) => match[0])
     expect(named.length).toBeGreaterThan(0)
@@ -281,5 +292,110 @@ describe("the adjudication sheet's contract is the one both documents state", ()
   test("the `Maybe` trap in `prefixRunId` is called out where an operator would hit it", async () => {
     const doc = (await adjudicationDoc()).replace(/\s+/g, " ")
     expect(doc).toContain("Copy `prefixRunId.value`, not `prefixRunId`.")
+  })
+})
+
+/**
+ * Story 2-7b — the adversarial suite's procedure, tied to the code it documents:
+ * the seal it prints, the files it names, the gate figures, the reader module and
+ * the statement the report opens with.
+ */
+describe("LIVE-RUN.md documents the adversarial suite that is actually shipped", () => {
+  const section = async (): Promise<string> => {
+    const doc = await liveRunDoc()
+    const start = doc.indexOf("## The adversarial suite (story 2-7b)")
+    const end = doc.indexOf("## What would falsify the design", start)
+    if (start < 0 || end < 0) throw new Error("LIVE-RUN.md carries no adversarial section")
+    return doc.slice(start, end)
+  }
+
+  test("the sealed case identity in force is printed: version and both hashes", async () => {
+    const text = await section()
+    expect(text).toContain(ADVERSARIAL_SEAL.version)
+    expect(text).toContain(ADVERSARIAL_SEAL.materialHash)
+    expect(text).toContain(ADVERSARIAL_SEAL.assertionsHash)
+  })
+
+  test("the files it names are the files the code writes", async () => {
+    const text = await section()
+    for (const file of [
+      ADVERSARIAL_SCHEDULE_FILE,
+      ADVERSARIAL_START_MARKER_FILE,
+      ADVERSARIAL_SLOT_STATUS_FILE,
+      TOOL_TRACE_FILE,
+      JOURNAL_FILE,
+      LOCK_FILE,
+      HALT_MARKER_FILE,
+    ]) {
+      expect(text, file).toContain(file)
+    }
+  })
+
+  test("the gate figures are the governor's", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const figure = (n: number) => n.toLocaleString("en-US")
+    expect(text).toContain(`ordinary ${figure(ADVERSARIAL_ALLOWANCES.runCap)} \`tokenCap\``)
+    expect(text).toContain(`the global ${figure(ADVERSARIAL_ALLOWANCES.global)}`)
+    expect(text).toContain(`the Adversarial ${figure(ADVERSARIAL_ALLOWANCES.adversarial)}`)
+  })
+
+  test("the reader module, its quantities and its bounded-evidence statement are named", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain(ADVERSARIAL_READER_MODULE)
+    for (const quantity of ADVERSARIAL_QUANTITIES) expect(text, quantity).toContain(`\`${quantity}\``)
+    expect(text).toContain(BOUNDED_EVIDENCE)
+  })
+
+  test("the live execution stays open, with its prerequisites named", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain("the sixteen live runs have not been executed")
+    for (const prerequisite of [
+      "Host accounting.",
+      "Billing authorization.",
+      "Verified shared gates.",
+      "Bounded tool termination.",
+      "Bounded observer writes.",
+    ]) {
+      expect(text, prerequisite).toContain(prerequisite)
+    }
+  })
+
+  test("the preflight checks are listed in the order the runner makes them", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const steps = [
+      "no start marker exists",
+      "the root is not nested in another experiment root",
+      "the Tools identity is not blank",
+      "`maxConcurrency` is not above 1",
+      "the roster is one slot",
+      "the seal",
+      "the schedule against the runner's own inputs",
+      "the journal opens and is not halted or stopped",
+      "every planned worktree passes the shared AD-16 checks",
+    ]
+    const at = steps.map((step) => text.indexOf(step))
+    for (const [index, position] of at.entries()) expect(position, steps[index]).toBeGreaterThan(-1)
+    expect([...at].sort((a, b) => a - b)).toEqual(at)
+  })
+
+  test("the runner's preflight code makes the checks in that order", async () => {
+    const source = await Bun.file(new URL("./adversarial.ts", import.meta.url)).text()
+    const body = source.slice(source.indexOf("export async function runAdversarialSuite"))
+    const markers = [
+      "ADVERSARIAL_START_MARKER_FILE",
+      "sharedLedgerProblem(root)",
+      "config.tools.trim()",
+      "concurrencyProblem(input.config)",
+      "oneSlotProblem(input.roster)",
+      "adversarialSealProblem(",
+      "verifyAdversarialSchedule(",
+      "openJournal(",
+      "containmentProblem(directory",
+      "writeBundleIndex(",
+      "writeAdversarialStartMarker(",
+    ]
+    const at = markers.map((marker) => body.indexOf(marker))
+    for (const [index, position] of at.entries()) expect(position, markers[index]).toBeGreaterThan(-1)
+    expect([...at].sort((a, b) => a - b)).toEqual(at)
   })
 })

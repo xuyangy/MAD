@@ -51,11 +51,14 @@ import type {
 } from "../core/ports/admission.ts"
 import type { LateUsageReport, LateUsageReporter } from "../core/ports/late-usage.ts"
 import {
+  adversarialRequestGate,
+  ADVERSARIAL_ALLOWANCES,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
   requestGate,
   type AllowanceCategory,
   type PairedPhase,
+  type RequestGateResult,
   type RequestGateView,
 } from "./governor.ts"
 
@@ -252,6 +255,8 @@ export interface UniqueExecutionBill {
    * paired runner records the consequence durably in the slot status.
    */
   refused: RefusedAdmission[]
+  /** Story 2-7b — every Adversarial admission this invocation refused, in order, held the same way. */
+  refusedAdversarial: AdversarialRefusal[]
   /**
    * Known spend past each configured threshold. Admitted in-flight work may
    * overshoot a threshold; the overshoot is reported here and never borrowed from
@@ -275,9 +280,24 @@ export interface RefusedAdmission {
   reason: string
 }
 
+/** Story 2-7b — one refused Adversarial admission. */
+export interface AdversarialRefusal {
+  /** Which run asked, in the runner's words (a case id and a side). */
+  label: string
+  /** Absent when the run had no id yet. */
+  runId?: string
+  stage: string
+  slot: string
+  attempt: number
+  cause: AdmissionRefusalCause
+  reason: string
+}
+
 export interface OvershootReport {
   global: { limit: number; spent: number; overshoot: number }
   blocks: { limit: number; spent: number; overshoot: number }
+  /** Story 2-7b — the Adversarial allowance. */
+  adversarial: { limit: number; spent: number; overshoot: number }
   /** One row per Blocks phase that holds any request. */
   phases: { block: number; phase: PairedPhase; limit: number; spent: number; overshoot: number }[]
 }
@@ -522,7 +542,11 @@ class JournalState {
     return total
   }
 
-  bill(unappliedLate: readonly LateUsageReport[], refused: readonly RefusedAdmission[] = []): UniqueExecutionBill {
+  bill(
+    unappliedLate: readonly LateUsageReport[],
+    refused: readonly RefusedAdmission[] = [],
+    refusedAdversarial: readonly AdversarialRefusal[] = [],
+  ): UniqueExecutionBill {
     const requests = [...this.requests.values()].map((request) => structuredClone(request))
     let known = emptyTokenUsage()
     const byCategory: Partial<Record<AllowanceCategory, TokenUsage>> = {}
@@ -564,7 +588,8 @@ class JournalState {
       stop: this.stop,
       unappliedLate: unappliedLate.map((report) => structuredClone(report)),
       refused: refused.map((refusal) => ({ ...refusal })),
-      overshoot: overshootOf(known, byCategory.blocks, [...phases.values()]),
+      refusedAdversarial: refusedAdversarial.map((refusal) => ({ ...refusal })),
+      overshoot: overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()]),
       haltMarker: { ...this.haltMarker },
     }
   }
@@ -576,12 +601,14 @@ const PHASES: readonly (PairedPhase | null)[] = ["prefix", "on", "off", null]
 function overshootOf(
   known: TokenUsage,
   blocks: TokenUsage | undefined,
+  adversarial: TokenUsage | undefined,
   phases: readonly PhaseBill[],
 ): OvershootReport {
   const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
   return {
     global: row(PAIRED_ALLOWANCES.global, spentTokens(known)),
     blocks: row(PAIRED_ALLOWANCES.blocks, blocks === undefined ? 0 : spentTokens(blocks)),
+    adversarial: row(ADVERSARIAL_ALLOWANCES.adversarial, adversarial === undefined ? 0 : spentTokens(adversarial)),
     phases: phases
       .filter((phase) => phase.category === "blocks" && phase.block !== null && phase.phase !== null)
       .map((phase) => ({
@@ -723,8 +750,27 @@ export interface ReconciliationHandle {
   bill(): UniqueExecutionBill
 }
 
+/**
+ * Story 2-7b — the run an Adversarial request belongs to. The request is
+ * journaled with `category: "adversarial"`, `block: null` and `phase: null`; the
+ * run id is what ties it to its case and side.
+ */
+export interface AdversarialAdmissionBinding {
+  /** The case and side, for a refusal or a stop reason. */
+  label: string
+  /** Read at admission time; `undefined` refuses as a runner stop. */
+  runId: () => string | undefined
+}
+
 export interface PairedJournal {
   admission(binding: AdmissionBinding): RequestAdmission
+  /**
+   * Story 2-7b — admission against the Adversarial gate: stop, halt, the global
+   * cap over every category, then the Adversarial allowance. The halt marker at
+   * the root is read again before each request, so a halt written there by
+   * another writer refuses the next request.
+   */
+  adversarialAdmission(binding: AdversarialAdmissionBinding): RequestAdmission
   /**
    * A non-throwing reporter for a backend. Each report goes to `sink` (the run's
    * own late-usage sink, which `continueReview` drains) and, as a separate copy,
@@ -808,6 +854,7 @@ export async function openJournal(
   let appendBroken = false
   /** Admissions refused during this invocation. */
   const refused: RefusedAdmission[] = []
+  const refusedAdversarial: AdversarialRefusal[] = []
 
   /** Serializes a task. The returned promise never rejects: a throw becomes `onError`'s value. */
   const enqueue = <T>(task: () => Promise<T>, onError: (error: unknown) => T): Promise<T> => {
@@ -907,96 +954,174 @@ export async function openJournal(
     return id
   }
 
-  const refuseAsStop = (): AdmissionDecision => ({
+  const refuseAsStop = (runner = "paired runner"): AdmissionDecision => ({
     ok: false,
     cause: "runner-stop",
-    reason: `the paired runner stopped admitting: ${state.stop}. No model failed.`,
+    reason: `the ${runner} stopped admitting: ${state.stop}. No model failed.`,
   })
+
+  /** Where a refused request would have been spent, read defensively off a caller's value. */
+  const whereOf = (request: AdmissionRequest): { stage: string; slot: string; attempt: number } => {
+    try {
+      const attempt = Number(request?.attempt)
+      return { stage: String(request?.stage), slot: String(request?.slot), attempt: Number.isFinite(attempt) ? attempt : 0 }
+    } catch {
+      return { stage: "unreadable", slot: "unreadable", attempt: 0 }
+    }
+  }
+  const runIdOf = (read: () => string | undefined): string | undefined => {
+    try {
+      const id = read()
+      return typeof id === "string" && id.length > 0 ? id : undefined
+    } catch {
+      // The run id is context for the refusal; its absence is recorded as absence.
+      return undefined
+    }
+  }
+
+  /** One category's admission: what it gates on, what it journals, where a refusal is kept. */
+  interface AdmitSpec {
+    gate: () => RequestGateResult
+    line: Pick<IssuedLine, "category" | "block" | "phase">
+    /** Names the requester in a stop reason. */
+    who: string
+    /** Names the runner in a refusal (`paired runner`, `adversarial runner`). */
+    runner: string
+    runId: () => string | undefined
+    record(decision: AdmissionDecision & { ok: false }, request: AdmissionRequest): void
+    /** Runs inside the queue before the gate. */
+    before?: () => Promise<void>
+  }
+
+  const admitWith = (request: AdmissionRequest, spec: AdmitSpec): Promise<AdmissionDecision> => {
+    const refuse = (decision: AdmissionDecision & { ok: false }): AdmissionDecision => {
+      spec.record(decision, request)
+      return decision
+    }
+    return enqueue(
+      async (): Promise<AdmissionDecision> => {
+        // A completed invocation refuses as a runner stop without latching
+        // `stop`: `stop` reports a failure, and completing is not one. Nor is
+        // it recorded in `refused`, which describes the invocation.
+        if (closed) {
+          return {
+            ok: false,
+            cause: "runner-stop",
+            reason: `the ${spec.runner} stopped admitting: the invocation has completed and admits nothing further. No model failed.`,
+          }
+        }
+        // Only a category with a pre-check awaits here: an extra await would let
+        // settlements land between two queued admissions and move the gate.
+        if (spec.before !== undefined) await spec.before()
+        const gate = spec.gate()
+        if (!gate.ok) return refuse(gate)
+        const problem = requestProblem(request)
+        if (problem !== null) {
+          state.stop ??= `${spec.who} asked to admit a malformed request: ${problem}`
+          return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+        }
+        const runId = spec.runId()
+        if (typeof runId !== "string" || runId.length === 0) {
+          state.stop ??= `${spec.who} asked to admit a request before its run id existed`
+          return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+        }
+        const line: IssuedLine = {
+          type: "issued",
+          physicalId: nextPhysicalId(),
+          ...spec.line,
+          stage: request.stage,
+          slot: request.slot,
+          attempt: request.attempt,
+          runId,
+        }
+        try {
+          await writeLine(line)
+        } catch (error) {
+          // The line may have reached the file before the failure. A
+          // \`not-issued\` settlement is held for \`flush()\`, which appends it
+          // only if the journal carries this \`issued\` line, so a request that
+          // never went out is not read back as uncertain.
+          unpersisted.push({ type: "settled", physicalId: line.physicalId, settlement: { kind: "not-issued" } })
+          state.stop ??= `the journal \`${file}\` could not record an admission: ${messageOf(error)}`
+          return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+        }
+        state.apply(line)
+        return { ok: true, settle: settleFor(line.physicalId) }
+      },
+      (error) => {
+        state.stop ??= `an admission could not be decided: ${messageOf(error)}`
+        return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+      },
+    )
+  }
 
   const journal: PairedJournal = {
     admission(binding) {
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
-          /** Record a refusal in `refused`, whatever its cause, and return it. */
-          const refuse = (decision: AdmissionDecision & { ok: false }): AdmissionDecision => {
-            let where: Pick<RefusedAdmission, "stage" | "slot" | "attempt">
-            let runId: string | undefined
-            try {
-              const attempt = Number(request?.attempt)
-              where = { stage: String(request?.stage), slot: String(request?.slot), attempt: Number.isFinite(attempt) ? attempt : 0 }
-            } catch {
-              where = { stage: "unreadable", slot: "unreadable", attempt: 0 }
-            }
-            try {
-              const id = binding.runId()
-              if (typeof id === "string" && id.length > 0) runId = id
-            } catch {
-              // The run id is context for the refusal; its absence is recorded as absence.
-            }
-            refused.push({
-              block: binding.block,
-              phase: binding.phase,
-              ...(runId === undefined ? {} : { runId }),
-              ...where,
-              cause: decision.cause,
-              reason: decision.reason,
-            })
-            return decision
-          }
-          return enqueue(
-            async (): Promise<AdmissionDecision> => {
-              // A completed invocation refuses as a runner stop without latching
-              // `stop`: `stop` reports a failure, and completing is not one. Nor is
-              // it recorded in `refused`, which describes the invocation.
-              if (closed) {
-                return {
-                  ok: false,
-                  cause: "runner-stop",
-                  reason: "the paired runner stopped admitting: the invocation has completed and admits nothing further. No model failed.",
-                }
-              }
-              const gate = requestGate(state.view(), { block: binding.block, phase: binding.phase })
-              if (!gate.ok) return refuse(gate)
-              const problem = requestProblem(request)
-              if (problem !== null) {
-                state.stop ??= `block ${binding.block}'s ${binding.phase} asked to admit a malformed request: ${problem}`
-                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
-              }
-              const runId = binding.runId()
-              if (typeof runId !== "string" || runId.length === 0) {
-                state.stop ??= `block ${binding.block}'s ${binding.phase} asked to admit a request before its run id existed`
-                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
-              }
-              const line: IssuedLine = {
-                type: "issued",
-                physicalId: nextPhysicalId(),
-                category: "blocks",
+          return admitWith(request, {
+            gate: () => requestGate(state.view(), { block: binding.block, phase: binding.phase }),
+            line: { category: "blocks", block: binding.block, phase: binding.phase },
+            who: `block ${binding.block}'s ${binding.phase}`,
+            runner: "paired runner",
+            // NO HALT-MARKER RE-READ HERE, deliberately: story 2-7b keeps Blocks
+            // admission exactly as 2-5c shipped it. The marker is read once, when
+            // the journal opens; the adversarial path below reads it again.
+            runId: binding.runId,
+            record(decision, asked) {
+              const runId = runIdOf(binding.runId)
+              refused.push({
                 block: binding.block,
                 phase: binding.phase,
-                stage: request.stage,
-                slot: request.slot,
-                attempt: request.attempt,
-                runId,
-              }
+                ...(runId === undefined ? {} : { runId }),
+                ...whereOf(asked),
+                cause: decision.cause,
+                reason: decision.reason,
+              })
+            },
+          })
+        },
+      }
+    },
+
+    adversarialAdmission(binding) {
+      return {
+        admit(request: AdmissionRequest): Promise<AdmissionDecision> {
+          return admitWith(request, {
+            // A halt marker written at the root after this journal opened (by
+            // the arm governor, or by hand) latches the halt before the gate reads
+            // it. Only this path re-reads it: Blocks admission is kept exactly as
+            // 2-5c shipped it, which reads the marker once, at open.
+            before: async () => {
+              if (state.halt !== null) return
               try {
-                await writeLine(line)
+                await readFile(markerPath)
+                state.latch(`the halt marker \`${markerPath}\` exists`)
+                state.haltMarker = { file: markerPath, error: null }
+                markerQueued = true
               } catch (error) {
-                // The line may have reached the file before the failure. A
-                // \`not-issued\` settlement is held for \`flush()\`, which appends it
-                // only if the journal carries this \`issued\` line, so a request that
-                // never went out is not read back as uncertain.
-                unpersisted.push({ type: "settled", physicalId: line.physicalId, settlement: { kind: "not-issued" } })
-                state.stop ??= `the journal \`${file}\` could not record an admission: ${messageOf(error)}`
-                return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                  state.latch(`whether the halt marker \`${markerPath}\` exists could not be established (${messageOf(error)})`)
+                  watchHalt()
+                }
               }
-              state.apply(line)
-              return { ok: true, settle: settleFor(line.physicalId) }
             },
-            (error) => {
-              state.stop ??= `an admission could not be decided: ${messageOf(error)}`
-              return refuse(refuseAsStop() as AdmissionDecision & { ok: false })
+            gate: () => adversarialRequestGate(state.view()),
+            line: { category: "adversarial", block: null, phase: null },
+            who: `adversarial run ${binding.label}`,
+            runner: "adversarial runner",
+            runId: binding.runId,
+            record(decision, asked) {
+              const runId = runIdOf(binding.runId)
+              refusedAdversarial.push({
+                label: binding.label,
+                ...(runId === undefined ? {} : { runId }),
+                ...whereOf(asked),
+                cause: decision.cause,
+                reason: decision.reason,
+              })
             },
-          )
+          })
         },
       }
     },
@@ -1022,7 +1147,7 @@ export async function openJournal(
       state.stop ??= reason
     },
 
-    bill: () => state.bill(pending, refused),
+    bill: () => state.bill(pending, refused, refusedAdversarial),
 
     settled: () => enqueue(async () => undefined, () => undefined),
 
@@ -1070,7 +1195,7 @@ export async function openJournal(
   function reconciliationHandle(): ReconciliationHandle {
     return {
       held: () => held.map((report) => structuredClone(report)),
-      bill: () => state.bill(held, refused),
+      bill: () => state.bill(held, refused, refusedAdversarial),
       async flush(): Promise<FlushOutcome> {
         const outcome: FlushOutcome = { ok: true, persisted: 0, conflicts: [], unmatched: [], failed: null }
         if (held.length === 0 && unpersisted.length === 0) return outcome

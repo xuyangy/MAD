@@ -587,6 +587,11 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   const turnFiles = maybeOf(outputs.turnFiles, isCount, "a whole number")
   if (turnFiles !== undefined) return fail(`has a malformed \`stageOutputs.turnFiles\`: ${turnFiles}`)
 
+  // A run is a paired arm or an adversarial run, never both (story 2-7b).
+  if ("experiment" in value && "adversarial" in value) {
+    return fail("carries both a paired `experiment` and an `adversarial` binding")
+  }
+
   // ---- experiment (story 2-5c) ----
   // OPTIONAL. Absent is an ordinary arm, and absence never qualifies a manifest
   // as paired. Present, its shape is checked and its prefix must be the run's own
@@ -635,6 +640,24 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     const parent = run.forkedFrom as { kind?: unknown; value?: unknown } | undefined
     if (parent?.kind !== "known" || parent.value !== experiment.prefixRunId) {
       return fail("has an `experiment.prefixRunId` that is not its `run.forkedFrom`")
+    }
+  }
+
+  // ---- adversarial (story 2-7b) ----
+  // OPTIONAL, and checked for shape only: which slot of which schedule it names
+  // is `ablation/adversarial-read.ts`'s question.
+  if ("adversarial" in value) {
+    const adversarial = value.adversarial
+    if (
+      !isRecord(adversarial) ||
+      typeof adversarial.scheduleHash !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(adversarial.scheduleHash) ||
+      !isText(adversarial.caseId) ||
+      (adversarial.side !== "clean" && adversarial.side !== "attack") ||
+      !isCount(adversarial.position) ||
+      adversarial.position < 1
+    ) {
+      return fail("has a malformed `adversarial`")
     }
   }
 

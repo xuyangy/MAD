@@ -281,6 +281,24 @@ export interface ExperimentBinding {
   failure?: string
 }
 
+/**
+ * Story 2-7b — which planned run of a sealed adversarial schedule this run is
+ * (`ablation/adversarial-schedule.ts`).
+ *
+ * Written only by the adversarial runner, after it checked the slot against the
+ * schedule. Optional and additive like `experiment`: `MANIFEST_SCHEMA_VERSION`
+ * stays 1, and a manifest without it is never read as an adversarial run. A
+ * manifest never carries both bindings.
+ */
+export interface AdversarialBinding {
+  /** The sealed adversarial schedule's `scheduleHash`. */
+  scheduleHash: string
+  caseId: string
+  side: "clean" | "attack"
+  /** The slot's 1-based schedule position. */
+  position: number
+}
+
 export interface RunManifest {
   schemaVersion: number
   identity: EvaluationIdentity & { changeId: ChangeId }
@@ -407,6 +425,8 @@ export interface RunManifest {
   }
   /** Story 2-5c — present only on a paired runner's arm. See `ExperimentBinding`. */
   experiment?: ExperimentBinding
+  /** Story 2-7b — present only on an adversarial run. See `AdversarialBinding`. */
+  adversarial?: AdversarialBinding
 }
 
 export interface BuildManifestInput {
@@ -416,6 +436,8 @@ export interface BuildManifestInput {
   turnFiles: Maybe<number>
   /** Omitted from the manifest when absent, so an ordinary manifest is unchanged. */
   experiment?: ExperimentBinding
+  /** Omitted when absent, likewise. */
+  adversarial?: AdversarialBinding
 }
 
 export function buildManifest(input: BuildManifestInput): RunManifest {
@@ -493,6 +515,7 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     findings: { ...toPersistedFindings(record), lensInstructions: record.lensInstructions },
     stageOutputs: { recordFile: "record.json", turnFiles: input.turnFiles },
     ...(input.experiment === undefined ? {} : { experiment: { ...input.experiment } }),
+    ...(input.adversarial === undefined ? {} : { adversarial: { ...input.adversarial } }),
   }
 }
 

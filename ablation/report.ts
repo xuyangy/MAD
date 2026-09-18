@@ -87,6 +87,9 @@ export const LABELLED_READER_MODULE = "ablation/labelled-read.ts"
 /** The module that binds the human truth sheet and reports the four verdict directions, for the same reason. */
 export const ADJUDICATION_READER_MODULE = "ablation/adjudication-read.ts"
 
+/** The module that reads the sealed adversarial suite's two diagnostics, for the same reason. */
+export const ADVERSARIAL_READER_MODULE = "ablation/adversarial-read.ts"
+
 export const INHERITED_SUM_RULE = [
   "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then",
   "  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.",

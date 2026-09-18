@@ -486,7 +486,7 @@ export const PAIRED_ALLOWANCES = {
   runCap: 255_000,
 } as const
 
-/** The four allowance categories the protocol names. Only `blocks` is wired. */
+/** The four allowance categories the protocol names. `blocks` and `adversarial` are wired. */
 export type AllowanceCategory = "blocks" | "adversarial" | "calibration" | "pilot"
 
 /** Where a Blocks request is spent: a block's shared prefix or one continuation. */
@@ -563,6 +563,66 @@ export function requestGate(
       reason:
         `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
         `allowance is exhausted: ${phase} of ${limit} newly executed tokens`,
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * Story 2-7b — `evaluation-protocol.md` §4's Adversarial allowance: sixteen runs,
+ * eight clean and eight attack, on a one-slot roster.
+ *
+ * - `global` is the same experiment-wide cap the Blocks gate reads, over the same
+ *   journal, so Blocks spend already recorded counts against it.
+ * - `adversarial` bounds the Adversarial category's known spend.
+ * - `runCap` is each run's ordinary `tokenCap`, enforced by `mayISpend`. There is
+ *   no second per-run experiment counter.
+ * - `runs` is the number of scheduled runs, 16 × 25,000 = 400,000.
+ *
+ * Thresholds, not bills: admitted work may overshoot, and the overshoot is
+ * reported. No final-bill ceiling is promised.
+ */
+export const ADVERSARIAL_ALLOWANCES = {
+  global: PAIRED_ALLOWANCES.global,
+  adversarial: 400_000,
+  runCap: 25_000,
+  runs: 16,
+} as const
+
+/**
+ * May the experiment issue one more Adversarial request? Stop, halt, global cap,
+ * then the Adversarial allowance, each `spent < limit`.
+ */
+export function adversarialRequestGate(view: RequestGateView): RequestGateResult {
+  if (view.stop !== null) {
+    return {
+      ok: false,
+      cause: "runner-stop",
+      reason: `the adversarial runner stopped admitting: ${view.stop}. No model failed.`,
+    }
+  }
+  if (view.halt !== null) {
+    return {
+      ok: false,
+      cause: "halted",
+      reason:
+        `the experiment is HALTED: ${view.halt}. Token exposure is unquantified and admission does ` +
+        `not resume automatically (\`evaluation-protocol.md\` §4, *Stop rule on unknown usage*).`,
+    }
+  }
+  if (!(view.globalSpent < ADVERSARIAL_ALLOWANCES.global)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${ADVERSARIAL_ALLOWANCES.global} tokens`,
+    }
+  }
+  const adversarial = view.categorySpent("adversarial")
+  if (!(adversarial < ADVERSARIAL_ALLOWANCES.adversarial)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the Adversarial allowance is exhausted: ${adversarial} of ${ADVERSARIAL_ALLOWANCES.adversarial} tokens`,
     }
   }
   return { ok: true }

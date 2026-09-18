@@ -146,7 +146,7 @@ function sortKeys(value: unknown): unknown {
   return value
 }
 
-function sha256(text: string): string {
+export function sha256(text: string): string {
   return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`
 }
 
@@ -320,49 +320,65 @@ async function publishSchedule(input: CreateScheduleInput, root: string): Promis
     }
     const schedule: PairedSchedule = { ...unsealed, scheduleHash: scheduleHashOf(unsealed) }
 
-    const temporary = join(root, `${SCHEDULE_FILE}.${process.pid}.${Date.now()}.tmp`)
-    // Only a temporary file THIS call created is removed afterwards, and only an
-    // EEXIST from `link` means a schedule already exists.
-    let createdTemporary = false
-    try {
-      try {
-        const handle = await open(temporary, "wx", 0o600)
-        createdTemporary = true
-        try {
-          await handle.writeFile(`${JSON.stringify(schedule, undefined, 2)}\n`, "utf8")
-          await handle.sync()
-        } finally {
-          await handle.close()
-        }
-      } catch (error) {
-        return { ok: false, reason: `the schedule's temporary file \`${temporary}\` could not be written: ${messageOf(error)}` }
-      }
-      try {
-        await link(temporary, file)
-      } catch (error) {
-        return {
-          ok: false,
-          reason:
-            (error as NodeJS.ErrnoException).code === "EEXIST"
-              ? `a schedule already exists at \`${file}\`; a schedule is never re-tossed or replaced`
-              : `the schedule could not be published: ${messageOf(error)}`,
-        }
-      }
-      try {
-        await syncDirectory(root)
-      } catch (error) {
-        return {
-          ok: false,
-          reason:
-            `the schedule was published at \`${file}\` and its coin is sealed, but its directory could not be synced ` +
-            `(${messageOf(error)}); it is never re-tossed, so check that the file survived before running it`,
-        }
-      }
-    } finally {
-      if (createdTemporary) await unlink(temporary).catch(() => undefined)
-    }
+    const published = await publishExclusive(root, SCHEDULE_FILE, `${JSON.stringify(schedule, undefined, 2)}\n`, "a schedule")
+    if (!published.ok) return published
     return { ok: true, schedule, file }
   }
+}
+
+export type Published = { ok: true; file: string } | { ok: false; reason: string }
+
+/**
+ * Publish `text` at `<root>/<name>` without ever replacing a file there: written
+ * and synced under a temporary name, then hard-linked into place, so an existing
+ * file refuses (`EEXIST`) and a partial file never appears under the final name.
+ * `what` names the document in a refusal (`a schedule`). Throws only where the
+ * caller's own `try` already reports it.
+ */
+export async function publishExclusive(root: string, name: string, text: string, what: string): Promise<Published> {
+  const file = join(root, name)
+  const temporary = join(root, `${name}.${process.pid}.${Date.now()}.tmp`)
+  // Only a temporary file THIS call created is removed afterwards, and only an
+  // EEXIST from `link` means the document already exists.
+  let createdTemporary = false
+  try {
+    try {
+      const handle = await open(temporary, "wx", 0o600)
+      createdTemporary = true
+      try {
+        await handle.writeFile(text, "utf8")
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    } catch (error) {
+      return { ok: false, reason: `${what}'s temporary file \`${temporary}\` could not be written: ${messageOf(error)}` }
+    }
+    try {
+      await link(temporary, file)
+    } catch (error) {
+      return {
+        ok: false,
+        reason:
+          (error as NodeJS.ErrnoException).code === "EEXIST"
+            ? `${what} already exists at \`${file}\`; ${what} is never re-tossed or replaced`
+            : `${what} could not be published: ${messageOf(error)}`,
+      }
+    }
+    try {
+      await syncDirectory(root)
+    } catch (error) {
+      return {
+        ok: false,
+        reason:
+          `${what} was published at \`${file}\`, but its directory could not be synced ` +
+          `(${messageOf(error)}); it is never replaced, so check that the file survived before using it`,
+      }
+    }
+  } finally {
+    if (createdTemporary) await unlink(temporary).catch(() => undefined)
+  }
+  return { ok: true, file }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,8 +559,13 @@ export type Started = { ok: true; file: string } | { ok: false; reason: string }
  * then fails, and the refusal says so: a later invocation finds the marker and
  * refuses.
  */
-export async function writeStartMarker(bundleRoot: string, scheduleHash: string, startedAt: string): Promise<Started> {
-  const file = join(resolve(bundleRoot), START_MARKER_FILE)
+export async function writeStartMarker(
+  bundleRoot: string,
+  scheduleHash: string,
+  startedAt: string,
+  name: string = START_MARKER_FILE,
+): Promise<Started> {
+  const file = join(resolve(bundleRoot), name)
   let handle: Awaited<ReturnType<typeof open>>
   try {
     handle = await open(file, "wx", 0o600)
@@ -587,7 +608,11 @@ export interface SlotStatusLine extends PlannedSlot {
 
 /** Append one slot status. Resolves to a reason when the append failed, else `null`. */
 export async function appendSlotStatus(bundleRoot: string, line: SlotStatusLine): Promise<string | null> {
-  const file = join(resolve(bundleRoot), SLOT_STATUS_FILE)
+  return appendStatusLine(join(resolve(bundleRoot), SLOT_STATUS_FILE), line)
+}
+
+/** Append one JSON line to a status file and sync it. Resolves to a reason when that failed, else `null`. */
+export async function appendStatusLine(file: string, line: unknown): Promise<string | null> {
   try {
     const handle = await open(file, "a", 0o600)
     try {
@@ -605,7 +630,11 @@ export async function appendSlotStatus(bundleRoot: string, line: SlotStatusLine)
 
 /** Every slot status line, in order. An absent file is no lines. */
 export async function readSlotStatuses(bundleRoot: string): Promise<SlotStatusLine[]> {
-  const file = join(resolve(bundleRoot), SLOT_STATUS_FILE)
+  return readStatusLines<SlotStatusLine>(join(resolve(bundleRoot), SLOT_STATUS_FILE))
+}
+
+/** Every line of a status file, parsed, in order. An absent file is no lines. */
+export async function readStatusLines<T>(file: string): Promise<T[]> {
   let text: string
   try {
     text = await readFile(file, "utf8")
@@ -616,7 +645,7 @@ export async function readSlotStatuses(bundleRoot: string): Promise<SlotStatusLi
   return text
     .split("\n")
     .filter((row) => row.length > 0)
-    .map((row) => JSON.parse(row) as SlotStatusLine)
+    .map((row) => JSON.parse(row) as T)
 }
 
 /** `present`, `absent`, or the reason neither could be established. */
