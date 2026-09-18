@@ -25,6 +25,7 @@ import {
   ADJUDICATION_QUANTITIES,
   ADJUDICATION_SHEET_FILE,
   ADJUDICATION_SHEET_VERSION,
+  NO_SHEET_REASON,
   TRUTH_LABELS,
 } from "./adjudication-read.ts"
 import { PAIRED_QUANTITIES } from "./paired-read.ts"
@@ -224,14 +225,57 @@ describe("the adjudication sheet's contract is the one both documents state", ()
     expect(TRUTH_LABELS).toEqual(["true-defect", "not-a-defect", "unresolved"])
   })
 
-  test("every quantity the reader summarises is named in LIVE-RUN.md", async () => {
-    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+  /**
+   * THE QUANTITY LIST IS READ INSIDE ITS OWN SECTION.
+   *
+   * Over the whole document, `unchanged` and `undecided transitions` are
+   * satisfied by the paired report's prose hundreds of lines above, so the
+   * adjudication summary could lose either line and this guard would stay green
+   * — a drift check that passes on unrelated text checks nothing.
+   */
+  const adjudicationSection = async (): Promise<string> => {
+    const doc = await liveRunDoc()
+    const start = doc.indexOf("### The adjudication report")
+    const end = doc.indexOf("### What the fake-backed tests do not establish", start)
+    if (start < 0 || end < 0) throw new Error("LIVE-RUN.md carries no adjudication section to read")
+    return doc.slice(start, end).replace(/\s+/g, " ")
+  }
+
+  test("every quantity the reader summarises is named in LIVE-RUN.md's own adjudication section", async () => {
+    const section = await adjudicationSection()
     for (const quantity of ADJUDICATION_QUANTITIES) {
       // The summary labels carry their own parenthetical gloss; the document
       // names the quantity, which is the label up to it.
       const named = quantity.label.replace(/ \(.*\)$/, "")
-      expect(doc, named).toContain(named)
+      expect(section, named).toContain(named)
     }
+  })
+
+  test("the reason a truth quantity reads with no sheet is the constant the reader prints", async () => {
+    expect(await adjudicationSection()).toContain(NO_SHEET_REASON)
+  })
+
+  /**
+   * A FILLED SHEET MUST NOT BE COMMITTABLE. `.gitignore` is the only thing
+   * keeping human truth labels out of this repository and off every
+   * model-reachable path, and nothing bound it to the name the reader opens —
+   * renaming the constant would have made a filled sheet committable again with
+   * the suite green. This is the bug class `labelled-read.test.ts` already
+   * records for the draft protocol.
+   */
+  test("`.gitignore` ignores the sheet file the reader opens, at every depth", async () => {
+    const ignore = await Bun.file(new URL("../.gitignore", import.meta.url)).text()
+    expect(ignore.split("\n").map((line) => line.trim())).toContain(ADJUDICATION_SHEET_FILE)
+
+    // THE PATTERN IS ASKED WHAT IT ACTUALLY IGNORES. A bare name matches at
+    // every depth, and a future edit anchoring it (`/adjudication.json`) would
+    // still satisfy the line check above while leaving a sheet inside a nested
+    // bundle committable — which is the only place a sheet is ever written.
+    const nested = `_bmad-output/run/bundle/${ADJUDICATION_SHEET_FILE}`
+    const checked = Bun.spawnSync(["git", "check-ignore", nested], {
+      cwd: new URL("..", import.meta.url).pathname,
+    })
+    expect(checked.exitCode, `git does not ignore ${nested}`).toBe(0)
   })
 
   test("the `Maybe` trap in `prefixRunId` is called out where an operator would hit it", async () => {

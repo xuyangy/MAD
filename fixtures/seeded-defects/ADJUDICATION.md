@@ -154,7 +154,7 @@ label has to be about the candidate and not about an arm.
 human-authored file. It parses this one. It never parses `adjudication.md` and never falls
 back to it.
 
-**`:78-80`'s matched-needs-no-row shortcut does not apply here.** Over there, a finding a
+**`:82`'s matched-needs-no-row shortcut does not apply here.** Over there, a finding a
 planted label already covers needs no row. Over here **every** canonical candidate in the
 block's shared discovery prefix gets a row, matched ones included. Two reasons, and both are
 about what the matcher is:
@@ -210,7 +210,15 @@ sitting next to the fixture.
   `findings`. `truth` takes the same three values as the table above: `true-defect`,
   `not-a-defect`, `unresolved`. `evidence` is optional in the schema and is the column that
   makes the label checkable; rule 2 above still applies, so a row with nothing behind it is an
-  `unresolved` row.
+  `unresolved` row. The adjudication report PRINTS it beneath the candidate's own line, so what
+  you write here is what a reader checks the label against.
+
+**What the report does with these labels.** Its false-positive line is a COUNT, not a precision:
+`k of n upheld finding(s) are known false positives`, where `n` is every finding that arm upheld.
+`evaluation-protocol.md` defines that denominator as `N = TP + FP + U` with the unknowns retained
+and permits a point precision only when `U = 0`, so ids you leave unlabelled, ids you label
+`unresolved`, and upheld ids the prefix pool does not hold all stay inside `n` and are printed on
+their own lines. A page you fill wrongly withdraws its own block and no others.
 
 **Getting the three identity values and the candidate ids**, run outside the reviewed worktree:
 

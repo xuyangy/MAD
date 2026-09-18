@@ -19,7 +19,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
-import type { DefectMatcher } from "../fixtures/recall.ts"
+import { lexicalDefectMatcher, type DefectMatcher } from "../fixtures/recall.ts"
 import { main as evalReadMain } from "../scripts/eval-read.ts"
 import {
   ADJUDICATION_SHEET_FILE,
@@ -138,6 +138,8 @@ interface BundleOptions {
   armExtras?: FindingSpec[]
   /** Mutate a block's prefix record before it is written. */
   recordOver?: (record: Record<string, unknown>, block: number) => void
+  /** Rewrite one arm's spec, to break exactly one field of it. */
+  armOver?: (spec: ArmSpec) => ArmSpec
 }
 
 function candidatesOf(options: BundleOptions, block: number): Candidate[] {
@@ -167,7 +169,8 @@ async function bundleAt(options: BundleOptions = {}): Promise<{ root: string; sc
   }
   // `arms` and `prefixOver` are this helper's own and are applied LAST, so a
   // caller's `paired` cannot silently lose them — and cannot silently be lost.
-  const schedule = await pairedBundleAt(root, { ...options.paired, arms, prefixOver })
+  const specs = options.armOver === undefined ? arms : arms.map(options.armOver)
+  const schedule = await pairedBundleAt(root, { ...options.paired, arms: specs, prefixOver })
 
   for (const block of [1, 2, 3]) {
     if (options.noRecord?.includes(block)) continue
@@ -211,6 +214,18 @@ function readBlock(result: AdjudicationReadResult, block: number): Extract<Block
   const found = blockOf(result, block)
   if (found.kind !== "read") throw new Error(`block ${block} is ${found.kind}: ${found.reasons.join("; ")}`)
   return found
+}
+
+/** The report's sheet-level section: everything above its first block heading. */
+function sheetSection(text: string): string {
+  const end = text.indexOf("\nBLOCK ")
+  return end < 0 ? text : text.slice(0, end)
+}
+
+/** Why a block is not `read`, or `""` when it is. */
+function reasonOf(result: AdjudicationReadResult, block: number): string {
+  const found = blockOf(result, block)
+  return found.kind === "read" ? "" : found.reasons.join(" ")
 }
 
 function labelledTruth(result: AdjudicationReadResult, block: number) {
@@ -274,7 +289,14 @@ function brokenAccounting(): AdjudicationReadResult {
     kind: "read",
     root: "/nowhere",
     scheduleHash: "sha256:none",
-    sheet: { kind: "read", file: "/nowhere/adjudication.json", scheduleHash: "sha256:none", blocks: [], strayPages: [] },
+    sheet: {
+      kind: "read",
+      file: "/nowhere/adjudication.json",
+      scheduleHash: "sha256:none",
+      blocks: [],
+      strayPages: [],
+      rejectedPages: [],
+    },
     matcher: "shipped-lexical",
     excluded: [],
     blocks: [
@@ -284,7 +306,7 @@ function brokenAccounting(): AdjudicationReadResult {
           kind: "read",
           prefixRunId: "run-prefix-1",
           recordFile: "/nowhere/record.json",
-          verdicts: { pool: 7, paired: 7, armMissing: [], undecided: [], decided: 7 },
+          verdicts: { pool: 7, paired: 7, armMissing: [], undecided: [], decided: 7, unchanged: [] },
           truth: {
             kind: "labelled",
             file: "/nowhere/adjudication.json",
@@ -299,7 +321,8 @@ function brokenAccounting(): AdjudicationReadResult {
             unchanged: ["c1", "c2", "c3", "c4", "c5", "c6"],
             labelMissing: [],
             truthUnresolved: [],
-            accounting: { accounted: 6, pool: 7, agree: false },
+            unclassified: [],
+            accounting: { accounted: 6, distinct: 6, pool: 7, agree: false },
             falsePositives: { on: arm("on"), off: arm("off") },
             candidates: [],
           },
@@ -308,6 +331,35 @@ function brokenAccounting(): AdjudicationReadResult {
     ],
     summaries: [],
   }
+}
+
+/**
+ * A result holding the branch no shipped label can reach, for the bucket that
+ * exists so a fourth truth label could not vanish into `label missing`.
+ */
+function unclassifiedResult(): AdjudicationReadResult {
+  const base = brokenAccounting()
+  const block = base.blocks[0]!.result
+  if (block.kind !== "read" || block.truth.kind !== "labelled") throw new Error("the sibling fixture changed shape")
+  block.verdicts = { pool: 1, paired: 1, armMissing: [], undecided: [], decided: 1, unchanged: [] }
+  block.truth.unclassified = ["c1"]
+  block.truth.unchanged = []
+  block.truth.labelCoverage = { rows: 1, of: 1 }
+  block.truth.accounting = { accounted: 1, distinct: 1, pool: 1, agree: true }
+  block.truth.candidates = [
+    {
+      id: "c1",
+      outcome: { kind: "unclassified", label: "true-defect" },
+      present: ["on", "off"],
+      on: "upheld",
+      off: "rejected",
+      label: "true-defect",
+      evidence: null,
+      suggested: null,
+      disagreement: null,
+    },
+  ]
+  return base
 }
 
 // ---------------------------------------------------------------------------
@@ -326,12 +378,17 @@ describe("a complete sheet over three blocks", () => {
       expect(truth.directions["true-rejected-to-upheld"]).toEqual(["c2"])
       expect(truth.directions["true-upheld-to-rejected"]).toEqual(["c3"])
       expect(truth.directions["false-rejected-to-upheld"]).toEqual(["c4"])
-      expect(truth.unchanged).toEqual(["c5"])
+      expect(verdicts.unchanged.map((entry) => entry.id)).toEqual(["c5"])
       expect(truth.labelMissing).toEqual([])
       expect(truth.truthUnresolved).toEqual([])
       expect(verdicts.undecided.map((entry) => entry.id)).toEqual(["c6"])
       expect(verdicts.armMissing.map((entry) => entry.id)).toEqual(["c7"])
-      expect(truth.accounting).toEqual({ accounted: BLOCK.length, pool: BLOCK.length, agree: true })
+      expect(truth.accounting).toEqual({
+        accounted: BLOCK.length,
+        distinct: BLOCK.length,
+        pool: BLOCK.length,
+        agree: true,
+      })
       expect(truth.candidates).toHaveLength(BLOCK.length)
       expect(new Set(truth.candidates.map((entry) => entry.id)).size).toBe(BLOCK.length)
     }
@@ -347,12 +404,16 @@ describe("a complete sheet over three blocks", () => {
   test("names each direction's numerator and denominator, and PRINTS the accounting it checked", async () => {
     const { root } = await withDefaultSheet()
     const text = renderAdjudicationBundle(await readAt(root))
-    for (const direction of DIRECTIONS) expect(text).toContain(`${direction.label}: 1 of 5 decided`)
+    // THE DENOMINATOR IS THE DIFFERING DECIDED PAIRS: 5 decided less the 1 both
+    // arms decided the same way, which is a verdict-axis count printed above.
+    expect(text).toContain("the four directions and the two label buckets divide 4 of 5 decided")
+    for (const direction of DIRECTIONS) expect(text).toContain(`${direction.label}: 1 of 4`)
     expect(text).toContain("truth pool: 7 canonical candidate(s)")
     expect(text).toContain("mean 1, min 1, max 1 — descriptive over 3 available observations")
     // THE RENDERED INVARIANT, not the recomputed one: the assertions above read
     // the data structure, and the line below is what an operator actually sees.
-    expect(text).toContain("undecided + arm missing = 7, and the truth pool holds 7 — they agree")
+    expect(text).toContain("unclassified + undecided + arm missing = 7 over 7 distinct id(s),")
+    expect(text).toContain("and the truth pool holds 7 — they agree")
     expect(text).not.toContain("ACCOUNTING BROKEN")
   })
 
@@ -367,7 +428,7 @@ describe("a complete sheet over three blocks", () => {
   test("a partition that does not cover its pool prints loudly instead of its own claim", () => {
     const text = renderAdjudicationBundle(brokenAccounting())
     expect(text).toContain("ACCOUNTING BROKEN")
-    expect(text).toContain("The buckets sum to 6 and the truth pool holds 7.")
+    expect(text).toContain("The buckets sum to 6 over 6 distinct id(s), and the truth pool holds 7.")
     expect(text).toContain("Do not read them.")
     expect(text).not.toContain("they agree")
   })
@@ -558,7 +619,10 @@ describe("the sheet's states stay distinct", () => {
     expect(readBlock(result, 1).truth.kind).toBe("unavailable")
   })
 
-  /** Every remaining shape the parser refuses, each named by its own field. */
+  /**
+   * THE SHEET'S OWN IDENTITY. A document whose schedule binding or `blocks` list
+   * cannot be read has no pages to isolate, so these stay whole-sheet.
+   */
   const malformed: { name: string; sheet: (schedule: PairedSchedule) => unknown; why: string }[] = [
     {
       name: "no `scheduleHash`",
@@ -570,45 +634,6 @@ describe("the sheet's states stay distinct", () => {
       sheet: (schedule) => sheetFor(schedule, pages(schedule), { blocks: {} }),
       why: "no `blocks` list",
     },
-    {
-      name: "`blocks[0]` is not an object",
-      sheet: (schedule) => sheetFor(schedule, [5 as unknown as SheetBlockInput]),
-      why: "`blocks[0]` is not an object",
-    },
-    {
-      name: "`blocks[0].prefixRunId` is not a string",
-      sheet: (schedule) => sheetFor(schedule, [{ ...pages(schedule)[0]!, prefixRunId: 7 as unknown as string }]),
-      why: "`blocks[0].prefixRunId` is not a string",
-    },
-    {
-      name: "`blocks[0].rows` is not a list",
-      sheet: (schedule) => sheetFor(schedule, [{ ...pages(schedule)[0]!, rows: "none" as unknown as [] }]),
-      why: "`blocks[0].rows` is not a list",
-    },
-    {
-      name: "`blocks[0].rows[0]` is not an object",
-      sheet: (schedule) => sheetFor(schedule, [{ ...pages(schedule)[0]!, rows: [null as unknown as never] }]),
-      why: "`blocks[0].rows[0]` is not an object",
-    },
-    {
-      name: "`rows[0].candidateId` is not a string",
-      sheet: (schedule) =>
-        sheetFor(schedule, [{ ...pages(schedule)[0]!, rows: [{ candidateId: 1 as unknown as string, truth: "true-defect" }] }]),
-      why: "`blocks[0].rows[0].candidateId` is not a string",
-    },
-    {
-      name: "`rows[0].evidence` is present and not a string",
-      sheet: (schedule) =>
-        sheetFor(schedule, [
-          { ...pages(schedule)[0]!, rows: [{ candidateId: "c1", truth: "true-defect", evidence: 3 as unknown as string }] },
-        ]),
-      why: "`blocks[0].rows[0].evidence` is present and is not a string",
-    },
-    {
-      name: "two pages for one block",
-      sheet: (schedule) => sheetFor(schedule, [pages(schedule)[0]!, pages(schedule)[0]!]),
-      why: "`blocks[1]` and `blocks[0]` are both block 1",
-    },
   ]
   for (const entry of malformed) {
     test(`malformed — ${entry.name}`, async () => {
@@ -618,6 +643,92 @@ describe("the sheet's states stay distinct", () => {
       if (result.sheet.kind !== "malformed") throw new Error(`expected malformed, got ${result.sheet.kind}`)
       expect(result.sheet.why).toContain(entry.why)
       expect(readBlock(result, 1).truth.kind).toBe("unavailable")
+    })
+  }
+
+  /**
+   * ONE BAD PAGE WITHDRAWS ONE BLOCK. Each of these used to return `malformed`
+   * for the WHOLE sheet, so a typo in block 1's page took the correctly filled
+   * truth labels of blocks 2 and 3 with it. Every case below carries all three
+   * pages and asserts that the other two still read their four directions —
+   * the isolation is the claim, not just the reason string.
+   */
+  const rejectedPage: { name: string; sheet: (schedule: PairedSchedule) => unknown; why: string }[] = [
+    {
+      name: "`blocks[0]` is not an object",
+      sheet: (schedule) => sheetFor(schedule, [5 as unknown as SheetBlockInput, ...pages(schedule).slice(1)]),
+      why: "`blocks[0]` is not an object",
+    },
+    {
+      name: "`blocks[0].prefixRunId` is not a string",
+      sheet: (schedule) =>
+        sheetFor(schedule, [
+          { ...pages(schedule)[0]!, prefixRunId: 7 as unknown as string },
+          ...pages(schedule).slice(1),
+        ]),
+      why: "`blocks[0].prefixRunId` is not a string",
+    },
+    {
+      name: "`blocks[0].rows` is not a list",
+      sheet: (schedule) =>
+        sheetFor(schedule, [{ ...pages(schedule)[0]!, rows: "none" as unknown as [] }, ...pages(schedule).slice(1)]),
+      why: "`blocks[0].rows` is not a list",
+    },
+    {
+      name: "`blocks[0].rows[0]` is not an object",
+      sheet: (schedule) =>
+        sheetFor(schedule, [{ ...pages(schedule)[0]!, rows: [null as unknown as never] }, ...pages(schedule).slice(1)]),
+      why: "`blocks[0].rows[0]` is not an object",
+    },
+    {
+      name: "`rows[0].candidateId` is not a string",
+      sheet: (schedule) =>
+        sheetFor(schedule, [
+          { ...pages(schedule)[0]!, rows: [{ candidateId: 1 as unknown as string, truth: "true-defect" }] },
+          ...pages(schedule).slice(1),
+        ]),
+      why: "`blocks[0].rows[0].candidateId` is not a string",
+    },
+    {
+      name: "`rows[0].evidence` is present and not a string",
+      sheet: (schedule) =>
+        sheetFor(schedule, [
+          { ...pages(schedule)[0]!, rows: [{ candidateId: "c1", truth: "true-defect", evidence: 3 as unknown as string }] },
+          ...pages(schedule).slice(1),
+        ]),
+      why: "`blocks[0].rows[0].evidence` is present and is not a string",
+    },
+    {
+      name: "a label outside the three, naming the row and the value",
+      sheet: (schedule) =>
+        sheetFor(schedule, [
+          { ...pages(schedule)[0]!, rows: [{ candidateId: "c1", truth: "probably-fine" as TruthLabel }] },
+          ...pages(schedule).slice(1),
+        ]),
+      why: "probably-fine",
+    },
+    {
+      name: "two pages for one block, and neither is chosen",
+      sheet: (schedule) => sheetFor(schedule, [pages(schedule)[0]!, ...pages(schedule)]),
+      why: "choosing between them would publish labels nobody agreed on",
+    },
+  ]
+  for (const entry of rejectedPage) {
+    test(`one page rejected, the others read — ${entry.name}`, async () => {
+      const { root, schedule } = await bundleAt()
+      await writeSheet(root, entry.sheet(schedule))
+      const result = await readAt(root)
+      if (result.sheet.kind !== "read") throw new Error(`expected read, got ${result.sheet.kind}`)
+
+      const first = readBlock(result, 1).truth
+      if (first.kind !== "unavailable") throw new Error(`expected unavailable, got ${first.kind}`)
+      expect(first.reasons.join(" ")).toContain("carries no valid page for block 1")
+      expect(first.reasons.join(" ")).toContain(entry.why)
+
+      for (const block of [2, 3]) {
+        expect(labelledTruth(result, block).directions["false-upheld-to-rejected"]).toEqual(["c1"])
+      }
+      for (const direction of DIRECTIONS) expect(summaryOf(result, direction.label).observed).toBe(2)
     })
   }
 
@@ -701,7 +812,7 @@ describe("the sheet is bound like evidence", () => {
     expect(labelledTruth(result, 2).directions["false-upheld-to-rejected"]).toEqual(["c1"])
     const third = readBlock(result, 3).truth
     if (third.kind !== "unavailable") throw new Error(`expected unavailable, got ${third.kind}`)
-    expect(third.reasons.join(" ")).toContain("carries no page for block 3")
+    expect(third.reasons.join(" ")).toContain("carries no valid page for block 3")
     expect(third.reasons.join(" ")).toContain("`blocks[2].block` = 9")
 
     const text = renderAdjudicationBundle(result)
@@ -741,19 +852,22 @@ describe("the sheet is bound like evidence", () => {
     expect(truth.reasons.join(" ")).toContain("`not-in-this-pool`")
   })
 
-  test("a label outside the three is malformed, naming the row and the value", async () => {
+  test("a label outside the three rejects its page, naming the row, the value and the three it knows", async () => {
     const { root, schedule } = await bundleAt()
     await writeSheet(
       root,
       sheetFor(schedule, [
-        { block: 1, prefixRunId: "run-prefix-1", rows: [{ candidateId: "c1", truth: "probably-fine" as TruthLabel }] },
+        { block: 1, prefixRunId: runIdOf({}, 1), rows: [{ candidateId: "c1", truth: "probably-fine" as TruthLabel }] },
+        ...pages(schedule).slice(1),
       ]),
     )
     const result = await readAt(root)
-    if (result.sheet.kind !== "malformed") throw new Error(`expected malformed, got ${result.sheet.kind}`)
-    expect(result.sheet.why).toContain("`c1`")
-    expect(result.sheet.why).toContain("probably-fine")
-    for (const label of TRUTH_LABELS) expect(result.sheet.why).toContain(label)
+    if (result.sheet.kind !== "read") throw new Error(`expected read, got ${result.sheet.kind}`)
+    const why = result.sheet.rejectedPages.map((page) => page.why).join(" ")
+    expect(why).toContain("`c1`")
+    expect(why).toContain("probably-fine")
+    for (const label of TRUTH_LABELS) expect(why).toContain(label)
+    expect(result.sheet.rejectedPages.map((page) => page.block)).toEqual([1])
   })
 })
 
@@ -985,7 +1099,9 @@ describe("false positives, per arm, with the denominator named", () => {
     // OFF upheld c1, c3, c5, c6; only c1 is not-a-defect.
     expect(truth.falsePositives.off.upheld).toBe(4)
     expect(truth.falsePositives.off.falsePositives).toEqual(["c1"])
-    expect(renderAdjudicationBundle(result)).toContain("arm on, run `run-on-0`: 1 of 4 upheld finding(s) (`c4`)")
+    expect(renderAdjudicationBundle(result)).toContain(
+      "arm on, run `run-on-0`: 1 of 4 upheld finding(s) are known false positives (`c4`)",
+    )
   })
 
   test("an unlabelled upheld finding is `label missing`, never a false positive by default", async () => {
@@ -1091,7 +1207,7 @@ describe("a planted-label match is suggested evidence, never a truth label", () 
     expect(text).toContain("sql-injection")
     // The suggestion column exists for the agreeing rows too, which is what makes
     // the contradicting ones checkable against something.
-    expect(text).toContain("LABEL AND SUGGESTION, PER CANDIDATE")
+    expect(text).toContain("LABEL, EVIDENCE AND SUGGESTION, PER CANDIDATE")
     expect(text).toContain("`c1`: label not-a-defect, suggestion `sql-injection`")
     expect(text).toContain("`c2`: label true-defect, suggestion none")
   })
@@ -1136,6 +1252,382 @@ describe("a planted-label match is suggested evidence, never a truth label", () 
 // The seam
 // ---------------------------------------------------------------------------
 
+/**
+ * What the review of 2026-09-18 changed, each claim with the assertion that
+ * would have caught it going the other way.
+ */
+describe("the report's states and rates say what they mean", () => {
+  /**
+   * A BROKEN LINK IS NOT AN ABSENT SHEET. `realpath` cannot resolve one and does
+   * not call that a containment failure, so without its own check the reader
+   * fell through to `ENOENT` and printed the banner saying nobody wrote a sheet.
+   * Somebody wrote one; it points at nothing.
+   */
+  test("a sheet that is a symlink to nothing is unreadable, never absent", async () => {
+    const { root } = await bundleAt()
+    const elsewhere = await tempDir()
+    await symlink(join(elsewhere, "never-written.json"), join(root, ADJUDICATION_SHEET_FILE))
+    const result = await readAt(root)
+    if (result.sheet.kind !== "unreadable") throw new Error(`expected unreadable, got ${result.sheet.kind}`)
+    expect(result.sheet.why).toContain("resolves to nothing")
+    const text = renderAdjudicationBundle(result)
+    expect(text).toContain("THE TRUTH SHEET COULD NOT BE READ")
+    expect(text).not.toContain("NO TRUTH SHEET")
+  })
+
+  /** `0 of 0` is not a rate. The house helper says so and this report now uses it. */
+  test("a block with nothing to divide by prints `not measurable`, never `0 of 0`", async () => {
+    const lonely: Candidate[] = [{ id: "only", on: "upheld", off: null }]
+    const { root, schedule } = await bundleAt({ blocks: { 1: lonely, 2: lonely, 3: lonely } })
+    await writeSheet(
+      root,
+      sheetFor(
+        schedule,
+        [1, 2, 3].map((block) => pageFor(block, lonely, () => "true-defect", `run-prefix-${block}`)),
+      ),
+    )
+    const result = await readAt(root)
+    expect(readBlock(result, 1).verdicts.decided).toBe(0)
+    const text = renderAdjudicationBundle(result)
+    expect(text).toContain("not measurable (0 cases)")
+    expect(text).not.toContain(" 0 of 0")
+  })
+
+  /** The column `ADJUDICATION.md` calls the one that makes a label checkable. */
+  test("a row's `evidence` reaches the report", async () => {
+    const { root, schedule } = await bundleAt()
+    const page = pageFor(1, BLOCK, (id) => LABELS[id]!)
+    await writeSheet(
+      root,
+      sheetFor(schedule, [
+        {
+          ...page,
+          rows: page.rows.map((row) =>
+            row.candidateId === "c1" ? { ...row, evidence: "the rate is validated on line 12" } : row,
+          ),
+        },
+        ...pages(schedule).slice(1),
+      ]),
+    )
+    const result = await readAt(root)
+    const account = labelledTruth(result, 1).candidates.find((entry) => entry.id === "c1")!
+    expect(account.evidence).toBe("the rate is validated on line 12")
+    expect(renderAdjudicationBundle(result)).toContain("evidence: the rate is validated on line 12")
+  })
+
+  /**
+   * An arm the paired reader refused to bind is named here too. Without it this
+   * report prints per-arm counts with no notice that an arm is missing from the
+   * comparison, one screen under a labelled report that does say so.
+   */
+  test("an arm the paired reader did not bind is named in this report", async () => {
+    const { root } = await withDefaultSheet({
+      armOver: (spec) =>
+        spec.block === 3 && spec.arm === "off"
+          ? { ...spec, over: { ...spec.over, fixtureHash: known("sha256:not-the-sealed-one") } }
+          : spec,
+    })
+    const result = await readAt(root)
+    expect(result.excluded.length).toBeGreaterThan(0)
+    expect(renderAdjudicationBundle(result)).toContain("ARMS THE PAIRED READER DID NOT BIND")
+  })
+
+  /**
+   * A cancelled prefix holds whatever discovery reached, so the truth pool is a
+   * partial one. Nothing is withheld — the counts are true of the pool that
+   * exists — but a pool the operator believes is complete is the one way these
+   * denominators mislead.
+   */
+  test("a cancelled prefix run is named, and the counts still read", async () => {
+    const { root } = await withDefaultSheet({
+      recordOver: (record, block) => {
+        if (block === 1) record.cancelled = { stage: "discover" }
+      },
+    })
+    const result = await readAt(root)
+    const block = readBlock(result, 1)
+    if (block.kind !== "read") throw new Error(`expected read, got ${block.kind}`)
+    expect(block.cancelledAt).toBe("discover")
+    expect(labelledTruth(result, 1).directions["false-upheld-to-rejected"]).toEqual(["c1"])
+    expect(renderAdjudicationBundle(result)).toContain("THE PREFIX RUN WAS CANCELLED AT `discover`")
+  })
+
+  /**
+   * A REJECTED PAGE IS NAMED EVEN WHEN NO BLOCK REPORTS ONE MISSING.
+   *
+   * A page naming a KNOWN block always leaves that block without one, so its
+   * reason renders in the block section only if that block reaches the truth
+   * half — and `readBlock` returns before it for a withheld paired block, a
+   * missing `on`/`off` pair, a prefix record absent or bound elsewhere, and a
+   * record whose canonical pool will not parse. A page carrying NO readable
+   * block number leaves no block short of a page at all, so when all three read
+   * it reaches nothing anywhere. Each case below would print nothing about the
+   * discarded page without the sheet-level section, and each asserts the REASON,
+   * not only that some line mentions the index.
+   */
+  const silent: {
+    name: string
+    reaches: RegExp
+    block: number
+    /** The block the rejected page named, or `null` when it carried no readable one. */
+    names: number | null
+    build: () => Promise<{ root: string; at: number }>
+  }[] = [
+    {
+      name: "the block's prefix record is missing, so the truth half is never reached",
+      reaches: /the prefix record is unavailable/,
+      block: 1,
+      names: 1,
+      build: async () => {
+        const { root, schedule } = await bundleAt({ noRecord: [1] })
+        await writeSheet(
+          root,
+          sheetFor(schedule, [
+            { ...pages(schedule)[0]!, rows: "none" as unknown as [] },
+            ...pages(schedule).slice(1),
+          ]),
+        )
+        return { root, at: 0 }
+      },
+    },
+    {
+      name: "the paired reader withheld the block",
+      reaches: /the paired block is withheld/,
+      block: 3,
+      names: 3,
+      build: async () => {
+        const { root, schedule } = await bundleAt()
+        await writeSheet(
+          root,
+          sheetFor(schedule, [
+            ...pages(schedule).slice(0, 2),
+            { ...pages(schedule)[2]!, rows: "none" as unknown as [] },
+          ]),
+        )
+        await rm(join(root, PREFIX_DIRECTORY, "2"), { recursive: true, force: true })
+        return { root, at: 2 }
+      },
+    },
+    {
+      name: "an extra page with no readable block number beside three valid ones",
+      reaches: /^$/,
+      block: 1,
+      names: null,
+      build: async () => {
+        const { root, schedule } = await bundleAt()
+        await writeSheet(root, sheetFor(schedule, [...pages(schedule), 5 as unknown as SheetBlockInput]))
+        return { root, at: 3 }
+      },
+    },
+  ]
+  for (const entry of silent) {
+    test(`a rejected page is named when ${entry.name}`, async () => {
+      const { root, at } = await entry.build()
+      const result = await readAt(root)
+      if (result.sheet.kind !== "read") throw new Error(`expected read, got ${result.sheet.kind}`)
+      expect(result.sheet.rejectedPages.map((page) => page.at)).toContain(at)
+
+      const rejected = result.sheet.rejectedPages.find((page) => page.at === at)!
+      expect(rejected.block).toEqual(entry.names)
+
+      // SCOPED TO THE SHEET SECTION, AND THE REASON IS ASSERTED. Over the whole
+      // report a bare index assertion passes on the block sections too, and
+      // dropping `why` from the rendered line would leave a heading and an index
+      // standing where the repair diagnostic used to be.
+      const section = sheetSection(renderAdjudicationBundle(result))
+      expect(section).toContain("SHEET PAGES REJECTED")
+      const line = section.split("\n").find((entry) => entry.includes(`\`blocks[${at}]\``))
+      expect(line, `no sheet-section line for \`blocks[${at}]\``).toBeDefined()
+      expect(line!).toContain(entry.names === null ? "no readable block number" : `block ${entry.names}`)
+      expect(line!).toContain(rejected.why)
+
+      // Each case must reach a DIFFERENT early return, or the three prove one path.
+      expect(reasonOf(result, entry.block), entry.name).toMatch(entry.reaches)
+    })
+  }
+
+  /** The valid pages are untouched by a rejected one sitting beside them. */
+  test("an extra rejected page leaves every valid page's results standing", async () => {
+    const { root, schedule } = await bundleAt()
+    await writeSheet(root, sheetFor(schedule, [...pages(schedule), 5 as unknown as SheetBlockInput]))
+    const result = await readAt(root)
+    for (const block of [1, 2, 3]) {
+      expect(labelledTruth(result, block).directions["false-upheld-to-rejected"], `block ${block}`).toEqual(["c1"])
+    }
+    for (const direction of DIRECTIONS) expect(summaryOf(result, direction.label).observed).toBe(3)
+  })
+
+  /**
+   * THE PROVENANCE LINE COMPARES THE FUNCTION, NOT THE OPTION'S PRESENCE. A
+   * caller handing over `lexicalDefectMatcher` explicitly is running the shipped
+   * matcher, and the report used to call that run INJECTED — a false sentence
+   * about where its own suggestions came from.
+   */
+  test("an explicitly passed shipped matcher is reported as shipped, not injected", async () => {
+    const { root } = await withDefaultSheet()
+    const passed = await readAt(root, lexicalDefectMatcher)
+    expect(passed.matcher).toBe("shipped-lexical")
+    expect(renderAdjudicationBundle(passed)).not.toContain("INJECTED")
+
+    const injected = await readAt(root, () => false)
+    expect(injected.matcher).toBe("injected")
+    expect(renderAdjudicationBundle(injected)).toContain("INJECTED")
+  })
+
+  /**
+   * THE THREE NON-DECISIVE STATES ARE NAMED FOR EVERY CANDIDATE. They used to be
+   * capped at five, and the per-candidate table that would have carried the rest
+   * sits below the no-sheet return — so past the sixth, a bundle with no sheet
+   * said how many were undecided and never which of the three states each was in.
+   */
+  test("every undecided candidate is named, past the five-id cap the other lists keep", async () => {
+    const many: Candidate[] = [1, 2, 3, 4, 5, 6, 7].map((n) => ({
+      id: `u${n}`,
+      on: "not-adjudicated",
+      off: "upheld",
+    }))
+    const { root } = await bundleAt({ blocks: { 1: many, 2: many, 3: many } })
+    const result = await readAt(root)
+    expect(readBlock(result, 1).verdicts.undecided).toHaveLength(7)
+    const text = renderAdjudicationBundle(result)
+    for (const candidate of many) expect(text, candidate.id).toContain(`\`${candidate.id}\` — on not-adjudicated, off upheld`)
+    expect(text).not.toContain("and 2 more")
+  })
+
+  /**
+   * A LABELLED CANDIDATE IS NEVER REPORTED AS AN UNLABELLED ONE. The branch is
+   * unreachable under the three shipped labels and exists for a fourth; filing
+   * it as `label missing` would print a false statement under a passing
+   * partition, which is the one shape the accounting cannot catch.
+   */
+  test("a labelled candidate no direction covers is `unclassified`, never `label missing`", () => {
+    const text = renderAdjudicationBundle(unclassifiedResult())
+    expect(text).toContain("UNCLASSIFIED: 1 of 1 carry a label no direction row covers")
+    expect(text).toContain("unclassified (labelled true-defect, and no direction row covers it)")
+    expect(text).not.toContain("label missing: 1")
+  })
+})
+
+/**
+ * `unchanged` is a VERDICT-axis count: both arms deciding a candidate the same
+ * way needs no truth label, so it reads with no sheet and in every sheet state.
+ */
+describe("`unchanged` is a verdict fact and does not wait for the sheet", () => {
+  /**
+   * TWO UNCHANGED AND ONE ARM-MISSING, so the two counts DIFFER.
+   *
+   * The default block holds one of each, and `observe()` used to return the
+   * arm-missing count for every verdict field that was not `undecided` — a
+   * quantity reporting another quantity's number under its own label. Over a
+   * fixture where both are 1 that substitution is invisible, so this block makes
+   * the two numbers disagree and the summary values are asserted, not just the
+   * observation count.
+   */
+  const SPLIT: Candidate[] = [
+    { id: "u1", on: "upheld", off: "upheld" },
+    { id: "u2", on: "judge-ruled-invalid", off: "judge-ruled-invalid" },
+    { id: "m1", on: "upheld", off: null },
+  ]
+
+  const sheetless: { name: string; build: () => Promise<string> }[] = [
+    {
+      name: "no sheet at all",
+      build: async () => (await bundleAt({ blocks: { 1: SPLIT, 2: SPLIT, 3: SPLIT } })).root,
+    },
+    {
+      name: "a sheet refused as being about another plan",
+      build: async () => {
+        const { root, schedule } = await bundleAt({ blocks: { 1: SPLIT, 2: SPLIT, 3: SPLIT } })
+        await writeSheet(root, sheetFor(schedule, pages(schedule), { scheduleHash: "sha256:someone-elses-plan" }))
+        return root
+      },
+    },
+  ]
+  for (const entry of sheetless) {
+    test(`reads with ${entry.name}`, async () => {
+      const result = await readAt(await entry.build())
+      expect(readBlock(result, 1).verdicts.unchanged.map((row) => row.id)).toEqual(["u1", "u2"])
+      const unchanged = summaryOf(result, "unchanged (decided both sides, same way)")
+      expect(unchanged.observed).toBe(3)
+      expect(unchanged.values).toEqual([2, 2, 2])
+      expect(summaryOf(result, "candidates missing from an arm").values).toEqual([1, 1, 1])
+      expect(summaryOf(result, "undecided transitions").values).toEqual([0, 0, 0])
+      expect(renderAdjudicationBundle(result)).toContain("unchanged (decided both sides, same way): 2 of 2 decided")
+    })
+  }
+
+  const labelled: { name: string; label: TruthLabel | null }[] = [
+    { name: "a decisive label", label: "true-defect" },
+    { name: "an `unresolved` label", label: "unresolved" },
+    { name: "no row at all", label: null },
+  ]
+  for (const entry of labelled) {
+    test(`an unchanged candidate is unchanged under ${entry.name}`, async () => {
+      const { root, schedule } = await bundleAt()
+      const page = pageFor(1, BLOCK, (id) => (id === "c5" ? (entry.label ?? "true-defect") : LABELS[id]!))
+      const rows = entry.label === null ? page.rows.filter((row) => row.candidateId !== "c5") : page.rows
+      await writeSheet(root, sheetFor(schedule, [{ ...page, rows }, ...pages(schedule).slice(1)]))
+      const result = await readAt(root)
+      const truth = labelledTruth(result, 1)
+
+      expect(readBlock(result, 1).verdicts.unchanged.map((row) => row.id)).toEqual(["c5"])
+      expect(truth.labelMissing).not.toContain("c5")
+      expect(truth.truthUnresolved).not.toContain("c5")
+      const account = truth.candidates.find((candidate) => candidate.id === "c5")!
+      expect(account.outcome).toEqual({ kind: "unchanged", state: "upheld" })
+      expect(truth.accounting.agree).toBe(true)
+    })
+  }
+
+  /**
+   * THE BUCKETS ARE DISJOINT AND COVER THE POOL, by id and not only by total.
+   * A total alone cannot see a candidate filed twice, because the double-count
+   * and the candidate it displaced cancel.
+   */
+  test("every bucket is disjoint and together they cover the pool", async () => {
+    const result = await readAt((await withDefaultSheet()).root)
+    const truth = labelledTruth(result, 1)
+    const verdicts = readBlock(result, 1).verdicts
+    const buckets = [
+      ...DIRECTIONS.map((direction) => truth.directions[direction.key]),
+      truth.labelMissing,
+      truth.truthUnresolved,
+      truth.unclassified,
+      verdicts.unchanged.map((row) => row.id),
+      verdicts.undecided.map((row) => row.id),
+      verdicts.armMissing.map((row) => row.id),
+    ]
+    const flat = buckets.flat()
+    expect(new Set(flat).size).toBe(flat.length)
+    expect(flat.length).toBe(BLOCK.length)
+    expect(truth.accounting).toEqual({
+      accounted: BLOCK.length,
+      distinct: BLOCK.length,
+      pool: BLOCK.length,
+      agree: true,
+    })
+  })
+
+  /**
+   * THE TRUTH HALF IS WITHDRAWN AND THE VERDICT HALF IS NOT. A sheet page bound
+   * to another execution says nothing about whether the two arms decided a
+   * candidate, so the verdict quantities keep all three observations while the
+   * truth quantities drop to two. Documentation alone would leave this unheld.
+   */
+  test("a block whose sheet page names another execution keeps its verdict quantities", async () => {
+    const { root, schedule } = await bundleAt()
+    const page = pageFor(1, BLOCK, (id) => LABELS[id]!, "run-prefix-2")
+    await writeSheet(root, sheetFor(schedule, [page, ...pages(schedule).slice(1)]))
+    const result = await readAt(root)
+
+    for (const quantity of ["undecided transitions", "candidates missing from an arm", "unchanged (decided both sides, same way)"]) {
+      expect(summaryOf(result, quantity).observed, quantity).toBe(3)
+    }
+    for (const direction of DIRECTIONS) expect(summaryOf(result, direction.label).observed).toBe(2)
+    expect(summaryOf(result, "label missing").observed).toBe(2)
+  })
+})
+
 describe("the `eval-read` seam", () => {
   test("prints the adjudication report fourth and still returns 0", async () => {
     const { root } = await withDefaultSheet()
@@ -1151,10 +1643,29 @@ describe("the `eval-read` seam", () => {
     expect(text).toContain("adjudication.json")
   })
 
-  test("the labelled report points at this one rather than promising a count it may not have", async () => {
+  /**
+   * No report promises a count an absent sheet never produced. The positive half
+   * — that the labelled report's own closing names THIS module — lives in
+   * `labelled-read.test.ts`, over a bundle whose labelled report is not refused.
+   * Asserted here it would be satisfied by the paired report's closing instead.
+   */
+  test("no report promises a count it may not have", async () => {
     const { root } = await withDefaultSheet()
     const { text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
     expect(text).not.toContain("adjudication is story 2-6b")
-    expect(text).toContain("ablation/adjudication-read.ts")
+  })
+
+  /**
+   * THE SEAM'S OWN SAFETY NET, exercised through the seam. `eval-read` wraps this
+   * reader in its own `try`, and a bundle with a refused schedule is the state
+   * that reaches it without a bundle on disk being broken.
+   */
+  test("a bundle whose sealed schedule is refused prints the reason and still returns 0", async () => {
+    const { root } = await withDefaultSheet()
+    await writeFile(join(root, SCHEDULE_FILE), "{ not a schedule")
+    const { code, text } = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", root]))
+    expect(code).toBe(0)
+    expect(text).toContain("MAD ADJUDICATION")
+    expect(text).not.toContain("THE FOUR DIRECTIONS")
   })
 })

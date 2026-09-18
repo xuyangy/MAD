@@ -47,7 +47,7 @@ import { known } from "./manifest.ts"
 import { readPairedBundle, renderPairedBundle, type PairedReadResult } from "./paired-read.ts"
 import { pairedBundleAt, PROTOCOL_FILE, WORKTREE, type ArmSpec, type PairedBundleOptions } from "./paired-read.fixture.ts"
 import { readBundle, renderBundle } from "./read-bundle.ts"
-import { LABELLED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE } from "./report.ts"
 import { writeBundle } from "./read-bundle.fixture.ts"
 import { readFrozenProtocol, SCHEDULE_FILE } from "./schedule.ts"
 
@@ -1417,6 +1417,24 @@ describe("slot identity and coverage", () => {
  * suite was green. The packaging half is held by `.gitignore`'s own exception
  * list, one line per cited file.
  */
+describe("the closing paragraph says where the counts it does not carry now live", () => {
+  /**
+   * SCOPED TO THIS REPORT'S OWN CLOSING. `eval-read` prints four reports and the
+   * PAIRED one names the adjudication module in its closing too, so an assertion
+   * over the whole output is satisfied by the wrong report — the sentence could
+   * be deleted from here with nothing failing. The slice is what holds it.
+   */
+  test("the labelled report's closing names the adjudication reader", async () => {
+    const { root } = await labelledBundle()
+    const outcome = await readLabelledBundle(await pairedOf(root))
+    const text = renderLabelledBundle(outcome)
+    const closing = text.slice(text.indexOf("WHAT THIS REPORT DOES NOT MEASURE."))
+    expect(closing, "no closing paragraph in the labelled report").not.toBe("")
+    expect(closing).toContain(ADJUDICATION_READER_MODULE)
+    expect(closing).toContain("U is not a truth label")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // When scoring itself fails
 // ---------------------------------------------------------------------------

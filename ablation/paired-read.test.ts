@@ -25,6 +25,7 @@ import { emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
 import { cancelledTurn, type BackendCapabilities, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
 import { DEFAULT_JUDGE_ANSWERS, fakeClock, judgeRoleOf } from "../core/test-support/fakes.ts"
+import { readAdjudicationBundle } from "./adjudication-read.ts"
 import { PREFIX_DIRECTORY, PREFIX_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import { known, unknownValue } from "./manifest.ts"
@@ -47,7 +48,14 @@ import {
 } from "./paired-read.fixture.ts"
 import { runPairedBlocks, type PairedPhaseContext } from "./paired.ts"
 import { writeBundle } from "./read-bundle.fixture.ts"
-import { appendSlotStatus, scheduleHashOf, SCHEDULE_FILE, SLOT_STATUS_FILE, type PairedSchedule } from "./schedule.ts"
+import {
+  appendSlotStatus,
+  PAIRED_BLOCKS,
+  scheduleHashOf,
+  SCHEDULE_FILE,
+  SLOT_STATUS_FILE,
+  type PairedSchedule,
+} from "./schedule.ts"
 
 const scratch: string[] = []
 
@@ -1034,6 +1042,49 @@ describe("a bundle `runPairedBlocks` actually wrote", () => {
     expect(evidence.forked).toBe(true)
     const first = blockOf(result, 1).result
     if (first.kind === "measured") expect(first.prefixRunId).toBe(evidence.prefixRunId.value)
+  })
+
+  /**
+   * THE JOIN THE ADJUDICATION READER IS BUILT ON, OVER BYTES A WRITER WROTE.
+   *
+   * `ablation/adjudication-read.ts` takes the block's prefix `record.json`
+   * canonical findings as the truth pool and joins them to each arm's persisted
+   * findings by `Finding.id`. Every fixture in `adjudication-read.test.ts`
+   * derives both sides from one `Candidate[]`, so the ids agree there by
+   * construction and the join is true of the fixture rather than of the code.
+   *
+   * If a fork, a dump or a clustering step ever re-minted ids, every pool
+   * candidate would land in `armMissing`, `paired` and `decided` would be 0, and
+   * the report would print four zeroes with `accounting.agree` still true —
+   * internally consistent and entirely empty, with nothing in the suite failing.
+   * This is the assertion that would fail first.
+   */
+  test("the prefix record's canonical ids are the ids both arms carry, so the truth pool joins", async () => {
+    const root = await tempDir()
+    const roster = rosterOf()
+    const base = scheduleInput(root, roster.roster)
+    await sealSchedule(root)
+
+    const outcome = await runPairedBlocks({
+      ...base,
+      worktree: WORKTREE,
+      priorWarnings: roster.warnings,
+      clock: fakeClock(),
+      backendFor: scriptedBackend,
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+
+    const adjudication = await readAdjudicationBundle(await read(root))
+    if (adjudication.kind !== "read") throw new Error(`expected read, got ${adjudication.kind}`)
+    expect(adjudication.blocks).toHaveLength(PAIRED_BLOCKS.length)
+    for (const block of adjudication.blocks) {
+      const where = `block ${block.block}`
+      if (block.result.kind !== "read") throw new Error(`${where}: ${block.result.reasons.join("; ")}`)
+      const verdicts = block.result.verdicts
+      expect(verdicts.pool, where).toBeGreaterThan(0)
+      expect(verdicts.paired, where).toBe(verdicts.pool)
+      expect(verdicts.armMissing, where).toEqual([])
+    }
   })
 })
 

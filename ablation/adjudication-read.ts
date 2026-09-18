@@ -69,7 +69,7 @@
  * Every entry point returns a typed result and nothing throws.
  */
 
-import { readFile, realpath } from "node:fs/promises"
+import { lstat, readFile, realpath } from "node:fs/promises"
 import { join, sep } from "node:path"
 
 import type { Finding } from "../core/domain/finding.ts"
@@ -77,6 +77,7 @@ import { adjudicate } from "../fixtures/seeded-defects/adjudicate.ts"
 import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
 import { lexicalDefectMatcher, type DefectMatcher } from "../fixtures/recall.ts"
 import { verdictState, type VerdictState } from "./compare.ts"
+import { countText } from "./cross-arm-rates.ts"
 import { loadPrefixRecord, type FindingList } from "./labelled-read.ts"
 import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-read.ts"
 import { PAIRED_BLOCKS, type Arm, type PairedSchedule } from "./schedule.ts"
@@ -215,6 +216,21 @@ export interface StrayPage {
 }
 
 /**
+ * A page naming a planned block that this reader could not read as one.
+ *
+ * It withdraws its own block's labels and no others. `block` is `null` when the
+ * page is not even an object, so no block number could be read off it — nothing
+ * is inferred about which block it was meant for, exactly as nothing is inferred
+ * for a `StrayPage`.
+ */
+export interface RejectedPage {
+  /** Index in the sheet's `blocks` list. */
+  at: number
+  block: number | null
+  why: string
+}
+
+/**
  * The sheet's states, none of which collapses into another.
  *
  * `absent` is nobody wrote one. `unreadable` is one this process could not open
@@ -230,7 +246,14 @@ export type SheetRead =
   | { kind: "unreadable"; file: string; why: string }
   | { kind: "malformed"; file: string; why: string }
   | { kind: "refused"; file: string; why: string }
-  | { kind: "read"; file: string; scheduleHash: string; blocks: SheetBlock[]; strayPages: StrayPage[] }
+  | {
+      kind: "read"
+      file: string
+      scheduleHash: string
+      blocks: SheetBlock[]
+      strayPages: StrayPage[]
+      rejectedPages: RejectedPage[]
+    }
 
 /** What a truth-dependent quantity reads when the sheet gives no labels. */
 export const NO_SHEET_REASON = "no adjudication sheet"
@@ -248,7 +271,18 @@ async function readSheet(root: string, schedule: PairedSchedule): Promise<SheetR
   try {
     text = await readFile(file, "utf8")
   } catch (error) {
-    if (isMissing(error)) return { kind: "absent", file, why: `${NO_SHEET_REASON} at \`${file}\`` }
+    if (isMissing(error)) {
+      // A BROKEN LINK IS NOT AN ABSENT SHEET. `realpath` above cannot resolve
+      // one either, and it deliberately does not treat that as a containment
+      // failure — so without this the one mistake a hand-placed file makes most
+      // easily, a link to a path that has moved, printed under a banner saying
+      // nobody wrote a sheet. Somebody wrote one; it points at nothing.
+      const link = await lstat(file).catch(() => null)
+      if (link !== null && link.isSymbolicLink()) {
+        return { kind: "unreadable", file, why: `\`${file}\` is a symlink and it resolves to nothing` }
+      }
+      return { kind: "absent", file, why: `${NO_SHEET_REASON} at \`${file}\`` }
+    }
     return { kind: "unreadable", file, why: `\`${file}\` could not be read (${messageOf(error)})` }
   }
   let raw: unknown
@@ -283,56 +317,83 @@ async function readSheet(root: string, schedule: PairedSchedule): Promise<SheetR
   }
   if (!Array.isArray(raw.blocks)) return { kind: "malformed", file, why: "it carries no `blocks` list" }
 
-  const blocks: SheetBlock[] = []
+  // A BAD PAGE REFUSES ITSELF AND NOTHING ELSE. Every check below the sheet's
+  // own identity is a check on ONE page, so one typo in page 3 withdraws the
+  // truth labels of page 3. Withdrawing blocks 1 and 2 with it would be a
+  // whole-sheet refusal dressed as a field check — the block the typo was meant
+  // for reads `carries no valid page`, with the reason named beside it.
+  // `malformed` above this line stays whole-sheet: a document whose version,
+  // schedule binding or `blocks` list cannot be read has no pages to isolate.
   const strayPages: StrayPage[] = []
-  const seen = new Map<number, number>()
+  const rejectedPages: RejectedPage[] = []
+  const byBlock = new Map<number, { at: number; entry: Record<string, unknown> }[]>()
   for (const [index, entry] of raw.blocks.entries()) {
-    if (!isRecord(entry)) return { kind: "malformed", file, why: `\`blocks[${index}]\` is not an object` }
+    if (!isRecord(entry)) {
+      rejectedPages.push({ at: index, block: null, why: `\`blocks[${index}]\` is not an object` })
+      continue
+    }
     const block = entry.block
-    // A PAGE NAMING NO PLANNED BLOCK REFUSES ITSELF AND NOTHING ELSE. One typo in
-    // page 3 used to withdraw the truth labels of blocks 1 and 2 as well, which
-    // is a whole-sheet refusal dressed as a field check. The block the typo was
-    // meant for now reads `carries no page`, with the stray named beside it.
     if (typeof block !== "number" || !PAIRED_BLOCKS.includes(block as (typeof PAIRED_BLOCKS)[number])) {
       strayPages.push({ at: index, block: JSON.stringify(block) ?? "absent" })
       continue
     }
-    const earlier = seen.get(block)
-    if (earlier !== undefined) {
-      return { kind: "malformed", file, why: `\`blocks[${index}]\` and \`blocks[${earlier}]\` are both block ${block}` }
-    }
-    seen.set(block, index)
-    if (typeof entry.prefixRunId !== "string") {
-      return { kind: "malformed", file, why: `\`blocks[${index}].prefixRunId\` is not a string` }
-    }
-    if (!Array.isArray(entry.rows)) return { kind: "malformed", file, why: `\`blocks[${index}].rows\` is not a list` }
-    const rows: SheetRow[] = []
-    for (const [at, row] of entry.rows.entries()) {
-      if (!isRecord(row)) return { kind: "malformed", file, why: `\`blocks[${index}].rows[${at}]\` is not an object` }
-      if (typeof row.candidateId !== "string") {
-        return { kind: "malformed", file, why: `\`blocks[${index}].rows[${at}].candidateId\` is not a string` }
-      }
-      if (!TRUTH_LABELS.includes(row.truth as TruthLabel)) {
-        return {
-          kind: "malformed",
-          file,
-          why:
-            `\`blocks[${index}].rows[${at}]\` labels candidate \`${row.candidateId}\` ` +
-            `${JSON.stringify(row.truth) ?? "absent"}, which is not one of ${TRUTH_LABELS.join(", ")}`,
-        }
-      }
-      if (row.evidence !== undefined && typeof row.evidence !== "string") {
-        return { kind: "malformed", file, why: `\`blocks[${index}].rows[${at}].evidence\` is present and is not a string` }
-      }
-      rows.push({
-        candidateId: row.candidateId,
-        truth: row.truth as TruthLabel,
-        ...(row.evidence === undefined ? {} : { evidence: row.evidence }),
-      })
-    }
-    blocks.push({ block, prefixRunId: entry.prefixRunId, rows })
+    const pages = byBlock.get(block) ?? []
+    pages.push({ at: index, entry })
+    byBlock.set(block, pages)
   }
-  return { kind: "read", file, scheduleHash: raw.scheduleHash, blocks, strayPages }
+
+  const blocks: SheetBlock[] = []
+  for (const [block, pages] of byBlock) {
+    if (pages.length > 1) {
+      // BOTH PAGES GO. Two pages for one block is two humans disagreeing or one
+      // sheet edited twice, and picking either would publish labels nobody
+      // agreed on — the rule this module already applies to two rows for one
+      // candidate, one level up.
+      const at = pages.map((page) => `\`blocks[${page.at}]\``).join(" and ")
+      for (const page of pages) {
+        rejectedPages.push({
+          at: page.at,
+          block,
+          why: `${at} are both block ${block}, and choosing between them would publish labels nobody agreed on`,
+        })
+      }
+      continue
+    }
+    const only = pages[0]!
+    const parsed = parsePage(only.at, block, only.entry)
+    if (typeof parsed === "string") {
+      rejectedPages.push({ at: only.at, block, why: parsed })
+      continue
+    }
+    blocks.push(parsed)
+  }
+  return { kind: "read", file, scheduleHash: raw.scheduleHash, blocks, strayPages, rejectedPages }
+}
+
+/** One page of the sheet, or the first field that is not what it claims to be. */
+function parsePage(index: number, block: number, entry: Record<string, unknown>): SheetBlock | string {
+  if (typeof entry.prefixRunId !== "string") return `\`blocks[${index}].prefixRunId\` is not a string`
+  if (!Array.isArray(entry.rows)) return `\`blocks[${index}].rows\` is not a list`
+  const rows: SheetRow[] = []
+  for (const [at, row] of entry.rows.entries()) {
+    if (!isRecord(row)) return `\`blocks[${index}].rows[${at}]\` is not an object`
+    if (typeof row.candidateId !== "string") return `\`blocks[${index}].rows[${at}].candidateId\` is not a string`
+    if (!TRUTH_LABELS.includes(row.truth as TruthLabel)) {
+      return (
+        `\`blocks[${index}].rows[${at}]\` labels candidate \`${row.candidateId}\` ` +
+        `${JSON.stringify(row.truth) ?? "absent"}, which is not one of ${TRUTH_LABELS.join(", ")}`
+      )
+    }
+    if (row.evidence !== undefined && typeof row.evidence !== "string") {
+      return `\`blocks[${index}].rows[${at}].evidence\` is present and is not a string`
+    }
+    rows.push({
+      candidateId: row.candidateId,
+      truth: row.truth as TruthLabel,
+      ...(row.evidence === undefined ? {} : { evidence: row.evidence }),
+    })
+  }
+  return { block, prefixRunId: entry.prefixRunId, rows }
 }
 
 /** `null` when `file` resolves inside the real bundle root, or why it does not. */
@@ -368,17 +429,22 @@ export type CandidateOutcome =
   | { kind: "label-missing" }
   | { kind: "truth-unresolved" }
   | { kind: "arm-missing" }
+  | { kind: "unclassified"; label: TruthLabel }
 
 /**
  * One canonical prefix candidate, accounted for once.
  *
- * The buckets are assigned in a FIXED order — arm-missing, undecided,
+ * The buckets are assigned in a FIXED order — arm-missing, undecided, unchanged,
  * label-missing, truth-unresolved, then the direction — so every candidate lands
- * in exactly one and the six counts sum to the pool. The order is the order in
- * which a fact disqualifies a candidate from being a direction at all: a
- * candidate one arm never raised has no pair to compare, whatever its label
- * says. `labelCoverage` below reports label rows over the WHOLE pool, so a
- * candidate counted here as arm-missing is not also lost from the coverage line.
+ * in exactly one and the counts sum to the pool. The order is the order in which
+ * a fact disqualifies a candidate from being a direction at all: a candidate one
+ * arm never raised has no pair to compare, whatever its label says, and a
+ * candidate both arms decided the SAME way transitioned nowhere, whatever its
+ * label says. The two label buckets therefore describe candidates that DIFFER
+ * between the arms, which is the population the four directions partition.
+ * `labelCoverage` below reports label rows over the WHOLE pool, so a candidate
+ * counted here as arm-missing or unchanged is not also lost from the coverage
+ * line.
  */
 export interface CandidateAccount {
   id: string
@@ -388,6 +454,8 @@ export interface CandidateAccount {
   on: VerdictBucket | null
   off: VerdictBucket | null
   label: TruthLabel | null
+  /** What the sheet gave as making the label checkable. Carried through and never interpreted. */
+  evidence: string | null
   /** The planted defect the matcher associated with it. SUGGESTED EVIDENCE, never a label. */
   suggested: string | null
   /** The human label contradicts the matcher's suggestion. The label is kept. */
@@ -406,6 +474,15 @@ export interface VerdictAccount {
   undecided: { id: string; on: VerdictBucket; off: VerdictBucket }[]
   /** Paired candidates both arms decided as upheld or rejected. The direction denominator. */
   decided: number
+  /**
+   * Decided candidates both arms decided the SAME way.
+   *
+   * It lives here and not beside the truth buckets because "both arms ruled it
+   * the same" is a fact about the two verdicts and needs no truth label to
+   * establish. A bundle with no sheet therefore still reports it, which is the
+   * rule the sheet-absent case has always followed for the other verdict counts.
+   */
+  unchanged: { id: string; state: "upheld" | "rejected" }[]
 }
 
 /** One arm's false positives: upheld findings the sheet calls `not-a-defect`. */
@@ -430,9 +507,17 @@ export interface ArmFalsePositives {
  * candidate would have printed its own invariant beside the evidence breaking
  * it. `agree` is the comparison; the renderer prints the failure loudly instead
  * of the claim.
+ *
+ * `distinct` is what makes the check bite. A total alone cannot see a candidate
+ * filed in two buckets, because the double-count and the candidate it displaced
+ * cancel; counting the DISTINCT ids across every bucket separates the two. Both
+ * numbers come from the one loop that assigns the buckets, so the rule is never
+ * written twice.
  */
 export interface Accounting {
   accounted: number
+  /** Distinct candidate ids across every bucket. Below `accounted` when one is filed twice. */
+  distinct: number
   pool: number
   agree: boolean
 }
@@ -450,6 +535,8 @@ export type TruthRead =
       unchanged: string[]
       labelMissing: string[]
       truthUnresolved: string[]
+      /** Labelled, decided and differing, and no direction row covers it. Empty under the three shipped labels. */
+      unclassified: string[]
       accounting: Accounting
       /** Both arms, by name. `readBlock` returns no `read` block without a pair. */
       falsePositives: { on: ArmFalsePositives; off: ArmFalsePositives }
@@ -468,7 +555,23 @@ export type TruthRead =
 export type BlockRead =
   | { kind: "unavailable"; reasons: string[] }
   | { kind: "refused"; reasons: string[] }
-  | { kind: "read"; prefixRunId: string; recordFile: string; verdicts: VerdictAccount; truth: TruthRead }
+  | {
+      kind: "read"
+      prefixRunId: string
+      recordFile: string
+      /**
+       * The stage the prefix run was cancelled at, when it was.
+       *
+       * A cancelled prefix holds whatever discovery had reached, so the truth
+       * pool is a partial one. Nothing here is withheld over it — the counts are
+       * true of the pool that exists — but the report says so, because a pool
+       * the operator believes is complete is the one way these denominators
+       * mislead. `labelled-read.ts` reads the same field off the same record.
+       */
+      cancelledAt?: string
+      verdicts: VerdictAccount
+      truth: TruthRead
+    }
 
 export interface AdjudicationBlock {
   block: number
@@ -489,13 +592,14 @@ export type AdjudicationQuantity = (typeof ADJUDICATION_QUANTITIES)[number]["lab
  */
 export const ADJUDICATION_QUANTITIES = [
   ...DIRECTIONS.map((direction) => ({ label: direction.label, source: "truth" as const, direction: direction.key })),
-  { label: "unchanged (decided both sides, same way)", source: "truth" as const, field: "unchanged" as const },
   { label: "label missing", source: "truth" as const, field: "label-missing" as const },
   { label: "truth unresolved", source: "truth" as const, field: "truth-unresolved" as const },
+  { label: "unclassified label", source: "truth" as const, field: "unclassified" as const },
   { label: "on false positives", source: "truth" as const, arm: "on" as const },
   { label: "off false positives", source: "truth" as const, arm: "off" as const },
   { label: "undecided transitions", source: "verdict" as const, field: "undecided" as const },
   { label: "candidates missing from an arm", source: "verdict" as const, field: "arm-missing" as const },
+  { label: "unchanged (decided both sides, same way)", source: "verdict" as const, field: "unchanged" as const },
 ] as const
 
 export interface AdjudicationSummary {
@@ -562,7 +666,10 @@ export async function readAdjudicationBundle(
     root: paired.root,
     scheduleHash: schedule.scheduleHash,
     sheet,
-    matcher: options.matcher === undefined ? "shipped-lexical" : "injected",
+    // THE FUNCTION IS COMPARED, NOT THE OPTION'S PRESENCE. A caller passing
+    // `lexicalDefectMatcher` by hand is running the shipped matcher, and saying
+    // otherwise would print a provenance line that is simply false.
+    matcher: matcher === lexicalDefectMatcher ? "shipped-lexical" : "injected",
     excluded: allExcluded(paired).map((entry) => ({
       armId: entry.armId,
       repeatId: entry.repeatId,
@@ -607,11 +714,18 @@ async function readBlock(
   const onById = byId(on.row.findings)
   const offById = byId(off.row.findings)
   const verdicts = account(pool.findings, onById, offById)
-  const truth = labelled(loaded.record.runId, loaded.file, pool, sheet, block.block, verdicts, onById, offById, matcher, {
+  const truth = labelled(loaded.record.runId, loaded.file, pool, sheet, block.block, onById, offById, matcher, {
     on: { arm: "on", runId: on.row.manifest.run.runId, findings: on.row.findings },
     off: { arm: "off", runId: off.row.manifest.run.runId, findings: off.row.findings },
   })
-  return { kind: "read", prefixRunId: loaded.record.runId, recordFile: loaded.file, verdicts, truth }
+  return {
+    kind: "read",
+    prefixRunId: loaded.record.runId,
+    recordFile: loaded.file,
+    ...(loaded.record.cancelled === undefined ? {} : { cancelledAt: loaded.record.cancelled.stage }),
+    verdicts,
+    truth,
+  }
 }
 
 function byId(findings: readonly Finding[]): Map<string, Finding> {
@@ -624,6 +738,7 @@ function byId(findings: readonly Finding[]): Map<string, Finding> {
 function account(pool: readonly Finding[], onById: Map<string, Finding>, offById: Map<string, Finding>): VerdictAccount {
   const armMissing: VerdictAccount["armMissing"] = []
   const undecided: VerdictAccount["undecided"] = []
+  const unchanged: VerdictAccount["unchanged"] = []
   let paired = 0
   let decided = 0
   for (const candidate of pool) {
@@ -644,8 +759,9 @@ function account(pool: readonly Finding[], onById: Map<string, Finding>, offById
       continue
     }
     decided += 1
+    if (on === off) unchanged.push({ id: candidate.id, state: on })
   }
-  return { pool: pool.length, paired, armMissing, undecided, decided }
+  return { pool: pool.length, paired, armMissing, undecided, decided, unchanged }
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +780,6 @@ function labelled(
   pool: Extract<FindingList, { kind: "read" }>,
   sheet: SheetRead,
   block: number,
-  verdicts: VerdictAccount,
   onById: Map<string, Finding>,
   offById: Map<string, Finding>,
   matcher: DefectMatcher,
@@ -685,7 +800,15 @@ function labelled(
         ? ""
         : `; the sheet carries ${sheet.strayPages.length} page(s) naming no planned block ` +
           `(${sheet.strayPages.map((stray) => `\`blocks[${stray.at}].block\` = ${stray.block}`).join(", ")})`
-    return { kind: "unavailable", reasons: [`the sheet \`${sheet.file}\` carries no page for block ${block}${strays}`] }
+    // A PAGE REJECTED FOR THIS BLOCK IS THE REASON THIS BLOCK HAS NONE, so it is
+    // named here rather than only at the top of the report. A page carrying no
+    // readable block number is named too, without guessing which block it meant.
+    const rejected = sheet.rejectedPages.filter((entry) => entry.block === block || entry.block === null)
+    const why = rejected.map((entry) => `; \`blocks[${entry.at}]\` was rejected because ${entry.why}`).join("")
+    return {
+      kind: "unavailable",
+      reasons: [`the sheet \`${sheet.file}\` carries no valid page for block ${block}${why}${strays}`],
+    }
   }
   if (page.prefixRunId !== prefixRunId) {
     return {
@@ -738,6 +861,13 @@ function labelled(
   const unchanged: string[] = []
   const labelMissing: string[] = []
   const truthUnresolved: string[] = []
+  const unclassified: string[] = []
+  // THE PARTITION IS COUNTED WHERE IT IS DECIDED. These two lists used to be
+  // read off `verdicts`, so the bucket rule existed in two functions walking the
+  // same pool and the accounting below could only ever agree. One loop assigns
+  // every candidate and every bucket list comes out of it.
+  const undecidedIds: string[] = []
+  const armMissingIds: string[] = []
   const candidates: CandidateAccount[] = []
 
   for (const finding of pool.findings) {
@@ -762,31 +892,40 @@ function labelled(
     const present: Arm[] = []
     if (onFinding !== undefined) present.push("on")
     if (offFinding !== undefined) present.push("off")
-    const base = { id, present, on, off, label, suggested, disagreement }
+    const base = { id, present, on, off, label, evidence: row?.evidence ?? null, suggested, disagreement }
 
+    // UNCHANGED IS TESTED BEFORE THE LABEL, because a candidate both arms
+    // decided the same way transitioned nowhere whatever its label says, and
+    // "both arms ruled it the same" needs no sheet to establish. The two label
+    // buckets below therefore describe candidates that DIFFER between the arms,
+    // which is the population the four directions partition.
     let outcome: CandidateOutcome
     if (on === null || off === null) {
       outcome = { kind: "arm-missing" }
+      armMissingIds.push(id)
     } else if (!directional(on) || !directional(off)) {
       outcome = { kind: "undecided" }
+      undecidedIds.push(id)
+    } else if (on === off) {
+      outcome = { kind: "unchanged", state: on }
+      unchanged.push(id)
     } else if (label === null) {
       outcome = { kind: "label-missing" }
       labelMissing.push(id)
     } else if (label === "unresolved") {
       outcome = { kind: "truth-unresolved" }
       truthUnresolved.push(id)
-    } else if (on === off) {
-      outcome = { kind: "unchanged", state: on }
-      unchanged.push(id)
     } else {
       const direction = directionOf(label, on, off)
-      // Unreachable: `label` is one of the two decisive labels here and both
-      // buckets are directional and differ, which is exactly the four rows of
-      // `DIRECTIONS`. It is a typed outcome rather than a `!` so a fifth label
-      // added to `TRUTH_LABELS` later cannot silently vanish from the table.
+      // Unreachable today: `label` is one of the two decisive labels here and
+      // both buckets are directional and differ, which is exactly the four rows
+      // of `DIRECTIONS`. A fifth label added to `TRUTH_LABELS` would land here,
+      // and it gets its OWN bucket rather than `label-missing` — a candidate the
+      // sheet labelled is not a candidate nobody labelled, and reporting one as
+      // the other would print a false statement under a passing partition.
       if (direction === null) {
-        outcome = { kind: "label-missing" }
-        labelMissing.push(id)
+        outcome = { kind: "unclassified", label }
+        unclassified.push(id)
       } else {
         outcome = { kind: "transition", direction }
         directions[direction].push(id)
@@ -795,14 +934,17 @@ function labelled(
     candidates.push({ ...base, outcome })
   }
 
-  const transitions = DIRECTIONS.reduce((total, direction) => total + directions[direction.key].length, 0)
-  const accounted =
-    transitions +
-    unchanged.length +
-    labelMissing.length +
-    truthUnresolved.length +
-    verdicts.undecided.length +
-    verdicts.armMissing.length
+  const buckets = [
+    ...DIRECTIONS.map((direction) => directions[direction.key]),
+    unchanged,
+    labelMissing,
+    truthUnresolved,
+    unclassified,
+    undecidedIds,
+    armMissingIds,
+  ]
+  const accounted = buckets.reduce((total, bucket) => total + bucket.length, 0)
+  const distinct = new Set(buckets.flat()).size
   return {
     kind: "labelled",
     file: sheet.file,
@@ -814,7 +956,13 @@ function labelled(
     unchanged,
     labelMissing,
     truthUnresolved,
-    accounting: { accounted, pool: poolIds.size, agree: accounted === poolIds.size },
+    unclassified,
+    accounting: {
+      accounted,
+      distinct,
+      pool: poolIds.size,
+      agree: accounted === poolIds.size && distinct === poolIds.size,
+    },
     falsePositives: {
       on: falsePositivesOf(arms.on, rows, poolIds),
       off: falsePositivesOf(arms.off, rows, poolIds),
@@ -913,19 +1061,35 @@ function summarize(blocks: readonly AdjudicationBlock[]): AdjudicationSummary[] 
   })
 }
 
-/** One block's value for one quantity, or why it has none. */
+/**
+ * One block's value for one quantity, or why it has none.
+ *
+ * EVERY FIELD IS NAMED AND AN UNKNOWN ONE SAYS SO. Both halves used to end in a
+ * bare `return` over the last field they knew, so a quantity added to
+ * `ADJUDICATION_QUANTITIES` with an unlisted `field` reported some other
+ * quantity's count under its own label — a wrong number that looks like a right
+ * one. An unknown field is now a missing observation with its reason.
+ */
 function observe(result: BlockRead, quantity: (typeof ADJUDICATION_QUANTITIES)[number]): number | string {
+  // Captured before the narrowing below, which leaves `quantity` as `never` on
+  // the unknown-field lines where the label is exactly what needs printing.
+  const label: string = quantity.label
+  const noRule = `this reader holds no observation rule for \`${label}\``
   if (result.kind !== "read") return result.reasons.join("; ")
   if (quantity.source === "verdict") {
-    return quantity.field === "undecided" ? result.verdicts.undecided.length : result.verdicts.armMissing.length
+    if (quantity.field === "undecided") return result.verdicts.undecided.length
+    if (quantity.field === "arm-missing") return result.verdicts.armMissing.length
+    if (quantity.field === "unchanged") return result.verdicts.unchanged.length
+    return noRule
   }
   const truth = result.truth
   if (truth.kind !== "labelled") return truth.reasons.join("; ")
   if ("direction" in quantity) return truth.directions[quantity.direction].length
   if ("arm" in quantity) return truth.falsePositives[quantity.arm].falsePositives.length
-  if (quantity.field === "unchanged") return truth.unchanged.length
   if (quantity.field === "label-missing") return truth.labelMissing.length
-  return truth.truthUnresolved.length
+  if (quantity.field === "truth-unresolved") return truth.truthUnresolved.length
+  if (quantity.field === "unclassified") return truth.unclassified.length
+  return noRule
 }
 
 /** An exact mean: an integer, or a reduced ratio of integers. Never a float. */
@@ -1028,6 +1192,28 @@ function sheetLines(sheet: SheetRead): string[] {
       )
       for (const stray of sheet.strayPages) lines.push(`    \`blocks[${stray.at}].block\` is ${stray.block}`)
     }
+    // EVERY REJECTED PAGE IS NAMED HERE, not only where a block reports one
+    // missing, because two kinds of rejected page never reach that report.
+    //
+    // A page naming a KNOWN block always leaves that block without one — a
+    // duplicate rejects every page of its block, and a single bad page is the
+    // block's only page — so its reason reaches the block section only if that
+    // block gets as far as the truth half. Four early returns stop it: a
+    // withheld paired block, no `on`/`off` pair, a prefix record missing or
+    // bound elsewhere, and a record whose canonical pool will not parse.
+    //
+    // A page carrying NO readable block number leaves no block short of a page
+    // at all, so when every planned block reads, it reaches nothing anywhere.
+    //
+    // Discarding part of a hand-filled sheet in silence is the collapse this
+    // module exists to prevent, so the sheet section states it unconditionally.
+    if (sheet.rejectedPages.length > 0) {
+      lines.push("  SHEET PAGES REJECTED — these pages supply no labels; the valid pages remain usable.")
+      for (const page of sheet.rejectedPages) {
+        const which = page.block === null ? "no readable block number" : `block ${page.block}`
+        lines.push(`    \`blocks[${page.at}]\` (${which}): ${page.why}`)
+      }
+    }
     lines.push("")
     return lines
   }
@@ -1053,11 +1239,18 @@ function renderBlock(block: AdjudicationBlock): string[] {
   }
 
   const verdicts = result.verdicts
+  lines.push(`  prefix run \`${result.prefixRunId}\`, record \`${result.recordFile}\``)
+  if (result.cancelledAt !== undefined) {
+    lines.push(
+      `  THE PREFIX RUN WAS CANCELLED AT \`${result.cancelledAt}\`, so this truth pool is whatever discovery had`,
+      "  reached. Every count below is true of the pool that exists and none of them is withheld; the pool itself",
+      "  is not the one the block planned.",
+    )
+  }
   lines.push(
-    `  prefix run \`${result.prefixRunId}\`, record \`${result.recordFile}\``,
     `  truth pool: ${verdicts.pool} canonical candidate(s) of the shared discovery prefix — every one of them gets a slot`,
-    `  paired in both arms: ${verdicts.paired} of ${verdicts.pool}`,
-    `  candidates missing from an arm: ${verdicts.armMissing.length} of ${verdicts.pool} — never a transition`,
+    `  paired in both arms: ${countText(verdicts.paired, verdicts.pool)}`,
+    `  candidates missing from an arm: ${countText(verdicts.armMissing.length, verdicts.pool)} — never a transition`,
   )
   for (const entry of verdicts.armMissing.slice(0, NAMED_IDS)) {
     const present = entry.present.length === 0 ? "neither arm raised it" : `raised only by ${entry.present.join(", ")}`
@@ -1065,12 +1258,21 @@ function renderBlock(block: AdjudicationBlock): string[] {
   }
   if (verdicts.armMissing.length > NAMED_IDS) lines.push(`    … and ${verdicts.armMissing.length - NAMED_IDS} more`)
 
-  lines.push(`  undecided transitions: ${verdicts.undecided.length} of ${verdicts.paired} paired — counted on their own`)
-  for (const entry of verdicts.undecided.slice(0, NAMED_IDS)) {
+  lines.push(
+    `  undecided transitions: ${countText(verdicts.undecided.length, verdicts.paired)} paired — counted on their own`,
+  )
+  // THE THREE NON-DECISIVE STATES ARE NAMED FOR EVERY CANDIDATE, not for five.
+  // "not-adjudicated, unresolved and unjudged are each named separately" is the
+  // rule, and the per-candidate table that would otherwise carry the rest sits
+  // below the no-sheet return — which is the ordinary state of a bundle today.
+  for (const entry of verdicts.undecided) {
     lines.push(`    \`${entry.id}\` — on ${entry.on}, off ${entry.off} (verdict axis)`)
   }
-  if (verdicts.undecided.length > NAMED_IDS) lines.push(`    … and ${verdicts.undecided.length - NAMED_IDS} more`)
-  lines.push(`  decided both sides: ${verdicts.decided} of ${verdicts.paired} paired — the direction denominator`)
+  lines.push(
+    `  unchanged (decided both sides, same way): ${countText(verdicts.unchanged.length, verdicts.decided)} decided —`,
+    "    a verdict-axis fact, so it reads with no sheet",
+    `  decided both sides: ${countText(verdicts.decided, verdicts.paired)} paired — the direction denominator`,
+  )
 
   const truth = result.truth
   if (truth.kind !== "labelled") {
@@ -1085,31 +1287,48 @@ function renderBlock(block: AdjudicationBlock): string[] {
     `  label coverage: ${truth.labelCoverage.rows} of ${truth.labelCoverage.of} pool candidate(s) have a row`,
     "  THE FOUR DIRECTIONS, each counted separately, over the candidates decided both sides",
   )
+  // THE DIRECTION DENOMINATOR IS THE DIFFERING DECIDED PAIRS. `unchanged` is a
+  // verdict-axis count and is printed above with the other verdict counts, so
+  // subtracting it here is what makes these four and the two label buckets
+  // partition one population.
+  const differing = verdicts.decided - verdicts.unchanged.length
+  lines.push(`  the four directions and the two label buckets divide ${countText(differing, verdicts.decided)} decided`)
   for (const direction of DIRECTIONS) {
     const ids = truth.directions[direction.key]
+    lines.push(`    ${direction.label}: ${countText(ids.length, differing)} — ${direction.reading}` + idsText(ids, direction.nameAll))
+  }
+  lines.push(
+    `    label missing: ${countText(truth.labelMissing.length, differing)} — excluded from the four directions`,
+    `    truth unresolved (the sheet kept it): ${countText(truth.truthUnresolved.length, differing)} — excluded too`,
+  )
+  if (truth.unclassified.length > 0) {
     lines.push(
-      `    ${direction.label}: ${ids.length} of ${verdicts.decided} decided — ${direction.reading}` +
-        idsText(ids, direction.nameAll),
+      `    UNCLASSIFIED: ${countText(truth.unclassified.length, differing)} carry a label no direction row covers` +
+        idsText(truth.unclassified, true),
     )
   }
   lines.push(
-    `    unchanged (decided both sides, same way): ${truth.unchanged.length} of ${verdicts.decided} decided`,
-    `    label missing: ${truth.labelMissing.length} of ${verdicts.decided} decided — excluded from the four directions`,
-    `    truth unresolved (the sheet kept it): ${truth.truthUnresolved.length} of ${verdicts.decided} decided — excluded too`,
     ...accountingLines(truth.accounting),
-    "  FALSE POSITIVES PER ARM — upheld findings the sheet calls not-a-defect, never derived from U",
+    // THE DENOMINATOR IS EVERY UPHELD FINDING, and the line says what the count
+    // is rather than calling it a rate. `evaluation-protocol.md:123-135` defines
+    // N = TP + FP + U over final upheld findings with the unknowns RETAINED, and
+    // permits a point precision only when U = 0. Restricting N to the pool would
+    // silently select a different population; naming the count honestly does not.
+    "  KNOWN FALSE POSITIVES AMONG ALL UPHELD FINDINGS, per arm — a count, not a precision, and never derived from U",
+    "    upheld = known FP + known true-defect + truth unresolved + label missing + outside the pool",
   )
   for (const arm of [truth.falsePositives.on, truth.falsePositives.off]) {
     lines.push(
-      `    arm ${arm.arm}, run \`${arm.runId}\`: ${arm.falsePositives.length} of ${arm.upheld} upheld ` +
-        `finding(s)${idsText(arm.falsePositives)}`,
-      `      true-defect: ${arm.trueDefects.length} of ${arm.upheld}; truth unresolved: ${arm.truthUnresolved.length} ` +
-        `of ${arm.upheld}; label missing: ${arm.labelMissing.length} of ${arm.upheld}`,
+      `    arm ${arm.arm}, run \`${arm.runId}\`: ${countText(arm.falsePositives.length, arm.upheld)} upheld ` +
+        `finding(s) are known false positives${idsText(arm.falsePositives)}`,
+      `      known true-defect: ${countText(arm.trueDefects.length, arm.upheld)}; truth unresolved: ` +
+        `${countText(arm.truthUnresolved.length, arm.upheld)}; label missing: ` +
+        `${countText(arm.labelMissing.length, arm.upheld)}`,
     )
     if (arm.outsidePool.length > 0) {
       lines.push(
-        `      upheld ids the prefix pool does not hold, so no slot covers them: ${arm.outsidePool.length} of ` +
-          `${arm.upheld}${idsText(arm.outsidePool)}`,
+        `      upheld ids the prefix pool does not hold, so no slot covers them: ` +
+          `${countText(arm.outsidePool.length, arm.upheld)}${idsText(arm.outsidePool)}`,
       )
     }
   }
@@ -1117,11 +1336,18 @@ function renderBlock(block: AdjudicationBlock): string[] {
   // THE SUGGESTION COLUMN, printed in full, because both operator documents say
   // it is there and a column that exists only when it contradicts the sheet is a
   // column a reader cannot check the agreeing rows against.
-  lines.push("  LABEL AND SUGGESTION, PER CANDIDATE — the suggestion is the matcher's and enters no count above")
+  lines.push(
+    "  LABEL, EVIDENCE AND SUGGESTION, PER CANDIDATE — the suggestion is the matcher's and enters no count above",
+  )
   for (const candidate of truth.candidates) {
     const label = candidate.label === null ? "no row" : candidate.label
     const suggested = candidate.suggested === null ? "none" : `\`${candidate.suggested}\``
     lines.push(`    \`${candidate.id}\`: label ${label}, suggestion ${suggested}, ${outcomeText(candidate)}`)
+    // THE COLUMN THAT MAKES A LABEL CHECKABLE IS PRINTED. `ADJUDICATION.md`
+    // calls it exactly that and the sheet's own parser refuses a non-string
+    // one, so carrying it through the reader and showing a reader nothing was
+    // the one shape in which the operator cannot check what they are reading.
+    if (candidate.evidence !== null) lines.push(`      evidence: ${candidate.evidence}`)
   }
 
   const disagreements = truth.candidates.filter((candidate) => candidate.disagreement !== null)
@@ -1142,7 +1368,9 @@ function outcomeText(candidate: CandidateAccount): string {
   if (outcome.kind === "arm-missing") {
     return candidate.present.length === 0 ? "missing from both arms" : `missing from an arm (raised only by ${candidate.present.join(", ")})`
   }
-  return outcome.kind === "label-missing" ? "label missing" : "truth unresolved"
+  if (outcome.kind === "label-missing") return "label missing"
+  if (outcome.kind === "truth-unresolved") return "truth unresolved"
+  return `unclassified (labelled ${outcome.label}, and no direction row covers it)`
 }
 
 /**
@@ -1155,12 +1383,14 @@ function accountingLines(accounting: Accounting): string[] {
   if (accounting.agree) {
     return [
       "  EVERY CANDIDATE IS ACCOUNTED FOR ONCE: transitions + unchanged + label missing + truth unresolved +",
-      `  undecided + arm missing = ${accounting.accounted}, and the truth pool holds ${accounting.pool} — they agree`,
+      `  unclassified + undecided + arm missing = ${accounting.accounted} over ${accounting.distinct} distinct id(s),`,
+      `  and the truth pool holds ${accounting.pool} — they agree`,
     ]
   }
   return [
     "  ACCOUNTING BROKEN — THIS REPORT'S PARTITION DOES NOT COVER ITS POOL. The buckets sum to " +
-      `${accounting.accounted} and the truth pool holds ${accounting.pool}.`,
+      `${accounting.accounted} over ${accounting.distinct} distinct id(s), and the truth pool holds ` +
+      `${accounting.pool}.`,
     "  A candidate in no bucket, or in two, makes every count above unreliable. Do not read them.",
   ]
 }

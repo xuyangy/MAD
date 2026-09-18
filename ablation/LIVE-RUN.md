@@ -550,8 +550,8 @@ ones, and not a per-arm list. A pool defined by what survived would let a candid
 disappearance decide whether it is ever truth-labelled.
 
 **A planted-label match is suggested evidence, never a truth label.** The report prints one line
-per candidate — the human label, the matcher's association and the bucket the candidate landed in
-— and the association enters no count; every number is identical under an injected matcher. A
+per candidate — the human label, the matcher's association and the bucket the candidate landed in,
+with the row's `evidence` beneath it when the sheet gave one — and the association enters no count; every number is identical under an injected matcher. A
 human label that contradicts a suggestion is **kept**, and the contradictions are listed again on
 their own. A label of `not-a-defect` or `unresolved` against a matched planted defect is a
 contradiction; a candidate with no row at all is not, because nobody labelled it.
@@ -571,24 +571,64 @@ aggregator also writes it on drop-out, so `upheld → not-adjudicated` is not no
 **Truth-`unresolved` and verdict-`unresolved` are different facts** and print apart.
 
 **Every candidate is accounted for once**, and the buckets sum to the prefix pool: a transition,
-unchanged, undecided, label missing, truth unresolved, or missing from an arm. A candidate one arm
-never raised is **missing**, with the side named, and is never a transition. A candidate with no
-row is `label missing`; one the sheet labels `unresolved` is kept under its own name. Both are
-excluded from the four directions and neither is a false positive.
+unchanged, undecided, label missing, truth unresolved, unclassified, or missing from an arm. A
+candidate one arm never raised is **missing**, with the side named, and is never a transition.
 
-**False positives** are upheld findings the sheet calls `not-a-defect`, per arm, as `k of n upheld
-finding(s)`. They are never derived from the labelled report's `U` and are never a default for an
-unlabelled finding.
+**`unchanged` is a verdict-axis count.** Both arms deciding a candidate the same way needs no truth
+label to establish, so it reads with no sheet, and it is tested before the label: the four
+directions and the two label buckets divide the candidates that DIFFER between the arms, which is
+the population they partition. A candidate with no row is `label missing`; one the sheet labels
+`unresolved` is kept under its own name. Both are excluded from the four directions and neither is
+a false positive. `unclassified label` is a candidate the sheet labelled that no direction row
+covers; it is empty under the three labels that exist, and it is there so a fourth could not vanish.
+
+**Known false positives are counted among ALL upheld findings**, per arm, as `k of n upheld
+finding(s) are known false positives`. It is a **count, not a precision**: `evaluation-protocol.md`
+defines the denominator over final upheld findings as `N = TP + FP + U` with the unknowns retained,
+and permits a point precision only when `U = 0`. The line beneath it holds the identity that
+denominator obeys — `upheld = known FP + known true-defect + truth unresolved + label missing +
+outside the pool` — so a reader can see every part of `n`. Upheld ids the prefix pool does not hold
+are printed on their own line and are never dropped from the denominator: dropping them would
+silently select a different population. They are never derived from the labelled report's `U` and
+are never a default for an unlabelled finding. Every list of ids on these lines is capped at five
+with the rest counted.
 
 **What the sheet's absence costs, in distinct states that never collapse.** No sheet: every
 truth-dependent quantity is unavailable with the reason `no adjudication sheet`, and the
-verdict-only counts — undecided transitions and candidates missing from an arm — still read. A
-sheet this process could not open reads `THE TRUTH SHEET COULD NOT BE READ`, which is not the same
-fact as nobody having written one. A malformed sheet is named as malformed with the field. A sheet
-about another plan, or resolving outside the bundle, is refused. A page naming an unplanned block
-refuses itself alone: the block it was meant for reads `carries no page`, the stray is named, and
-the other blocks still read. A sheet present with no row for one candidate is that candidate's
-`label missing`, not a sheet state.
+verdict-only counts — undecided transitions, candidates missing from an arm, and unchanged — still
+read. A sheet this process could not open reads `THE TRUTH SHEET COULD NOT BE READ`, which is not
+the same fact as nobody having written one — and a sheet that is a **symlink resolving to nothing**
+reads there too, because somebody placed it. A sheet about another plan, or resolving outside the
+bundle, is refused. A sheet present with no row for one candidate is that candidate's `label
+missing`, not a sheet state.
+
+**Malformed is whole-sheet; a bad page is not.** Only the sheet's own identity — text that is not
+JSON, a version this reader does not know, a missing `scheduleHash`, a `blocks` that is not a list
+— makes the whole sheet malformed, because such a document has no pages to isolate. Every check
+below that is a check on ONE page, and a page failing it withdraws its own block and no others.
+
+Three page-level outcomes, each on its own:
+
+- **A page naming an unplanned block** is a stray. It is rejected and named with the value it
+  carried, and nothing is inferred about which block it was meant for.
+- **A page naming a planned block that cannot be read as one** — a bad `prefixRunId`, a bad `rows`,
+  a bad row, or a label outside the three — is rejected with its reason.
+- **Two pages for one block** rejects BOTH. Choosing between them would publish labels nobody
+  agreed on, which is the rule already applied to two rows for one candidate.
+
+In all three, the block left without a page reads `carries no valid page for block N` with the
+reason beside it, and every other block still reads. **Every rejected page is also listed once in
+the sheet section**, by index, by the block it named or as carrying no readable block number, and
+with its reason. Two kinds of rejected page reach no block report at all: one naming a known block
+whose block is unavailable for an earlier reason — a withheld paired block, a prefix record missing
+or bound elsewhere, a canonical pool that will not parse — and one carrying no readable block
+number, which leaves no block short of a page and so is mentioned nowhere when all three read.
+Discarding part of a hand-filled sheet in silence is the collapse this reader exists to prevent.
+
+**A cancelled prefix run is said out loud.** The truth pool is then whatever discovery had reached.
+Nothing is withheld — the counts are true of the pool that exists — but the report names the stage
+it was cancelled at, because a pool the operator believes is complete is the one way these
+denominators mislead.
 
 **The block itself has three states too.** A prefix record bound to another run id or another
 roster, or one escaping the bundle root, is **refused**; a record that is not there, or that
@@ -597,9 +637,14 @@ nothing could parse, is **unavailable**. The report prints them under their own 
 **The lost true candidates are named in full.** `true upheld → rejected` prints every id; the
 other three lists are capped at five with the rest counted.
 
-**The partition checks itself.** The line saying every candidate is accounted for once compares
-the six buckets against the pool size before printing. When they disagree the report says so
-loudly and tells the reader not to trust the counts above it.
+**The partition checks itself.** The line saying every candidate is accounted for once compares the
+buckets against the pool size before printing — both their total and the number of DISTINCT ids
+across them, because a total alone cannot see a candidate filed twice: the double-count and the
+candidate it displaced cancel. Both numbers come from the one loop that assigns the buckets. When
+they disagree the report says so loudly and tells the reader not to trust the counts above it.
+
+**A rate with nothing to divide by says so.** Every `k of n` line reads `not measurable (0 cases)`
+when `n` is zero, rather than `0 of 0`.
 
 **One prefix run is one observation.** Two blocks naming one `prefixRunId` contribute one value
 to each summary, and the second names that reason.
@@ -608,9 +653,9 @@ to each summary, and the second names that reason.
 and max over complete observations only, labelled descriptive and not the planned three-block result.
 One observation reads `spread unavailable`; none reads unavailable, never 0. The quantities are the
 four directions — `false upheld → rejected`, `true rejected → upheld`, `true upheld → rejected`,
-`false rejected → upheld` — plus `unchanged`, `label missing`, `truth unresolved`,
-`on false positives`, `off false positives`, `undecided transitions` and
-`candidates missing from an arm`. The last two need no sheet; the rest do.
+`false rejected → upheld` — plus `label missing`, `truth unresolved`, `unclassified label`,
+`on false positives`, `off false positives`, `undecided transitions`,
+`candidates missing from an arm` and `unchanged`. The last three need no sheet; the rest do.
 
 **What it does not own.** No precision, no precision bound, no final recall, no cost contrast and no
 earned / did-not-earn reading. Those are story 2.8's, under the frozen protocol's bound arithmetic.
