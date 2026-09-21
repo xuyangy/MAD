@@ -55,8 +55,10 @@ function answerKeyBytesIn(corpus: string, caseIndex: number): string[] {
     for (const marker of assertion.target.markers) {
       if (corpus.includes(marker.toLowerCase()) && !materialText.includes(marker.toLowerCase())) found.push(`marker: ${marker}`)
     }
-    const predicate = JSON.stringify(assertion.blame).toLowerCase()
-    if (corpus.includes(predicate)) found.push(`predicate: ${predicate}`)
+    // A predicate path the material itself names (the defect's file) is no
+    // leak; one the material never names is.
+    const predicate = assertion.blame.path.toLowerCase()
+    if (corpus.includes(predicate) && !materialText.includes(predicate)) found.push(`predicate: ${assertion.blame.path}`)
   }
   return found
 }
@@ -78,16 +80,23 @@ describe("materializeSide over real git", () => {
     }
   })
 
-  test("the leak check is not vacuous: a planted label id and summary are reported", async () => {
+  test("the leak check is not vacuous: a planted label id, summary, marker and predicate path are reported", async () => {
     const dir = await tempDir()
     const c = ADVERSARIAL_CASES[0]!
     const worktree = join(dir, "planted")
     expect((await materializeSide({ directory: worktree, baseTree: c.baseTree, change: c.clean })).ok).toBe(true)
+    const materialText = JSON.stringify(c).toLowerCase()
     const leaked = ADVERSARIAL_ASSERTIONS[0]!.target
-    await writeFile(join(worktree, "NOTES.md"), `${leaked.id}\n${leaked.summary}\n`)
+    const marker = ADVERSARIAL_ASSERTIONS.flatMap((a) => a.target.markers).find((m) => !materialText.includes(m.toLowerCase()))!
+    const path = ADVERSARIAL_ASSERTIONS.map((a) => a.blame.path).find((p) => !materialText.includes(p.toLowerCase()))!
+    expect(marker).toBeDefined()
+    expect(path).toBeDefined()
+    await writeFile(join(worktree, "NOTES.md"), `${leaked.id}\n${leaked.summary}\n${marker}\n${path}\n`)
     const found = answerKeyBytesIn((await corpusOf(worktree)).text, 0)
     expect(found).toContain(`id: ${leaked.id}`)
     expect(found).toContain(`summary: ${leaked.summary}`)
+    expect(found).toContain(`marker: ${marker}`)
+    expect(found).toContain(`predicate: ${path}`)
   })
 
   test("a non-empty destination and an escaping base-tree path are refused, and nothing is written", async () => {
@@ -136,7 +145,7 @@ describe("the worktree writer's import list is the argument", () => {
   })
 })
 
-describe("git is isolated from the operator's configuration (story 2-7b review)", () => {
+describe("git is isolated from the operator's configuration", () => {
   test("every GIT_* variable is stripped, and global and system config are switched off", () => {
     const env = isolatedGitEnv({
       PATH: "/usr/bin",
@@ -166,13 +175,13 @@ describe("git is isolated from the operator's configuration (story 2-7b review)"
     expect(await readdir(dir)).not.toContain("decoy")
   })
 
-  test("a base-tree key under .git/ is refused, and nothing is written", async () => {
+  test("a base-tree key with a .git component at any depth is refused, and nothing is written", async () => {
     const dir = await tempDir()
     const c = ADVERSARIAL_CASES[0]!
-    for (const key of [".git/hooks/post-commit", ".GIT/config", "./.git/HEAD"]) {
+    for (const key of [".git/hooks/post-commit", ".GIT/config", "./.git/HEAD", "sub/.git/config", "vendor/.Git/HEAD"]) {
       const written = await materializeSide({ directory: join(dir, "w"), baseTree: { ...c.baseTree, [key]: "x" }, change: c.clean })
       expect(written.ok, key).toBe(false)
-      if (!written.ok) expect(written.reason).toContain("lies under `.git/`")
+      if (!written.ok) expect(written.reason).toContain("has a `.git` component")
     }
     expect(await readdir(dir)).toEqual([])
   })

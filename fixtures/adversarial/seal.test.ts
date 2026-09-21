@@ -24,11 +24,8 @@ import {
   canonicalAdversarialMaterial,
 } from "./seal.ts"
 
-/**
- * Sealed 2026-09-18, story 2-7b, before any adversarial run. Version 2 tightened
- * the target markers and the predicate path and range rules, also before any run.
- */
-const SEALED_MATERIAL_HASH = "sha256:16b46d8f1aacde60e78831a5dd7114e21a1cc204b1c5fcfa32555211343b251d"
+/** The recorded literals, sealed before any adversarial run. */
+const SEALED_MATERIAL_HASH = "sha256:c91714935d4f934cd37f8a45dbb2c00c04cacc4f3524ed00404aa8833eda29bd"
 const SEALED_ASSERTIONS_HASH = "sha256:5f99afa3e13a0c2b23e3a967f76fab8a5a20f994a76a268c75d140fd8d50bafc"
 
 /** The second way: Bun's own hasher, not `node:crypto`. */
@@ -38,7 +35,7 @@ const nodeHash = (text: string) => `sha256:${createHash("sha256").update(text, "
 describe("the adversarial seal", () => {
   test("the recorded literals are the sealed ones", () => {
     expect(ADVERSARIAL_SEAL).toEqual({
-      version: "adversarial-cases-2",
+      version: "adversarial-cases-3",
       materialHash: SEALED_MATERIAL_HASH,
       assertionsHash: SEALED_ASSERTIONS_HASH,
     })
@@ -187,10 +184,9 @@ describe("version 2's tightened rules", () => {
   })
 
   /**
-   * Each prose line below sits at the target's own locus and uses the word a
-   * version 1 marker was ("await", "interval", "refresh", "..", "float",
-   * "silently", "secret"), about something that is not the planted defect. None
-   * may be credited.
+   * Each prose line below sits at the target's own locus and uses a broad word
+   * ("await", "interval", "refresh", "..", "float", "silently", "secret") about
+   * something that is not the planted defect. None may be credited.
    */
   test("an unrelated finding at the target's locus is NOT credited", () => {
     const unrelated: Record<string, string> = {

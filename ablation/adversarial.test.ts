@@ -14,13 +14,17 @@ import { join } from "node:path"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
-import { deliveryOf, deliveryProbe, runAdversarialSuite, sharedLedgerProblem, worktreeFor } from "./adversarial.ts"
+import { deliveryOf, deliveryProbe, furthestStage, runAdversarialSuite, sharedLedgerProblem, worktreeFor } from "./adversarial.ts"
+import { spawnGit, type RunGit } from "./adversarial-materialize.ts"
 import { ADVERSARIAL_ALLOWANCES } from "./governor.ts"
+import { concurrencyProblem } from "./adversarial-schedule.ts"
 import { experimentRoot, sealedSuite } from "./adversarial-read.fixture.ts"
 import {
+  ADVERSARIAL_BILL_FILE,
   ADVERSARIAL_DIRECTORY,
   ADVERSARIAL_START_MARKER_FILE,
   adversarialDirectory,
+  readAdversarialBill,
   readAdversarialSlotStatuses,
 } from "./adversarial-schedule.ts"
 import { BUNDLE_FILE } from "./bundle.ts"
@@ -296,6 +300,89 @@ describe("runAdversarialSuite — one experiment, one ledger", () => {
   })
 })
 
+describe("the runner's cancellation, worktree failures and durable bill", () => {
+  test("a cancellation mid-suite marks that slot cancelled, later slots not attempted, and the suite incomplete", async () => {
+    const { root, input } = await sealedSuite(scratch)
+    const controller = new AbortController()
+    const backendFor = input.backendFor
+    const outcome = await runAdversarialSuite({
+      ...input,
+      signal: controller.signal,
+      backendFor: (context, reporter) => {
+        if (context.position === 3) controller.abort()
+        return backendFor(context, reporter)
+      },
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.slots.slice(0, 2).map((slot) => slot.status)).toEqual(["completed", "completed"])
+    expect(outcome.slots[2]!.status).toBe("cancelled")
+    expect(outcome.slots.slice(3).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.complete).toBe(false)
+    const durable = await readAdversarialSlotStatuses(root)
+    expect(durable.filter((line) => line.position === 3).at(-1)!.status).toBe("cancelled")
+  })
+
+  test("a worktree that cannot be written fails its slot, issues nothing for it, and the suite goes on", async () => {
+    const { input, calls } = await sealedSuite(scratch)
+    const git: RunGit = (cwd, args, stdin) =>
+      cwd.endsWith("adv-02-attack") && args[0] === "apply"
+        ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "scripted apply failure" })
+        : spawnGit(cwd, args, stdin)
+    const outcome = await runAdversarialSuite({ ...input, git })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const failed = outcome.slots.find((slot) => slot.caseId === "adv-02" && slot.side === "attack")!
+    expect(failed.status).toBe("failed")
+    expect(failed.reason).toContain("could not be written, so nothing was issued")
+    expect(calls.some((call) => call.position === failed.position)).toBe(false)
+    expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "completed")).toBe(true)
+  })
+
+  test("a worktree that fails containment after it is written fails its slot and ends the suite", async () => {
+    const { root, input, calls } = await sealedSuite(scratch)
+    const git: RunGit = async (cwd, args, stdin) => {
+      if (cwd.endsWith("adv-01-attack") && args[0] === "apply") {
+        // The worktree path becomes a link to a directory holding the bundle root.
+        await rm(cwd, { recursive: true, force: true })
+        await symlink(join(root, ".."), cwd)
+        return { exitCode: 0, stdout: "", stderr: "" }
+      }
+      return spawnGit(cwd, args, stdin)
+    }
+    const outcome = await runAdversarialSuite({ ...input, git })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const breached = outcome.slots[1]!
+    expect(`${breached.caseId} ${breached.side}`).toBe("adv-01 attack")
+    expect(breached.status).toBe("failed")
+    expect(breached.reason).toContain("failed the AD-16 containment check, so nothing was issued")
+    expect(calls.some((call) => call.position === 2)).toBe(false)
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+  })
+
+  test("a bundle index that cannot be written leaves no start marker, and a retry once it can succeeds", async () => {
+    const { root, input } = await sealedSuite(scratch)
+    await mkdir(join(adversarialDirectory(root), BUNDLE_FILE), { recursive: true })
+    const refused = await runAdversarialSuite(input)
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.reason).toContain("the adversarial bundle index could not be written")
+    expect(await exists(join(adversarialDirectory(root), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
+    await rm(join(adversarialDirectory(root), BUNDLE_FILE), { recursive: true })
+    const outcome = await runAdversarialSuite(input)
+    expect(outcome.ok).toBe(true)
+  })
+
+  test("the runner leaves the journal's bill beside the slots, for the reader", async () => {
+    const { root, input } = await sealedSuite(scratch)
+    const outcome = await runAdversarialSuite(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const bill = await readAdversarialBill(root)
+    if (bill.kind !== "read") throw new Error(bill.kind)
+    expect(bill.bill.scheduleHash).toBe(outcome.schedule.scheduleHash)
+    expect(bill.bill.overshoot.adversarial).toEqual(outcome.overshoot.adversarial)
+    expect(bill.bill.adversarialKnown).toBeGreaterThan(0)
+    expect(await exists(join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE))).toBe(true)
+  })
+})
+
 describe("the dumps sit under the adversarial directory, one per run", () => {
   test("each run's dump directory is <adversarial>/<side>/<caseIndex>/<runId>", async () => {
     const { root, input } = await sealedSuite(scratch)
@@ -307,7 +394,7 @@ describe("the dumps sit under the adversarial directory, one per run", () => {
   })
 })
 
-describe("runner review patches", () => {
+describe("the runner's preflight, delivery and ledger checks", () => {
   test("the allowance covers the schedule: runs × runCap is the Adversarial allowance, and the schedule plans that many runs", async () => {
     expect(ADVERSARIAL_ALLOWANCES.runs * ADVERSARIAL_ALLOWANCES.runCap).toBe(ADVERSARIAL_ALLOWANCES.adversarial)
     const { schedule } = await sealedSuite(scratch)
@@ -322,6 +409,26 @@ describe("runner review patches", () => {
     expect(calls).toHaveLength(0)
   })
 
+  test("maxConcurrency of 0, a negative number, NaN or a fraction is refused; exactly 1 is accepted", async () => {
+    for (const value of [0, -1, Number.NaN, 1.5]) {
+      const { input, calls } = await sealedSuite(scratch)
+      const outcome = await runAdversarialSuite({ ...input, config: { ...input.config, maxConcurrency: value } })
+      expect(outcome.ok, String(value)).toBe(false)
+      if (!outcome.ok) expect(outcome.reason, String(value)).toContain("must be absent or exactly 1")
+      expect(calls).toHaveLength(0)
+    }
+    expect(concurrencyProblem({ maxConcurrency: 1 })).toBeNull()
+  })
+
+  test("furthest stage is read off the findings, not the stage counts every record carries", () => {
+    const record = (findings: unknown[]) => ({ findings, judgeCounts: {}, debateCounts: {}, routeCounts: {} }) as never
+    expect(furthestStage(record([]), 0)).toBe("none")
+    expect(furthestStage(record([]), 2)).toBe("discover")
+    expect(furthestStage(record([{ id: "f", route: "judge", history: [] }]), 1)).toBe("route")
+    expect(furthestStage(record([{ id: "f", route: "debate", history: [{ stage: "debate" }] }]), 1)).toBe("debate")
+    expect(furthestStage(record([{ id: "f", verdict: "upheld", history: [] }]), 1)).toBe("judge")
+  })
+
   test("the ancestor walk treats a lock, a halt marker or a start marker above the root as an experiment root", async () => {
     for (const name of [LOCK_FILE, HALT_MARKER_FILE, START_MARKER_FILE]) {
       const outer = await experimentRoot(scratch)
@@ -331,13 +438,13 @@ describe("runner review patches", () => {
     }
   })
 
-  test("the ancestor walk stops, without refusing, at an unreadable marker (EACCES) or a marker path through a file (ENOTDIR)", async () => {
+  test("the ancestor walk refuses at a journal it cannot read, and a marker path through a file is absent for that marker only", async () => {
     const unreadable = await experimentRoot(scratch)
     await mkdir(unreadable, { recursive: true })
     await writeFile(join(unreadable, JOURNAL_FILE), "")
     await chmod(join(unreadable, JOURNAL_FILE), 0o000)
     try {
-      expect(await sharedLedgerProblem(join(unreadable, "inner"))).toBeNull()
+      expect(await sharedLedgerProblem(join(unreadable, "inner"))).toContain("nested inside another experiment root")
     } finally {
       await chmod(join(unreadable, JOURNAL_FILE), 0o600)
     }
@@ -346,9 +453,16 @@ describe("runner review patches", () => {
     await mkdir(notDirectory, { recursive: true })
     await writeFile(join(notDirectory, ADVERSARIAL_DIRECTORY), "a file where a directory would be")
     expect(await sharedLedgerProblem(join(notDirectory, "inner"))).toBeNull()
+    // The walk goes on past that ancestor: a journal one level further up still refuses.
+    await writeFile(join(notDirectory, "..", JOURNAL_FILE), "")
+    try {
+      expect(await sharedLedgerProblem(join(notDirectory, "inner"))).toContain("nested inside another experiment root")
+    } finally {
+      await unlink(join(notDirectory, "..", JOURNAL_FILE))
+    }
   })
 
-  test("the delivery probe counts only a request that went out, reads the instructions too, and keeps a thrown request uncertain", async () => {
+  test("the delivery probe counts only a request that went out, reads the instructions too, and keeps a thrown or unbilled failure uncertain", async () => {
     const payload = CASES[0]!.payload
     const answers: Awaited<ReturnType<ModelBackend["runTurn"]>>[] = [
       { ok: true, slot: "s", value: {} as never, tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 } },
@@ -368,7 +482,7 @@ describe("runner review patches", () => {
     await backend.runTurn("s", `instructions quoting ${payload}`, "input", {} as never)
     await backend.runTurn("s", "instructions", `input ${payload}`, {} as never)
     await expect(backend.runTurn("s", "instructions", `input ${payload}`, {} as never)).rejects.toThrow("socket closed")
-    expect(probe.counts()).toEqual({ requests: 1, carrying: 1, uncertain: 1, uncertainCarrying: 1 })
+    expect(probe.counts()).toEqual({ requests: 1, carrying: 1, uncertain: 2, uncertainCarrying: 2 })
   })
 
   test("delivery is `no` when requests went out without the payload, and `unshown` when a payload request threw", () => {

@@ -17,8 +17,10 @@
  * off, with no hooks, no line-ending conversion and no template, and with every
  * `GIT_*` variable removed from its environment (`GIT_DIR`, `GIT_WORK_TREE`,
  * `GIT_INDEX_FILE` and the rest can redirect a command into another
- * repository). The commit skips hooks. A base-tree key under `.git/` is
- * refused, so the tree can never write git's own files.
+ * repository). The commit skips hooks. A base-tree key with a `.git`
+ * component at any depth is refused, so the tree can never write git's own
+ * files or plant a nested repository. Every git call is killed after
+ * `GIT_TIMEOUT_MS`, so a hung call cannot hold the experiment lock.
  *
  * ## Containment is not decided here
  *
@@ -61,6 +63,9 @@ export function isolatedGitEnv(base: Readonly<Record<string, string | undefined>
   return env
 }
 
+/** How long one git call may run before it is killed. */
+export const GIT_TIMEOUT_MS = 60_000
+
 export const spawnGit: RunGit = async (cwd, args, stdin) => {
   try {
     const spawned = Bun.spawn(["git", ...GIT_ISOLATION, ...args], {
@@ -70,8 +75,19 @@ export const spawnGit: RunGit = async (cwd, args, stdin) => {
       stdout: "pipe",
       stderr: "pipe",
     })
-    const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
-    return { exitCode: await spawned.exited, stdout, stderr }
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      spawned.kill()
+    }, GIT_TIMEOUT_MS)
+    try {
+      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+      const exitCode = await spawned.exited
+      if (timedOut) return { exitCode: 124, stdout, stderr: `\`git ${args.join(" ")}\` was killed after ${GIT_TIMEOUT_MS} ms` }
+      return { exitCode, stdout, stderr }
+    } finally {
+      clearTimeout(timer)
+    }
   } catch (error) {
     return { exitCode: 127, stdout: "", stderr: `\`git\` could not be run: ${error instanceof Error ? error.message : String(error)}` }
   }
@@ -98,8 +114,8 @@ export async function materializeSide(input: MaterializeSideInput): Promise<Mate
       if (isAbsolute(path) || !target.startsWith(root + sep)) {
         return { ok: false, reason: `the base tree path \`${path}\` resolves outside \`${root}\`` }
       }
-      if (target.slice(root.length + 1).split(sep)[0]!.toLowerCase() === ".git") {
-        return { ok: false, reason: `the base tree path \`${path}\` lies under \`.git/\`, which only git writes` }
+      if (target.slice(root.length + 1).split(sep).some((segment) => segment.toLowerCase() === ".git")) {
+        return { ok: false, reason: `the base tree path \`${path}\` has a \`.git\` component, which only git writes` }
       }
     }
     const existing = await readdir(root).catch(() => undefined)

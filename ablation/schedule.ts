@@ -372,7 +372,7 @@ export async function publishExclusive(root: string, name: string, text: string,
         ok: false,
         reason:
           `${what} was published at \`${file}\`, but its directory could not be synced ` +
-          `(${messageOf(error)}); it is never replaced, so check that the file survived before using it`,
+          `(${messageOf(error)}); it is sealed and never re-tossed or replaced, so check that the file survived before using it`,
       }
     }
   } finally {

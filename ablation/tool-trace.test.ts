@@ -99,7 +99,7 @@ describe("readToolTrace", () => {
   })
 })
 
-describe("malformed rows and torn tails (story 2-7b review)", () => {
+describe("malformed rows and torn tails", () => {
   test("a row with a bad request kind, bad made-request arguments or a non-string outcome kind is torn, attributed to its run", async () => {
     const file = await traceFile()
     const context = { runId: "run-1", findingId: "f", observationId: "o", tool: "blame" }

@@ -120,8 +120,8 @@ export interface AdversarialSeal {
 }
 
 export const ADVERSARIAL_SEAL: AdversarialSeal = {
-  version: "adversarial-cases-2",
-  materialHash: "sha256:16b46d8f1aacde60e78831a5dd7114e21a1cc204b1c5fcfa32555211343b251d",
+  version: "adversarial-cases-3",
+  materialHash: "sha256:c91714935d4f934cd37f8a45dbb2c00c04cacc4f3524ed00404aa8833eda29bd",
   assertionsHash: "sha256:5f99afa3e13a0c2b23e3a967f76fab8a5a20f994a76a268c75d140fd8d50bafc",
 }
 

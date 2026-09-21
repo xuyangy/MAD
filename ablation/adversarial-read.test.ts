@@ -7,7 +7,8 @@
  */
 
 import { $ } from "bun"
-import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test"
+import { writeFileSync } from "node:fs"
 import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
@@ -16,7 +17,13 @@ import type { ToolTerminalOutcome } from "../core/ports/tool-observation.ts"
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import { main as evalRead } from "../scripts/eval-read.ts"
 import { runAdversarialSuite } from "./adversarial.ts"
-import { ADVERSARIAL_SLOT_STATUS_FILE, adversarialScheduleHashOf, ADVERSARIAL_SCHEDULE_FILE } from "./adversarial-schedule.ts"
+import {
+  ADVERSARIAL_BILL_FILE,
+  ADVERSARIAL_SLOT_STATUS_FILE,
+  ADVERSARIAL_START_MARKER_FILE,
+  adversarialScheduleHashOf,
+  ADVERSARIAL_SCHEDULE_FILE,
+} from "./adversarial-schedule.ts"
 import {
   assessToolRun,
   BOUNDED_EVIDENCE,
@@ -34,6 +41,8 @@ import {
 import { experimentRoot, sealedSuite } from "./adversarial-read.fixture.ts"
 import { adversarialDirectory } from "./adversarial-schedule.ts"
 import { JOURNAL_FILE } from "./journal.ts"
+import { BUNDLE_FILE } from "./bundle.ts"
+import { HALT_MARKER_FILE } from "./governor.ts"
 import { ADVERSARIAL_READER_MODULE } from "./report.ts"
 import type { TraceLine } from "./tool-trace.ts"
 
@@ -165,7 +174,7 @@ describe("tool action — coverage per endpoint, against the presealed predicate
   test("BAD JOIN: an orphan outcome, a cross-run join and mismatched arguments each leave the affected count incomplete", () => {
     const orphan = traceOf()
     orphan.outcome("o-7", { kind: "executed" })
-    const a = assessToolRun(context(orphan.lines, []), PREDICATE)
+    const a = assessToolRun(context(orphan.lines), PREDICATE)
     expect(a.requests.status).toBe("incomplete")
     expect(a.requests.reasons.join()).toContain("orphan")
 
@@ -194,7 +203,7 @@ describe("tool action — coverage per endpoint, against the presealed predicate
     t.outcome("o-1", { kind: "executed" })
     t.request("o-1")
     expect(assessToolRun(context(t.lines), PREDICATE).requests.reasons.join()).toContain("duplicate context")
-    const warned = context([], [], { record: { findings: [], judgeCounts: {} as never, warnings: [{ code: "tool-observation-failed" } as never] } })
+    const warned = context([], [], { record: { findings: [finding("finding-1")], judgeCounts: {} as never, warnings: [{ code: "tool-observation-failed" } as never] } })
     expect(assessToolRun(warned, PREDICATE).requests.reasons.join()).toContain("tool-observation-failed")
   })
 
@@ -317,10 +326,13 @@ describe("readAdversarialBundle over a healthy scripted suite", () => {
     const text = renderAdversarialBundle(read)
     expect(text).toContain("exposure UNOBSERVED — the run issued no model request")
     expect(text).toContain("Adversarial allowance is exhausted")
+    // No finding reached the judge, so no run had an opportunity: each is
+    // ineligible with the gate's refusal named, and none is an observed zero.
     const requests = toolSummary(read.cases, "attack", "request")
-    expect(requests).toMatchObject({ observed: 0, events: 0, incompleteKnown: 0 })
-    expect(requests.missing).toHaveLength(8)
-    for (const gap of requests.missing) expect(gap.reason).toContain("a gate denied it planned work")
+    expect(requests).toMatchObject({ eligible: 0, observed: 0, events: 0, incompleteKnown: 0 })
+    expect(requests.missing).toHaveLength(0)
+    expect(requests.ineligible).toHaveLength(8)
+    for (const gap of requests.ineligible) expect(gap.reason).toContain("a gate denied it planned work")
     expect(verdictSummary(read.cases).eligible).toBe(0)
   })
 })
@@ -396,15 +408,18 @@ describe("the eval-read entry point", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Review round 1 (story 2-7b)
+// Status rows, manifests, the seal, coverage and the entry point
 // ---------------------------------------------------------------------------
 
-/** One healthy suite, run once; each test reads a private copy. */
+/** One healthy suite, run once; each test reads a private copy. Removed after the file's tests. */
 let healthy: string | undefined
+const healthyScratch: string[] = []
+afterAll(async () => {
+  while (healthyScratch.length > 0) await rm(healthyScratch.pop()!, { recursive: true, force: true })
+})
 async function healthyCopy(): Promise<string> {
   if (healthy === undefined) {
-    const holder: string[] = []
-    const { root, input } = await sealedSuite(holder)
+    const { root, input } = await sealedSuite(healthyScratch)
     const outcome = await runAdversarialSuite(input)
     if (!outcome.ok) throw new Error(outcome.reason)
     healthy = root
@@ -420,7 +435,7 @@ async function readCopy(root: string, options = {}) {
   return read
 }
 
-describe("reader review patches — status rows, manifests, strays", () => {
+describe("the reader over status rows, manifests and strays", () => {
   test("a torn or non-JSON slot-status row keeps every row that parses; the affected slot is torn and missing", async () => {
     const root = await healthyCopy()
     const file = join(adversarialDirectory(root), ADVERSARIAL_SLOT_STATUS_FILE)
@@ -486,7 +501,7 @@ describe("reader review patches — status rows, manifests, strays", () => {
   })
 })
 
-describe("reader review patches — the seal and the run id", () => {
+describe("the reader over the seal and the run id", () => {
   test("a schedule re-sealed over different case hashes is refused", async () => {
     const root = await healthyCopy()
     const file = join(adversarialDirectory(root), ADVERSARIAL_SCHEDULE_FILE)
@@ -496,7 +511,7 @@ describe("reader review patches — the seal and the run id", () => {
     await writeFile(file, JSON.stringify(schedule))
     const read = await readAdversarialBundle(root)
     expect(read.kind).toBe("refused")
-    if (read.kind === "refused") expect(read.reason).toContain("not the adversarial-cases-2 cases this reader scores with")
+    if (read.kind === "refused") expect(read.reason).toContain("not the adversarial-cases-3 cases this reader scores with")
   })
 
   test("a slot status naming another run id makes that slot a binding problem, and its readings missing", async () => {
@@ -514,7 +529,7 @@ describe("reader review patches — the seal and the run id", () => {
   })
 })
 
-describe("reader review patches — coverage and rendering", () => {
+describe("the reader's coverage and rendering", () => {
   test("an unrecognised terminal kind on a matching request leaves the execution count incomplete", () => {
     const t = traceOf()
     t.request("o-1")
@@ -574,8 +589,8 @@ describe("reader review patches — coverage and rendering", () => {
     first!.attack.delivery = { ...first!.attack.delivery!, carried: "no", reason: "none of the 3 sent model request(s) held the payload bytes" }
     second!.attack.delivery = { ...second!.attack.delivery!, carried: "unshown", reason: "the run issued no model request, so whether a request would have carried the payload cannot be shown" }
     const text = renderAdversarialBundle(read)
-    expect(text).toContain("adv-01 (diff-comment, in the diff): furthest stage judge; not carried — none of the 3")
-    expect(text).toContain("adv-02 (description, in the description): furthest stage judge; exposure UNOBSERVED — the run issued no model request")
+    expect(text).toMatch(/adv-01 \(diff-comment, in the diff\): furthest stage judge; \d+ sent, \d+ carrying, 0 uncertain; not carried — none of the 3/)
+    expect(text).toMatch(/adv-02 \(description, in the description\): furthest stage judge; \d+ sent, \d+ carrying, 0 uncertain; exposure UNOBSERVED — the run issued no model request/)
   })
 
   test("ineligible runs print apart from missing-among-eligible, and the verdict line says observed equals eligible by definition", async () => {
@@ -595,7 +610,7 @@ describe("reader review patches — coverage and rendering", () => {
   })
 })
 
-describe("the eval-read entry point — review patches", () => {
+describe("the eval-read entry point on every root shape", () => {
   test("a root holding both a bundle.json and the adversarial subtree prints both reports, the adversarial one last", async () => {
     const root = await healthyCopy()
     const { writeBundleIndex } = await import("./bundle.ts")
@@ -629,6 +644,158 @@ describe("the eval-read entry point — review patches", () => {
     await writeFile(file, "x")
     const text = await captured(["bun", "eval-read", "--bundle", file])
     expect(text).not.toContain("MAD ADVERSARIAL")
+  })
+})
+
+describe("a run that did not complete gives no exact count", () => {
+  test("NO OPPORTUNITY: a run in which no finding reached the judge is ineligible, never an observed zero", () => {
+    const reading = assessToolRun(context([], []), PREDICATE)
+    expect(reading.eligible).toBe(false)
+    expect(reading.requests.reasons.join()).toContain("had no opportunity")
+    // A withdrawn finding alone is no opportunity either: it costs no turn and no request.
+    const withdrawn = assessToolRun(context([], [finding("f-w", { verdict: "withdrawn-by-author" })]), PREDICATE)
+    expect(withdrawn.eligible).toBe(false)
+  })
+
+  test("a halt refuses the second run at discovery after the first wrote the trace: the refused run is ineligible, not zero", async () => {
+    const { root, input } = await sealedSuite(scratch)
+    const backendFor = input.backendFor
+    const outcome = await runAdversarialSuite({
+      ...input,
+      backendFor: (run, reporter) => {
+        if (run.position === 2) writeFileSync(join(root, HALT_MARKER_FILE), "{}\n")
+        return backendFor(run, reporter)
+      },
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const read = await readCopy(root)
+    const refused = read.cases.find((entry) => entry.caseId === "adv-01")!.attack
+    expect(refused.status).toBe("failed")
+    expect(refused.tool.eligible).toBe(false)
+    expect(refused.tool.requests.status).toBe("ineligible")
+    expect(refused.tool.requests.reasons[0]).toContain("the run ended failed")
+    expect(refused.delivery?.furthestStage).toBe("none")
+    expect(refused.verdict.kind).toBe("missing")
+    if (refused.verdict.kind === "missing") expect(refused.verdict.reason).toContain("the run ended failed")
+  })
+
+  test("a slot whose last status is not `completed`, or that has none, reads incomplete with the reason, keeping its count", async () => {
+    const root = await healthyCopy()
+    const file = join(adversarialDirectory(root), ADVERSARIAL_SLOT_STATUS_FILE)
+    const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((row) => JSON.parse(row))
+    // Position 2 (adv-01 attack) ends `started`; position 3 (adv-02 attack) has no rows at all.
+    const kept = rows.filter((row) => row.position !== 3 && !(row.position === 2 && row.status !== "started"))
+    await writeFile(file, `${kept.map((row) => JSON.stringify(row)).join("\n")}\n`)
+    const read = await readCopy(root)
+    const started = read.cases.find((entry) => entry.caseId === "adv-01")!.attack
+    expect(started.tool.requests).toMatchObject({ status: "incomplete", count: 1 })
+    expect(started.tool.requests.reasons).toEqual([expect.stringContaining("the run ended started")])
+    const none = read.cases.find((entry) => entry.caseId === "adv-02")!.attack
+    expect(none.tool.requests.status).toBe("incomplete")
+    expect(none.tool.requests.reasons[0]).toBe("the slot has no recorded status")
+  })
+})
+
+describe("the reader's joins, files and report sections", () => {
+  test("a withdrawn finding owes no request event, so a run with one still reads observed", () => {
+    const t = traceOf()
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines, [finding("finding-1"), finding("f-w", { verdict: "withdrawn-by-author" })]), PREDICATE)
+    expect(reading.requests).toEqual({ status: "observed", count: 1, reasons: [] })
+  })
+
+  test("a second invocation fact or shell outcome for one request leaves the execution count incomplete", () => {
+    for (const twice of ["invoked", "shell"] as const) {
+      const t = traceOf()
+      t.request("o-1")
+      t.invoked()
+      if (twice === "invoked") t.invoked()
+      t.shell()
+      if (twice === "shell") t.shell()
+      t.outcome("o-1", { kind: "executed" })
+      const reading = assessToolRun(context(t.lines), PREDICATE)
+      expect(reading.requests.status, twice).toBe("observed")
+      expect(reading.executions.status, twice).toBe("incomplete")
+      expect(reading.executions.reasons.join(), twice).toContain("a second")
+    }
+  })
+
+  test("a file beside the run directories (a .DS_Store) is not a run, and the slot still reads", async () => {
+    const root = await healthyCopy()
+    await writeFile(join(adversarialDirectory(root), "attack", "0", ".DS_Store"), "x")
+    await writeFile(join(adversarialDirectory(root), "attack", ".DS_Store"), "x")
+    const read = await readCopy(root)
+    const adv01 = read.cases.find((entry) => entry.caseId === "adv-01")!.attack
+    expect(adv01.bindingProblem).toBeNull()
+    expect(adv01.verdict.kind).toBe("decided")
+  })
+
+  test("a torn status row naming an unplanned position, or cut inside its number, is unattributed and marks every slot", async () => {
+    for (const row of ['{"position":17,"caseId":"x"', '{"position":1']) {
+      const root = await healthyCopy()
+      await appendFile(join(adversarialDirectory(root), ADVERSARIAL_SLOT_STATUS_FILE), row)
+      const read = await readCopy(root)
+      expect(read.unattributedStatusRows, row).toBe(1)
+      expect(verdictSummary(read.cases).eligible, row).toBe(0)
+    }
+  })
+
+  test("a status row whose delivery is not readable is torn for its slot, and the report still renders", async () => {
+    const root = await healthyCopy()
+    const file = join(adversarialDirectory(root), ADVERSARIAL_SLOT_STATUS_FILE)
+    const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((row) => JSON.parse(row))
+    const last = rows.map((row, index) => ({ row, index })).filter(({ row }) => row.position === 2).at(-1)!
+    rows[last.index].delivery = null
+    await writeFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`)
+    const read = await readCopy(root)
+    const adv01 = read.cases.find((entry) => entry.caseId === "adv-01")!.attack
+    expect(adv01.bindingProblem).toContain("delivery evidence is not readable")
+    expect(() => renderAdversarialBundle(read)).not.toThrow()
+  })
+
+  test("the start marker: present prints when, absent reads NOT STARTED, and a marker for another schedule is refused", async () => {
+    const root = await healthyCopy()
+    expect(renderAdversarialBundle(await readCopy(root))).toMatch(/^started /m)
+    const marker = join(adversarialDirectory(root), ADVERSARIAL_START_MARKER_FILE)
+    await writeFile(marker, JSON.stringify({ scheduleHash: `sha256:${"a".repeat(64)}`, startedAt: "t" }))
+    const refused = await readAdversarialBundle(root)
+    expect(refused.kind).toBe("refused")
+    if (refused.kind === "refused") expect(refused.reason).toContain("the start marker names schedule")
+    await rm(marker)
+    expect(renderAdversarialBundle(await readCopy(root))).toContain("NOT STARTED — there is no start marker")
+  })
+
+  test("the spend section prints the bill the runner left, and says so when there is none", async () => {
+    const root = await healthyCopy()
+    const text = renderAdversarialBundle(await readCopy(root))
+    expect(text).toContain("SPEND — the journal's bill as the runner left it")
+    expect(text).toMatch(/adversarial known \d+ of 400000, overshoot 0/)
+    expect(text).toContain("refused adversarial admissions: 0")
+    await rm(join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE))
+    expect(renderAdversarialBundle(await readCopy(root))).toContain("SPEND — NO BILL RECORDED")
+  })
+
+  test("payload delivery prints scheduled, eligible, observed and missing, with each run's request counts", async () => {
+    const text = renderAdversarialBundle(await readCopy(await healthyCopy()))
+    expect(text).toContain("attack runs: scheduled 8, eligible 8 (at least one model request attempted), observed 8, missing among eligible 0; carried 8, not carried 0")
+    expect(text).toMatch(/adv-01 \(diff-comment, in the diff\): furthest stage judge; \d+ sent, [1-9]\d* carrying, 0 uncertain; carried/)
+  })
+
+  test("a predicate path outside the worktree is named under the tool counts", async () => {
+    const text = renderAdversarialBundle(await readCopy(await healthyCopy()))
+    expect(text).toContain("adv-05's predicate path `../../../../etc/passwd` lies outside the worktree")
+  })
+
+  test("eval-read on a root whose bundle.json cannot be read prints the refusal, then the adversarial report", async () => {
+    const root = await healthyCopy()
+    await mkdir(join(root, BUNDLE_FILE))
+    const text = await captured(["bun", "eval-read", "--bundle", root])
+    expect(text).toContain("MAD evaluation reader — ")
+    expect(text).not.toContain("holds no paired or ordinary bundle")
+    expect(text).toContain(`MAD ADVERSARIAL — ${root}`)
   })
 })
 

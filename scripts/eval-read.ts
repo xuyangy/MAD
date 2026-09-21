@@ -42,23 +42,22 @@
  *
  * Story 2-7b — AN EXPERIMENT ROOT CARRYING AN ADVERSARIAL SCHEDULE GETS THE
  * ADVERSARIAL REPORT, last, from `<root>/adversarial/`. It is reached whether or
- * not the root holds a `bundle.json`: an experiment root may hold only the
- * adversarial subtree, and then the ordinary reader's refusal is printed and the
- * adversarial report still follows. A root with neither prints the ordinary
- * reader's refusal alone, as before.
- *
- * On a root with an adversarial schedule and no `bundle.json`, one line says
- * so in place of the ordinary reader's refusal. A `--bundle` that names the
+ * not the root holds a `bundle.json`. An experiment root may hold only the
+ * adversarial subtree: then one line says so in place of the ordinary reader's
+ * refusal, and the adversarial report follows. When a `bundle.json` exists and
+ * cannot be read, the ordinary reader's refusal prints and the adversarial
+ * report still follows. A root with neither prints the ordinary reader's
+ * refusal alone. A `--bundle` that names the
  * adversarial directory itself (`<root>/adversarial`, holding
  * `adversarial-schedule.json`) is read as its parent, the experiment root, and
  * the report says so.
  */
 
-import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/adjudication-read.ts"
-import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adversarial-read.ts"
 import { existsSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 
+import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/adjudication-read.ts"
+import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adversarial-read.ts"
 import { ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE, hasAdversarialSchedule } from "../ablation/adversarial-schedule.ts"
 import { BUNDLE_FILE } from "../ablation/bundle.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"

@@ -12,7 +12,8 @@
  * already recorded there counts toward the global cap and a halt written there
  * refuses the next adversarial request. The suite's own files live under
  * `<root>/adversarial/`: the schedule, start marker, slot status,
- * `tool-trace.jsonl`, the bundle index, the dumps and the worktrees. It never
+ * `tool-trace.jsonl`, the bundle index, the dumps, the worktrees and, when the
+ * runner ends, the bill summary the reader prints. It never
  * touches the paired schedule, start marker or `bundle.json`. A root nested
  * inside another experiment root, or an adversarial subtree holding a journal of
  * its own, is refused: a fresh journal there would see none of the experiment's
@@ -47,7 +48,7 @@
  * what that does not establish about a real host.
  */
 
-import { readFile } from "node:fs/promises"
+import { stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 import type { PluginInput } from "@opencode-ai/plugin"
@@ -74,7 +75,9 @@ import {
   concurrencyProblem,
   oneSlotProblem,
   verifyAdversarialSchedule,
+  writeAdversarialBill,
   writeAdversarialStartMarker,
+  type AdversarialBillSummary,
   type AdversarialConfig,
   type AdversarialSchedule,
   type AdversarialSlot,
@@ -89,6 +92,7 @@ import {
   JOURNAL_FILE,
   LOCK_FILE,
   openJournal,
+  type AdversarialRefusal,
   type OvershootReport,
   type PairedJournal,
   type ReconciliationHandle,
@@ -169,14 +173,18 @@ async function containmentProblem(bundleRoot: string, worktree: string): Promise
 
 type Probe = { kind: "present" } | { kind: "absent" } | { kind: "error"; code: string | undefined; reason: string }
 
+/**
+ * Whether a path exists, by `stat`: it needs search permission on the
+ * directories only, never read permission on the file. `ENOTDIR` means a
+ * component on the way is a file, so nothing can sit at this path.
+ */
 async function probeFile(file: string): Promise<Probe> {
   try {
-    await readFile(file)
+    await stat(file)
     return { kind: "present" }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code === "ENOENT") return { kind: "absent" }
-    if (code === "EISDIR") return { kind: "present" }
+    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" }
     return { kind: "error", code, reason: `whether \`${file}\` exists could not be established: ${messageOf(error)}` }
   }
 }
@@ -196,10 +204,11 @@ const EXPERIMENT_ROOT_MARKERS = [
  * directory is already an experiment root, or the adversarial subtree holds a
  * journal or lock of its own.
  *
- * The walk up stops, without refusing, at an ancestor it may not look into
- * (`EACCES`) or that is not a directory (`ENOTDIR`): nothing above that point
- * is readable to this process, so no experiment root there could be shared
- * with it either. Any other error refuses.
+ * Each marker is probed with `stat`, so a marker that exists and cannot be read
+ * still refuses. The walk up stops, without refusing, at an ancestor this
+ * process may not search (`EACCES` or `EPERM` from `stat`): it cannot open any
+ * file under that directory, so no experiment root there could be shared with
+ * it either. Any other error refuses.
  */
 export async function sharedLedgerProblem(experimentRoot: string): Promise<string | null> {
   const root = resolve(experimentRoot)
@@ -220,7 +229,7 @@ export async function sharedLedgerProblem(experimentRoot: string): Promise<strin
       const file = join(directory, name)
       const found = await probeFile(file)
       if (found.kind === "error") {
-        if (found.code === "EACCES" || found.code === "ENOTDIR") return null
+        if (found.code === "EACCES" || found.code === "EPERM") return null
         return found.reason
       }
       if (found.kind === "present") {
@@ -240,10 +249,10 @@ export async function sharedLedgerProblem(experimentRoot: string): Promise<strin
  * Counts the model requests a run actually sent, and how many held the payload
  * bytes (a byte-substring check over the prompt and the instructions).
  *
- * A request counts once `runTurn` resolved with an envelope that answered or
- * was billed (`ok`, `tokens` or `usageUnknown`). An envelope with none of those
- * never went out. A `runTurn` that threw is `uncertain`: it may or may not have
- * gone out, and it is never counted as sent.
+ * A request counts as sent once `runTurn` resolved with an envelope that
+ * answered or was billed (`ok`, `tokens` or `usageUnknown`). A `runTurn` that
+ * threw, or resolved as a failure with no usage, is `uncertain`: it may or may
+ * not have gone out, and it is never counted as sent.
  */
 export function deliveryProbe(payload: string | null) {
   let requests = 0
@@ -271,6 +280,9 @@ export function deliveryProbe(payload: string | null) {
           if (sent) {
             requests += 1
             if (holds) carrying += 1
+          } else {
+            uncertain += 1
+            if (holds) uncertainCarrying += 1
           }
           return envelope as never
         },
@@ -314,12 +326,19 @@ export function deliveryOf(
   return { ...base, carried: "no", reason: `none of the ${counts.requests} sent model request(s) held the payload bytes` }
 }
 
-/** The last stage the record shows ran. */
+/**
+ * The last stage the record shows a finding reached. The stage counts are set
+ * on every returned record, even when no finding got that far, so they are not
+ * read here.
+ */
 export function furthestStage(record: RunRecord | undefined, requests: number): ReachedStage {
-  if (record?.judgeCounts !== undefined) return "judge"
-  if (record?.debateCounts !== undefined) return "debate"
-  if (record?.routeCounts !== undefined) return "route"
-  return requests > 0 ? "discover" : "none"
+  const findings = record?.findings ?? []
+  const reached = (stage: string): boolean =>
+    findings.some((finding) => finding.unresolved?.diedAtStage === stage || (finding.history ?? []).some((entry) => entry.stage === stage))
+  if (findings.some((finding) => finding.verdict !== undefined) || reached("judge")) return "judge"
+  if (reached("debate")) return "debate"
+  if (findings.some((finding) => finding.route !== undefined)) return "route"
+  return requests > 0 || findings.length > 0 ? "discover" : "none"
 }
 
 export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Promise<AdversarialSuiteOutcome> {
@@ -430,12 +449,7 @@ async function execute(
   ): Promise<string | null> => {
     const report: AdversarialSlotReport = { ...reports.get(slot.position), ...slot, status, reason, ...extra }
     reports.set(slot.position, report)
-    let at: string
-    try {
-      at = input.clock.now()
-    } catch (error) {
-      at = `unknown (the clock failed: ${messageOf(error)})`
-    }
+    const at = now(input.clock)
     const problem = await appendAdversarialSlotStatus(root, {
       ...slot,
       status,
@@ -613,6 +627,8 @@ async function execute(
   const { handle, releaseError } = await journal.close()
   if (releaseError !== null) warnings.push(releaseError)
   const bill = handle.bill()
+  const billProblem = await writeAdversarialBill(root, billSummaryOf(schedule.scheduleHash, bill, now(input.clock)))
+  if (billProblem !== null) warnings.push(billProblem)
   const slots = schedule.slots.map((slot) => reports.get(slot.position)!)
   const complete =
     slots.every((slot) => slot.status === "completed") &&
@@ -639,11 +655,7 @@ async function execute(
  * skipped for budget, findings stranded by anything but a cancellation, and any
  * refused adversarial admission of this run.
  */
-export function deniedAdversarialWork(
-  record: RunRecord,
-  refused: readonly { label: string; stage: string; slot: string; attempt: number; cause: string; reason: string }[],
-  label: string,
-): string | null {
+export function deniedAdversarialWork(record: RunRecord, refused: readonly AdversarialRefusal[], label: string): string | null {
   const parts: string[] = []
   const skipped = record.skippedForBudget ?? []
   if (skipped.length > 0) parts.push(`discovery skipped ${skipped.join(", ")} for budget`)
@@ -660,6 +672,31 @@ export function deniedAdversarialWork(
     )
   }
   return parts.length === 0 ? null : parts.join("; ")
+}
+
+/** The durable summary of the journal's bill for the reader. */
+export function billSummaryOf(scheduleHash: string, bill: UniqueExecutionBill, at: string): AdversarialBillSummary {
+  return {
+    scheduleHash,
+    at,
+    adversarialKnown: bill.overshoot.adversarial.spent,
+    globalKnown: bill.overshoot.global.spent,
+    overshoot: { global: { ...bill.overshoot.global }, adversarial: { ...bill.overshoot.adversarial } },
+    unknown: bill.unknown.filter((request) => request.category === "adversarial").length,
+    uncertain: bill.uncertain.filter((request) => request.category === "adversarial").length,
+    inFlight: bill.inFlight.filter((request) => request.category === "adversarial").length,
+    refused: bill.refusedAdversarial.map((refusal) => ({ label: refusal.label, stage: refusal.stage, cause: refusal.cause, reason: refusal.reason })),
+    halt: bill.halt,
+    stop: bill.stop,
+  }
+}
+
+function now(clock: Clock): string {
+  try {
+    return clock.now()
+  } catch (error) {
+    return `unknown (the clock failed: ${messageOf(error)})`
+  }
 }
 
 function manifestReason(outcome: ArtifactOutcome): string {

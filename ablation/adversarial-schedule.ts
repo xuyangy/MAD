@@ -18,6 +18,8 @@
  *   adversarial-start.json      written once before the first billable action
  *   adversarial-slots.jsonl     append-only started/terminal status per slot,
  *                               with each attack run's delivery evidence
+ *   adversarial-bill.json       the journal's bill as the runner left it, written
+ *                               once when the runner ends
  *
  * The journal, the lock and the halt marker are the EXPERIMENT ROOT's, shared
  * with every category (`ablation/journal.ts`). Nothing here touches the paired
@@ -150,19 +152,22 @@ export function adversarialScheduleHashOf(schedule: Omit<AdversarialSchedule, "s
 }
 
 /**
- * Why a `maxConcurrency` is refused, or `null`. The roster has one slot, and
- * every run rebinds one shared Bun `$` to its own worktree, so more than one
- * turn in flight buys nothing and a concurrent blame could run in the wrong
- * worktree.
+ * Why a `maxConcurrency` is refused, or `null`. Only an absent value or exactly
+ * 1 is accepted. The roster has one slot, and every run rebinds one shared Bun
+ * `$` to its own worktree, so more than one turn in flight buys nothing and a
+ * concurrent blame could run in the wrong worktree. A value below 1 or not a
+ * whole number admits no turn at all, so it is refused too.
  */
 export function concurrencyProblem(config: Pick<AdversarialConfig, "maxConcurrency">): string | null {
-  if (config.maxConcurrency !== undefined && config.maxConcurrency > 1) {
+  const value = config.maxConcurrency
+  if (value === undefined || value === 1) return null
+  if (Number.isInteger(value) && value > 1) {
     return (
-      `maxConcurrency ${config.maxConcurrency} is refused: the adversarial runs use a one-slot roster over a shared ` +
+      `maxConcurrency ${value} is refused: the adversarial runs use a one-slot roster over a shared ` +
       "Bun `$` that each run rebinds to its own worktree, so at most one turn may be in flight"
     )
   }
-  return null
+  return `maxConcurrency ${value} is refused: it must be absent or exactly 1`
 }
 
 /** Why a roster is not the protocol's one-slot roster, or `null`. */
@@ -201,8 +206,8 @@ export type AdversarialScheduleCreated =
 /**
  * Toss the four coins and publish the schedule, under the experiment root's
  * lock. Refuses, and tosses nothing, when a schedule exists, the seal does not
- * verify, the protocol does not verify or the roster is not one slot. Bills
- * nothing.
+ * verify, the roster is not one slot, `maxConcurrency` is not absent or 1, the
+ * Tools identity is blank or the protocol does not verify. Bills nothing.
  */
 export async function createAdversarialSchedule(input: CreateAdversarialScheduleInput): Promise<AdversarialScheduleCreated> {
   const root = resolve(input.experimentRoot)
@@ -410,6 +415,102 @@ export function writeAdversarialStartMarker(experimentRoot: string, scheduleHash
   return writeStartMarker(adversarialDirectory(experimentRoot), scheduleHash, startedAt, ADVERSARIAL_START_MARKER_FILE)
 }
 
+export type StartMarkerRead =
+  | { kind: "absent" }
+  | { kind: "present"; scheduleHash: string; startedAt: string }
+  | { kind: "unreadable"; reason: string }
+
+/** The adversarial start marker, as the reader sees it. Never throws. */
+export async function readAdversarialStartMarker(experimentRoot: string): Promise<StartMarkerRead> {
+  const file = join(adversarialDirectory(experimentRoot), ADVERSARIAL_START_MARKER_FILE)
+  let text: string
+  try {
+    text = await readFile(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" }
+    return { kind: "unreadable", reason: `the start marker \`${file}\` could not be read: ${messageOf(error)}` }
+  }
+  try {
+    const marker = JSON.parse(text) as Record<string, unknown> | null
+    if (marker !== null && typeof marker === "object" && typeof marker.scheduleHash === "string" && typeof marker.startedAt === "string") {
+      return { kind: "present", scheduleHash: marker.scheduleHash, startedAt: marker.startedAt }
+    }
+  } catch {
+    // Reported below with the same reason as a marker of the wrong shape.
+  }
+  return { kind: "unreadable", reason: `the start marker \`${file}\` holds no readable schedule hash and start time` }
+}
+
+export const ADVERSARIAL_BILL_FILE = "adversarial-bill.json"
+
+/**
+ * The experiment journal's bill as the adversarial runner left it, written once
+ * when the runner ends. Spend, overshoot and unknown usage live in the journal;
+ * this file carries the runner's summary so the durable report can print them.
+ */
+export interface AdversarialBillSummary {
+  scheduleHash: string
+  at: string
+  /** Known Adversarial and whole-experiment spend, in tokens. */
+  adversarialKnown: number
+  globalKnown: number
+  overshoot: { global: { limit: number; spent: number; overshoot: number }; adversarial: { limit: number; spent: number; overshoot: number } }
+  /** Requests settled with unknown usage, issued and never settled, and still in flight. */
+  unknown: number
+  uncertain: number
+  inFlight: number
+  /** Refused Adversarial admissions, each with its run label and reason. */
+  refused: { label: string; stage: string; cause: string; reason: string }[]
+  halt: string | null
+  stop: string | null
+}
+
+/** Write the bill summary with `wx`: a runner ends once. Returns why it failed, or `null`. */
+export async function writeAdversarialBill(experimentRoot: string, summary: AdversarialBillSummary): Promise<string | null> {
+  const published = await publishExclusive(
+    adversarialDirectory(experimentRoot),
+    ADVERSARIAL_BILL_FILE,
+    `${JSON.stringify(summary, undefined, 2)}\n`,
+    "the adversarial bill summary",
+  )
+  return published.ok ? null : published.reason
+}
+
+export type BillRead = { kind: "absent" } | { kind: "read"; bill: AdversarialBillSummary } | { kind: "unreadable"; reason: string }
+
+/** The bill summary, as the reader sees it. Never throws. */
+export async function readAdversarialBill(experimentRoot: string): Promise<BillRead> {
+  const file = join(adversarialDirectory(experimentRoot), ADVERSARIAL_BILL_FILE)
+  let text: string
+  try {
+    text = await readFile(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" }
+    return { kind: "unreadable", reason: `the bill summary \`${file}\` could not be read: ${messageOf(error)}` }
+  }
+  try {
+    const bill = JSON.parse(text) as AdversarialBillSummary
+    if (
+      bill !== null &&
+      typeof bill === "object" &&
+      typeof bill.scheduleHash === "string" &&
+      typeof bill.adversarialKnown === "number" &&
+      typeof bill.globalKnown === "number" &&
+      typeof bill.overshoot?.adversarial?.overshoot === "number" &&
+      typeof bill.overshoot?.global?.overshoot === "number" &&
+      typeof bill.unknown === "number" &&
+      typeof bill.uncertain === "number" &&
+      typeof bill.inFlight === "number" &&
+      Array.isArray(bill.refused)
+    ) {
+      return { kind: "read", bill }
+    }
+  } catch {
+    // Reported below with the same reason as a summary of the wrong shape.
+  }
+  return { kind: "unreadable", reason: `the bill summary \`${file}\` is not a readable bill` }
+}
+
 /** How far a run got, from its record: the last stage that ran. */
 export type ReachedStage = "none" | "discover" | "route" | "debate" | "judge"
 
@@ -466,7 +567,26 @@ export type SlotStatusRows =
   | { kind: "read"; lines: AdversarialSlotStatusLine[]; torn: TornStatusRow[] }
   | { kind: "unreadable"; reason: string }
 
-const POSITION_PREFIX = /^\{"position":(\d+)/
+// The number must be followed by the next field or the object's end, so a row
+// torn inside `{"position":12` is not read as position 1.
+const POSITION_PREFIX = /^\{"position":(\d+)[,}]/
+
+/** Whether a row's `delivery`, when present, has the shape the render reads. */
+function deliveryShapeOk(delivery: unknown): boolean {
+  if (delivery === undefined) return true
+  if (delivery === null || typeof delivery !== "object") return false
+  const d = delivery as Record<string, unknown>
+  return (
+    typeof d.surface === "string" &&
+    typeof d.carrier === "string" &&
+    typeof d.furthestStage === "string" &&
+    typeof d.requests === "number" &&
+    typeof d.carrying === "number" &&
+    typeof d.uncertain === "number" &&
+    (d.carried === "yes" || d.carried === "no" || d.carried === "unshown") &&
+    typeof d.reason === "string"
+  )
+}
 
 /**
  * The reader's view of the slot-status file: every row that parses is kept, and
@@ -499,6 +619,10 @@ export async function readAdversarialSlotStatusRows(experimentRoot: string): Pro
     const line = parsed as Record<string, unknown> | null
     if (line === null || typeof line !== "object" || typeof line.position !== "number" || typeof line.status !== "string") {
       torn.push({ row: index + 1, position: attributed, why: "a row is not a slot status" })
+      return
+    }
+    if (!deliveryShapeOk(line.delivery)) {
+      torn.push({ row: index + 1, position: line.position, why: "a row's delivery evidence is not readable" })
       return
     }
     if (tail) torn.push({ row: index + 1, position: line.position, why: "the last row has no newline" })

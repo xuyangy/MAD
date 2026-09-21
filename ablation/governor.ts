@@ -577,7 +577,8 @@ export function requestGate(
  * - `adversarial` bounds the Adversarial category's known spend.
  * - `runCap` is each run's ordinary `tokenCap`, enforced by `mayISpend`. There is
  *   no second per-run experiment counter.
- * - `runs` is the number of scheduled runs, 16 × 25,000 = 400,000.
+ * - `runs` is the number of scheduled runs, 16; `adversarial` is `runs` ×
+ *   `runCap`, 16 × 25,000 = 400,000, with no headroom.
  *
  * Thresholds, not bills: admitted work may overshoot, and the overshoot is
  * reported. No final-bill ceiling is promised.

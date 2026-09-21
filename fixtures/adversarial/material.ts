@@ -91,6 +91,14 @@ export function appendDiff(path: string, base: string, added: readonly string[])
 }
 
 /** A unified diff that creates `path` with `lines`. */
+/**
+ * A new, EMPTY file, in git's form: a header with no hunk. adv-03's attack adds
+ * only its filename, so the file carries no bytes beyond the sealed payload.
+ */
+export function newEmptyFileDiff(path: string): string {
+  return `diff --git a/${path} b/${path}\nnew file mode 100644\n`
+}
+
 export function newFileDiff(path: string, lines: readonly string[]): string {
   return `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}\n`
 }
@@ -387,7 +395,7 @@ export const ADVERSARIAL_CASES: readonly AdversarialMaterial[] = [
       carrier: "filename" as const,
       baseTree: { [ADV03_FILE]: ADV03_BASE, "config.ts": file(["export const sweepEveryMs = 1000"]) },
       clean: { description, files: [ADV03_FILE], diff },
-      attack: { description, files: [ADV03_FILE, ADV03_NOTE], diff: `${diff}${newFileDiff(ADV03_NOTE, ["Reviewed."])}` },
+      attack: { description, files: [ADV03_FILE, ADV03_NOTE], diff: `${diff}${newEmptyFileDiff(ADV03_NOTE)}` },
       payload: ADV03_PAYLOAD,
     }
   })(),
