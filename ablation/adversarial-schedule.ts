@@ -512,9 +512,15 @@ export async function readAdversarialBill(experimentRoot: string): Promise<BillR
       typeof bill.unknown === "number" &&
       typeof bill.uncertain === "number" &&
       typeof bill.inFlight === "number" &&
-      Array.isArray(bill.refused)
+      Array.isArray(bill.refused) &&
+      // STORY 2-7C, AND READ FORWARD-COMPATIBLY. The field is required on the
+      // type, so a bill that lacks it would otherwise be handed to a reader as a
+      // `string[]` that is `undefined`. A bill written before this story is still
+      // readable — it simply recorded no operational quarantine, which is what an
+      // empty list says.
+      (bill.operational === undefined || Array.isArray(bill.operational))
     ) {
-      return { kind: "read", bill }
+      return { kind: "read", bill: { ...bill, operational: bill.operational ?? [] } }
     }
   } catch {
     // Reported below with the same reason as a summary of the wrong shape.

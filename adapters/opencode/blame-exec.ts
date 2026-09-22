@@ -21,6 +21,11 @@
  * - **`launch-failed` is PRE-LAUNCH ONLY.** The operating system refused to
  *   start the program — a missing binary, an unreadable working directory. That
  *   is a PROVED non-execution, and `core/judge/blame.ts` reads it as one.
+ * - **`refused` is MAD'S OWN PRE-LAUNCH FAULT.** A deadline no timer can honour
+ *   means nothing is attempted. Nothing executed here either, but the reason
+ *   belongs to MAD's wiring rather than to the host, and reporting it as
+ *   `launch-failed` would file a bug in this repository as a measurement of the
+ *   machine the run was made on. The caller classifies it `pre-shell`.
  * - **`observation-failed` is POST-LAUNCH.** A spawn handle came back and then
  *   something about watching the process failed: the exit promise rejected, or
  *   the output could not be read to its end. Holding a spawn handle does NOT
@@ -142,8 +147,22 @@ export type CleanupState =
  * would hand `core/judge/blame.ts` an evidence shape it could not tell apart.
  */
 export type BlameExecOutcome =
-  /** The process ran and returned. `exitCode` is git's own, zero or not. */
-  | { kind: "returned"; exitCode: number; signal: string | null; stdout: string; stderr: string }
+  /**
+   * The process ran and returned. `exitCode` is git's own, zero or not.
+   *
+   * `stderrFailure` IS THE STRUCTURAL TAG. Where it is set, `stderr` is empty
+   * and the string in it is MAD's account of why the pipe could not be read —
+   * never something git said. A caller that merges the two loses the only
+   * distinction between a diagnostic the program emitted and one it did not.
+   */
+  | {
+      kind: "returned"
+      exitCode: number
+      signal: string | null
+      stdout: string
+      stderr: string
+      stderrFailure: string | null
+    }
   /**
    * NOTHING STARTED, and the launcher saw that for itself. PRE-LAUNCH ONLY — see
    * this file's header. It is the authoritative launch-failure signal that
@@ -151,6 +170,15 @@ export type BlameExecOutcome =
    * stderr, and it is the only outcome here that proves a non-execution.
    */
   | { kind: "launch-failed"; why: string }
+  /**
+   * MAD REFUSED TO LAUNCH, AND THE REFUSAL IS ITS OWN. A caller handed this
+   * function a deadline no timer can honour, so nothing was attempted. Nothing
+   * executed — as with `launch-failed` — but the reason is a MAD-side
+   * construction fault rather than anything the operating system said, and the
+   * two must not be reported as one: `launch-failed` is a MEASUREMENT of the
+   * host, and a bug in MAD's own wiring is not evidence about the host.
+   */
+  | { kind: "refused"; why: string }
   /**
    * A SPAWN HANDLE CAME BACK AND THEN THE OBSERVATION FAILED. Nothing about
    * whether git ran is established either way. `cleanup` says whether the
@@ -187,8 +215,16 @@ export interface BlameExecOptions {
 /** SIGKILL. The number rather than the name, so the seam takes one shape only. */
 const SIGKILL = 9
 
-/** What one pipe gave back. A failed read is TAGGED, never flattened to `""`. */
-type PipeRead = { ok: true; text: string } | { ok: false; why: string }
+/**
+ * What one pipe gave back. A failed read is TAGGED, never flattened to `""`.
+ *
+ * `unreadEnd` SEPARATES TWO FAILURES THE CLEANUP DECISION READS DIFFERENTLY. A
+ * stream that existed and whose end MAD never saw carries no information about
+ * descendants, so it cannot support a confirmed cleanup. A stream that was never
+ * there at all is a different fact: there is no inherited write end to reason
+ * about, so its absence is not evidence of a survivor.
+ */
+type PipeRead = { ok: true; text: string } | { ok: false; why: string; unreadEnd: boolean }
 
 /** What the exit gave back. A rejection is TAGGED, never read as an exit. */
 type ExitRead = { ok: true; code: number } | { ok: false; why: string }
@@ -236,14 +272,17 @@ function readPipe(
   stream: SpawnedBlame["stdout"],
   name: string,
 ): { read: Tracked<PipeRead>; release: () => void; setupFailure: string | null } {
-  const unusable = (why: string) => ({
-    read: track(Promise.resolve<PipeRead>({ ok: false, why })),
+  const unusable = (why: string, unreadEnd: boolean) => ({
+    read: track(Promise.resolve<PipeRead>({ ok: false, why, unreadEnd })),
     release: () => undefined,
     setupFailure: why,
   })
 
   if (stream === null || stream === undefined || typeof stream === "number") {
-    return unusable(`no ${name} pipe was available, so the command's ${name} was never read`)
+    // NO PIPE EXISTED, so no descendant can be holding its write end. The read
+    // still failed — the caller gets no output — but the cleanup decision has
+    // nothing to withhold confirmation for.
+    return unusable(`no ${name} pipe was available, so the command's ${name} was never read`, false)
   }
 
   // ACQUIRING THE READER IS ITSELF A FAILABLE STEP, AND IT FAILS SYNCHRONOUSLY.
@@ -257,7 +296,9 @@ function readPipe(
   try {
     acquired = stream.getReader()
   } catch (error) {
-    return unusable(`the ${name} pipe could not be opened for reading: ${messageOf(error)}`)
+    // THE PIPE IS REAL AND SOMETHING ELSE HOLDS IT. Its end will never be
+    // observed here, so cleanup cannot be confirmed on it.
+    return unusable(`the ${name} pipe could not be opened for reading: ${messageOf(error)}`, true)
   }
   const reader = acquired
 
@@ -275,7 +316,7 @@ function readPipe(
           }
         }
       } catch (error) {
-        return { ok: false, why: `the ${name} pipe could not be read to its end: ${messageOf(error)}` }
+        return { ok: false, why: `the ${name} pipe could not be read to its end: ${messageOf(error)}`, unreadEnd: true }
       }
       const joined = new Uint8Array(size)
       let at = 0
@@ -295,7 +336,22 @@ function readPipe(
       // cancel can produce is consumed here; there is no caller left that a
       // released resource could fail for.
       try {
-        void reader.cancel().catch(() => undefined)
+        // CANCEL, THEN GIVE THE LOCK BACK. Cancelling ends the read but leaves
+        // the reader holding the stream, so a caller that went looking would
+        // still find it locked — which is not what "released" means. The lock is
+        // returned once the cancel has settled, because releasing under a live
+        // read is itself an error.
+        void reader
+          .cancel()
+          .catch(() => undefined)
+          .finally(() => {
+            try {
+              reader.releaseLock()
+            } catch {
+              // Already released, or released by something else. Either way the
+              // stream is not held by us.
+            }
+          })
       } catch {
         // Nothing left to report to at this layer.
       }
@@ -338,7 +394,7 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     ["the blame cleanup budget", options.cleanupMs],
   ] as const) {
     const problem = deadlineProblem(name, ms)
-    if (problem !== null) return { kind: "launch-failed", why: `nothing was launched: ${problem}` }
+    if (problem !== null) return { kind: "refused", why: `nothing was launched: ${problem}` }
   }
 
   const spawn = options.spawn ?? defaultSpawn
@@ -354,7 +410,10 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     return { kind: "launch-failed", why: messageOf(error) }
   }
 
-  const pid = child.pid
+  // AN OPERATOR RECOVERS BY THIS NUMBER, so a handle that carries none must not
+  // reach a halt reason as `undefined`. `-1` is never a real pid, and the
+  // reasons below say "process -1" rather than pretending to identify one.
+  const pid = Number.isInteger(child.pid) && child.pid > 0 ? child.pid : -1
   const out = readPipe(child.stdout, "stdout")
   const err = readPipe(child.stderr, "stderr")
   // TAGGED, SO A REJECTED EXIT IS NEVER READ AS AN EXIT.
@@ -460,11 +519,18 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     // THE PROCESS ITSELF IS ACCOUNTED FOR — its exit was read — but the output a
     // citation would be built from was not. Reporting `""` here is what would
     // let a truncated read become a confident "the history contradicts nothing".
+    //
+    // THE CLEANUP IS ASKED FOR RATHER THAN ASSERTED. A read that never reached
+    // the end of a real pipe is exactly the descendant signal `accountFor`
+    // withholds confirmation for, and hard-coding `confirmed` here would state
+    // the opposite of what was observed. Everything has already settled, so this
+    // spends none of the budget.
+    const cleanup = await accountFor(child, { exit, out: out.read, err: err.read }, options.cleanupMs)
     releaseReads()
     return {
       kind: "observation-failed",
       pid,
-      cleanup: { kind: "confirmed", observed: observedOf(child) },
+      cleanup,
       why:
         `\`${options.argv.join(" ")}\` exited with status ${exitRead.code}, but ${stdout.why}. The ` +
         `output is INCOMPLETE, so nothing was read that a citation could rest on`,
@@ -478,9 +544,11 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     signal: child.signalCode,
     stdout: stdout.text,
     // STDERR IS DIAGNOSTIC, NOT REQUIRED, so a failed read of it degrades the
-    // message rather than the call — and it SAYS SO, on `clipStderr`'s principle
-    // that a field which silently lost its end is worse than a short one.
-    stderr: stderr.ok ? stderr.text : `(${stderr.why})`,
+    // message rather than the call. It degrades it in a FIELD OF ITS OWN: the
+    // text below is git's or it is absent, and MAD's reason for not having it
+    // travels beside it where no reader can mistake one for the other.
+    stderr: stderr.ok ? stderr.text : "",
+    stderrFailure: stderr.ok ? null : stderr.why,
   }
 }
 
@@ -550,23 +618,49 @@ async function accountFor(
     }
   }
 
+  // SETTLING IS NOT REACHING THE END. A pipe whose reader could not be acquired
+  // settles immediately, and one that threw mid-stream settles too — neither saw
+  // EOF, so neither carries the descendant evidence confirmation rests on. This
+  // is the half of the three-part rule that `Promise.all` alone cannot express:
+  // it waits for the promises, not for what they say.
+  const unseen: string[] = []
+  for (const [name, part] of [
+    ["stdout", parts.out],
+    ["stderr", parts.err],
+  ] as const) {
+    const read = await part.promise
+    if (!read.ok && read.unreadEnd) unseen.push(`${name} (${read.why})`)
+  }
+
   const exitRead = await parts.exit.promise
-  if (!exitRead.ok) {
+  const exitConfirmed = ((): { ok: true; observed: ObservedExit } | { ok: false; why: string } => {
+    if (exitRead.ok) return { ok: true, observed: observedOf(child) }
     // A REJECTED EXIT PROMISE IS NOT CONFIRMATION. It is only overridden by an
     // INDEPENDENT source: a real exit code or a real signal recorded on the
     // handle by whatever did reap the process.
     const observed = observedOf(child)
     if (observed.exitCode === null && observed.signal === null) {
       return {
-        kind: "unresolved",
+        ok: false,
         why:
           `${exitRead.why}, and neither an exit code nor a terminating signal was recorded for process ` +
           `${child.pid}, so nothing confirms it ended`,
       }
     }
-    return { kind: "confirmed", observed }
+    return { ok: true, observed }
+  })()
+
+  if (unseen.length > 0) {
+    const ended = exitConfirmed.ok ? `process ${child.pid} was accounted for, but ` : `${exitConfirmed.why}, and `
+    return {
+      kind: "unresolved",
+      why:
+        `${ended}the end of its ${unseen.join(" and ")} was never observed — an unread pipe is not a ` +
+        `closed one, so nothing here rules out a descendant still holding it`,
+    }
   }
-  return { kind: "confirmed", observed: observedOf(child) }
+  if (!exitConfirmed.ok) return { kind: "unresolved", why: exitConfirmed.why }
+  return { kind: "confirmed", observed: exitConfirmed.observed }
 }
 
 /**

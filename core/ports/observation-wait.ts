@@ -77,16 +77,19 @@ export const OBSERVATION_WRITE_TIMEOUT_MS = 5_000
  * `observationIoDeadlineProblem` is what stops a later edit from setting these
  * two numbers equal, or from inverting them, without a test noticing.
  *
- * WHAT THAT GUARD DOES AND DOES NOT COVER. It compares an implementation's
- * deadline against the constant above, which is the bound the SHIPPED callers
- * use — `core/stages/judge.ts` and `adapters/opencode/tools.ts` both take it by
+ * WHAT THAT GUARD COVERS. By default it compares an implementation's deadline
+ * against the constant above, which is the bound the shipped callers use —
+ * `core/stages/judge.ts` and `adapters/opencode/tools.ts` both take it by
  * default, and `ablation/adversarial.ts` wires the adversarial path with both
- * defaults in force. A caller that passes its own shorter override can still
- * invert the nesting and be released before the sink has decided anything; that
- * override exists for tests, and the ordering is claimed for the shipped wiring
- * rather than for every construction the types allow. Closing it for arbitrary
- * callers would need the sink to learn that its caller had abandoned a write,
- * which `ToolObservation` cannot express without widening.
+ * defaults in force. A caller that overrides its own bound DECLARES it instead,
+ * and the guard then checks the real pair rather than the shipped one, so an
+ * inverted override is refused at construction where it is written.
+ *
+ * WHAT IT STILL DOES NOT COVER. A caller that overrides and declares nothing is
+ * checked against the shipped constant, so the ordering it gets is claimed for
+ * what it declared rather than for what it does. Closing that for every
+ * construction the types allow would need the sink to learn that its caller had
+ * abandoned a write, which `ToolObservation` cannot express without widening.
  */
 export const OBSERVATION_IO_TIMEOUT_MS = 4_000
 
@@ -131,12 +134,12 @@ export function deadlineProblem(name: string, ms: number): string | null {
  * Adds the NESTING rule to the checks above: an inner deadline at or past the
  * caller's is not an inner deadline. See `OBSERVATION_IO_TIMEOUT_MS`.
  */
-export function observationIoDeadlineProblem(ms: number): string | null {
+export function observationIoDeadlineProblem(ms: number, callerMs: number = OBSERVATION_WRITE_TIMEOUT_MS): string | null {
   const problem = deadlineProblem("an observation I/O deadline", ms)
   if (problem !== null) return problem
-  if (ms >= OBSERVATION_WRITE_TIMEOUT_MS) {
+  if (ms >= callerMs) {
     return (
-      `an observation I/O deadline must be strictly shorter than the ${OBSERVATION_WRITE_TIMEOUT_MS}ms ` +
+      `an observation I/O deadline must be strictly shorter than the ${callerMs}ms ` +
       `a caller waits (${ms}ms is not), or the caller is released before the sink has decided its ` +
       `write is unresolved — and the quarantine then lands one model request too late`
     )
@@ -177,10 +180,24 @@ export type ObservationWaitOutcome =
  * A SYNCHRONOUS THROW FROM `write` IS A REJECTION. A sink that throws before
  * returning its promise has answered, and answering badly is not hanging.
  */
+export interface ObservationWaitOptions {
+  /**
+   * How long to wait, in milliseconds. Defaults to `OBSERVATION_WRITE_TIMEOUT_MS`.
+   *
+   * NAMED RATHER THAN POSITIONAL, on `adapters/opencode/model-backend.ts`'s
+   * precedent and for its reason: a bare number at a call site says nothing
+   * about which of a nested pair of deadlines it is, and the two here differ by
+   * one second and decide whether a quarantine lands before the next model
+   * request or after it.
+   */
+  timeoutMs?: number
+}
+
 export async function awaitObservationWrite(
   write: () => Promise<void>,
-  ms: number = OBSERVATION_WRITE_TIMEOUT_MS,
+  options: ObservationWaitOptions = {},
 ): Promise<ObservationWaitOutcome> {
+  const ms = options.timeoutMs ?? OBSERVATION_WRITE_TIMEOUT_MS
   let started: Promise<void>
   try {
     started = write()

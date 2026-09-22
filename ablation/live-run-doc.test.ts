@@ -359,9 +359,15 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       ["Verified shared gates", "OPEN"],
       ["Bounded tool termination", "PARTLY CLOSED"],
       ["Bounded observer writes", "CLOSED"],
+      // Promoted out of the prose (review of 2-7c): a blocker a reader counting
+      // the numbered list does not count is one nobody schedules.
+      ["Bounded materializer termination", "OPEN"],
+      ["Bounded review-path reads", "OPEN"],
     ] as const) {
       expect(text, prerequisite).toContain(`${prerequisite} — ${status}`)
     }
+    // The list is the whole list — the property that makes counting it safe.
+    expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
     // And the honest headline: this patch did not close every hang.
     expect(text).toContain("The live execution is still blocked")
     expect(text).toContain("materializer termination remains unverified")

@@ -778,6 +778,46 @@ describe("the reader's joins, files and report sections", () => {
     expect(renderAdversarialBundle(await readCopy(root))).toContain("SPEND — NO BILL RECORDED")
   })
 
+  test("AN OPERATIONAL QUARANTINE IS PRINTED BESIDE THE HALT, never swallowed by it", async () => {
+    // THE SUBSTITUTION THIS GUARDS. `halt` is first-reason-wins, so on a run
+    // where an accounting halt landed first it names the money — in the bill AND
+    // in the write-once marker. The cleanup reason then lives only here, and a
+    // reader that printed `halt` and stopped would send an operator to look for
+    // missing money while a process MAD launched was still unaccounted for. The
+    // two need different recovery.
+    const root = await healthyCopy()
+    const file = join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE)
+    const bill = JSON.parse(await Bun.file(file).text()) as Record<string, unknown>
+    await writeFile(
+      file,
+      JSON.stringify({
+        ...bill,
+        halt: "the experiment billed an UNKNOWN amount",
+        operational: ["OPERATIONAL HALT — process 4242 could not be confirmed terminated"],
+      }),
+    )
+
+    const text = renderAdversarialBundle(await readCopy(root))
+    expect(text).toContain("OPERATIONAL QUARANTINE (1)")
+    expect(text).toContain("process 4242 could not be confirmed terminated")
+    // Beside, not instead of: the money reason is still there.
+    expect(text).toContain("billed an UNKNOWN amount")
+  })
+
+  test("AND AN ORDINARY BUNDLE PRINTS NO QUARANTINE SECTION — the non-vacuous sibling", async () => {
+    // Also the compatibility case: a bill written before story 2-7c has no
+    // `operational` key at all, and it reads as "none recorded" rather than
+    // failing validation or printing an empty section that claims something.
+    const root = await healthyCopy()
+    const file = join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE)
+    const { operational: _dropped, ...older } = JSON.parse(await Bun.file(file).text()) as Record<string, unknown>
+    await writeFile(file, JSON.stringify(older))
+
+    const text = renderAdversarialBundle(await readCopy(root))
+    expect(text).toContain("SPEND — the journal's bill as the runner left it")
+    expect(text).not.toContain("OPERATIONAL QUARANTINE")
+  })
+
   test("payload delivery prints scheduled, eligible, observed and missing, with each run's request counts", async () => {
     const text = renderAdversarialBundle(await readCopy(await healthyCopy()))
     expect(text).toContain("attack runs: scheduled 8, eligible 8 (at least one model request attempted), observed 8, missing among eligible 0; carried 8, not carried 0")

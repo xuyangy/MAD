@@ -34,10 +34,11 @@
  *
  * ## An UNRESOLVED file operation is not a failed one (story 2-7c)
  *
- * The sink's own file work is bounded by the same five seconds the judge and the
- * adapter bound their waits by (`core/ports/observation-wait.ts`). Past that the
- * append is ABANDONED, and abandoning an append to a shared file is a different
- * and worse state than one that failed:
+ * The sink's own file work is bounded, and bounded STRICTLY INSIDE the wait the
+ * judge and the adapter take on it — four seconds against their five
+ * (`core/ports/observation-wait.ts`). The gap is the point and is explained
+ * below. Past that bound the append is ABANDONED, and abandoning an append to a
+ * shared file is a different and worse state than one that failed:
  *
  * - A FAILED append is finished. The file is whatever it is, and the next run
  *   can open it and close the torn tail.
@@ -216,6 +217,17 @@ export interface ToolTraceSinkInput {
    */
   operationTimeoutMs?: number
   /**
+   * Story 2-7c — the bound the CALLER of this sink waits under, where it is not
+   * the shipped one.
+   *
+   * The nesting rule is relational: this sink's own deadline has to be strictly
+   * shorter than whatever its caller will wait, or the caller is released before
+   * the sink has decided anything. A caller that takes the shipped default says
+   * nothing and is checked against it. A caller that overrides declares the
+   * number here, so the pair that will actually run is the pair validated.
+   */
+  callerTimeoutMs?: number
+  /**
    * Story 2-7c — called ONCE, the first time an operation is abandoned with its
    * physical effect unconfirmed.
    *
@@ -247,7 +259,10 @@ export function createToolTraceSink(input: ToolTraceSinkInput): ToolTraceSink {
 
   const io = input.io ?? FILE_IO
   const operationTimeoutMs = input.operationTimeoutMs ?? OBSERVATION_IO_TIMEOUT_MS
-  const deadlineIssue = observationIoDeadlineProblem(operationTimeoutMs)
+  const deadlineIssue =
+    input.callerTimeoutMs === undefined
+      ? observationIoDeadlineProblem(operationTimeoutMs)
+      : observationIoDeadlineProblem(operationTimeoutMs, input.callerTimeoutMs)
   if (deadlineIssue !== null) throw new TraceDeadlineError(deadlineIssue)
   let queue: Promise<void> = Promise.resolve()
   let seq = 0

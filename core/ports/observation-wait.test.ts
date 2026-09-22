@@ -30,13 +30,13 @@ describe("awaitObservationWrite", () => {
   test("a write that settles is SETTLED, and the generous deadline never fires", async () => {
     // THE NON-VACUOUS SIBLING. Without it every row below passes on an
     // implementation that timed out unconditionally.
-    const outcome = await awaitObservationWrite(async () => undefined, 30_000)
+    const outcome = await awaitObservationWrite(async () => undefined, { timeoutMs: 30_000 })
     expect(outcome).toEqual({ kind: "settled" })
   })
 
   test("a write that rejects is REJECTED, and carries what it rejected with", async () => {
     const boom = new Error("the sink is full")
-    const outcome = await awaitObservationWrite(() => Promise.reject(boom), 30_000)
+    const outcome = await awaitObservationWrite(() => Promise.reject(boom), { timeoutMs: 30_000 })
     expect(outcome).toEqual({ kind: "rejected", error: boom })
   })
 
@@ -48,18 +48,18 @@ describe("awaitObservationWrite", () => {
     const boom = new Error("no promise for you")
     const outcome = await awaitObservationWrite(() => {
       throw boom
-    }, 30_000)
+    }, { timeoutMs: 30_000 })
     expect(outcome).toEqual({ kind: "rejected", error: boom })
   })
 
   test("A WRITE THAT NEVER SETTLES IS TIMED-OUT, which is its own outcome", async () => {
-    const outcome = await awaitObservationWrite(() => new Promise<void>(() => {}), 5)
+    const outcome = await awaitObservationWrite(() => new Promise<void>(() => {}), { timeoutMs: 5 })
     expect(outcome).toEqual({ kind: "timed-out", ms: 5 })
   })
 
   test("A LATE RESOLUTION CHANGES NOTHING — the value never comes back", async () => {
     const gate = deferred<void>()
-    const outcome = await awaitObservationWrite(() => gate.promise, 5)
+    const outcome = await awaitObservationWrite(() => gate.promise, { timeoutMs: 5 })
     expect(outcome.kind).toBe("timed-out")
 
     gate.resolve()
@@ -79,7 +79,7 @@ describe("awaitObservationWrite", () => {
     globalThis.addEventListener("unhandledrejection", onUnhandled as EventListener)
     try {
       const gate = deferred<void>()
-      const outcome = await awaitObservationWrite(() => gate.promise, 5)
+      const outcome = await awaitObservationWrite(() => gate.promise, { timeoutMs: 5 })
       expect(outcome.kind).toBe("timed-out")
 
       gate.reject(new Error("the sink failed, eventually"))
@@ -103,9 +103,9 @@ describe("awaitObservationWrite", () => {
       return realClear(id)
     }) as typeof clearTimeout
     try {
-      await awaitObservationWrite(async () => undefined, 30_000)
-      await awaitObservationWrite(() => Promise.reject(new Error("no")), 30_000)
-      await awaitObservationWrite(() => new Promise<void>(() => {}), 5)
+      await awaitObservationWrite(async () => undefined, { timeoutMs: 30_000 })
+      await awaitObservationWrite(() => Promise.reject(new Error("no")), { timeoutMs: 30_000 })
+      await awaitObservationWrite(() => new Promise<void>(() => {}), { timeoutMs: 5 })
       expect(cleared).toHaveLength(3)
     } finally {
       globalThis.clearTimeout = realClear

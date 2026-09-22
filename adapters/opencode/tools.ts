@@ -320,13 +320,22 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
   const blameTimeoutMs = options.blameTimeoutMs ?? DEFAULT_BLAME_TIMEOUT_MS
   const cleanupTimeoutMs = options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS
   const observationTimeoutMs = options.observationTimeoutMs ?? OBSERVATION_WRITE_TIMEOUT_MS
-  // REFUSED AT CONSTRUCTION. A zero, a negative, a `NaN` or a value past the
-  // timer ceiling all schedule for right now, so an adapter built with one would
-  // abandon every observation it ever made while looking like it had a bound.
-  // The two blame deadlines are checked by the launcher, before it starts
-  // anything.
-  const observationIssue = deadlineProblem("the observation write deadline", observationTimeoutMs)
-  if (observationIssue !== null) throw new RangeError(`opencodeTools was not built: ${observationIssue}`)
+  // REFUSED AT CONSTRUCTION, ALL THREE ALIKE. A zero, a negative, a `NaN` or a
+  // value past the timer ceiling all schedule for right now, so an adapter built
+  // with one would abandon every call it ever made while looking like it had a
+  // bound. A deadline is a construction option, so the construction is where it
+  // is judged: leaving the two blame deadlines to the launcher turned a fault in
+  // MAD's own wiring into a per-call outcome the judge counted as a measurement.
+  // The launcher still refuses one, for the caller that does not come through
+  // here, and says there that the refusal is MAD's rather than the host's.
+  for (const [name, ms] of [
+    ["the observation write deadline", observationTimeoutMs],
+    ["the blame execution deadline", blameTimeoutMs],
+    ["the blame cleanup budget", cleanupTimeoutMs],
+  ] as const) {
+    const issue = deadlineProblem(name, ms)
+    if (issue !== null) throw new RangeError(`opencodeTools was not built: ${issue}`)
+  }
 
   /**
    * The latched quarantine, or `null`. Per INSTANCE and not per module: two
@@ -361,7 +370,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     send: (sink: ToolObservation) => Promise<void>,
   ): Promise<void> {
     if (observation === undefined) return
-    const outcome = await awaitObservationWrite(() => send(observation), observationTimeoutMs)
+    const outcome = await awaitObservationWrite(() => send(observation), { timeoutMs: observationTimeoutMs })
     if (outcome.kind === "settled") return
     try {
       observation.failed({
@@ -437,6 +446,17 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     })
 
+    if (outcome.kind === "refused") {
+      // MAD'S OWN FAULT, BEFORE ANY SHELL. Nothing executed, which `pre-shell`
+      // says — and it says it without borrowing the operating system's voice the
+      // way `launch: "failed"` would. `core/judge/blame.ts` reads both as
+      // `not-executed`; only this one is honest about who refused.
+      throw withEvidence(new GitError(command, outcome.why), {
+        stage: "pre-shell",
+        launch: "not-attempted",
+      })
+    }
+
     if (outcome.kind === "launch-failed") {
       // PRE-LAUNCH ONLY. The operating system refused to start the program, so
       // this is a PROVED non-execution — the one thing the old shell could never
@@ -485,30 +505,46 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     // citation over lines git never finished blaming. The exit code is preserved
     // in the evidence because it was really observed; what it does not do is
     // prove the program completed, so the launch reading stays `unproved`.
-    if (outcome.signal !== null) {
-      throw withEvidence(
-        new GitError(
-          command,
-          `the command was terminated by signal ${outcome.signal} (reported status ${outcome.exitCode}), ` +
-            `so its output is incomplete and nothing here is evidence that git finished`,
-        ),
-        { stage: "shell", exitCode: outcome.exitCode, launch: "unproved" },
-      )
-    }
+    // THE TRACE'S `stderr` IS WHAT THE COMMAND PRINTED, AND ONLY THAT. Where the
+    // pipe could not be read, the launcher hands back an empty `stderr` and its
+    // reason in `stderrFailure`, and the two stay apart here: the field keeps
+    // only git's own text, and MAD's account of why it has none travels in the
+    // error message, which is MAD's voice by construction. Folding the reason
+    // into the field would put a sentence git never wrote where every reader
+    // downstream treats the contents as the program's.
+    const unreadStderr =
+      outcome.stderrFailure === null ? "" : ` (MAD could not read the command's stderr: ${outcome.stderrFailure})`
 
     const launch = launchEvidenceFrom(outcome.exitCode)
+    // RECORDED BEFORE THE THROW, FOR EVERY OUTCOME THAT HAS ONE. A signalled exit
+    // carries a real status and a real diagnostic, and the trace is where both
+    // belong; the earlier shape threw first and lost facts the evidence already
+    // held. The `launch` reading is what separates the two cases, not whether a
+    // row was written.
     await observe("shellOutcome", (sink) =>
       sink.shellOutcome({
         tool: "blame",
         args,
         exitCode: outcome.exitCode,
-        launch,
+        launch: outcome.signal === null ? launch : "unproved",
         stderr: clipStderr(outcome.stderr),
         at: clock.now(),
       }),
     )
+
+    if (outcome.signal !== null) {
+      throw withEvidence(
+        new GitError(
+          command,
+          `the command was terminated by signal ${outcome.signal} (reported status ${outcome.exitCode}), ` +
+            `so its output is incomplete and nothing here is evidence that git finished${unreadStderr}`,
+        ),
+        { stage: "shell", exitCode: outcome.exitCode, launch: "unproved" },
+      )
+    }
+
     if (outcome.exitCode !== 0) {
-      throw withEvidence(new GitError(command, outcome.stderr), {
+      throw withEvidence(new GitError(command, `${outcome.stderr}${unreadStderr}`), {
         stage: "shell",
         exitCode: outcome.exitCode,
         launch,

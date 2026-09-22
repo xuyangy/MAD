@@ -907,6 +907,52 @@ describe("ACCOUNTING UNCERTAINTY AND OPERATIONAL QUARANTINE COEXIST (story 2-7c)
     expect(lockRetained).toBe(true)
   })
 
+  test("MONEY FIRST AND THE MARKER ALREADY WRITTEN: the marker cannot gain the reason, so the BILL has to carry it", async () => {
+    // THE INTERLEAVING THE TWO TESTS AROUND THIS ONE DO NOT REACH. They call
+    // `settled()` only after both halts have latched, so the marker's lazy read
+    // of `state.operational` saves them. Here the marker write has already RUN
+    // before the quarantine happens, and `unknown-usage-halt.json` is opened with
+    // `wx` and never rewritten — so the file on disk names the money and nothing
+    // else, permanently.
+    //
+    // That is the deliberate contract of a write-once marker, not a defect. What
+    // it MAKES REQUIRED is the durable bill: it is then the only record that says
+    // a process MAD launched was never accounted for, and an operator reading
+    // only the marker would take an accounting problem for the whole story.
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    await unknownSpend(journal)
+    // The marker is queued and physically written HERE, before the quarantine.
+    await journal.settled()
+    const beforeQuarantine = JSON.parse(await readFile(join(root, HALT_MARKER_FILE), "utf8")) as {
+      haltReason: string
+      operational?: string[]
+    }
+    expect(beforeQuarantine.haltReason).toContain("billed an UNKNOWN amount")
+    expect(beforeQuarantine.operational ?? []).toEqual([])
+
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    await journal.settled()
+
+    // THE FILE IS UNCHANGED. Write-once means write-once.
+    const afterQuarantine = JSON.parse(await readFile(join(root, HALT_MARKER_FILE), "utf8")) as {
+      haltReason: string
+      operational?: string[]
+    }
+    expect(afterQuarantine).toEqual(beforeQuarantine)
+
+    // AND THE BILL CARRIES WHAT THE MARKER CANNOT. This is the assertion that
+    // makes the write-once contract safe rather than lossy.
+    const bill = journal.bill()
+    expect(bill.halt).toContain("billed an UNKNOWN amount")
+    expect(bill.operational).toHaveLength(1)
+    expect(bill.operational[0]).toContain("could not be confirmed terminated")
+
+    const { lockRetained } = await journal.close()
+    expect(lockRetained).toBe(true)
+  })
+
   test("CLEANUP FIRST, THEN MONEY: the halt keeps the cleanup reason AND the unknown still bills", async () => {
     const root = await tempDir()
     const journal = await opened(root)

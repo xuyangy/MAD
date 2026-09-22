@@ -275,6 +275,32 @@ export function truncatedListWarnings(args: {
  */
 const UNRESOLVED_BLAME_CLEANUP = new Map<string, BlameCleanupUnresolved>()
 
+/**
+ * The latch's two halves, as functions rather than as reads of the `Map`.
+ *
+ * EXPORTED SO THE BEHAVIOUR CAN BE RUN RATHER THAN GREPPED. `MadPlugin` is
+ * reachable in tests only through a wiring harness that never enters the blame
+ * block, so the only thing pinning this seam was a source-text assertion —
+ * which a move of the declaration inside the plugin would leave green while the
+ * latch stopped outliving one invocation, the entire reason it exists.
+ *
+ * FIRST REASON WINS. A second unconfirmed cleanup in the same worktree does not
+ * overwrite the first: the earliest process is the one an operator has the least
+ * chance of finding by other means, and a reason replaced is a pid lost.
+ */
+export function blameQuarantineFor(worktree: string): BlameCleanupUnresolved | undefined {
+  return UNRESOLVED_BLAME_CLEANUP.get(worktree)
+}
+
+export function latchBlameQuarantine(worktree: string, fact: BlameCleanupUnresolved): void {
+  if (!UNRESOLVED_BLAME_CLEANUP.has(worktree)) UNRESOLVED_BLAME_CLEANUP.set(worktree, fact)
+}
+
+/** Test-only. Nothing in a run clears a latch; recovery is a restart. */
+export function clearBlameQuarantineForTests(worktree: string): void {
+  UNRESOLVED_BLAME_CLEANUP.delete(worktree)
+}
+
 export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
   return {
     tool: {
@@ -440,15 +466,13 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // invocation's own unconfirmed cleanup latches the next one. The
           // refusal rides the existing `blame-unavailable` warning with the
           // reason and the pid inside it; no new code and no new surface.
-          const alreadyUnresolved = UNRESOLVED_BLAME_CLEANUP.get(worktree)
+          const alreadyUnresolved = blameQuarantineFor(worktree)
           const tools = opencodeTools({
             $,
             worktree,
             toolObservation,
             ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
-            onCleanupUnresolved: (fact) => {
-              if (!UNRESOLVED_BLAME_CLEANUP.has(worktree)) UNRESOLVED_BLAME_CLEANUP.set(worktree, fact)
-            },
+            onCleanupUnresolved: (fact) => latchBlameQuarantine(worktree, fact),
           })
           let change
           try {

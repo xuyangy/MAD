@@ -438,11 +438,21 @@ async function readHalt(root: string): Promise<HaltReport> {
     return { kind: "halted", file, reason: `the marker is present but did not parse (${messageOf(error)}); its presence is the halt` }
   }
   const reason = isRecord(recorded) ? recorded.haltReason : undefined
+  const named =
+    typeof reason === "string" && reason.trim().length > 0 ? reason : "the marker records no `haltReason`; its presence is the halt"
+  // BOTH REASONS, WHERE THE MARKER HOLDS BOTH (story 2-7c). `haltReason` is
+  // written once and never overwritten, so on a run where an accounting halt
+  // landed first it names the money and only `operational` names the process or
+  // the append nobody could account for. They need different recovery steps, and
+  // a reader that showed the first and dropped the second would send an operator
+  // to the wrong file. Absent on markers written before this story, and on every
+  // ordinary run.
+  const operational = isRecord(recorded) ? recorded.operational : undefined
+  const extra = Array.isArray(operational) ? operational.filter((entry): entry is string => typeof entry === "string") : []
   return {
     kind: "halted",
     file,
-    reason:
-      typeof reason === "string" && reason.trim().length > 0 ? reason : "the marker records no `haltReason`; its presence is the halt",
+    reason: extra.length === 0 ? named : `${named}; also ${extra.join("; also ")}`,
   }
 }
 

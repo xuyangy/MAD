@@ -851,6 +851,22 @@ The live execution is a separate task, and it stays open until each of these hol
 4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
    The blame path is addressed; the materializer is not. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
+6. **Bounded materializer termination — OPEN.** `ablation/adversarial-materialize.ts`'s
+   `spawnGit` sends a bare SIGTERM with no escalation, never confirms termination, and awaits
+   both pipes before `exited` — so a descendant holding a pipe stops the call returning at all
+   while the caller holds the experiment lock. It also reports a synthesized `exitCode: 124` no
+   reader can tell from a status git returned. This is the open half of (4), promoted to an
+   entry of its own: a blocker that lives only in prose is one a reader counting the list does
+   not count. **Owner: unassigned.**
+7. **Bounded review-path reads — OPEN.** `adapters/opencode/repo.ts` reads the change through
+   the host shell with no deadline of any kind (`git()` at `:37-41`, and a serial per-file loop
+   at `:69-80` whose `git diff --no-index` has neither a per-call nor a total deadline). One
+   hung read holds the whole review before the judge exists. The launcher story 2-7c built is
+   the piece a fix would reuse. **Owner: unassigned.**
+
+**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** Five of the seven are open. Nothing that blocks
+the sixteen runs is recorded only in the prose below; the prose explains the entries, it does
+not add to them.
 
 **The live execution is still blocked.** (1), (2) and (3) are open, and (4) is only half
 done: this prerequisite originally named a non-returning `git blame` and assumed
@@ -867,8 +883,8 @@ unbounded in its failure cases**, and it is named as an outstanding blocker in i
 The file's own header claim has been corrected rather than left to be quoted as evidence.
 
 **This patch does not close every hang.** It closes the two named in (4)'s blame half and in
-(5). `adapters/opencode/repo.ts` reads the change through the host shell with no deadline at
-all, and the materializer is as above.
+(5). The two it does not close are entries (6) and (7) above, each named there with what is
+wrong with it.
 
 ### The blame path and the observer writes — what closed, and on what evidence
 
@@ -896,6 +912,14 @@ resolution or a late rejection changes neither.
 |---|---|---|
 | **5,000 ms** — caller bound | the judge and the adapter, on one observer write | this observation is incomplete; the run's trace is short |
 | **4,000 ms** — sink I/O bound | the trace sink, on its own physical append | the append is unconfirmed; poison the file and **notify the runner** |
+
+**WHICH OF THE TWO A REAL RUN ACTUALLY HITS.** With both defaults in force the inner bound
+always wins, so a hanging append on the observer MAD ships is reported by the SINK — "the
+physical append is UNCONFIRMED" — and the caller's 5,000 ms expiry is never reached. That is
+the nesting working, not a dead branch: the caller's bound is the backstop for any
+`ToolObservation` implementation, including one that hangs before the sink's own timer is
+armed, and it is what bounds the judge when the observer is not this sink. A reader diagnosing
+a real run should expect the sink's wording.
 
 The sink's is deliberately the shorter of the two, and it starts when the write is *asked
 for* rather than when its turn in the queue comes. That is what puts the runner's admission
@@ -982,7 +1006,18 @@ then the halt marker. A halt reason beginning `OPERATIONAL HALT` says a cleanup 
 and **makes no claim about spend** — read the bill for that, and note that an accounting halt
 and an operational quarantine can both be true at once, in either order. Whichever latched
 first is the halt reason; the other is recorded beside it in `operational` on the bill summary
-and, where the marker was written after it, in the marker too.
+and, where the marker was written after it, in the marker too. `renderAdversarialBundle` prints
+that list under `OPERATIONAL QUARANTINE`, so the bundle report shows both reasons even when the
+marker on disk can only carry one.
+
+**Late usage cannot be reconciled until the lock is gone, and that is part of the recovery.**
+A quarantined close retains the lock deliberately, and `ReconciliationHandle.flush()` needs
+that same lock to persist a late usage report — so for as long as the quarantine stands, late
+reports are HELD rather than written. Nothing is discarded, and nothing is lost: the reports
+stay in the handle, and the bill already records what is uncertain. But an operator who checks
+the process, finds it gone and expects the late arrivals to have landed on their own will not
+find them. Remove `paired.lock` first, in the order above; reconciliation is something the
+next run does, not something the quarantined one finishes.
 
 ### What the host/runtime probe established (2026-09-21)
 

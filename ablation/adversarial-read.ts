@@ -758,6 +758,22 @@ function billLines(read: BillRead): string[] {
     `  halt: ${bill.halt ?? "none"}; runner stop: ${bill.stop ?? "none"}`,
     `  refused adversarial admissions: ${bill.refused.length}`,
   ]
+  // PRINTED BESIDE THE HALT, NEVER INSTEAD OF IT (story 2-7c). Where an
+  // accounting halt latched first, `halt` above names the money and the marker on
+  // disk names the money too — and this list is then the only place a reader is
+  // told that a process MAD launched, or an append it started, was never
+  // accounted for. The two need different recovery, so a bundle that showed one
+  // and swallowed the other would send an operator to the wrong file.
+  //
+  // `operational` is absent from bills written before this story, so the read is
+  // defensive: nothing is printed rather than an empty section claiming none.
+  const operational = bill.operational ?? []
+  if (operational.length > 0) {
+    lines.push(
+      `  OPERATIONAL QUARANTINE (${operational.length}) — separate from spend, and its recovery is manual:`,
+    )
+    for (const reason of operational) lines.push(`    ${reason}`)
+  }
   for (const refusal of bill.refused) lines.push(`    ${refusal.label} at ${refusal.stage} (${refusal.cause}): ${refusal.reason}`)
   return lines
 }

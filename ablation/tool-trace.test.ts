@@ -469,7 +469,7 @@ describe("NESTED DEADLINES: the latch lands before the caller is released (story
       onUnresolved: () => order.push("runner latched"),
     })
 
-    const outcome = await awaitObservationWrite(() => sink.request(request("o-1")), 5)
+    const outcome = await awaitObservationWrite(() => sink.request(request("o-1")), { timeoutMs: 5 })
     order.push("caller released")
 
     // The caller abandoned the write rather than the sink resolving it, and the

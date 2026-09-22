@@ -989,7 +989,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   ): Promise<void> => {
     const sink = input.toolObservation
     if (sink === undefined) return
-    const outcome = await awaitObservationWrite(() => send(sink), input.observationTimeoutMs)
+    const outcome = await awaitObservationWrite(() => send(sink), { ...(input.observationTimeoutMs === undefined ? {} : { timeoutMs: input.observationTimeoutMs }) })
     if (outcome.kind === "settled") return
     keepObservationFailure({
       where: "core",

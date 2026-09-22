@@ -23,9 +23,10 @@
 
 import { describe, expect, test } from "bun:test"
 
-import type { SpawnBlame, SpawnedBlame } from "./blame-exec.ts"
+import { runBoundedBlame, type SpawnBlame, type SpawnedBlame } from "./blame-exec.ts"
 import { blameFailureOutcome } from "../../core/judge/blame.ts"
 import { toolFailureEvidence } from "../../core/ports/tool-observation.ts"
+import { blameQuarantineFor, clearBlameQuarantineForTests, latchBlameQuarantine } from "./plugin.ts"
 import { GitError } from "./repo.ts"
 import {
   DEFAULT_BLAME_CLEANUP_TIMEOUT_MS,
@@ -700,25 +701,35 @@ describe("A SIGNALLED EXIT IS NOT A COMPLETED RUN (story 2-7c)", () => {
 })
 
 describe("the deadlines are validated before anything launches (story 2-7c)", () => {
-  test("zero, negative, NaN and past the timer ceiling are refused, and nothing is spawned", async () => {
+  test("zero, negative, NaN and past the timer ceiling are refused AT CONSTRUCTION", async () => {
     // Every one of these makes `setTimeout` fire immediately, which turns a
     // bound into an unconditional failure that reads like a hang nobody can
-    // reproduce. Refused where the value is supplied.
+    // reproduce. Refused where the value is supplied, which for a construction
+    // option is the construction — not once per call, and not as an outcome the
+    // judge would go on to count as a measurement of the host.
     for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648]) {
       const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
-      const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: bad })
-      const error = await rejection(tools.blame("src/pay.ts", 1, 1))
-      expect(error.message).toContain("nothing was launched")
+      expect(() => opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: bad })).toThrow(RangeError)
+      expect(() => opencodeTools({ worktree: "/repo", spawn, blameCleanupTimeoutMs: bad })).toThrow(RangeError)
       expect(launches).toEqual([])
-      // Proved non-execution, which it is: nothing was started.
-      expect(blameFailureOutcome(error, "why")).toEqual({ kind: "not-executed", refusedAt: "launch", why: "why" })
     }
   })
 
-  test("the cleanup budget is validated too", async () => {
+  test("AND A GOOD PAIR STILL BUILDS AND RUNS — the non-vacuous sibling", async () => {
     const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
-    const tools = opencodeTools({ worktree: "/repo", spawn, blameCleanupTimeoutMs: 0 })
-    await expect(tools.blame("src/pay.ts", 1, 1)).rejects.toThrow("nothing was launched")
+    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 1_000, blameCleanupTimeoutMs: 100 })
+    expect(await tools.blame("src/pay.ts", 1, 1)).toBe(PORCELAIN)
+    expect(launches).toHaveLength(1)
+  })
+
+  test("THE LAUNCHER'S OWN REFUSAL IS MAD'S FAULT, NOT THE HOST'S", async () => {
+    // For the caller that does not come through `opencodeTools`. Nothing ran, so
+    // the reading is `not-executed` either way — but `pre-shell` says MAD
+    // refused, where `refusedAt: "launch"` would put a mistyped constant in this
+    // repository on the record as the operating system declining to start git.
+    const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+    const outcome = await runBoundedBlame({ argv: ["git", "blame"], cwd: "/repo", deadlineMs: 0, cleanupMs: 5, spawn })
+    expect(outcome.kind).toBe("refused")
     expect(launches).toEqual([])
   })
 })
@@ -753,21 +764,87 @@ describe("THE PER-WORKTREE LATCH AN ORDINARY RUN NEEDS (story 2-7c)", () => {
     expect(launches).toHaveLength(1)
   })
 
-  test("the plugin carries the latch per worktree, sets it once, and does not go global", async () => {
-    // STRUCTURAL, for `plugin-wiring.test.ts`'s stated reason: every run there
-    // uses an unreachable server URL, so no finding is raised and the blame block
-    // is never entered. What is pinned here is that the seam is wired the way the
-    // behaviour above needs — keyed on the worktree, read in and written out.
-    const source = await Bun.file(new URL("./plugin.ts", import.meta.url)).text()
-    expect(source).toContain("UNRESOLVED_BLAME_CLEANUP.get(worktree)")
-    expect(source).toContain("UNRESOLVED_BLAME_CLEANUP.set(worktree, fact)")
-    expect(source).toContain("quarantinedBy: alreadyUnresolved")
-    // Keyed, never a single boolean: one unaccounted-for process in one
-    // repository is no reason to refuse MAD in an unrelated one.
-    expect(source).toContain("new Map<string, BlameCleanupUnresolved>()")
-    // And no durable store for ordinary runs: no file, no lock, no halt marker.
-    const latch = source.slice(source.indexOf("UNRESOLVED_BLAME_CLEANUP"))
-    expect(latch).not.toContain("writeFile")
+  test("the plugin's latch OUTLIVES ONE INVOCATION, and a second run refuses", async () => {
+    // RUN, NOT GREPPED. `MadPlugin` is reachable in tests only through a wiring
+    // harness whose unreachable server URL means the blame block is never
+    // entered, so the seam used to be pinned by source-text assertions alone —
+    // and moving the declaration inside the plugin would leave every one of them
+    // green while the latch quietly became per-invocation.
+    const worktree = "/repo-latch-a"
+    clearBlameQuarantineForTests(worktree)
+    try {
+      expect(blameQuarantineFor(worktree)).toBeUndefined()
+
+      // Invocation one: an unconfirmed cleanup latches through the callback the
+      // plugin installs.
+      const first = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN, hang: true, unkillable: true } }])
+      const toolsOne = opencodeTools({
+        worktree,
+        spawn: first.spawn,
+        blameTimeoutMs: 20,
+        blameCleanupTimeoutMs: 20,
+        onCleanupUnresolved: (fact) => latchBlameQuarantine(worktree, fact),
+      })
+      await rejection(toolsOne.blame("src/pay.ts", 1, 1))
+      expect(blameQuarantineFor(worktree)).toBeDefined()
+
+      // Invocation two: a NEW adapter, as an ordinary run builds each time. It
+      // must refuse without launching, because the process from the first one is
+      // still unaccounted for.
+      const second = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+      const carried = blameQuarantineFor(worktree)
+      const toolsTwo = opencodeTools({
+        worktree,
+        spawn: second.spawn,
+        ...(carried === undefined ? {} : { quarantinedBy: carried }),
+      })
+      const error = await rejection(toolsTwo.blame("src/pay.ts", 1, 1))
+
+      expect(second.launches).toEqual([])
+      expect(error.message).toContain("refusing to launch")
+    } finally {
+      clearBlameQuarantineForTests(worktree)
+    }
+  })
+
+  test("AND AN UNRELATED WORKTREE STILL RUNS — the latch is keyed, not global", async () => {
+    const quarantined = "/repo-latch-b"
+    const healthy = "/repo-latch-c"
+    clearBlameQuarantineForTests(quarantined)
+    clearBlameQuarantineForTests(healthy)
+    try {
+      latchBlameQuarantine(quarantined, { operation: "git blame", why: "process 7 was never accounted for", pid: 7 })
+
+      // One unaccounted-for process in one repository is no reason to refuse MAD
+      // in an unrelated one.
+      expect(blameQuarantineFor(healthy)).toBeUndefined()
+      const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+      expect(await opencodeTools({ worktree: healthy, spawn }).blame("src/pay.ts", 1, 1)).toBe(PORCELAIN)
+      expect(launches).toHaveLength(1)
+    } finally {
+      clearBlameQuarantineForTests(quarantined)
+      clearBlameQuarantineForTests(healthy)
+    }
+  })
+
+  test("the latch keeps the FIRST reason, and stays out of any durable store", async () => {
+    const worktree = "/repo-latch-d"
+    clearBlameQuarantineForTests(worktree)
+    try {
+      latchBlameQuarantine(worktree, { operation: "git blame", why: "first", pid: 1 })
+      latchBlameQuarantine(worktree, { operation: "git blame", why: "second", pid: 2 })
+      // A reason replaced is a pid lost, and the earliest process is the one an
+      // operator has least chance of finding by other means.
+      expect(blameQuarantineFor(worktree)?.pid).toBe(1)
+
+      // An ordinary review has no experiment to quarantine: no file, no lock, no
+      // halt marker. That one is structural because its claim is an ABSENCE.
+      const source = await Bun.file(new URL("./plugin.ts", import.meta.url)).text()
+      const latch = source.slice(source.indexOf("UNRESOLVED_BLAME_CLEANUP"))
+      expect(latch).not.toContain("writeFile")
+    } finally {
+      clearBlameQuarantineForTests(worktree)
+    }
   })
 })
 
@@ -785,11 +862,13 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
     const closed = () => new ReadableStream<Uint8Array>({ start: (c) => c.close() })
     const locked = closed()
     const held = locked.getReader()
+    // The OTHER pipe, kept so a test can ask whether its reader was given back.
+    const other = closed()
     let kills = 0
     const spawn: SpawnBlame = () => ({
       pid: 777,
-      stdout: which === "stdout" ? locked : closed(),
-      stderr: which === "stderr" ? locked : closed(),
+      stdout: which === "stdout" ? locked : other,
+      stderr: which === "stderr" ? locked : other,
       // Never settles, so nothing but the guard can end this call.
       exited: new Promise<number>(() => {}),
       exitCode: null,
@@ -798,7 +877,7 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
         kills += 1
       },
     })
-    return { spawn, kills: () => kills, release: () => held.releaseLock() }
+    return { spawn, other, kills: () => kills, release: () => held.releaseLock() }
   }
 
   test("A LOCKED STDOUT IS KILLED AND CLASSIFIED — it does not escape as a throw", async () => {
@@ -846,9 +925,27 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
       expect(locked.kills()).toBe(1)
       expect(error).toBeInstanceOf(GitError)
       expect(blameFailureOutcome(error, "why")).toEqual({ kind: "unknown", why: "why" })
+      // THE RELEASE ITSELF, OBSERVED. `getReader()` throws while a reader is
+      // held, so acquiring one here is the only direct evidence that the stdout
+      // reader was given back — and without it this test asserted a kill and a
+      // classification while its title claimed something it never looked at.
+      // The release settles on a microtask after the cancel, so the check waits
+      // one turn — it is asserting that the lock comes back, not when.
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(() => locked.other.getReader()).not.toThrow()
     } finally {
       locked.release()
     }
+  })
+
+  test("AND A HELD READER REALLY DOES REFUSE A SECOND ONE — the non-vacuous sibling", () => {
+    // The assertion above is only worth anything if `getReader()` throws when the
+    // lock is genuinely still held. It does.
+    const stream = new ReadableStream<Uint8Array>({ start: (c) => c.close() })
+    const held = stream.getReader()
+    expect(() => stream.getReader()).toThrow()
+    held.releaseLock()
   })
 
   test("AND AN OPENABLE PIPE STILL READS — the non-vacuous sibling", async () => {

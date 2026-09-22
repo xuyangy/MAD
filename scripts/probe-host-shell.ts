@@ -148,12 +148,24 @@ async function embeddedBun(): Promise<string> {
     const bytes = await Bun.file(binary).bytes()
     // Byte-for-byte rather than UTF-8: this is a binary, and a lossy decode
     // would corrupt the very strings being searched for.
-    let text = ""
-    for (let at = 0; at < bytes.length; at += 65_536) {
-      text += String.fromCharCode(...bytes.subarray(at, Math.min(at + 65_536, bytes.length)))
-    }
+    //
+    // SCANNED CHUNK BY CHUNK, AND NEVER ACCUMULATED. The file is on the order of
+    // a hundred megabytes, so building one string of it is a large allocation in
+    // a script whose whole point is to be cheap. Chunks OVERLAP by the longest
+    // marker a match can span, so one that straddles a boundary is still found.
+    const marker = /(?:bun-v|Bun\/)(\d+\.\d+\.\d+)/g
+    const OVERLAP = 64
     const found = new Set<string>()
-    for (const match of text.matchAll(/(?:bun-v|Bun\/)(\d+\.\d+\.\d+)/g)) found.add(match[1]!)
+    for (let at = 0; at < bytes.length; at += 65_536) {
+      const end = Math.min(at + 65_536 + OVERLAP, bytes.length)
+      const chunk = bytes.subarray(at, end)
+      let text = ""
+      // Built one code unit at a time rather than by spreading the chunk: a
+      // spread of 65,536 arguments sits against the engine's argument limit.
+      for (const byte of chunk) text += String.fromCharCode(byte)
+      marker.lastIndex = 0
+      for (const match of text.matchAll(marker)) found.add(match[1]!)
+    }
     if (found.size === 0) return `NOT ESTABLISHED: no Bun version marker in ${binary}`
     return `${[...found].sort().join(", ")} (read from ${binary}; a build marker, not a statement by the host)`
   } catch (error) {
@@ -179,8 +191,19 @@ function describe(outcome: Awaited<ReturnType<typeof capture>>): string {
       return `launch-failed: ${outcome.why}`
     case "terminated":
       return `terminated: ${outcome.why}`
-    default:
+    case "refused":
+      return `refused before any launch (MAD's own wiring, not the host): ${outcome.why}`
+    case "observation-failed":
+      return `observation-failed: ${outcome.why}`
+    case "cleanup-unresolved":
       return `cleanup-unresolved: ${outcome.why}`
+    default:
+      // EXHAUSTIVE, AND CHECKED AT COMPILE TIME. This report is read as a
+      // readiness ledger, so an outcome that fell through to a `default` would be
+      // filed under whichever label that branch happened to carry — which is how
+      // a failed read came to be printed as a cleanup failure. A new variant now
+      // fails the build here instead.
+      return `unknown outcome: ${JSON.stringify(outcome satisfies never)}`
   }
 }
 

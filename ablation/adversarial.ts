@@ -102,7 +102,7 @@ import {
 } from "./journal.ts"
 import { known, type AdversarialBinding, type CodeRevision, type Maybe } from "./manifest.ts"
 import { SCHEDULE_FILE, START_MARKER_FILE, type SlotStatus } from "./schedule.ts"
-import { createToolTraceSink, TOOL_TRACE_FILE, type TraceIo } from "./tool-trace.ts"
+import { createToolTraceSink, TOOL_TRACE_FILE, TraceUnresolvedError, type TraceIo } from "./tool-trace.ts"
 
 type Shell = PluginInput["$"]
 
@@ -137,14 +137,23 @@ export interface RunAdversarialSuiteInput {
   git?: RunGit
   traceIo?: TraceIo
   /**
-   * Story 2-7c — the three bounded-wait seams, passed straight through to the
-   * adapter and the sink. Construction options with shipped defaults, for tests
-   * that would otherwise have to wait out a real minute; no flag, config key or
-   * environment variable reaches any of them.
+   * Story 2-7c — the four bounded-wait seams, passed straight through to the
+   * adapter, the judge and the sink. Construction options with shipped defaults,
+   * for tests that would otherwise have to wait out a real minute; no flag,
+   * config key or environment variable reaches any of them.
+   *
+   * `observationTimeoutMs` is the CALLER'S bound, the outer half of the nested
+   * pair. Without a seam for it the suite could drive the sink's inner deadline
+   * and never the bound the whole nesting argument is about, so the one ordering
+   * that puts the runner's stop before the next model request was reachable in
+   * no test that ran the real wiring. It is declared to the sink as well as
+   * passed to the adapter and the judge, so an override that inverted the pair
+   * is refused where it is written rather than discovered as a late latch.
    */
   blameTimeoutMs?: number
   blameCleanupTimeoutMs?: number
   traceTimeoutMs?: number
+  observationTimeoutMs?: number
   /** Test seam for the blame launcher. Defaults to the real one. */
   spawnBlame?: SpawnBlame
 }
@@ -368,8 +377,23 @@ export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Prom
   const lock = taken.lock
   let journal: PairedJournal | undefined
   const refuse = async (reason: string): Promise<AdversarialSuiteOutcome> => {
-    const releaseError = journal === undefined ? await lock.release() : (await journal.close()).releaseError
-    return { ok: false, reason: releaseError === null ? reason : `${reason}; ${releaseError}` }
+    if (journal === undefined) {
+      const releaseError = await lock.release()
+      return { ok: false, reason: releaseError === null ? reason : `${reason}; ${releaseError}` }
+    }
+    // A RETAINED LOCK IS REPORTED HERE TOO. This path has no `warnings` channel,
+    // so the one place it can say the lock is still held is the reason itself.
+    // Preflight cannot quarantine today, which is exactly why the flag must not
+    // be read and dropped: the next caller to reach a quarantine through here
+    // would return an ordinary refusal over a directory nothing may touch.
+    const { releaseError, lockRetained } = await journal.close()
+    const notes = [
+      ...(releaseError === null ? [] : [releaseError]),
+      ...(lockRetained
+        ? [`the run lock was NOT released and is still held; recovery is manual`]
+        : []),
+    ]
+    return { ok: false, reason: notes.length === 0 ? reason : `${reason}; ${notes.join("; ")}` }
   }
 
   let prepared: { schedule: AdversarialSchedule; journal: PairedJournal; cases: readonly AdversarialMaterial[] }
@@ -550,6 +574,7 @@ async function execute(
         binding: { caseId: slot.caseId, side: slot.side, position: slot.position },
         ...(input.traceIo === undefined ? {} : { io: input.traceIo }),
         ...(input.traceTimeoutMs === undefined ? {} : { operationTimeoutMs: input.traceTimeoutMs }),
+        ...(input.observationTimeoutMs === undefined ? {} : { callerTimeoutMs: input.observationTimeoutMs }),
         onUnresolved: (fact) =>
           quarantine(
             `the ${label} run left an UNRESOLVED trace operation: ${fact.why}; no further run may ` +
@@ -557,7 +582,16 @@ async function execute(
           ),
       })
     } catch (error) {
-      quarantine(`the ${label} run could not open the tool trace: ${messageOf(error)}`)
+      // A REFUSAL IS NOT A QUARANTINE. `TraceUnresolvedError` means an earlier
+      // operation still holds the file, which is the state this run must stop
+      // for. Every other construction failure — a deadline this suite was built
+      // with, an inverted nesting — is a fault in MAD's own wiring, and
+      // stranding sixteen slots behind a retained lock for a number someone
+      // mistyped would make a configuration mistake indistinguishable from a
+      // process nobody can account for.
+      if (error instanceof TraceUnresolvedError) {
+        quarantine(`the ${label} run could not open the tool trace: ${messageOf(error)}`)
+      }
       await mark(slot, "failed", `the ${label} run could not open the tool trace, so nothing was issued: ${messageOf(error)}`)
       return
     }
@@ -572,9 +606,11 @@ async function execute(
       $: input.shell,
       worktree,
       toolObservation: observer,
+      ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
       clock: input.clock,
       ...(input.blameTimeoutMs === undefined ? {} : { blameTimeoutMs: input.blameTimeoutMs }),
       ...(input.blameCleanupTimeoutMs === undefined ? {} : { blameCleanupTimeoutMs: input.blameCleanupTimeoutMs }),
+      ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
       ...(input.spawnBlame === undefined ? {} : { spawn: input.spawnBlame }),
       onCleanupUnresolved: (fact) =>
         quarantine(
@@ -610,6 +646,7 @@ async function execute(
         ...(input.config.maxConcurrency === undefined ? {} : { maxConcurrency: input.config.maxConcurrency }),
         tools,
         toolObservation: observer,
+      ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
         lateUsage: sink,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         admission: journal.adversarialAdmission({ label, runId: () => runId }),

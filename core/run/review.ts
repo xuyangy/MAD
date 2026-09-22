@@ -274,6 +274,18 @@ export interface ReviewDeps {
    * that passes one here and not there gets half a trace.
    */
   toolObservation?: ToolObservation
+  /**
+   * Story 2-7c — how long the judge waits on one observation write, where that
+   * is not the shipped bound.
+   *
+   * It travels beside the sink rather than inside it, because the wait belongs
+   * to the caller and not to the implementation: the judge is the side that has
+   * to still be holding the finding when the sink decides an append is
+   * unresolved. A construction seam with a shipped default and no user-facing
+   * dial; the adapter takes its own copy for the same reason `toolObservation`
+   * has to be passed twice.
+   */
+  observationTimeoutMs?: number
 }
 
 export interface ReviewResult {
@@ -531,7 +543,7 @@ export interface PreparedReview {
  */
 export type ContinueDeps = Pick<
   ReviewDeps,
-  "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission" | "toolObservation"
+  "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission" | "toolObservation" | "observationTimeoutMs"
 >
 
 /**
@@ -1034,6 +1046,7 @@ export async function continueReview(
     // above: the judge mints no id and writes no event when the key is absent,
     // and that is what keeps an unobserved run's bytes identical.
     ...(deps.toolObservation === undefined ? {} : { toolObservation: deps.toolObservation }),
+    ...(deps.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: deps.observationTimeoutMs }),
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the
