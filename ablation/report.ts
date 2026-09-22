@@ -87,6 +87,13 @@ export const LABELLED_READER_MODULE = "ablation/labelled-read.ts"
 /** The module that binds the human truth sheet and reports the four verdict directions, for the same reason. */
 export const ADJUDICATION_READER_MODULE = "ablation/adjudication-read.ts"
 
+/**
+ * The module that composes the paired, labelled and adjudication results into
+ * the frozen protocol's reporting contract — precision, final recall, cost and
+ * treatment opportunity — for the same reason.
+ */
+export const EVALUATION_REPORT_MODULE = "ablation/evaluation-report.ts"
+
 /** The module that reads the sealed adversarial suite's two diagnostics, for the same reason. */
 export const ADVERSARIAL_READER_MODULE = "ablation/adversarial-read.ts"
 

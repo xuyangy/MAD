@@ -21,6 +21,7 @@ import { candidate, fakeChange } from "../core/test-support/fakes.ts"
 import type { Roster } from "../core/domain/roster.ts"
 import { LABELLED_CHANGE_SEAL, type LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_DIRECTORY, PREFIX_EVIDENCE_VERSION, PREFIX_FILE, type BundleArm } from "./bundle.ts"
+import type { Provenance } from "./arms.ts"
 import { known } from "./manifest.ts"
 import { writeBundle, type Fake } from "./read-bundle.fixture.ts"
 import {
@@ -60,6 +61,8 @@ export function scheduleInput(root: string, roster = rosterOf().roster) {
 export interface SealOverrides {
   roster?: Roster
   fixture?: LabelledChangeSeal
+  /** The schedule's `config.provenance`. Any string seals, so a reader's unrecognised-value branch is reachable. */
+  provenance?: string
 }
 
 /** Seal a real schedule at an existing root. Nothing is billed and nothing runs. */
@@ -67,6 +70,7 @@ export async function sealSchedule(root: string, coin: CoinFace = "heads", seal:
   const created = await createSchedule({
     ...scheduleInput(root, seal.roster),
     ...(seal.fixture === undefined ? {} : { fixture: seal.fixture }),
+    ...(seal.provenance === undefined ? {} : { config: { provenance: seal.provenance as Provenance } }),
     createdAt: "2026-09-14T00:00:00.000Z",
     coin: () => coin,
   })
@@ -225,6 +229,7 @@ export interface PairedBundleOptions {
   slots?: "complete" | "started-only" | "absent"
   roster?: Roster
   fixture?: LabelledChangeSeal
+  provenance?: string
 }
 
 /** A complete, healthy paired bundle at an existing root, unless a test asks for less. */
@@ -232,6 +237,7 @@ export async function pairedBundleAt(root: string, options: PairedBundleOptions 
   const schedule = await sealSchedule(root, options.coin, {
     ...(options.roster === undefined ? {} : { roster: options.roster }),
     ...(options.fixture === undefined ? {} : { fixture: options.fixture }),
+    ...(options.provenance === undefined ? {} : { provenance: options.provenance }),
   })
   await writeBundle(root, options.declared ?? DECLARED, options.written?.(schedule) ?? sixArms(schedule, options.arms ?? []))
   for (const block of options.prefixes ?? [1, 2, 3]) {

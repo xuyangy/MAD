@@ -84,6 +84,12 @@ export interface Fake {
    */
   routeCounts?: unknown
   /**
+   * Story 2-8a — `status.debateCounts`, which the evaluation report reads to say
+   * whether debate ran in the ON arm. The default is the `did-not-run` a stage
+   * that never ran writes.
+   */
+  debateCounts?: unknown
+  /**
    * Story 2-5d — `run.finishedAt`. It needs a knob because `parseManifest`
    * refuses an `experiment.failure` on a manifest whose run reads as finished:
    * a thrown continuation's record is what the branch HELD when it threw, so its
@@ -180,7 +186,7 @@ export function manifestFor(fake: Fake): unknown {
       cancelledAt: unknownValue("the run was never cancelled"),
       warnings: fake.warnings ?? [],
       routeCounts: "routeCounts" in fake ? fake.routeCounts : { kind: "did-not-run" },
-      debateCounts: { kind: "did-not-run" },
+      debateCounts: "debateCounts" in fake ? fake.debateCounts : { kind: "did-not-run" },
       judgeCounts: { kind: "did-not-run" },
     },
     findings: fake.findings ?? { pool: [], canonicalIds: [], lensInstructions: [] },

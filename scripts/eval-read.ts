@@ -40,6 +40,13 @@
  * no sheet still gets the report, with every truth-dependent quantity
  * unavailable and the verdict-only counts read.
  *
+ * Story 2-8a — AND A FIFTH, the evaluation report, after the adjudication one:
+ * the frozen protocol's reporting contract — execution coverage, precision and
+ * its bounds, final recall, cost and treatment opportunity — composed from the
+ * three reports above. Each of those readers runs ONCE; its result, or the error
+ * it threw, is handed to the evaluation report, so a reader that threw leaves
+ * its own quantities unavailable and every other section still prints.
+ *
  * Story 2-7b — AN EXPERIMENT ROOT CARRYING AN ADVERSARIAL SCHEDULE GETS THE
  * ADVERSARIAL REPORT, last, from `<root>/adversarial/`. It is reached whether or
  * not the root holds a `bundle.json`. An experiment root may hold only the
@@ -60,6 +67,7 @@ import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/ad
 import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adversarial-read.ts"
 import { ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE, hasAdversarialSchedule } from "../ablation/adversarial-schedule.ts"
 import { BUNDLE_FILE } from "../ablation/bundle.ts"
+import { readEvaluationReport, renderEvaluationReport, settle } from "../ablation/evaluation-report.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
@@ -78,7 +86,21 @@ export function flag(argv: readonly string[], name: string): string | undefined 
   return argv[index + 1]
 }
 
-export async function main(argv: readonly string[] = Bun.argv): Promise<number> {
+/**
+ * The two readers whose failure the evaluation report must survive. Replaceable
+ * only so a test can make one throw; the defaults are the shipped readers.
+ */
+export interface Readers {
+  labelled: typeof readLabelledBundle
+  adjudication: typeof readAdjudicationBundle
+}
+
+export async function main(argv: readonly string[] = Bun.argv, readers: Partial<Readers> = {}): Promise<number> {
+  // `??`, not a spread: an explicit `undefined` keeps the shipped reader.
+  const use: Readers = {
+    labelled: readers.labelled ?? readLabelledBundle,
+    adjudication: readers.adjudication ?? readAdjudicationBundle,
+  }
   const root = flag(argv, "bundle")
   if (root === undefined || root.trim() === "" || root.startsWith("--")) {
     console.log(
@@ -130,20 +152,31 @@ export async function main(argv: readonly string[] = Bun.argv): Promise<number> 
     } else {
       console.log(renderPairedBundle(paired))
       // The labelled reader promises not to throw. If it ever does, the reports
-      // above already printed, and this script still prints and returns 0.
+      // above already printed, and this script still prints and returns 0. Its
+      // result or its error is kept for the evaluation report.
+      const labelled = await settle(() => use.labelled(paired))
       try {
-        const labelled = await readLabelledBundle(paired)
-        if (labelled.kind !== "not-applicable") console.log(renderLabelledBundle(labelled))
+        if (labelled.kind === "threw") console.log(`MAD labelled reader — ${labelled.message}`)
+        else if (labelled.value.kind !== "not-applicable") console.log(renderLabelledBundle(labelled.value))
       } catch (error) {
         console.log(`MAD labelled reader — ${error instanceof Error ? error.message : String(error)}`)
       }
-      // The adjudication reader makes the same promise, in its own `try` so that
-      // a labelled reader that broke it does not take this report with it.
+      // The adjudication reader makes the same promise, settled on its own so
+      // that a labelled reader that broke it does not take this report with it.
+      const adjudication = await settle(() => use.adjudication(paired))
       try {
-        const adjudication = await readAdjudicationBundle(paired)
-        if (adjudication.kind !== "not-applicable") console.log(renderAdjudicationBundle(adjudication))
+        if (adjudication.kind === "threw") console.log(`MAD adjudication reader — ${adjudication.message}`)
+        else if (adjudication.value.kind !== "not-applicable") console.log(renderAdjudicationBundle(adjudication.value))
       } catch (error) {
         console.log(`MAD adjudication reader — ${error instanceof Error ? error.message : String(error)}`)
+      }
+      // The evaluation report reads no file. It composes the three results
+      // above, a reader's error included, in its own `try`.
+      try {
+        const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+        if (report.kind !== "not-applicable") console.log(renderEvaluationReport(report))
+      } catch (error) {
+        console.log(`MAD evaluation report — ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }

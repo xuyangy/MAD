@@ -37,7 +37,21 @@ import {
   ADVERSARIAL_START_MARKER_FILE,
 } from "./adversarial-schedule.ts"
 import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
-import { ADJUDICATION_READER_MODULE, ADVERSARIAL_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
+import {
+  ADJUDICATION_READER_MODULE,
+  ADVERSARIAL_READER_MODULE,
+  EVALUATION_REPORT_MODULE,
+  LABELLED_READER_MODULE,
+  PAIRED_READER_MODULE,
+} from "./report.ts"
+import {
+  DIRECTION_UNRESOLVED,
+  EVALUATION_QUANTITIES,
+  NO_TREATMENT_OPPORTUNITY,
+  NOT_COMPOSED,
+  ONE_PREFIX_ONE_PAIR,
+  REPORTING_MILESTONE,
+} from "./evaluation-report.ts"
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
 
@@ -413,5 +427,52 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     const at = markers.map((marker) => body.indexOf(marker))
     for (const [index, position] of at.entries()) expect(position, markers[index]).toBeGreaterThan(-1)
     expect([...at].sort((a, b) => a - b)).toEqual(at)
+  })
+})
+
+describe("LIVE-RUN.md documents the evaluation report that is actually shipped", () => {
+  const section = async () => {
+    const doc = await liveRunDoc()
+    const start = doc.indexOf("### The evaluation report (story 2-8a)")
+    expect(start, "no evaluation report section").toBeGreaterThan(-1)
+    const end = doc.indexOf("\n### ", start + 1)
+    return (end < 0 ? doc.slice(start) : doc.slice(start, end)).replace(/\s+/g, " ")
+  }
+
+  test("it names the module, and every quantity it tracks availability for", async () => {
+    const text = await section()
+    expect(text).toContain(EVALUATION_REPORT_MODULE)
+    for (const quantity of EVALUATION_QUANTITIES) expect(text, quantity).toContain(`\`${quantity}\``)
+  })
+
+  test("the statements the report prints are the ones the document quotes", async () => {
+    const text = await section()
+    expect(text).toContain(REPORTING_MILESTONE)
+    expect(text).toContain(DIRECTION_UNRESOLVED)
+    expect(text).toContain(NO_TREATMENT_OPPORTUNITY)
+    expect(text).toContain("SYNTHETIC")
+  })
+
+  test("the cost is observed per-block cost, and the bill and its gaps belong to the journal", async () => {
+    const text = await section()
+    expect(text).toContain("The manifest cost is observed per-block cost, not the experiment bill.")
+    expect(text).toContain(`\`${JOURNAL_FILE}\``)
+    expect(text).toContain("A failed prefix has no arm manifests, so its spend stays a gap here")
+    expect(text).toContain("A missing arm manifest is also a gap with its reason, never a zero.")
+  })
+
+  test("the unavailable cases are documented with the words the report prints", async () => {
+    const text = await section()
+    expect(text).toContain(NOT_COMPOSED)
+    expect(text).toContain(`*${ONE_PREFIX_ONE_PAIR}*`)
+    expect(text).toContain("A withheld or absent block makes its treatment opportunity unknown")
+    expect(text).toContain("makes the block execution incomplete")
+  })
+
+  test("what story 2-8b still owns is stated, and nothing here closes 2.8", async () => {
+    const text = await section()
+    expect(text).toContain("What story 2-8b still owns.")
+    expect(text).toContain("real-host request-accounting check")
+    expect(text).toContain("it closes neither story 2.8, FR11 nor the epic")
   })
 })

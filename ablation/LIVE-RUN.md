@@ -398,7 +398,8 @@ false positives, no final recall, none of the four labelled verdict transitions,
 earned / did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's,
 printed after this one. The four labelled verdict transitions and the per-arm false positives
 are the adjudication report's, printed after that one, from a human truth sheet.
-Precision, final recall and cost contrasts belong to story 2.8. An
+Precision, final recall and cost contrasts belong to story 2.8, and the evaluation report
+prints them last (see *The evaluation report* below). An
 arm that upheld nothing is reported as undefined, never as 100% and never as a clean list. A
 candidate left unresolved by the budget is counted and shown, never treated as removed noise.
 It does not re-derive the unique-execution bill: that is the journal's.
@@ -521,7 +522,8 @@ The status block states four things separately, and the third and fourth are eas
   numbers are not that proposal's quantity.
 
 **What it does not own.** The four labelled verdict transitions and the per-arm false positives
-are the adjudication report's, below. Precision and cost contrasts are story 2.8.
+are the adjudication report's, below. Precision and cost contrasts are story 2.8's, printed by
+the evaluation report.
 
 ### The adjudication report (story 2-6b): the four verdict directions and false positives
 
@@ -658,7 +660,79 @@ four directions — `false upheld → rejected`, `true rejected → upheld`, `tr
 `candidates missing from an arm` and `unchanged`. The last three need no sheet; the rest do.
 
 **What it does not own.** No precision, no precision bound, no final recall, no cost contrast and no
-earned / did-not-earn reading. Those are story 2.8's, under the frozen protocol's bound arithmetic.
+earned / did-not-earn reading. Precision, its bounds, final recall and the cost contrast are story
+2.8's, under the frozen protocol's bound arithmetic, and the evaluation report computes them from this
+report's counts.
+
+### The evaluation report (story 2-8a): precision, final recall, cost and treatment opportunity
+
+`bun run eval-read` prints a fifth report after the adjudication one, produced by
+`ablation/evaluation-report.ts`. It opens no file. It composes the paired, labelled and adjudication
+results into the frozen protocol's reporting contract (`evaluation-protocol.md` v1 §3, §4 and §6).
+Each of those readers runs once. If the labelled or adjudication reader throws, its error reaches this
+report as an unavailable reason: its own quantities are unavailable, and coverage, cost and treatment
+still print. It bills nothing, prints and gates nothing, and always exits 0. A bundle with no sealed
+schedule gets no evaluation report.
+
+**Provenance comes first.** A schedule sealed with `provenance: scripted` opens the report with a
+**SYNTHETIC** banner, before any number. That evidence supports one milestone only:
+*reporting implementation complete; live evidence pending*. A refused schedule prints provenance
+**unestablished**. A `live` schedule prints no banner.
+
+**The estimands.**
+
+- **Execution coverage.** Three scheduled blocks, `n` completed, and every failed, cancelled,
+  unfinished, not-attempted or unrecorded slot and every withheld block, each with its reason.
+- **Precision per arm**, from the adjudication counts: TP is `trueDefects`, FP is `falsePositives`,
+  U is `truthUnresolved + labelMissing + outsidePool`, and N is `upheld`. A point `TP/(TP+FP)` prints
+  only when U = 0; otherwise precision lies in `[TP/N, (TP+U)/N]`. An arm that upheld nothing has
+  **undefined** precision, never 100%.
+- **The pair difference ON − OFF.** The primary bound is the **shared-label** bound
+  `[K + Σmin(0,a_i), K + Σmax(0,a_i)]` over the distinct unlabelled ids upheld in either arm. The
+  **outer** bound `[L_on − U_off, U_on − L_off]` prints too, labelled outer. Both are identification
+  bounds, never confidence intervals. A primary bound spanning both signs reads
+  *this bound does not resolve direction*. An outer bound crossing zero is named as that bound's own
+  limitation.
+- **Observed spread.** Every pair difference, then mean, min and max over all three pairs. With any
+  pair bounded, the planned mean averages the endpoints and min and max print as bounds. With any
+  pair undefined or unavailable, no three-pair summary prints, and no subset stands in for one.
+- **Final recall.** Planted-defect **matcher** recall per arm (`x of 13`) and the ON − OFF change: a
+  preservation diagnostic, never truth-sheet precision. The lost true candidates are the sheet-labelled
+  true prefix candidates an arm did not uphold, each with its bucket.
+- **Cost.** Per block: the shared prefix once, and each continuation's newly executed tokens and turns.
+  The prefix cancels in ON − OFF only when both arms are established to have inherited one execution.
+  An unknown in a continuation is never subtracted: one side unknown gives a one-sided bound, both
+  sides give none. `unaudited` usage is an observed lower bound, never exact.
+- **Treatment opportunity.** How many candidates the OFF arm's normal policy would have debated, and
+  whether the debate stage ran in the ON arm. Zero reads *no treatment opportunity — demonstrates
+  neither benefit nor failure*.
+
+**When a block cannot supply a quantity, the report says which and why.**
+
+- A withheld or absent block makes its treatment opportunity unknown, with the block's reasons.
+- A block that continues a prefix an earlier block already supplied is one discovery pass counted
+  twice. Its precision difference, matcher recall change, lost true candidates, cost contrast, block
+  execution and treatment opportunity are unavailable, each with the reason
+  *one shared prefix is one pair*. Coverage does not count it as a completed block.
+- An arm that threw, was cancelled or did not finish makes the block execution incomplete: its spend
+  still prints, marked `INCOMPLETE`, and no contrast is taken against it.
+- One block whose composition fails is unavailable with the message, and the other blocks still
+  read. When the report cannot be composed at all, for example because the paired reader threw, it
+  prints `MAD EVALUATION REPORT — NOT COMPOSED` and the reason.
+
+Availability prints as `n/3` separately for each quantity: `precision difference`,
+`planted-defect matcher recall change`, `lost true candidates`, `cost contrast` and
+`treatment opportunity`.
+
+**The manifest cost is observed per-block cost, not the experiment bill.** The unique-execution bill
+belongs to `paired-journal.jsonl`, and this report neither reads nor re-derives it. The report sums no
+blocks into a total. A failed prefix has no arm manifests, so its spend stays a gap here and the report
+points at `paired-journal.jsonl`. A missing arm manifest is also a gap with its reason, never a zero.
+
+**What story 2-8b still owns.** The three blocks over a real change, the retained outcomes, the
+manifest-linked report and its confounds and limits, and the real-host request-accounting check that
+must pass before anything bills. Nothing in this report is live evidence, and it closes neither story
+2.8, FR11 nor the epic.
 
 ### What the fake-backed tests do not establish
 

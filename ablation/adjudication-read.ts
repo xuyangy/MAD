@@ -62,9 +62,10 @@
  * ## WHAT IT DOES NOT COMPUTE
  *
  * No precision, no precision bounds, no final recall, no cost contrast, and no
- * earned / did-not-earn reading. Those are story 2.8's, under the frozen
- * protocol's bound arithmetic. It never parses `adjudication.md` and never falls
- * back to it.
+ * earned / did-not-earn reading. Precision, its bounds, final recall and the
+ * cost contrast are story 2.8's, under the frozen protocol's bound arithmetic,
+ * and `ablation/evaluation-report.ts` computes them from this reader's counts.
+ * It never parses `adjudication.md` and never falls back to it.
  *
  * Every entry point returns a typed result and nothing throws.
  */
@@ -78,8 +79,10 @@ import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
 import { lexicalDefectMatcher, type DefectMatcher } from "../fixtures/recall.ts"
 import { verdictState, type VerdictState } from "./compare.ts"
 import { countText } from "./cross-arm-rates.ts"
+import { meanText } from "./fraction.ts"
 import { loadPrefixRecord, type FindingList } from "./labelled-read.ts"
 import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-read.ts"
+import { EVALUATION_REPORT_MODULE } from "./report.ts"
 import { PAIRED_BLOCKS, type Arm, type PairedSchedule } from "./schedule.ts"
 
 /** Where the filled sheet lives, beside the evidence it is about. */
@@ -1092,19 +1095,6 @@ function observe(result: BlockRead, quantity: (typeof ADJUDICATION_QUANTITIES)[n
   return noRule
 }
 
-/** An exact mean: an integer, or a reduced ratio of integers. Never a float. */
-function meanText(values: readonly number[]): string {
-  const sum = values.reduce((total, value) => total + value, 0)
-  const n = values.length
-  if (sum % n === 0) return String(sum / n)
-  const divisor = gcd(sum, n)
-  return `${sum / divisor}/${n / divisor}`
-}
-
-function gcd(a: number, b: number): number {
-  return b === 0 ? Math.abs(a) : gcd(b, a % b)
-}
-
 // ---------------------------------------------------------------------------
 // The report
 // ---------------------------------------------------------------------------
@@ -1172,7 +1162,8 @@ export function renderAdjudicationBundle(outcome: AdjudicationReadOutcome): stri
 
   lines.push(
     "WHAT THIS REPORT DOES NOT MEASURE. No precision, no precision bound, no final recall, no cost contrast and no",
-    "earned / did-not-earn reading — those are story 2.8's, under the frozen protocol's bound arithmetic. The",
+    "earned / did-not-earn reading. Precision, its bounds, final recall and the cost contrast are story 2.8's, under",
+    `the frozen protocol's bound arithmetic, printed by the evaluation report (\`${EVALUATION_REPORT_MODULE}\`). The`,
     "labelled report's U is not a truth label and no number here was derived from it. This report prints and gates",
     "nothing.",
   )

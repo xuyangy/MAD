@@ -50,8 +50,9 @@
  * `ablation/adjudication-read.ts`'s, read from the human truth sheet bound to
  * this bundle's schedule and prefix runs. `differences` below says only THAT two
  * arms decided a candidate differently; which way, and whether that was the
- * right way, is that reader's. Precision, recall and every earned /
- * did-not-earn reading belong to story 2.8.
+ * right way, is that reader's. Precision, final recall and cost contrasts
+ * belong to story 2.8 and are printed by `ablation/evaluation-report.ts`; no
+ * module returns an earned / did-not-earn reading.
  *
  * Every rate names its numerator and its denominator as `x of y`. There is no
  * float, no percentage and no fused score, and a zero denominator reads
@@ -85,7 +86,7 @@ import { countText } from "./cross-arm-rates.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import type { Completion, ExperimentBinding, Maybe, RunManifest } from "./manifest.ts"
 import { disclosures, readBundle, type ArmRow, type BundleReadOutcome, type BundleReadResult } from "./read-bundle.ts"
-import { ADJUDICATION_READER_MODULE, INHERITED_SUM_RULE, LABELLED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, EVALUATION_REPORT_MODULE, INHERITED_SUM_RULE, LABELLED_READER_MODULE } from "./report.ts"
 import {
   PAIRED_BLOCKS,
   readSchedule,
@@ -1142,7 +1143,8 @@ export function renderPairedBundle(result: PairedReadResult): string {
     "did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's",
     `(\`${LABELLED_READER_MODULE}\`), printed after this one. The four labelled verdict transitions and the`,
     `per-arm false positives are the adjudication report's (\`${ADJUDICATION_READER_MODULE}\`), printed after that`,
-    "one, from a human truth sheet. Precision, final recall and cost contrasts belong to story 2.8.",
+    "one, from a human truth sheet. Precision, final recall and cost contrasts belong to story 2.8, and the",
+    `evaluation report (\`${EVALUATION_REPORT_MODULE}\`) prints them last.`,
     "Nothing here is a product-value claim, and three blocks were bought as DESCRIPTIVE evidence with no significance",
     "claim available from them (`evaluation-protocol.md` §4).",
   )

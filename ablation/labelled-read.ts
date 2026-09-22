@@ -58,7 +58,8 @@
  * Verdict-direction labels and false-positive counts are adjudication:
  * `ablation/adjudication-read.ts` reads them from the human truth sheet and
  * prints them after this report. This module's `U` is not a truth label and
- * never becomes one. Precision and cost contrasts belong to story 2.8.
+ * never becomes one. Precision and cost contrasts belong to story 2.8 and are
+ * printed by `ablation/evaluation-report.ts`.
  *
  * The prefix record this module resolves, binds and validates is also the
  * adjudication reader's truth pool, so `loadPrefixRecord` is exported and that
@@ -88,8 +89,9 @@ import {
 import { PREFIX_DIRECTORY } from "./bundle.ts"
 import { verdictState } from "./compare.ts"
 import { countText } from "./cross-arm-rates.ts"
+import { meanText } from "./fraction.ts"
 import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-read.ts"
-import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, EVALUATION_REPORT_MODULE, LABELLED_READER_MODULE } from "./report.ts"
 import { canonicalJson, PAIRED_BLOCKS, type Arm, type ArmPosition, type PairedSchedule } from "./schedule.ts"
 
 /** The draft protocol that proposes the endpoints this reader prints. */
@@ -1152,19 +1154,6 @@ function observe(block: LabelledBlock, quantity: (typeof LABELLED_QUANTITIES)[nu
   return cap1.difference
 }
 
-/** An exact mean: an integer, or a reduced ratio of integers. Never a float. */
-function meanText(values: readonly number[]): string {
-  const sum = values.reduce((total, value) => total + value, 0)
-  const n = values.length
-  if (sum % n === 0) return String(sum / n)
-  const divisor = gcd(sum, n)
-  return `${sum / divisor}/${n / divisor}`
-}
-
-function gcd(a: number, b: number): number {
-  return b === 0 ? Math.abs(a) : gcd(b, a % b)
-}
-
 // ---------------------------------------------------------------------------
 // The report
 // ---------------------------------------------------------------------------
@@ -1305,8 +1294,8 @@ export function renderLabelledBundle(outcome: LabelledReadOutcome): string {
     "WHAT THIS REPORT DOES NOT MEASURE. U is not a truth label: an upheld finding no planted label claimed is",
     `unlabelled, never a false positive. False positives and the four labelled verdict transitions are the`,
     `adjudication report's (\`${ADJUDICATION_READER_MODULE}\`), printed after this one, and they come from a human`,
-    "truth sheet rather than from any number above. Precision and cost contrasts belong to story 2.8. Nothing here",
-    "is a product-value claim.",
+    "truth sheet rather than from any number above. Precision and cost contrasts belong to story 2.8, and the",
+    `evaluation report (\`${EVALUATION_REPORT_MODULE}\`) prints them last. Nothing here is a product-value claim.`,
   )
   return `${lines.join("\n")}\n`
 }
