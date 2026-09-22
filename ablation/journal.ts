@@ -265,6 +265,15 @@ export interface UniqueExecutionBill {
   overshoot: OvershootReport
   /** Where the halt marker was written for a latched halt, or why it could not be. */
   haltMarker: { file: string | null; error: string | null }
+  /**
+   * Story 2-7c — every operational quarantine reason, beside `halt` rather than
+   * inside it.
+   *
+   * `halt` keeps the FIRST reason latched, so on a run where an unknown-usage
+   * halt landed before an unresolved process, `halt` names the money and this
+   * names the cleanup. Empty on every ordinary run.
+   */
+  operational: string[]
 }
 
 /** One refused admission: where it would have been spent, and why it was not. */
@@ -392,6 +401,16 @@ class JournalState {
   readonly integrity: IntegrityFailure[] = []
   halt: string | null = null
   stop: string | null = null
+  /**
+   * Story 2-7c — every operational quarantine reason, in order.
+   *
+   * ADDITIVE AND SEPARATE FROM `halt`. `latch` keeps the FIRST reason, so an
+   * accounting halt that arrived earlier would otherwise swallow the fact that a
+   * process or a file operation is also unaccounted for — and those two need
+   * different recovery steps. Nothing here is ever cleared, and nothing here
+   * touches the bill.
+   */
+  readonly operational: string[] = []
   haltMarker: { file: string | null; error: string | null } = { file: null, error: null }
 
   latch(reason: string): void {
@@ -591,6 +610,7 @@ class JournalState {
       refusedAdversarial: refusedAdversarial.map((refusal) => ({ ...refusal })),
       overshoot: overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()]),
       haltMarker: { ...this.haltMarker },
+      operational: [...this.operational],
     }
   }
 }
@@ -779,14 +799,83 @@ export interface PairedJournal {
   reporter(sink?: LateUsageReporter): LateUsageReporter
   /** Stop admitting. The reason is reported as a runner stop, never as a model failure. */
   stopAdmitting(reason: string): void
+  /**
+   * Story 2-7c — AN OPERATIONAL HALT, LATCHED FROM OUTSIDE THE ACCOUNTING.
+   *
+   * Every other halt in this file comes from money: a request that billed an
+   * unknown amount, a request issued and never settled, an integrity failure.
+   * This one comes from the machine — a process MAD launched and cannot confirm
+   * it terminated, or a file operation whose physical effect is unconfirmed.
+   *
+   * IT IS WORDED SO IT IS NOT READ AS UNKNOWN SPEND. The halt marker's file name
+   * (`unknown-usage-halt.json`) and every reader sentence around it were written
+   * for the accounting case, so a reason landing in them without a prefix would
+   * tell the next person money is unaccounted for when it is not. Nothing here
+   * touches the bill: no request is manufactured, no usage is simulated, and
+   * `bill()` reports exactly what it would have reported anyway.
+   *
+   * IT IS SYNCHRONOUS AND IT IS TOTAL. Admission stops the moment it returns,
+   * which is what lets a caller latch before the next model request rather than
+   * at the end of a run. Persisting the marker is queued behind it and may fail
+   * on its own; the stop, the latch and the lock retention do not depend on that
+   * write succeeding.
+   *
+   * IT ALSO RETAINS THE LOCK. `close()` will not release it afterwards — see
+   * there.
+   */
+  haltOperationally(reason: string): void
   bill(): UniqueExecutionBill
   /** Wait for every queued append. */
   settled(): Promise<void>
   /**
    * End the invocation: stop admitting, wait for the queue, release the lock and
    * return the reconciliation handle. Does not wait on any provider.
+   *
+   * AFTER `haltOperationally` THE LOCK IS KEPT rather than released, and
+   * `lockRetained` says so. A quarantined bundle has a process or a file
+   * operation nobody can account for, and the lock is the one thing that stops a
+   * second writer appending beside it. Recovery is manual: nothing here clears
+   * the halt, and `ReconciliationHandle.flush()` will not be able to take the
+   * lock it needs while this invocation holds it, which is the intended
+   * consequence rather than a defect.
    */
-  close(): Promise<{ handle: ReconciliationHandle; releaseError: string | null }>
+  close(): Promise<{
+    handle: ReconciliationHandle
+    releaseError: string | null
+    lockRetained: boolean
+  }>
+}
+
+/**
+ * The words that stop an operational halt being READ as unaccounted money —
+ * without claiming the opposite either.
+ *
+ * IT MAKES NO CLAIM ABOUT SPEND, and the earlier wording ("no spend is
+ * unaccounted for") did, which was a lie waiting to happen: a run can have an
+ * unknown-usage halt AND an unresolved process at the same time, in either
+ * order, and a prefix asserting the accounting was clean would then be false in
+ * the one place a reader trusts it. What this says is only what it knows — that
+ * THIS reason is about cleanup — and it leaves the accounting to the bill, which
+ * is the thing that actually knows.
+ *
+ * Exported so the runner, the reader and the tests name it once. The halt marker
+ * is `unknown-usage-halt.json`, and a reason that said nothing would be read
+ * under that file name as a statement about spend.
+ */
+export const OPERATIONAL_HALT_PREFIX =
+  "OPERATIONAL HALT (operational cleanup is unresolved; this reason alone makes no claim about spend — " +
+  "read the bill for that): "
+
+/**
+ * The reason, worded once.
+ *
+ * IDEMPOTENT, because a caller needs the same sentence in more than one place: a
+ * runner puts it on its own local stop and in its slot statuses as well as
+ * handing it to `haltOperationally`, and two spellings of one halt is exactly
+ * the drift the prefix exists to prevent.
+ */
+export function operationalHaltReason(reason: string): string {
+  return reason.startsWith(OPERATIONAL_HALT_PREFIX) ? reason : `${OPERATIONAL_HALT_PREFIX}${reason}`
 }
 
 export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; reason: string }
@@ -839,6 +928,8 @@ export async function openJournal(
   let queue: Promise<void> = Promise.resolve()
   let closed = false
   let heldLock: HeldLock | null = lock
+  /** Story 2-7c — set by `haltOperationally`, and never cleared by this module. */
+  let retainLock = false
   let markerQueued = state.haltMarker.file !== null
   /** Reports whose `executionId` is not bound yet, in arrival order. */
   let pending: LateUsageReport[] = []
@@ -1147,6 +1238,24 @@ export async function openJournal(
       state.stop ??= reason
     },
 
+    haltOperationally(reason) {
+      const worded = operationalHaltReason(reason)
+      // THE LOCK FLAG FIRST, and it is a plain assignment rather than a `??=`
+      // guard: whichever operational halt lands first, every later one still
+      // finds the bundle quarantined.
+      retainLock = true
+      state.stop ??= worded
+      // `latch` IS FIRST-REASON-WINS, WHICH WOULD ERASE THIS CAUSE. An accounting
+      // halt that landed earlier keeps its reason — correctly, because it is
+      // still true and overwriting it would hide why the money is uncertain — so
+      // the quarantine is recorded ADDITIVELY beside it. Both orderings then
+      // survive: whichever came first is the halt reason, and this list always
+      // says a cleanup is unresolved.
+      state.latch(worded)
+      state.operational.push(worded)
+      watchHalt()
+    },
+
     bill: () => state.bill(pending, refused, refusedAdversarial),
 
     settled: () => enqueue(async () => undefined, () => undefined),
@@ -1154,11 +1263,14 @@ export async function openJournal(
     async close() {
       closed = true
       await enqueue(async () => undefined, () => undefined)
-      const releaseError = heldLock === null ? null : await heldLock.release()
-      heldLock = null
+      // THE ONLY CLOSE THAT DOES NOT RELEASE. See `close()` on the interface:
+      // a quarantined bundle keeps its lock so no second writer appends beside
+      // a process or an append nobody can account for.
+      const releaseError = retainLock || heldLock === null ? null : await heldLock.release()
+      if (!retainLock) heldLock = null
       held = [...pending, ...held]
       pending = []
-      return { handle: reconciliationHandle(), releaseError }
+      return { handle: reconciliationHandle(), releaseError, lockRetained: retainLock }
     },
   }
 
@@ -1299,6 +1411,10 @@ async function writeHaltMarker(markerPath: string, state: JournalState): Promise
     source: "paired journal",
     stop: state.stop,
     integrity: state.integrity,
+    // Story 2-7c — ADDITIVE, so a marker written for an accounting halt still
+    // tells the next reader that a process or a file operation is unaccounted
+    // for. The two need different recovery steps.
+    operational: [...state.operational],
   }
   try {
     const handle = await open(markerPath, "wx", 0o600)

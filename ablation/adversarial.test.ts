@@ -35,7 +35,13 @@ import { parseManifest } from "./read-bundle.ts"
 import { SCHEDULE_FILE, START_MARKER_FILE } from "./schedule.ts"
 import { ADVERSARIAL_CASES as CASES } from "../fixtures/adversarial/material.ts"
 import type { ModelBackend } from "../core/ports/model-backend.ts"
-import { readToolTrace } from "./tool-trace.ts"
+import {
+  createToolTraceSink,
+  readToolTrace,
+  TOOL_TRACE_FILE,
+  traceUnresolved,
+  TraceUnresolvedError,
+} from "./tool-trace.ts"
 
 const HERE = process.cwd()
 const scratch: string[] = []
@@ -494,3 +500,153 @@ describe("the runner's preflight, delivery and ledger checks", () => {
   })
 })
 
+
+describe("the quarantine, end to end (story 2-7c)", () => {
+  /**
+   * A launcher whose child never exits and ignores the kill, so the cleanup
+   * budget is what ends the call. The real deadline is exercised against real
+   * processes in `adapters/opencode/tools-observation.test.ts`; here the point is
+   * what the SUITE does when the adapter reports one.
+   */
+  const unkillableSpawn = () => {
+    const launches: string[][] = []
+    const spawn = (request: { cmd: string[]; cwd: string }) => {
+      launches.push([...request.cmd])
+      return {
+        // REAL, OPENABLE, NEVER-ENDING PIPES. A missing pipe is its own failure
+        // and would short-circuit before the deadline; what this row is about is
+        // a command that runs past its execution budget and then cannot be
+        // confirmed terminated.
+        pid: 40404,
+        stdout: new ReadableStream<Uint8Array>({ start: () => undefined }),
+        stderr: new ReadableStream<Uint8Array>({ start: () => undefined }),
+        exited: new Promise<number>(() => {}),
+        exitCode: null,
+        signalCode: null,
+        kill: () => undefined,
+      }
+    }
+    return { spawn, launches }
+  }
+
+  test("AN UNCONFIRMED PROCESS CLEANUP stops admission, halts, strands the rest and KEEPS THE LOCK", async () => {
+    const { root, input, calls } = await sealedSuite(scratch)
+    const { spawn, launches } = unkillableSpawn()
+
+    const outcome = await runAdversarialSuite({
+      ...input,
+      spawnBlame: spawn,
+      blameTimeoutMs: 5,
+      blameCleanupTimeoutMs: 5,
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+
+    // The adapter refuses further launches, so exactly one process was started.
+    expect(launches).toHaveLength(1)
+
+    // THE HALT IS OPERATIONAL AND SAYS SO. A reader who opens
+    // `unknown-usage-halt.json` must not be told money is unaccounted for.
+    expect(outcome.bill.halt).toContain("OPERATIONAL HALT")
+    expect(outcome.bill.halt).toContain("makes no claim about spend")
+    expect(outcome.bill.halt).not.toContain("no spend is unaccounted for")
+    expect(outcome.bill.halt).toContain("TERMINATION IS UNCONFIRMED")
+    expect(outcome.bill.halt).toContain("40404")
+    expect(outcome.bill.operational).toHaveLength(1)
+    const marker = JSON.parse(await readFile(join(root, HALT_MARKER_FILE), "utf8")) as { haltReason: string }
+    expect(marker.haltReason).toContain("OPERATIONAL HALT")
+
+    // ADMISSION STOPPED AT THAT MOMENT, not at the end of the run. The judge
+    // catches the blame failure and goes on to ask its fact-checker, so a
+    // refusal has to already be in place — and it is, on the very run that hung.
+    // NAMED EXACTLY, not "more than zero". The judge asks its fact-checker and
+    // its logic evaluator after a blame failure, so the first run's remaining
+    // admissions are the refusals under test, and a count that only had to beat
+    // zero would pass on almost any behaviour.
+    const refused = outcome.bill.refusedAdversarial
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.stage).toBe("judge")
+    expect(refused[0]!.attempt).toBe(1)
+    expect(refused[0]!.label).toBe(`${outcome.schedule.slots[0]!.caseId} ${outcome.schedule.slots[0]!.side}`)
+    // A RUNNER STOP RATHER THAN A BUDGET REFUSAL, and the reason carries the
+    // operational wording — so nothing in the refusal record implies the
+    // Adversarial allowance ran out.
+    expect(refused[0]!.cause).toBe("runner-stop")
+    expect(refused[0]!.reason).toContain("OPERATIONAL HALT")
+
+    // LATER SLOTS READ `not-attempted`, and the run's own evidence is kept. The
+    // first slot's status is NAMED: `not("completed")` would have passed on
+    // `cancelled`, on `not-attempted`, and on a slot that was never written.
+    expect(outcome.slots[0]!.status).toBe("failed")
+    expect(outcome.slots[0]!.reason).toContain("a gate denied it planned work")
+    expect(outcome.slots).toHaveLength(16)
+    expect(outcome.slots.slice(1).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.complete).toBe(false)
+    const statuses = await readAdversarialSlotStatuses(root)
+    expect(statuses.some((status) => status.status === "not-attempted")).toBe(true)
+
+    // THE LOCK IS STILL HELD, and the warning says why and that recovery is by
+    // hand. No automatic clearing anywhere.
+    expect(await exists(join(root, LOCK_FILE))).toBe(true)
+    expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(true)
+    expect(outcome.warnings.some((warning) => warning.includes("check process 40404 by hand"))).toBe(true)
+
+    // AND NO FURTHER PAID REQUEST WAS MADE AFTER THE LATCH.
+    const positions = new Set(calls.map((call) => call.position))
+    expect([...positions]).toEqual([outcome.schedule.slots[0]!.position])
+  })
+
+  test("AN UNCONFIRMED TRACE APPEND does the same, and no later run reuses the file", async () => {
+    const { root, input } = await sealedSuite(scratch)
+
+    const outcome = await runAdversarialSuite({
+      ...input,
+      traceTimeoutMs: 5,
+      // An IO whose append never settles. The physical write may still be
+      // running, so the file is not safe for any later run to touch.
+      traceIo: { appendLine: () => new Promise<void>(() => {}) },
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+
+    // "DOES THE SAME" IS NOW ACTUALLY TESTED. Its process-cleanup sibling asserts
+    // the cause, the operational wording, the stranded slots, the retained lock
+    // and the warning; this row asserted three of those and claimed the rest.
+    expect(outcome.bill.halt).toContain("OPERATIONAL HALT")
+    expect(outcome.bill.halt).toContain("makes no claim about spend")
+    expect(outcome.bill.halt).toContain("UNRESOLVED trace operation")
+    expect(outcome.bill.operational).toHaveLength(1)
+
+    const refused = outcome.bill.refusedAdversarial
+    expect(refused.length).toBeGreaterThanOrEqual(1)
+    expect(refused[0]!.cause).toBe("runner-stop")
+    expect(refused[0]!.reason).toContain("OPERATIONAL HALT")
+    expect(refused[0]!.label).toBe(`${outcome.schedule.slots[0]!.caseId} ${outcome.schedule.slots[0]!.side}`)
+
+    expect(outcome.slots).toHaveLength(16)
+    expect(outcome.slots.slice(1).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(await exists(join(root, LOCK_FILE))).toBe(true)
+    expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(true)
+    expect(outcome.complete).toBe(false)
+
+    // AND NO LATER RUN MAY REUSE THE FILE. The sink refuses to be built over a
+    // trace an operation has not let go of, which is the half that outlives this
+    // suite's own admission stop.
+    const traceFile = join(adversarialDirectory(root), TOOL_TRACE_FILE)
+    expect(traceUnresolved(traceFile)).not.toBeNull()
+    expect(() =>
+      createToolTraceSink({ file: traceFile, binding: { caseId: "adv-01", side: "clean", position: 1 } }),
+    ).toThrow(TraceUnresolvedError)
+  })
+
+  test("THE HEALTHY SUITE STILL RELEASES ITS LOCK — the non-vacuous sibling", async () => {
+    // Without this row both above would pass on a runner that quarantined every
+    // run it ever made.
+    const { root, input } = await sealedSuite(scratch)
+    const outcome = await runAdversarialSuite(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+
+    expect(outcome.complete).toBe(true)
+    expect(outcome.bill.halt).toBeNull()
+    expect(await exists(join(root, LOCK_FILE))).toBe(false)
+    expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(false)
+  })
+})

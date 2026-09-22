@@ -53,6 +53,7 @@ import { dirname, join, resolve } from "node:path"
 
 import type { PluginInput } from "@opencode-ai/plugin"
 
+import type { SpawnBlame } from "../adapters/opencode/blame-exec.ts"
 import { opencodeTools } from "../adapters/opencode/tools.ts"
 import { createTurnRecorder, realRefusalFor, refusalFor, safeName, type ArtifactOutcome } from "../adapters/opencode/artifacts.ts"
 import type { Roster } from "../core/domain/roster.ts"
@@ -92,6 +93,7 @@ import {
   JOURNAL_FILE,
   LOCK_FILE,
   openJournal,
+  operationalHaltReason,
   type AdversarialRefusal,
   type OvershootReport,
   type PairedJournal,
@@ -134,6 +136,17 @@ export interface RunAdversarialSuiteInput {
   /** Seams for tests. Default to real git and the file-backed trace. */
   git?: RunGit
   traceIo?: TraceIo
+  /**
+   * Story 2-7c — the three bounded-wait seams, passed straight through to the
+   * adapter and the sink. Construction options with shipped defaults, for tests
+   * that would otherwise have to wait out a real minute; no flag, config key or
+   * environment variable reaches any of them.
+   */
+  blameTimeoutMs?: number
+  blameCleanupTimeoutMs?: number
+  traceTimeoutMs?: number
+  /** Test seam for the blame launcher. Defaults to the real one. */
+  spawnBlame?: SpawnBlame
 }
 
 export interface AdversarialSlotReport extends AdversarialSlot {
@@ -441,6 +454,31 @@ async function execute(
     journal.stopAdmitting(reason)
   }
 
+  /**
+   * Story 2-7c — the suite's response to an unconfirmed process cleanup or an
+   * unconfirmed trace append.
+   *
+   * SYNCHRONOUS, AND IN THIS ORDER. `endWith` stops local admission and
+   * `haltOperationally` latches the journal's own stop, both before this
+   * function returns — so by the time the adapter's timed-out `blame` call
+   * returns to the judge, the next model request is already refused. An
+   * end-of-run check would be too late: the judge catches a blame failure and
+   * goes straight on to ask its fact-checker.
+   *
+   * SAFETY DOES NOT WAIT ON THE DURABLE HALF. `haltOperationally` queues the
+   * halt marker's write and retains the lock synchronously; if that write fails,
+   * admission has still stopped and the lock is still held.
+   */
+  const quarantine = (why: string): void => {
+    // WORDED ONCE, and the same sentence everywhere it lands: the runner's own
+    // stop, the slot statuses it strands, the journal's halt and the marker at
+    // the root. Two spellings of one halt is how a reader ends up guessing.
+    const reason = operationalHaltReason(why)
+    endWith(reason)
+    journal.haltOperationally(reason)
+    warnings.push(reason)
+  }
+
   const mark = async (
     slot: AdversarialSlot,
     status: SlotStatus,
@@ -501,17 +539,49 @@ async function execute(
 
     // ONE OBSERVER VALUE, handed to the adapter and to `review()` below. Either
     // half alone is half a trace.
-    const observer = createToolTraceSink({
-      file: traceFile,
-      binding: { caseId: slot.caseId, side: slot.side, position: slot.position },
-      ...(input.traceIo === undefined ? {} : { io: input.traceIo }),
+    //
+    // IT REFUSES TO BUILD over a trace file an earlier operation has not let go
+    // of (story 2-7c). Sixteen runs share one `tool-trace.jsonl`, so a slot that
+    // appended and never heard back leaves a file no later slot may touch.
+    let observer: ReturnType<typeof createToolTraceSink>
+    try {
+      observer = createToolTraceSink({
+        file: traceFile,
+        binding: { caseId: slot.caseId, side: slot.side, position: slot.position },
+        ...(input.traceIo === undefined ? {} : { io: input.traceIo }),
+        ...(input.traceTimeoutMs === undefined ? {} : { operationTimeoutMs: input.traceTimeoutMs }),
+        onUnresolved: (fact) =>
+          quarantine(
+            `the ${label} run left an UNRESOLVED trace operation: ${fact.why}; no further run may ` +
+              `append to that file and recovery is manual`,
+          ),
+      })
+    } catch (error) {
+      quarantine(`the ${label} run could not open the tool trace: ${messageOf(error)}`)
+      await mark(slot, "failed", `the ${label} run could not open the tool trace, so nothing was issued: ${messageOf(error)}`)
+      return
+    }
+    // THE SHARED-`$` HAZARD, AND WHY IT DOES NOT BITE HERE. Bun's `$` is one
+    // object whose `.cwd()` retains its argument, so two adapters over one shell
+    // can take each other's directory. `blame` does not go through the shell —
+    // `adapters/opencode/blame-exec.ts` launches it with an explicit working
+    // directory — so no run can move another run's `$`. The shell is handed over
+    // because `opencodeTools` keeps it on its construction surface, and these
+    // runs stay strictly sequential.
+    const tools = opencodeTools({
+      $: input.shell,
+      worktree,
+      toolObservation: observer,
+      clock: input.clock,
+      ...(input.blameTimeoutMs === undefined ? {} : { blameTimeoutMs: input.blameTimeoutMs }),
+      ...(input.blameCleanupTimeoutMs === undefined ? {} : { blameCleanupTimeoutMs: input.blameCleanupTimeoutMs }),
+      ...(input.spawnBlame === undefined ? {} : { spawn: input.spawnBlame }),
+      onCleanupUnresolved: (fact) =>
+        quarantine(
+          `the ${label} run could not confirm that a process it launched terminated: ${fact.why}; ` +
+            `check process ${fact.pid} by hand before anything else is run here`,
+        ),
     })
-    // THE SHARED-`$` HAZARD: `opencodeTools` calls `$.cwd(worktree)`, and Bun's
-    // `$` keeps that directory for every later caller of the same object. Runs
-    // are strictly sequential here and each one rebinds `$` to its own worktree
-    // before any blame runs, so no run blames in another run's worktree. Making
-    // these runs concurrent would break that.
-    const tools = opencodeTools({ $: input.shell, worktree, toolObservation: observer, clock: input.clock })
 
     let runId: string | undefined
     const runClock: Clock = {
@@ -624,8 +694,15 @@ async function execute(
     else if (report.status === "started") await mark(slot, "failed", ended ?? "the runner ended while this slot was running")
   }
 
-  const { handle, releaseError } = await journal.close()
+  const { handle, releaseError, lockRetained } = await journal.close()
   if (releaseError !== null) warnings.push(releaseError)
+  if (lockRetained) {
+    warnings.push(
+      `the experiment lock was NOT released: this bundle is quarantined and the lock is what stops a ` +
+        `second writer appending beside a process or a file operation nobody can account for. Release ` +
+        `it by hand once the named process and file state have been checked.`,
+    )
+  }
   const bill = handle.bill()
   const billProblem = await writeAdversarialBill(root, billSummaryOf(schedule.scheduleHash, bill, now(input.clock)))
   if (billProblem !== null) warnings.push(billProblem)
@@ -688,6 +765,7 @@ export function billSummaryOf(scheduleHash: string, bill: UniqueExecutionBill, a
     refused: bill.refusedAdversarial.map((refusal) => ({ label: refusal.label, stage: refusal.stage, cause: refusal.cause, reason: refusal.reason })),
     halt: bill.halt,
     stop: bill.stop,
+    operational: [...bill.operational],
   }
 }
 

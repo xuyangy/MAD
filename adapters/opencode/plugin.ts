@@ -37,7 +37,7 @@ import {
 import { OpencodeModelBackend } from "./model-backend.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
 import { opencodeRepo } from "./repo.ts"
-import { opencodeTools } from "./tools.ts"
+import { opencodeTools, type BlameCleanupUnresolved } from "./tools.ts"
 import { resolveRoster } from "./roster.ts"
 
 /**
@@ -248,6 +248,33 @@ export function truncatedListWarnings(args: {
   ]
 }
 
+/**
+ * Story 2-7c — WORKTREES WHERE A BLAME LEFT A PROCESS NOBODY COULD ACCOUNT FOR.
+ *
+ * `adapters/opencode/blame-exec.ts` kills a `git blame` that overruns and then
+ * spends a separate budget confirming it went. Where that cannot be confirmed
+ * the adapter instance refuses every further launch — but an ordinary run builds
+ * a NEW adapter per invocation, so without this the user could retry and start
+ * another process beside the one already unaccounted for, once per attempt.
+ *
+ * NARROW ON PURPOSE, and each limit is deliberate:
+ *
+ * - **Per worktree, never global.** One unaccounted-for process in one
+ *   repository is no reason to refuse MAD in an unrelated one.
+ * - **Per host process, and NOT durable.** It lives in this module's memory and
+ *   is gone when the host restarts. That is an accepted limit rather than an
+ *   oversight: a durable registry of process state is a file MAD would have to
+ *   own, garbage-collect and reason about across machines, which is a design
+ *   decision and not a patch. After a restart, MAD launches again — the earlier
+ *   process, if it really survived, is the operator's to find.
+ * - **No ledger, no lock, no halt file.** Those belong to the evaluation
+ *   harness. An ordinary review has no experiment to quarantine.
+ *
+ * It carries no process registry: the fact is the reason and the pid, exactly as
+ * the adapter reported it, so a user reading the warning has the number to check.
+ */
+const UNRESOLVED_BLAME_CLEANUP = new Map<string, BlameCleanupUnresolved>()
+
 export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
   return {
     tool: {
@@ -407,7 +434,22 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           // than through a second imitation of this wiring. `undefined` is a
           // supported value and the record it produces is the unobserved one.
           const toolObservation: ToolObservation | undefined = undefined
-          const tools = opencodeTools({ $, worktree, toolObservation })
+          // STORY 2-7c — THE PER-WORKTREE CLEANUP LATCH. Carried IN so a retry
+          // after an unconfirmed termination refuses rather than launching
+          // beside a process nobody can account for, and carried OUT so this
+          // invocation's own unconfirmed cleanup latches the next one. The
+          // refusal rides the existing `blame-unavailable` warning with the
+          // reason and the pid inside it; no new code and no new surface.
+          const alreadyUnresolved = UNRESOLVED_BLAME_CLEANUP.get(worktree)
+          const tools = opencodeTools({
+            $,
+            worktree,
+            toolObservation,
+            ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
+            onCleanupUnresolved: (fact) => {
+              if (!UNRESOLVED_BLAME_CLEANUP.has(worktree)) UNRESOLVED_BLAME_CLEANUP.set(worktree, fact)
+            },
+          })
           let change
           try {
             change = await repo.change(args.target)

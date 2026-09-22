@@ -1,5 +1,5 @@
 /**
- * The `Tools` port over opencode's host shell — AD-13's FIRST route, driven for
+ * The `Tools` port over the host's repository — AD-13's FIRST route, driven for
  * the first time by story 10. Read-only: MAD never writes to the user's repo
  * (AD-16), and `adapters/opencode/tools.test.ts` asserts that structurally
  * rather than trusting this sentence.
@@ -13,17 +13,6 @@
  * that said it ran `git blame` and did not was indistinguishable from one that
  * did. This adapter is what lets MAD run the check itself, so at least one class
  * of evidence in the record is executed rather than claimed (CAP-8).
- *
- * ## One git wrapper in this adapter, not two
- *
- * `$`, `.cwd(worktree).nothrow()` and `GitError` all come from `./repo.ts`
- * unchanged, and `GitError` is IMPORTED rather than re-declared. A second,
- * differently-behaved git wrapper in one adapter is the duplication the epic-1
- * retrospective's F11 warns about — and the behaviour that must not diverge is
- * the important one: `.nothrow()` keeps a non-zero exit from throwing, so
- * without reading `exitCode` a failed blame degrades into empty output, which
- * downstream reads as "blame found nothing to contradict". A failure must never
- * read as a pass (AD-6).
  *
  * ## Only `blame` is driven
  *
@@ -39,9 +28,8 @@
  *
  * `Finding.locus.file` is validated only as a non-empty string, so it may not
  * exist, may escape the worktree, may contain a newline or a shell metacharacter.
- * It goes to git as its OWN argv element after `--`, never inside a composed
- * shell string. Bun's `$` interpolates an array as separate, escaped arguments,
- * which is the same property `repo.ts` relies on.
+ * It goes to git as its OWN argv element after `--`, and the launcher hands argv
+ * to the OS element for element — there is no command line to be syntax in.
  *
  * ## This file builds no material span
  *
@@ -52,56 +40,59 @@
  * `scripts/lint-material-spans.ts` proves it). That split is also the AD-1
  * correct one: the adapter executes, the core frames.
  *
- * ## WHAT THE PINNED HOST SHELL ESTABLISHES, AND WHAT IT DOES NOT
+ * ## WHAT THE LAUNCHER ESTABLISHES, AND WHAT IT DOES NOT (story 2-7c)
  *
- * `options.$` is `PluginInput["$"]` from `@opencode-ai/plugin` 1.18.18, which
- * re-exports Bun's shell. Story 2-7a's tool-action mapping is written against
- * this read of `node_modules/@opencode-ai/plugin/dist/shell.d.ts` and against
- * what pinned Bun 1.3.14 was observed to do, because a mapping written from
- * assumption would report launch failures as git failures.
+ * `blame` runs through `./blame-exec.ts`, not through the host shell. That file
+ * is where the deadline, the kill and the cleanup budget live; what matters here
+ * is what each of its four outcomes proves, because those readings become a
+ * measured execution count.
  *
- * WHAT THE INTERFACE CARRIES. `BunShellOutput` is exactly `stdout`, `stderr`,
- * `exitCode` and decoders over stdout. There is NO pid, NO termination signal
- * and NO launched/not-launched flag. `nothrow()` turns a non-zero exit into a
- * resolved value rather than a rejection. So the pinned interface, on its own,
- * establishes only two things: a ZERO exit means the program ran to completion
- * successfully, and a REJECTION means MAD got no answer at all.
+ * A LAUNCH FAILURE IS OBSERVED, NOT INFERRED FROM TEXT, AND IT IS PRE-LAUNCH
+ * ONLY. The launcher sees `Bun.spawn` refuse for itself — a missing git, an
+ * unreadable working directory — and says so. NOTHING ABOUT THE LAUNCH IS READ
+ * OUT OF THE CHILD'S OWN OUTPUT, and that is the load-bearing part: the host
+ * shell's only launch signal was a `bun: command not found: ` line on stderr,
+ * and git echoes a model-supplied path verbatim into `fatal: no such path
+ * '<path>' in HEAD` — so a path carrying that phrase would be untrusted text
+ * deciding an execution count. Observing the spawn removes the exposure instead
+ * of hardening a match against it.
  *
- * WHAT A NON-ZERO EXIT DOES NOT ESTABLISH. Nothing in the type distinguishes
- * "git ran and refused" from "git never started". `git blame` over a bad path or
- * a bad range exits 128 with git's own `fatal:` text on stderr; that is a git
- * failure, and a reader cannot prove it is one from `exitCode` alone.
+ * A FAILURE AFTER THE SPAWN IS A DIFFERENT FACT AND TAKES A DIFFERENT BRANCH.
+ * `launch: "failed"` is read by `core/judge/blame.ts` as a PROVED non-execution,
+ * so it may only ever describe a program the OS refused to start. Once a spawn
+ * handle exists, a rejected exit read or an unreadable stdout establishes
+ * nothing about whether the git executable ran — holding a handle is not proof
+ * of execution — so those come back as `observation-failed` and are classified
+ * `unproved` with no exit code, which is `unknown`. Whether they QUARANTINE
+ * depends on the cleanup state and not on the error's class.
  *
- * WHERE THE HOST DOES DOCUMENT A DISTINCTION, IT IS USED — AND ONLY WHERE THE
- * HOST ITSELF WROTE IT. A command the shell cannot find is reported BY THE
- * SHELL, not by the program: under `nothrow()` it resolves with `exitCode` **1**
- * and stderr that is exactly `bun: command not found: <name>`. It is NOT the 127
- * a POSIX shell would give, so an exit-code test for 127 would have been wrong.
- * That marker is the one positive launch-failure signal available here, and
- * `launchEvidenceFrom` below is where it is read.
+ * A ZERO EXIT STILL MEANS THE PROGRAM RAN TO COMPLETION, and a NON-ZERO EXIT
+ * still establishes nothing about whether git started — `git blame` over a bad
+ * path exits 128 with its own `fatal:` text, which is a git failure, and the
+ * number alone cannot be told from a program that never ran. So a non-zero exit
+ * reads `unproved` exactly as before.
  *
- * THE MARKER IS ANCHORED AT THE START OF STDERR, not at the start of any line,
- * and that distinction is load-bearing rather than tidy. `Finding.locus.file` is
- * a model's free string which may contain a newline (see above), and git echoes
- * the path verbatim into `fatal: no such path '<path>' in HEAD`. A line-anchored
- * marker would therefore let a path carrying `\nbun: command not found: git`
- * turn a `git blame` that really executed into "the command was never found" —
- * untrusted text deciding an execution count, which is the exact inversion this
- * seam exists to prevent. The host writes its own line as the whole of stderr,
- * so the start of stderr is where it is looked for.
- * `adapters/opencode/tools-observation.test.ts` asserts both halves against the
- * real host rather than against a faked exit code.
+ * A TIMEOUT IS NOT AN EXIT. A blame MAD stopped waiting for carries NO exit code
+ * into the evidence — not a real one, and certainly not a synthesized `124`.
+ * Whatever the OS reported about the killed process is preserved in the failure
+ * TEXT, where a reader can use it, and never in the structured evidence, where
+ * `core/judge/blame.ts` would have to decide what it meant. The reading is
+ * `unknown`, which is what it is.
  *
- * A REJECTION CARRIES NO EXIT CODE. A worktree that does not exist rejects with
- * a plain `Error: No such file or directory` and no `exitCode` field — so an
- * interrupted or exceptional call yields **no** launch evidence, and the
- * execution reading for it is `unknown` rather than false.
+ * AN UNCONFIRMED CLEANUP QUARANTINES THIS INSTANCE. See `onCleanupUnresolved`
+ * below.
  */
 
 import type { PluginInput } from "@opencode-ai/plugin"
 
 import type { Clock } from "../../core/ports/clock.ts"
 import { systemClock } from "../../core/ports/clock.ts"
+import {
+  awaitObservationWrite,
+  deadlineProblem,
+  OBSERVATION_WRITE_TIMEOUT_MS,
+  observationTimeoutReason,
+} from "../../core/ports/observation-wait.ts"
 import type {
   BlameArguments,
   LaunchEvidence,
@@ -115,12 +106,76 @@ import {
   TOOL_FAILURE_EVIDENCE,
 } from "../../core/ports/tool-observation.ts"
 import type { CommandResult, GrepHit, Tools } from "../../core/ports/tools.ts"
+import type { SpawnBlame } from "./blame-exec.ts"
+import { runBoundedBlame } from "./blame-exec.ts"
 import { GitError } from "./repo.ts"
 
 type Shell = PluginInput["$"]
 
+/**
+ * SIXTY SECONDS OF NOMINAL EXECUTION for one `git blame` over at most
+ * `MAX_BLAME_ROWS` lines.
+ *
+ * The same number `ablation/adversarial-materialize.ts` names for the git calls
+ * that write each worktree, so the two halves of one evaluation do not disagree
+ * about how long a git may take. (That file's own termination is a separate,
+ * still-unverified matter — see `ablation/LIVE-RUN.md`.) Far outside the range a
+ * healthy blame answers in over the at most `MAX_BLAME_ROWS` lines
+ * `core/stages/judge.ts` asks for, and inside the range a cold, very large or
+ * network-backed repository can legitimately need. Fixed, with no user-facing
+ * dial: CAP-7 froze the tool's dials at the preset and the budget.
+ */
+export const DEFAULT_BLAME_TIMEOUT_MS = 60_000
+
+/**
+ * FIVE SECONDS TO ESTABLISH THAT THE KILLED CHILD REALLY WENT, separate from the
+ * sixty above and much shorter, on `model-backend.ts`'s precedent.
+ *
+ * The two bound different things. The first bounds git doing work; this bounds
+ * the operating system reaping a process that has already been sent SIGKILL,
+ * which is not work and does not get quicker with waiting. What it buys is the
+ * difference between "terminated" and "termination is unconfirmed", and those
+ * are the two facts the whole quarantine hangs on.
+ */
+export const DEFAULT_BLAME_CLEANUP_TIMEOUT_MS = 5_000
+
+/**
+ * Story 2-7c — an unconfirmed process cleanup, as the host is told about it.
+ *
+ * SMALL AND STRUCTURED, carrying only what was actually established: which
+ * operation, why it is unresolved, and the process identity where one is known.
+ * It carries no exit code and no launch evidence, because there is none — that
+ * is what "unconfirmed" means, and a field invented to fill the shape would be
+ * the exact fabrication this story forbids.
+ */
+export interface BlameCleanupUnresolved {
+  /** The operation whose cleanup is unresolved, in MAD's own words. */
+  operation: string
+  /** Why termination could not be confirmed, including both deadlines. */
+  why: string
+  /** The process MAD launched and cannot account for. */
+  pid: number
+}
+
 export interface OpencodeToolsOptions {
-  $: Shell
+  /**
+   * The host shell, kept on the construction surface and NO LONGER USED BY
+   * `blame` (story 2-7c).
+   *
+   * `blame` moved to `./blame-exec.ts` because a `BunShellPromise` carries no
+   * pid, no kill and no abort, so a blame that never returned could not be
+   * terminated. `adapters/opencode/repo.ts` still reads the change through this
+   * same shell and is deliberately untouched — reading the change IS repository
+   * commands, and that is a different story's refactor.
+   *
+   * IT IS NEVER READ. Nothing in this file touches it, and a construction that
+   * omits it runs `blame` identically — `adapters/opencode/tools.test.ts` pins
+   * that a shell handed in here is not called at all. It stays on the surface
+   * because every existing caller passes one and a later driven method may want
+   * it; removing it is a breaking change to the factory's shape and is filed in
+   * the deferred-work ledger rather than smuggled in here.
+   */
+  $?: Shell
   worktree: string
   /**
    * Story 2-7a — the tool-action observer, OPTIONAL and bound by its constructor
@@ -143,27 +198,72 @@ export interface OpencodeToolsOptions {
    * default costs an unobserved run nothing.
    */
   clock?: Clock
+  /**
+   * Story 2-7c — the three deadlines, as construction options in the shape
+   * `adapters/opencode/model-backend.ts` established for `timeoutMs` and
+   * `cleanupTimeoutMs`.
+   *
+   * NOT DIALS. There is no CLI flag, no config key and no environment variable
+   * behind any of them, and `adapters/opencode/plugin.ts` passes none — a
+   * shipped run takes the constants above. They are named options rather than
+   * positional millisecond numbers for the reason `model-backend.test.ts` pins:
+   * two numbers of the same type in a row is a call nobody can read and a swap
+   * no compiler catches.
+   */
+  blameTimeoutMs?: number
+  blameCleanupTimeoutMs?: number
+  observationTimeoutMs?: number
+  /**
+   * Story 2-7c — HOW THIS ADAPTER SAYS IT HAS QUARANTINED ITSELF.
+   *
+   * When a blame's cleanup cannot be confirmed, the process MAD launched may
+   * still be running and MAD has no way to find out. This instance then refuses
+   * every further launch, and calls this back once with the fact.
+   *
+   * THE LATCH LANDS BEFORE THE NOTIFICATION, and the notification lands no later
+   * than the timed-out call returns. A host that reacts inside the callback
+   * therefore already sees an adapter that refuses, and a callback that throws
+   * can neither restore launch permission nor turn the blame into a success —
+   * both are decided before it is entered.
+   *
+   * IT EXISTS BECAUSE AN OBSERVATION FAILURE CANNOT CARRY THIS. An ordinary run
+   * supplies no observer at all (`adapters/opencode/plugin.ts`), so routing
+   * process-cleanup state through `ToolObservation.failed` would make the fact
+   * reachable only on an evaluation run — while the hang itself is reachable on
+   * every run.
+   */
+  onCleanupUnresolved?: (fact: BlameCleanupUnresolved) => void
+  /**
+   * Story 2-7c — BUILD THIS INSTANCE ALREADY QUARANTINED.
+   *
+   * The same latch `onCleanupUnresolved` sets, carried in from outside. It is
+   * how a host that outlives one construction — `adapters/opencode/plugin.ts`
+   * serves many invocations from one process — stops a second invocation
+   * launching against a worktree where an earlier one left a process it could
+   * not account for. Without it every invocation would start clean and a user
+   * retrying could multiply unaccounted-for processes one run at a time.
+   *
+   * It reuses the refusal path rather than adding a second one, so a refused
+   * blame lands in the existing `blame-unavailable` warning with this reason
+   * inside it — no new warning code, and nothing a reader has to learn.
+   */
+  quarantinedBy?: BlameCleanupUnresolved
+  /** Test seam for the launcher. Defaults to the real one. */
+  spawn?: SpawnBlame
 }
 
 /**
- * The host's own command-not-found line, which the SHELL writes and a program
- * never does.
+ * What a FINISHED run establishes about whether the program launched.
  *
- * MATCHED AT THE START OF STDERR, NEVER AT THE START OF A LINE. See this file's
- * header: git echoes a model-supplied path into its own `fatal:` line, so a
- * line-anchored marker hands an attacker a way to turn a real execution into
- * "never launched". The host emits this line as the whole of stderr.
+ * Exported so the host semantics behind it are testable. Story 2-7c narrowed it
+ * to the one question a completed exit can answer: a zero exit proves the
+ * program ran, and anything else proves nothing either way. The launch FAILURE
+ * reading does not come from here at all: `./blame-exec.ts` observes a refused
+ * spawn directly, which is why nothing in this function reads the child's own
+ * output.
  */
-const COMMAND_NOT_FOUND = "bun: command not found: "
-
-/**
- * What a finished shell call establishes about whether the program launched.
- * Exported so the host semantics behind it are testable against the real host.
- * See this file's header for the read it is written from.
- */
-export function launchEvidenceFrom(exitCode: number, stderr: string): LaunchEvidence {
-  if (exitCode === 0) return "proved"
-  return stderr.startsWith(COMMAND_NOT_FOUND) ? "failed" : "unproved"
+export function launchEvidenceFrom(exitCode: number): LaunchEvidence {
+  return exitCode === 0 ? "proved" : "unproved"
 }
 
 /**
@@ -215,9 +315,25 @@ function withEvidence(error: GitError, evidence: ToolFailureEvidence): GitError 
 }
 
 export function opencodeTools(options: OpencodeToolsOptions): Tools {
-  const $ = options.$.cwd(options.worktree).nothrow()
   const observation = options.toolObservation
   const clock = options.clock ?? systemClock()
+  const blameTimeoutMs = options.blameTimeoutMs ?? DEFAULT_BLAME_TIMEOUT_MS
+  const cleanupTimeoutMs = options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS
+  const observationTimeoutMs = options.observationTimeoutMs ?? OBSERVATION_WRITE_TIMEOUT_MS
+  // REFUSED AT CONSTRUCTION. A zero, a negative, a `NaN` or a value past the
+  // timer ceiling all schedule for right now, so an adapter built with one would
+  // abandon every observation it ever made while looking like it had a bound.
+  // The two blame deadlines are checked by the launcher, before it starts
+  // anything.
+  const observationIssue = deadlineProblem("the observation write deadline", observationTimeoutMs)
+  if (observationIssue !== null) throw new RangeError(`opencodeTools was not built: ${observationIssue}`)
+
+  /**
+   * The latched quarantine, or `null`. Per INSTANCE and not per module: two
+   * adapters in one process bind two different worktrees, and one unaccounted
+   * process is not a reason to refuse a launch nothing connects it to.
+   */
+  let quarantined: BlameCleanupUnresolved | null = options.quarantinedBy ?? null
 
   /**
    * AN OBSERVATION FAILURE IS NEVER A TOOL FAILURE, AND IT IS NEVER SILENT.
@@ -229,6 +345,13 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
    * one `tool-observation-failed` warning. Without that drain a run whose every
    * adapter write failed would render identically to a fully traced one.
    *
+   * AND IT IS BOUNDED. An unbounded await here stalls the blame in front of it,
+   * one finding at a time. Past the deadline the write is ABANDONED: the
+   * observation is incomplete, it is reported as a failure naming the write and
+   * the duration, and the value never comes back — a late resolution cannot
+   * complete it and a late rejection is consumed inside
+   * `awaitObservationWrite`.
+   *
    * The inner catch exists because a broken observer may break there too; at
    * that point there is no channel left, and a `git blame` must not fail because
    * its trace could not be written.
@@ -238,65 +361,165 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     send: (sink: ToolObservation) => Promise<void>,
   ): Promise<void> {
     if (observation === undefined) return
+    const outcome = await awaitObservationWrite(() => send(observation), observationTimeoutMs)
+    if (outcome.kind === "settled") return
     try {
-      await send(observation)
-    } catch (error) {
-      try {
-        observation.failed({
-          where: "adapter",
-          write,
-          why: error instanceof Error ? error.message : String(error),
-        })
-      } catch {
-        // The last resort failed too. There is no second channel at this layer.
-      }
+      observation.failed({
+        where: "adapter",
+        write,
+        why:
+          outcome.kind === "timed-out"
+            ? observationTimeoutReason(write, outcome.ms)
+            : outcome.error instanceof Error
+              ? outcome.error.message
+              : String(outcome.error),
+      })
+    } catch {
+      // The last resort failed too. There is no second channel at this layer.
     }
   }
 
   /**
-   * Identical to `repo.ts`'s helper, deliberately: `.nothrow()` gives us control
-   * over a non-zero exit, and silence is not control. Read the exit code and say
-   * what happened.
+   * Latch the quarantine, then tell the host. In that order, and the order is
+   * the contract: see `onCleanupUnresolved`.
+   */
+  function quarantine(fact: BlameCleanupUnresolved): void {
+    if (quarantined !== null) return
+    quarantined = fact
+    try {
+      options.onCleanupUnresolved?.(fact)
+    } catch {
+      // A host that failed to record the fact does not get its launches back,
+      // and the blame that produced it stays a failure. There is nothing left
+      // to escalate to at this layer.
+    }
+  }
+
+  /**
+   * Run one git command under a deadline, and say what happened.
    *
    * THE INVOCATION AND THE RETURN ARE TWO FACTS (story 2-7a). The invocation is
    * written BEFORE the call is awaited, so a call that never comes back still
-   * leaves the record that something was launched at; the shell's outcome is
-   * written after, with what the pinned interface actually established about the
-   * launch. Entering this function is neither fact.
+   * leaves the record that something was launched at; the outcome is written
+   * after, with what the launcher actually established. Entering this function
+   * is neither fact.
+   *
+   * A TIMED-OUT OR UNCONFIRMED CALL WRITES NO OUTCOME FACT, deliberately.
+   * `ToolShellOutcome` requires an `exitCode`, and there is no honest number to
+   * put there — so the trace carries the invocation with no outcome, which
+   * `ablation/adversarial-read.ts` already reads as an incomplete call rather
+   * than as a zero.
    */
   async function git(command: string, argv: string[], args: BlameArguments): Promise<string> {
+    if (quarantined !== null) {
+      // NOTHING IS LAUNCHED WHILE QUARANTINED, and the refusal is proved rather
+      // than assumed: `pre-shell` plus `not-attempted` is the one evidence shape
+      // that means "no process was started", which is what actually happened.
+      throw withEvidence(
+        new GitError(
+          command,
+          `refusing to launch: an earlier ${quarantined.operation} could not be confirmed terminated, ` +
+            `so this adapter launches nothing further. ${quarantined.why}`,
+        ),
+        { stage: "pre-shell", launch: "not-attempted" },
+      )
+    }
+
     await observe("invoked", (sink) =>
-      sink.invoked({ tool: "blame", args, argv: ["git", ...argv], at: clock.now() }),
+      sink.invoked({ tool: "blame", args, argv: [...argv], at: clock.now() }),
     )
-    // A REJECTION IS NOT OBSERVED AS AN OUTCOME, because there is none: no exit
-    // code, so no launch evidence, so the reading is `unknown` and the error
-    // carries nothing that would upgrade it.
-    const result = await $`git ${argv}`
-    const stderr = result.stderr.toString()
-    const launch = launchEvidenceFrom(result.exitCode, stderr)
+
+    const outcome = await runBoundedBlame({
+      argv,
+      cwd: options.worktree,
+      deadlineMs: blameTimeoutMs,
+      cleanupMs: cleanupTimeoutMs,
+      ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+    })
+
+    if (outcome.kind === "launch-failed") {
+      // PRE-LAUNCH ONLY. The operating system refused to start the program, so
+      // this is a PROVED non-execution — the one thing the old shell could never
+      // establish. Nothing post-launch may take this branch: see the header.
+      throw withEvidence(new GitError(command, `the command could not be started: ${outcome.why}`), {
+        stage: "shell",
+        launch: "failed",
+      })
+    }
+
+    if (outcome.kind === "observation-failed") {
+      // POST-LAUNCH. A spawn handle came back and then watching the process
+      // failed. A handle is not evidence that git executed, so this is
+      // `unproved` with no exit code — `unknown` in `core/judge/blame.ts` — and
+      // never the proved non-execution above.
+      //
+      // THE QUARANTINE TRIGGER IS UNRESOLVED CLEANUP, NOT THE ERROR'S CLASS. An
+      // observation that failed while the process and its pipes were accounted
+      // for is an ordinary failure; one that leaves them unaccounted for is not.
+      if (outcome.cleanup.kind === "unresolved") {
+        quarantine({ operation: command, why: `${outcome.why}. ${outcome.cleanup.why}`, pid: outcome.pid })
+      }
+      throw withEvidence(new GitError(command, outcome.why), { stage: "shell", launch: "unproved" })
+    }
+
+    if (outcome.kind === "cleanup-unresolved" || outcome.kind === "terminated") {
+      if (outcome.kind === "cleanup-unresolved") {
+        quarantine({ operation: command, why: outcome.why, pid: outcome.pid })
+      }
+      // NO EXIT CODE IN THE EVIDENCE. `unproved` with no number reads as
+      // `unknown` in `core/judge/blame.ts`, which is the honest classification
+      // for a call MAD stopped waiting for — and it stays a failure even if a
+      // racing late exit turns out to be zero.
+      throw withEvidence(new GitError(command, outcome.why), {
+        stage: "shell",
+        launch: "unproved",
+      })
+    }
+
+    // A SIGNALLED EXIT IS NOT A COMPLETED RUN, whatever number came with it.
+    //
+    // A child killed from outside — an operator, an OOM killer, a session
+    // teardown — can be reported with status 0 and a terminating signal, and its
+    // stdout is then whatever it had flushed before it died. A truncated
+    // porcelain prefix parses perfectly well, so accepting this would produce a
+    // citation over lines git never finished blaming. The exit code is preserved
+    // in the evidence because it was really observed; what it does not do is
+    // prove the program completed, so the launch reading stays `unproved`.
+    if (outcome.signal !== null) {
+      throw withEvidence(
+        new GitError(
+          command,
+          `the command was terminated by signal ${outcome.signal} (reported status ${outcome.exitCode}), ` +
+            `so its output is incomplete and nothing here is evidence that git finished`,
+        ),
+        { stage: "shell", exitCode: outcome.exitCode, launch: "unproved" },
+      )
+    }
+
+    const launch = launchEvidenceFrom(outcome.exitCode)
     await observe("shellOutcome", (sink) =>
       sink.shellOutcome({
         tool: "blame",
         args,
-        exitCode: result.exitCode,
+        exitCode: outcome.exitCode,
         launch,
-        stderr: clipStderr(stderr),
+        stderr: clipStderr(outcome.stderr),
         at: clock.now(),
       }),
     )
-    if (result.exitCode !== 0) {
-      throw withEvidence(new GitError(command, stderr), {
+    if (outcome.exitCode !== 0) {
+      throw withEvidence(new GitError(command, outcome.stderr), {
         stage: "shell",
-        exitCode: result.exitCode,
+        exitCode: outcome.exitCode,
         launch,
       })
     }
-    return result.stdout.toString()
+    return outcome.stdout
   }
 
   return {
     async blame(path: string, startLine: number, endLine: number): Promise<string> {
-      // A RANGE CHECK BEFORE THE SHELL, not after. `-L` takes `<start>,<end>`
+      // A RANGE CHECK BEFORE THE LAUNCH, not after. `-L` takes `<start>,<end>`
       // and a non-integer or reversed range is a caller bug, not repository
       // state — git would reject most of them, but `-L 1,1e9` and `-L 0,5` fail
       // with git's own wording, which reads to a user as though their repo were
@@ -308,7 +531,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
         startLine < 1 ||
         endLine < startLine
       if (bad) {
-        // SEPARABLE FROM EVERY LATER FAILURE (story 2-7a). No shell ran, so this
+        // SEPARABLE FROM EVERY LATER FAILURE (story 2-7a). Nothing ran, so this
         // is "request observed, execution did not occur" and never an
         // invocation: the evidence says `pre-shell` and no invocation fact is
         // written, which is what keeps a refused range out of an execution count.
@@ -330,7 +553,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       // width-dependent, and the core has to parse this into a citation.
       return git(
         "git blame",
-        ["blame", "-L", `${startLine},${endLine}`, "--porcelain", "--", path],
+        ["git", "blame", "-L", `${startLine},${endLine}`, "--porcelain", "--", path],
         { path, startLine, endLine },
       )
     },

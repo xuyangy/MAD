@@ -19,8 +19,27 @@
  * `GIT_INDEX_FILE` and the rest can redirect a command into another
  * repository). The commit skips hooks. A base-tree key with a `.git`
  * component at any depth is refused, so the tree can never write git's own
- * files or plant a nested repository. Every git call is killed after
- * `GIT_TIMEOUT_MS`, so a hung call cannot hold the experiment lock.
+ * files or plant a nested repository.
+ *
+ * ## `GIT_TIMEOUT_MS` IS NOT BOUNDED TERMINATION
+ *
+ * It does not make this module safe to leave running, and it must not be quoted
+ * as though it did. What `spawnGit` actually gives:
+ *
+ * - The timer fires and sends a bare `kill()` — SIGTERM, with no escalation,
+ *   which a process may ignore — and termination is never confirmed afterwards.
+ * - The call awaits BOTH PIPES before `exited`, so a descendant that inherited
+ *   the write end keeps that read outstanding. The timer still fires and the
+ *   signal is still sent; what is prevented is `spawnGit` RETURNING at all, so
+ *   it can neither confirm cleanup nor report it, and the caller waits forever.
+ * - It reports `exitCode: 124`, a number git never returned, synthesized from a
+ *   local flag and indistinguishable from a real status.
+ *
+ * So worktree materialization is UNBOUNDED IN ITS FAILURE CASES and the
+ * experiment lock can still be held indefinitely. `adapters/opencode/blame-exec.ts`
+ * is the shape a fix takes; the gap is filed in
+ * `_bmad-output/implementation-artifacts/deferred-work.md` and named as an open
+ * blocker in `ablation/LIVE-RUN.md`. No test covers any of it.
  *
  * ## Containment is not decided here
  *

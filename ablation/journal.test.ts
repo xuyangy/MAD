@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { appendFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -762,5 +762,264 @@ describe("settlements the journal cannot count, failed appends and closing (stor
       expect.objectContaining({ block: 1, phase: "prefix", runId: "p", stage: "discover", slot: "discovery-2", attempt: 2, cause: "budget" }),
     ])
     await journal.close()
+  })
+})
+
+describe("the OPERATIONAL halt and the retained lock (story 2-7c)", () => {
+  test("it latches, stops admission SYNCHRONOUSLY, and is worded apart from unknown spend", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+
+    // SYNCHRONOUS. The next request is refused from the moment the call returns,
+    // which is what lets a runner latch before asking another model rather than
+    // at the end of a run.
+    const bill = journal.bill()
+    expect(bill.halt).toContain("OPERATIONAL HALT")
+    // IT MAKES NO CLAIM ABOUT SPEND. The earlier wording asserted the accounting
+    // was clean, which is a sentence that becomes false the moment an
+    // unknown-usage halt and an unresolved process coexist.
+    expect(bill.halt).toContain("makes no claim about spend")
+    expect(bill.halt).not.toContain("no spend is unaccounted for")
+    expect(bill.halt).toContain("could not be confirmed terminated")
+    expect(bill.operational).toHaveLength(1)
+    expect(bill.stop).toContain("OPERATIONAL HALT")
+    const decision = await journal.adversarialAdmission({ label: "adv-01 attack", runId: () => "run-1" }).admit(discover())
+    expect(decision.ok).toBe(false)
+
+    // AND NOTHING WAS INVENTED ON THE BILL. No request, no usage, no unknown.
+    expect(bill.unknown).toEqual([])
+    expect(bill.uncertain).toEqual([])
+    expect(bill.inFlight).toEqual([])
+
+    // THE HALT MARKER CARRIES THE SAME WORDS, so a reader who finds
+    // `unknown-usage-halt.json` is not told money is missing when it is not.
+    await journal.settled()
+    const marker = JSON.parse(await readFile(join(root, HALT_MARKER_FILE), "utf8")) as { haltReason: string }
+    expect(marker.haltReason).toContain("OPERATIONAL HALT")
+
+    const closed = await journal.close()
+    expect(closed.lockRetained).toBe(true)
+  })
+
+  test("THE LOCK IS KEPT, and a second writer is refused", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    journal.haltOperationally("an append to the trace is unconfirmed")
+
+    const { lockRetained, releaseError } = await journal.close()
+
+    expect(lockRetained).toBe(true)
+    expect(releaseError).toBeNull()
+    expect(existsSync(join(root, LOCK_FILE))).toBe(true)
+    const second = await acquireLock(root, now())
+    expect(second.ok).toBe(false)
+    if (!second.ok) expect(second.reason).toContain("another writer holds")
+  })
+
+  test("AN ORDINARY CLOSE STILL RELEASES — the non-vacuous sibling", async () => {
+    // Without this row the two above would pass on a journal that never released
+    // the lock at all.
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    const { lockRetained, releaseError } = await journal.close()
+
+    expect(lockRetained).toBe(false)
+    expect(releaseError).toBeNull()
+    expect(existsSync(join(root, LOCK_FILE))).toBe(false)
+    expect((await acquireLock(root, now())).ok).toBe(true)
+  })
+
+  test("A HALT WRITE THAT FAILS COSTS NEITHER THE STOP NOR THE LOCK", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    // THE ROOT IS MADE UNWRITABLE AFTER THE JOURNAL IS OPEN, so the marker write
+    // is refused by the filesystem. The durable half is what fails here; the
+    // local half must not depend on it.
+    await chmod(root, 0o500)
+    try {
+      journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+      await journal.settled()
+    } finally {
+      await chmod(root, 0o700)
+    }
+
+    const bill = journal.bill()
+    expect(bill.stop).toContain("OPERATIONAL HALT")
+    expect(bill.haltMarker.file).toBeNull()
+    expect(bill.haltMarker.error).not.toBeNull()
+    const decision = await journal.adversarialAdmission({ label: "adv-01 attack", runId: () => "run-1" }).admit(discover())
+    expect(decision.ok).toBe(false)
+
+    const { lockRetained } = await journal.close()
+    expect(lockRetained).toBe(true)
+  })
+
+  test("A LATE REPORT IS STILL RECORDED, and never discarded by the quarantine", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-1" })
+    const decision = await admission.admit(discover())
+    if (!decision.ok) throw new Error("expected admission")
+    await decision.settle({ kind: "unknown", why: "no usage came back", executionId: "exec-1" })
+
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    journal.reporter().report({ executionId: "exec-1", tokens: usage(11, 3) })
+    await journal.settled()
+
+    // The recovery landed on the record. Nothing about the quarantine throws
+    // usage away, and nothing about it simulates any.
+    expect((await lines(root)).some((line) => line.type === "late")).toBe(true)
+    await journal.close()
+  })
+})
+
+describe("ACCOUNTING UNCERTAINTY AND OPERATIONAL QUARANTINE COEXIST (story 2-7c)", () => {
+  /** Settle a request with unknown usage, which is what latches an accounting halt. */
+  async function unknownSpend(journal: PairedJournal): Promise<void> {
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run-1" }).admit(discover())
+    if (!decision.ok) throw new Error("expected admission")
+    await decision.settle({ kind: "unknown", why: "no usage came back", executionId: "exec-1" })
+  }
+
+  test("MONEY FIRST, THEN CLEANUP: the halt keeps the money reason AND the quarantine is recorded", async () => {
+    // `latch` is first-reason-wins, correctly — overwriting would hide why the
+    // money is uncertain. So the quarantine has to be recorded BESIDE it, or the
+    // ordering silently decides which of two facts the operator gets told.
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    await unknownSpend(journal)
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    await journal.settled()
+
+    const bill = journal.bill()
+    expect(bill.halt).toContain("billed an UNKNOWN amount")
+    expect(bill.halt).not.toContain("OPERATIONAL HALT")
+    // AND THE QUARANTINE SURVIVED ANYWAY.
+    expect(bill.operational).toHaveLength(1)
+    expect(bill.operational[0]).toContain("could not be confirmed terminated")
+    expect(bill.unknown).toHaveLength(1)
+
+    const { lockRetained } = await journal.close()
+    expect(lockRetained).toBe(true)
+  })
+
+  test("CLEANUP FIRST, THEN MONEY: the halt keeps the cleanup reason AND the unknown still bills", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    // Admission is stopped, so the request is journaled directly rather than
+    // through a gate that would now refuse it — the point is the ACCOUNTING, not
+    // a second admission.
+    const bill = journal.bill()
+    expect(bill.halt).toContain("OPERATIONAL HALT")
+    expect(bill.operational).toHaveLength(1)
+
+    const { handle, lockRetained } = await journal.close()
+    expect(lockRetained).toBe(true)
+    // Nothing about the quarantine discards or simulates usage.
+    expect(handle.bill().unknown).toEqual([])
+    expect(handle.bill().operational).toHaveLength(1)
+  })
+
+  test("A SECOND QUARANTINE DOES NOT ERASE THE FIRST, and never renames the halt", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+
+    journal.haltOperationally("a process could not be confirmed terminated")
+    const first = journal.bill().halt
+    journal.haltOperationally("a trace append is unconfirmed")
+
+    // The halt reason is unchanged — no overwrite, no rename.
+    expect(journal.bill().halt).toBe(first)
+    // And both causes are on the record.
+    expect(journal.bill().operational).toHaveLength(2)
+    expect(journal.bill().operational[1]).toContain("trace append")
+    await journal.close()
+  })
+
+  test("AN ORDINARY RUN CARRIES NONE OF THIS — the non-vacuous sibling", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run-1" }).admit(discover())
+    if (decision.ok) await decision.settle({ kind: "usage", tokens: usage(10, 2) })
+
+    expect(journal.bill().operational).toEqual([])
+    expect(journal.bill().halt).toBeNull()
+    const { lockRetained } = await journal.close()
+    expect(lockRetained).toBe(false)
+  })
+})
+
+describe("A RESTART DOES NOT UNDO THE QUARANTINE (story 2-7c)", () => {
+  test("a NEW journal over the same root is refused by the retained lock", async () => {
+    // The durable half. `ablation/tool-trace.ts`'s poison map is process memory
+    // and is gone on a restart; the LOCK and the HALT MARKER are the things on
+    // disk, and this is what a second writer actually meets.
+    const root = await tempDir()
+    const journal = await opened(root)
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    await journal.settled()
+    await journal.close()
+
+    const restart = await acquireLock(root, now())
+    expect(restart.ok).toBe(false)
+    if (!restart.ok) expect(restart.reason).toContain("another writer holds")
+  })
+
+  test("AND EVEN WITH THE LOCK GONE, the halt marker refuses the next journal", async () => {
+    // Belt and braces, because a human recovering by hand removes the lock. The
+    // marker is the second, independent refusal, and nothing auto-clears it.
+    const root = await tempDir()
+    const journal = await opened(root)
+    journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+    await journal.settled()
+    await journal.close()
+    await unlink(join(root, LOCK_FILE))
+
+    const lock = await acquireLock(root, now())
+    expect(lock.ok).toBe(true)
+    if (!lock.ok) return
+    const reopened = await openJournal(root, lock.lock, now)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok) return
+    // Halted on open, so nothing is admitted.
+    expect(reopened.journal.bill().halt).toContain("halt marker")
+    const decision = await reopened.journal
+      .adversarialAdmission({ label: "adv-01 attack", runId: () => "run-2" })
+      .admit(discover())
+    expect(decision.ok).toBe(false)
+    await reopened.journal.close()
+  })
+
+  test("A FAILED HALT WRITE STILL RETAINS THE LOCK, so a restart is still refused", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    await chmod(root, 0o500)
+    try {
+      journal.haltOperationally("a process MAD launched could not be confirmed terminated")
+      await journal.settled()
+    } finally {
+      await chmod(root, 0o700)
+    }
+
+    expect(journal.bill().haltMarker.file).toBeNull()
+    const { lockRetained } = await journal.close()
+    expect(lockRetained).toBe(true)
+    // No marker on disk, so the LOCK is the only thing standing — and it stands.
+    expect(existsSync(join(root, HALT_MARKER_FILE))).toBe(false)
+    expect((await acquireLock(root, now())).ok).toBe(false)
+  })
+
+  test("AN ORDINARY RUN LETS THE NEXT WRITER IN — the non-vacuous sibling", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    await journal.close()
+    const restart = await acquireLock(root, now())
+    expect(restart.ok).toBe(true)
   })
 })

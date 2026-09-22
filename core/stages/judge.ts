@@ -116,6 +116,11 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import {
+  awaitObservationWrite,
+  deadlineProblem,
+  observationTimeoutReason,
+} from "../ports/observation-wait.ts"
 import type {
   ToolCallContext,
   ToolObservation,
@@ -269,6 +274,16 @@ export interface JudgeInput {
    * it, and `factChecksMadExecuted` is untouched by it.
    */
   toolObservation?: ToolObservation
+  /**
+   * Story 2-7c — how long ONE observer write may take before it is abandoned.
+   *
+   * A CONSTRUCTION SEAM, NOT A DIAL. `core/ports/observation-wait.ts` holds the
+   * shipped constant and every caller in the tree takes it; this option exists
+   * so a test can use a deadline it does not have to wait out, and there is no
+   * flag, config key or environment variable behind it. Absent an observer it is
+   * never read, so an ordinary run starts no timer at all.
+   */
+  observationTimeoutMs?: number
 }
 
 export interface JudgeStageResult extends JudgeCounts {
@@ -860,6 +875,17 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   const runId = input.runId ?? "run"
   const warnings: Warning[] = []
 
+  // REFUSED BEFORE THE STAGE DOES ANYTHING. `observationTimeoutMs` is a
+  // construction seam with a shipped default, and every invalid value —
+  // zero, negative, `NaN`, past the timer ceiling — schedules for right now, so a
+  // stage that accepted one would abandon every observation while appearing to
+  // bound them. A caller that passes one has a bug, and a bug at a seam is worth
+  // a throw rather than a run whose trace is silently empty.
+  if (input.observationTimeoutMs !== undefined) {
+    const problem = deadlineProblem("JudgeInput.observationTimeoutMs", input.observationTimeoutMs)
+    if (problem !== null) throw new RangeError(problem)
+  }
+
   // Story 2.3 — the two facts a judge turn carries that are not a verdict.
   // `core/stages/discover.ts` carries the argument for both: the unknowns live
   // on the LEDGER, which is the run's one record of money, and this marks its
@@ -944,9 +970,17 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   /**
    * Write one tool-action fact, or record that it could not be written.
    *
-   * AWAITED BY EVERY CALLER. The request event has to be durable before the
-   * delegation it describes, so that a trace carrying an invocation with no
-   * request in front of it is an integrity failure rather than a race.
+   * AWAITED BY EVERY CALLER, AND BOUNDED (story 2-7c). A SUCCESSFUL request
+   * write is still durable before the delegation it describes, which is what
+   * makes a trace carrying an invocation with no request in front of it an
+   * integrity failure rather than a race.
+   *
+   * WHAT A TIMEOUT CHANGES IS THE FAILED PATH ONLY. Past the deadline the write
+   * is abandoned, the observation is INCOMPLETE — never a durable success — and
+   * the judge continues under the failure semantics that already existed: the
+   * failure is kept here, the stage raises `tool-observation-failed`, and no
+   * verdict, count or citation moves. Before this bound the alternative was not
+   * a stronger guarantee but an unbounded stall, one finding at a time.
    */
   const observe = async (
     write: ToolObservationWrite,
@@ -955,16 +989,19 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   ): Promise<void> => {
     const sink = input.toolObservation
     if (sink === undefined) return
-    try {
-      await send(sink)
-    } catch (error) {
-      keepObservationFailure({
-        where: "core",
-        write,
-        observationId,
-        why: error instanceof Error ? error.message : String(error),
-      })
-    }
+    const outcome = await awaitObservationWrite(() => send(sink), input.observationTimeoutMs)
+    if (outcome.kind === "settled") return
+    keepObservationFailure({
+      where: "core",
+      write,
+      observationId,
+      why:
+        outcome.kind === "timed-out"
+          ? observationTimeoutReason(write, outcome.ms)
+          : outcome.error instanceof Error
+            ? outcome.error.message
+            : String(outcome.error),
+    })
   }
 
   // AD-6b — the MODEL behind a slot id. ONE helper, in `core/domain/roster.ts`,

@@ -2056,16 +2056,33 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
     expect(trace.outcomes[0]).toMatchObject({ kind: "invoked-unknown", exitCode: 128 })
   })
 
-  test("A LAUNCH THE HOST ITSELF REFUSED: execution did not occur", async () => {
-    // The one positive launch-failure signal the pinned host gives. Where it is
-    // present, "unknown" would be needlessly weak.
-    const error = Object.assign(new Error("bun: command not found: git"), {
-      toolFailure: { stage: "shell", exitCode: 1, launch: "failed" },
+  test("A LAUNCH THE OS REFUSED: execution did not occur", async () => {
+    // A PROVED non-execution, and the only kind there is. The launcher sees
+    // `posix_spawn` refuse for itself, so there is no exit code to carry —
+    // nothing ran and nothing returned one. Where the refusal really is
+    // observed, "unknown" would be needlessly weak.
+    const error = Object.assign(new Error("the command could not be started: ENOENT"), {
+      toolFailure: { stage: "shell", launch: "failed" },
     })
     const trace = memory()
     await run([withLocus(12, 14)], { tools: throwing(error), toolObservation: trace.observer })
 
     expect(trace.outcomes[0]).toMatchObject({ kind: "not-executed", refusedAt: "launch" })
+  })
+
+  test("A FAILURE AFTER THE SPAWN IS UNKNOWN, NOT A PROVED NON-EXECUTION", async () => {
+    // A spawn handle came back and then the exit read or the output read failed.
+    // Holding a handle is not evidence that the program ran, so this must not
+    // arrive as the `not-executed` above — that is a measurement, and this is a
+    // blind spot.
+    const error = Object.assign(new Error("the process's exit status could not be read"), {
+      toolFailure: { stage: "shell", launch: "unproved" },
+    })
+    const trace = memory()
+    await run([withLocus(12, 14)], { tools: throwing(error), toolObservation: trace.observer })
+
+    expect(trace.outcomes[0]!.kind).toBe("unknown")
+    expect(trace.outcomes[0]).not.toMatchObject({ kind: "not-executed" })
   })
 
   test("AN OBSERVER THAT REJECTS changes no verdict and is NOT a blame failure", async () => {

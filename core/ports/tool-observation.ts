@@ -79,13 +79,37 @@
  *
  * ## The contract a caller relies on
  *
- * - `request` is recorded BEFORE the core delegates, and is awaited, so a trace
- *   that carries an invocation with no request in front of it is an integrity
- *   failure rather than an ordering accident.
+ * - A SUCCESSFUL `request` write is recorded BEFORE the core delegates, and is
+ *   awaited, so a trace that carries an invocation with no successfully written
+ *   request in front of it is an integrity failure rather than an ordering
+ *   accident.
  * - Every write may reject. A rejection is an OBSERVATION failure: it never
  *   changes a verdict, never becomes a tool failure, and is recorded under its
  *   own name. The judge raises `tool-observation-failed`, which is a separate
  *   warning from `blame-unavailable`.
+ * - EVERY WRITE IS ALSO BOUNDED IN TIME (story 2-7c), and a bound is not a
+ *   silence. A write that has not settled by the caller's deadline is ABANDONED:
+ *   `core/ports/observation-wait.ts` holds the one policy, the shipped bound is
+ *   five seconds, and no dial exposes it. What abandonment means to a caller:
+ *
+ *   - It is INCOMPLETE OBSERVATION AND NEVER A SUCCESSFUL DURABLE WRITE. The
+ *     old guarantee — a request is durable before the delegation it describes —
+ *     still holds for every write that SUCCEEDS, and is the only case it ever
+ *     claimed. An abandoned write makes no claim in either direction: it did not
+ *     fail, it did not succeed, and the physical write behind it MAY STILL BE
+ *     RUNNING.
+ *   - The caller may proceed WITHOUT that durability, and only under the failure
+ *     semantics above: the abandonment is recorded as a `ToolObservationFailure`
+ *     naming the write and the duration, the run's trace is short by at least
+ *     that event, and a reader counts the affected call incomplete rather than
+ *     zero. The verdict, the citation and the execution count are untouched.
+ *   - The value NEVER COMES BACK. A late resolution does not retro-complete the
+ *     observation, a late rejection is consumed rather than left to float, and
+ *     an abandoned write is never attached to a later finding or a later run.
+ *   - An implementation whose own physical I/O is still unconfirmed owes its
+ *     host MORE than a failure record: it must stop accepting writes and say so
+ *     at once, because a file with an unresolved append is not safe for a later
+ *     run to reuse. `ablation/tool-trace.ts` is the implementation that does it.
  * - `failed` is how a layer with no run record — the adapter — reports one of
  *   those. It must not throw.
  * - `takeFailures` returns and CLEARS what `failed` has collected. The judge
@@ -166,11 +190,12 @@ export interface ToolInvocationFact {
  * What the host shell's return establishes about whether the program ran.
  *
  * - `proved` — a zero exit from the pinned real-git path.
- * - `failed` — the host itself reported that it could not find the command, so
- *   nothing ran.
- * - `unproved` — a non-zero exit. The program may have run and failed, or may
- *   never have started; see `adapters/opencode/tools.ts`'s header for what the
- *   pinned interface does and does not establish.
+ * - `failed` — the layer that starts processes reported that it could not start
+ *   this one, so nothing ran. Observed by the launcher itself, never inferred
+ *   from a diagnostic the child could have written.
+ * - `unproved` — no proof either way. A non-zero exit (the program may have run
+ *   and failed, or may never have started), or a call killed on a deadline
+ *   before any exit was read; see `adapters/opencode/tools.ts`'s header.
  * - `not-attempted` — nothing was launched at, because the call was refused
  *   before any shell ran. Never the reading of a `ToolShellOutcome`, which by
  *   construction describes a shell that returned.
@@ -211,9 +236,9 @@ export const STDERR_CLIPPED = " … (clipped)"
  * the core.
  *
  * - `not-executed` — the request was observed and execution did not occur. The
- *   core refused it (`refusedAt: "core"`), the adapter refused the range before
- *   any shell ran (`"pre-shell"`), or the host reported the command missing
- *   (`"launch"`).
+ *   core refused it (`refusedAt: "core"`), the adapter refused before starting
+ *   anything — a bad range, or a quarantined instance (`"pre-shell"`) — or the
+ *   launcher itself could not start the program (`"launch"`).
  * - `executed` — a call that returned output the core could parse. It is one
  *   execution whether or not it produced a usable citation.
  * - `executed-failed` — one execution PLUS a failure. The execution still
@@ -281,9 +306,24 @@ export interface ToolObservation {
  * honest reading for a caller whose evidence is missing, not a defect.
  */
 export interface ToolFailureEvidence {
-  /** Where the call died. `shell` means the host returned a non-zero exit. */
+  /**
+   * Where the call died.
+   *
+   * - `pre-shell` — NOTHING WAS LAUNCHED AT. The adapter refused before starting
+   *   anything: a bad line range, or an instance that has quarantined itself.
+   * - `shell` — the call reached the layer that starts processes, and that layer
+   *   is the source of this evidence. It covers a program that ran and exited,
+   *   a spawn the operating system refused, and a call whose process was killed
+   *   on a deadline. Which of the three it was is carried by `launch` and by the
+   *   presence of `exitCode`, never by this field alone.
+   */
   stage: "pre-shell" | "shell"
-  /** Present only for `shell`, and only as a whole number. */
+  /**
+   * Present only for `shell`, and only as a whole number ACTUALLY OBSERVED from
+   * a process that returned. A call MAD stopped waiting for carries none: there
+   * is no honest number for it, and a synthesized one (a `124`, say) would be
+   * indistinguishable from a status git really gave.
+   */
   exitCode?: number
   launch: LaunchEvidence
 }

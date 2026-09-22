@@ -838,15 +838,198 @@ predicate, so a model that names the repository by its absolute path is not coun
 
 The live execution is a separate task, and it stays open until each of these holds:
 
-- **Host accounting.** How many physical requests the opencode host makes per port call,
-  and whether each is accounted for, is verified on a real host.
-- **Billing authorization.** A person authorizes the Adversarial allowance's spend.
-- **Verified shared gates.** The global and Adversarial gates are verified against a real
-  host before the first paid request.
-- **Bounded tool termination.** A `git blame` that does not return is bounded. (The git
-  calls that write each worktree are already killed after 60 seconds.)
-- **Bounded observer writes.** A trace write that hangs stalls the judge; bounding it is an
-  escalated human decision (2-7a).
+1. **Host accounting — OPEN.** How many physical requests the opencode host makes per port
+   call, and whether each is accounted for, is verified on a real host. Split into a story of
+   its own; it needs a live host and nothing in 2-7c touches it.
+2. **Billing authorization — OPEN.** A named person with authority over the budget must
+   authorize the Adversarial allowance's spend (400,000 ledger tokens, `ablation/governor.ts`)
+   before the first paid request. This is a decision, not an engineering task: no code can
+   satisfy it and no story closes it. **Owner: the human who owns the budget.** It is recorded
+   here because a prerequisite with no owner is one nobody notices is missing.
+3. **Verified shared gates — OPEN.** The global and Adversarial gates are verified against a
+   real host before the first paid request. Split into the same story as (1).
+4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
+   The blame path is addressed; the materializer is not. See below.
+5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
+
+**The live execution is still blocked.** (1), (2) and (3) are open, and (4) is only half
+done: this prerequisite originally named a non-returning `git blame` and assumed
+parenthetically that "the git calls that write each worktree are already killed after 60
+seconds". **That assumption was false.** `ablation/adversarial-materialize.ts`'s `spawnGit`
+sends a bare SIGTERM with no escalation and never confirms termination; and it reports a
+synthesized `exitCode: 124` that a reader cannot tell from a status git returned. Worse, it
+awaits both pipes before `exited`, so a descendant holding a pipe stops `spawnGit` RETURNING
+at all — the timer still fires and the signal is still sent, but the call can neither confirm
+cleanup nor report it, and the caller waits indefinitely while holding the experiment lock.
+No test covers any of it. Story 2-7c deliberately did not touch it — its Boundaries forbid
+refactoring other git callers — so **materializer termination remains unverified and
+unbounded in its failure cases**, and it is named as an outstanding blocker in its own right.
+The file's own header claim has been corrected rather than left to be quoted as evidence.
+
+**This patch does not close every hang.** It closes the two named in (4)'s blame half and in
+(5). `adapters/opencode/repo.ts` reads the change through the host shell with no deadline at
+all, and the materializer is as above.
+
+### The blame path and the observer writes — what closed, and on what evidence
+
+Closed **against passing acceptance evidence, not because the code exists**. What the tests
+actually establish, and what they do not:
+
+**A `git blame` that does not return.** `blame` no longer goes through the host shell. It
+runs through `adapters/opencode/blame-exec.ts`, which spawns the process itself, so MAD holds
+a pid and can send a signal — a `BunShellPromise` carries none of those, which is why
+abandoning the wait was the only thing the old path could do. At 60,000 ms the child is
+killed forcibly with no graceful period (a read-only blame has nothing to flush), and a
+separate 5,000 ms budget is then spent establishing whether it really went.
+`adapters/opencode/tools-observation.test.ts` drives that against real processes and real
+signals, including a child whose descendant holds the pipe open past its own exit — the case
+that makes the deadline unreachable if the pipes are awaited before the exit.
+
+**A trace write that hangs.** Every observer write from both layers goes through
+`core/ports/observation-wait.ts` and is abandoned after 5,000 ms. The judge returns, the run
+raises `tool-observation-failed`, that run's tool coverage is incomplete, and a late
+resolution or a late rejection changes neither.
+
+**Two different deadlines, nested.** They are easy to confuse and they do different jobs:
+
+| Deadline | Who waits | What expiry means |
+|---|---|---|
+| **5,000 ms** — caller bound | the judge and the adapter, on one observer write | this observation is incomplete; the run's trace is short |
+| **4,000 ms** — sink I/O bound | the trace sink, on its own physical append | the append is unconfirmed; poison the file and **notify the runner** |
+
+The sink's is deliberately the shorter of the two, and it starts when the write is *asked
+for* rather than when its turn in the queue comes. That is what puts the runner's admission
+stop before the caller is released, and so before the next model request. The claim is about
+the **shipped wiring** — both sides taking their defaults, which is what the adversarial
+runner builds. A caller that passes its own shorter override can still be released first;
+that override exists for tests and nothing shipped uses one.
+
+**What is NOT promised.**
+
+- **No hard wall-clock bound.** 60,000 ms is nominal execution plus at most 5,000 ms of
+  asynchronous cleanup, measured by timers on an event loop and by an operating system that
+  owes no schedule. What is promised is that MAD stops waiting and says which outcome it got.
+- **A bound stops waiting; termination is confirmed separately.** Where it cannot be
+  confirmed, MAD says *termination is unconfirmed; the process may still be running* — never
+  that it is running and never that it stopped.
+- **A timer is never evidence.** A timed-out blame is always a failure with no citation and
+  no `factChecksMadExecuted` increment, even if a racing late exit turns out to be zero. No
+  exit code is invented and no `124` is synthesized; an exit or signal that really was
+  observed is preserved in the failure text and never in the structured evidence.
+- **The signal reaches the child MAD spawned, not its descendants.** A credential helper or
+  an external diff driver git leaves behind is not signalled. MAD does not claim otherwise:
+  a cleanup is confirmed only when the exit AND both pipes are accounted for, because an open
+  pipe after the child is gone means something that inherited it is still running. That case
+  is reported as **unresolved**, which quarantines — it is never reported as a confirmed kill.
+- **A failure AFTER the spawn is not a proved non-execution.** Holding a spawn handle does not
+  prove the git executable ran. A rejected exit read or an unreadable stdout is therefore
+  classified `unknown`, and only a spawn the operating system refused is read as
+  `not-executed`. A torn or missing stdout is never presented as complete output — a truncated
+  porcelain prefix parses, and would have produced a citation over lines git never finished.
+- **A signalled exit is not a completed run.** A child killed from outside can report status 0
+  with whatever it had flushed. That produces no citation and no successful fact count.
+- **The production review path is NOT thereby "bounded".** `adapters/opencode/repo.ts` still
+  reads the change through the host shell with no deadline, the materializer is unbounded in
+  its failure cases (above), and FR9 is not complete.
+
+### The cleanup-unconfirmed quarantine, and how to recover from it
+
+When a blame's cleanup cannot be confirmed, or a trace append is abandoned with its physical
+effect unconfirmed, the suite quarantines the bundle:
+
+- the adapter instance refuses every further launch;
+- the runner stops admitting **synchronously, at that moment** — not when `review()` returns,
+  because the judge catches a blame failure and may ask a model next;
+- the shared halt is persisted with an operational reason that begins `OPERATIONAL HALT
+  (operational cleanup is unresolved; this reason alone makes no claim about spend — read the
+  bill for that)`, so the halt file's name (`unknown-usage-halt.json`) does not tell the next
+  reader money is missing, and does not tell them it is safe either;
+- every later slot is marked `not-attempted`, incomplete evidence is preserved, and nothing
+  is re-run or replaced;
+- **the experiment lock is NOT released.** It is what stops a second writer appending beside
+  a process or a file operation nobody can account for.
+
+If the halt file itself cannot be written, admission still stops and the lock is still held —
+neither depends on that write.
+
+**What is durable, and what is not — this distinction decides your recovery.**
+
+| Guard | Where it lives | Survives a restart? |
+|---|---|---|
+| The adapter instance's launch refusal | that object's memory | no |
+| The trace file's unresolved-append poison | one module's memory in one process | **no** |
+| The plugin's per-worktree blame latch (ordinary runs) | one module's memory in the host process | **no** |
+| The retained `paired.lock` | the filesystem | **yes** |
+| The halt marker `unknown-usage-halt.json` | the filesystem | **yes** |
+
+So the in-memory guards stop a SECOND RUN IN THE SAME PROCESS, and nothing more. What stops a
+restarted process is the **retained lock** and the **halt marker**, and they are independent:
+the lock refuses the next writer outright, and if a human removes it, the marker still halts
+the journal on open so nothing is admitted. If the halt write itself failed, the lock is still
+held and is then the only guard standing — which is why it is retained regardless.
+
+For an ordinary (non-evaluation) review there is no lock, no journal and no halt marker by
+design. The per-worktree latch is all there is, and it is gone when the host restarts: MAD
+will then launch again, and a process that really did survive is the operator's to find. That
+is an accepted limit, not an oversight — a durable registry of process state is a file MAD
+would have to own and garbage-collect across machines, which is a design decision rather than
+a patch.
+
+**Recovery is manual, and nothing clears the quarantine automatically.** No late success ever
+releases the lock or clears the halt. Check the named process (the reason gives its pid) and
+the state of `adversarial/tool-trace.jsonl` by hand; only then remove `paired.lock`, and only
+then the halt marker. A halt reason beginning `OPERATIONAL HALT` says a cleanup is unresolved
+and **makes no claim about spend** — read the bill for that, and note that an accounting halt
+and an operational quarantine can both be true at once, in either order. Whichever latched
+first is the halt reason; the other is recorded beside it in `operational` on the bill summary
+and, where the marker was written after it, in the marker too.
+
+### What the host/runtime probe established (2026-09-21)
+
+`bun run scripts/probe-host-shell.ts` measures the facts the launcher rests on rather than
+assuming them. It makes no model request, bills nothing, starts no opencode session, installs
+nothing into the user's configuration, and prints no environment VALUE — only key names and
+equality flags, because an environment carries credentials.
+
+Measured on this host:
+
+| Fact | Value |
+|---|---|
+| `@opencode-ai/plugin` pinned in `package.json` | 1.18.18 |
+| installed `opencode --version` | 1.18.31 |
+| Bun running the test suite | 1.3.14 |
+| Bun compiled into the opencode binary | 1.3.14 — **inferred** from a build marker in the binary, not a statement the host made |
+| git both paths resolve | `/usr/local/bin/git`, 2.53.0 |
+
+The two paths **agree** on the resolved git, the version, the working directory, one hostile
+argv element kept whole, a successful blame's exit and byte count, and a real git failure's
+exit 128. They differ in three stated ways:
+
+- **Launch failure.** The shell resolved a missing command to exit 1 with its own
+  `bun: command not found: ` line, which had to be recognised by matching that text — text
+  git could be made to echo. The launcher is refused by `posix_spawn` and reports that
+  directly, so no untrusted output decides an execution count any more.
+- **Standard input.** The launcher does not inherit it (`/dev/null`), so a git that decides
+  to prompt fails fast instead of blocking. Deliberate.
+- **`PWD`.** `posix_spawn` changes the working directory without touching `PWD`, so the
+  launcher sets it to match — otherwise the child is told it is somewhere it is not. With
+  that in place the shell and the launcher pass **identical** environment keys and values.
+
+**What the probe measured, and what it did not.** It compares **Bun's `$` in the probe's own
+process** against a direct spawn. It starts no opencode session and loads no plugin, so the
+`$` an *injected host plugin* receives was never exercised — this is not an empirical probe of
+the injected host. Three kinds of evidence are kept apart and none stands in for another:
+
+- **tagged source** — that `$` is `Bun.$` unwrapped, read from
+  `packages/opencode/src/plugin/index.ts` for v1.18.18 and v1.18.31;
+- **binary build marker** — the embedded Bun version, *inferred* from version strings left in
+  the compiled opencode file, which is not a statement the host made and does not establish
+  that the installed binary matches its tag;
+- **measured runtime cases** — everything in the table and the list above.
+
+Scope: this host, this runtime, this configuration, for the cases listed. **Not** a claim of
+universal equivalence, and it establishes nothing about host request accounting or the
+experiment's shared gates.
 
 ### What the scripted tests do not establish
 
@@ -860,6 +1043,11 @@ The states in *When a run stops and needs a human* above apply unchanged, becaus
 journal and halt marker are the same files. In addition, keep `adversarial-schedule.json`,
 `adversarial-start.json`, `adversarial-slots.jsonl` and `tool-trace.jsonl` as they are. A
 started adversarial schedule is never run again and no case is re-run or replaced.
+
+One state is new (story 2-7c) and needs a different first move: a run that ends holding the
+lock, with a halt reason beginning `OPERATIONAL HALT`. That is the cleanup-unconfirmed
+quarantine above — check the named process and the trace file **before** removing
+`paired.lock`, because the lock is what is stopping a second writer.
 
 ## What would falsify the design
 

@@ -349,15 +349,25 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
   test("the live execution stays open, with its prerequisites named", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("the sixteen live runs have not been executed")
-    for (const prerequisite of [
-      "Host accounting.",
-      "Billing authorization.",
-      "Verified shared gates.",
-      "Bounded tool termination.",
-      "Bounded observer writes.",
-    ]) {
-      expect(text, prerequisite).toContain(prerequisite)
+    // EACH PREREQUISITE WITH ITS STATUS, not just its name. Story 2-7c closed
+    // one and half of another, and a list that only checked the five headings
+    // would read the same whether they were all open or all closed — which is
+    // the one thing a readiness document must not be ambiguous about.
+    for (const [prerequisite, status] of [
+      ["Host accounting", "OPEN"],
+      ["Billing authorization", "OPEN"],
+      ["Verified shared gates", "OPEN"],
+      ["Bounded tool termination", "PARTLY CLOSED"],
+      ["Bounded observer writes", "CLOSED"],
+    ] as const) {
+      expect(text, prerequisite).toContain(`${prerequisite} — ${status}`)
     }
+    // And the honest headline: this patch did not close every hang.
+    expect(text).toContain("The live execution is still blocked")
+    expect(text).toContain("materializer termination remains unverified")
+    expect(text).toContain("This patch does not close every hang")
+    // Billing authorization is a decision with a named owner, not a task.
+    expect(text).toContain("Owner: the human who owns the budget")
   })
 
   test("the preflight checks are listed in the order the runner makes them", async () => {

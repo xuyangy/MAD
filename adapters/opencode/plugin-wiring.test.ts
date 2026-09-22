@@ -628,12 +628,31 @@ describe("mad_review.execute — AD-6 `dial-clamped` actually reaches the caller
 describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)", () => {
   const pluginSource = () => Bun.file(new URL("./plugin.ts", import.meta.url)).text()
 
+  /**
+   * The `opencodeTools({...})` call's own argument literal.
+   *
+   * SLICED RATHER THAN MATCHED AS ONE STRING. The construction site is
+   * multi-line, and an assertion pinned to one exact spelling fails for a
+   * reformat while passing for a deleted field — the opposite of what it is for.
+   * Each field is checked on its own line inside this literal.
+   */
+  const toolsLiteral = (source: string): string => {
+    const at = source.indexOf("opencodeTools({")
+    if (at < 0) return ""
+    const rest = source.slice(at)
+    const end = rest.indexOf("\n          })")
+    return end < 0 ? rest : rest.slice(0, end)
+  }
+
   test("THE PORT IS BUILT, and from the same two inputs `Repo` is built from", async () => {
     const source = await pluginSource()
     // Story 2-7a widened the construction site by one field. The two inputs this
     // test has always been about are still both here and still the same two
     // `Repo` gets; what is new is that the observer rides along with them.
-    expect(source).toContain("opencodeTools({ $, worktree, toolObservation })")
+    const literal = toolsLiteral(source)
+    expect(literal).toMatch(/^\s*\$,\s*$/m)
+    expect(literal).toMatch(/^\s*worktree,\s*$/m)
+    expect(literal).toMatch(/^\s*toolObservation,\s*$/m)
     // Beside `Repo`, not somewhere else: both ports describe the same worktree,
     // and a run whose blame reads a different tree than its diff is nonsense.
     expect(source).toContain("opencodeRepo({ $, worktree })")
@@ -694,7 +713,11 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
   })
 
   test("and that assertion can FAIL too — the negative control for the observer", async () => {
-    const withoutIt = (await pluginSource()).replace(/\n\s*toolObservation,\n/, "\n")
+    // EVERY occurrence, not the first. `toolObservation,` appears on its own line
+    // at BOTH call sites, so a control that deleted only the first would strip
+    // the factory's copy and then assert something about `review()`'s, which is
+    // still there.
+    const withoutIt = (await pluginSource()).replaceAll(/\n\s*toolObservation,\n/g, "\n")
     const call = withoutIt.slice(withoutIt.indexOf("await review({"))
     const literal = call.slice(0, call.indexOf("\n          })"))
     expect(literal).not.toMatch(/^\s*toolObservation,\s*$/m)
@@ -720,7 +743,7 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     expect(source).toContain("const toolObservation: ToolObservation | undefined")
     // Both readers, by the bare name. A second `const toolObservation` anywhere
     // in the file would make the two sites able to refer to different objects.
-    expect(source).toContain("opencodeTools({ $, worktree, toolObservation })")
+    expect(toolsLiteral(source)).toMatch(/^\s*toolObservation,\s*$/m)
     const call = source.slice(source.indexOf("await review({"))
     expect(call.slice(0, call.indexOf("\n          })"))).toMatch(/^\s*toolObservation,\s*$/m)
   })
@@ -730,13 +753,15 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     // declarations still contains every string the assertions above look for,
     // and is exactly the shape that silently splits the trace in half.
     const split = (await pluginSource()).replace(
-      "const tools = opencodeTools({ $, worktree, toolObservation })",
+      "const tools = opencodeTools({",
       "const toolObservation2: ToolObservation | undefined = undefined\n" +
         "          const toolObservation = toolObservation2\n" +
-        "          const tools = opencodeTools({ $, worktree, toolObservation })",
+        "          const tools = opencodeTools({",
     )
 
-    expect(split).toContain("opencodeTools({ $, worktree, toolObservation })")
+    // Every field assertion above still holds on this file, which is the point:
+    // only the DECLARATION COUNT catches a trace quietly split in half.
+    expect(toolsLiteral(split)).toMatch(/^\s*toolObservation,\s*$/m)
     expect(declarations(split)).not.toBe(1)
   })
 })

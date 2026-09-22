@@ -463,6 +463,17 @@ export interface AdversarialBillSummary {
   refused: { label: string; stage: string; cause: string; reason: string }[]
   halt: string | null
   stop: string | null
+  /**
+   * Story 2-7c — every operational quarantine reason, beside `halt` rather than
+   * inside it.
+   *
+   * DURABLE HERE BECAUSE THE HALT MARKER MAY NOT CARRY IT. The marker is written
+   * once, without overwrite, the first time a halt latches — so on a run where an
+   * accounting halt landed first, the marker names the money and this names the
+   * cleanup. The two need different recovery steps and neither may hide the
+   * other. Empty on every ordinary run.
+   */
+  operational: string[]
 }
 
 /** Write the bill summary with `wx`: a runner ends once. Returns why it failed, or `null`. */
