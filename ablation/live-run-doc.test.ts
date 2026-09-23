@@ -53,9 +53,20 @@ import {
   REPORTING_MILESTONE,
 } from "./evaluation-report.ts"
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
-import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE } from "./schedule.ts"
+import { PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
+import { DEFAULT_SERVER } from "../scripts/paired.ts"
+import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
+
+/** The text from `start` up to (not including) `end`, or a clear error naming what is missing. */
+function between(doc: string, start: string, end: string, what: string): string {
+  const from = doc.indexOf(start)
+  if (from < 0) throw new Error(`LIVE-RUN.md carries no ${what}: \`${start}\` was not found`)
+  const to = doc.indexOf(end, from + start.length)
+  if (to < 0) throw new Error(`LIVE-RUN.md's ${what} has no end: \`${end}\` was not found after it`)
+  return doc.slice(from, to)
+}
 
 describe("LIVE-RUN.md names the cross-arm case set that is actually in force", () => {
   test("the cross-arm set version in the document is the seal's", async () => {
@@ -469,10 +480,84 @@ describe("LIVE-RUN.md documents the evaluation report that is actually shipped",
     expect(text).toContain("makes the block execution incomplete")
   })
 
-  test("what story 2-8b still owns is stated, and nothing here closes 2.8", async () => {
+  test("what stories 2-8c and 2-8d still own is stated, and nothing here closes 2.8", async () => {
     const text = await section()
-    expect(text).toContain("What story 2-8b still owns.")
-    expect(text).toContain("real-host request-accounting check")
+    expect(text).toContain("What stories 2-8c and 2-8d still own.")
+    expect(text).not.toContain("What story 2-8b still owns.")
+    expect(text).toContain("Story 2-8c owns the real-host request-accounting check")
+    expect(text).toContain("Story 2-8d owns the three blocks over a real change")
     expect(text).toContain("it closes neither story 2.8, FR11 nor the epic")
+  })
+})
+
+/**
+ * Story 2-8b — the launcher's procedure, tied to the gate table and the command.
+ * The numbered gate list is the operator's readiness picture, so it is pinned
+ * against `PAIRED_GATES` entry for entry: a gate closed in the table and still
+ * OPEN here, or one added to the table and missing here, fails.
+ */
+describe("LIVE-RUN.md documents the paired launcher that is actually shipped", () => {
+  const section = async (): Promise<string> =>
+    between(await liveRunDoc(), "## The paired launcher (story 2-8b)", "\n## ", "the paired launcher section")
+
+  test("the numbered gate list mirrors PAIRED_GATES: number, name, status, kind, phase and owner", async () => {
+    const text = await section()
+    const items = [...text.matchAll(/^(\d+)\. \*\*(.+?) — (OPEN|CLOSED)\.\*\*([\s\S]*?)(?=^\d+\. |^\*\*THE NUMBERED)/gm)]
+    expect(items.map((item) => [Number(item[1]), item[2], item[3]])).toEqual(
+      PAIRED_GATES.map((gate) => [gate.number, gate.name, gate.status]),
+    )
+    for (const [index, item] of items.entries()) {
+      const gate = PAIRED_GATES[index]!
+      const body = item[4]!.replace(/\s+/g, " ")
+      expect(body.toLowerCase(), gate.name).toContain(`${gate.kind}, required for ${gate.phase}`)
+      expect(body, gate.name).toContain(`Owner: ${gate.owner}.`)
+      expect(body, `${gate.name} requires`).toContain(`Requires: ${gate.requires.replace(/\s+/g, " ")}.`)
+      if (gate.status === "CLOSED") expect(body, `${gate.name} evidence`).toContain(`Evidence: ${gate.evidence!.replace(/\s+/g, " ")}.`)
+      else expect(body, `${gate.name} carries no evidence`).not.toContain("Evidence:")
+    }
+    expect(text).toContain("**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**")
+  })
+
+  test("the command, its stages and its refusals are documented", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain("bun run paired --live")
+    for (const stage of ["Stage 1 — offline checks.", "Stage 2 — client and roster.", "Stage 3 — the recheck**, immediately before the schedule: the worktree identity, the `--out` containment and the bundle root", "Stage 4 — `createSchedule`, then `runPairedBlocks`"]) {
+      expect(text, stage).toContain(stage)
+    }
+    expect(text).toContain("`not evaluated: <prerequisite>`")
+    expect(text).toContain("**`--target`**, as a second authority on what is reviewed")
+    expect(text).toContain("Authority lives only in the repository.")
+    expect(text).toContain("A change made after the stage-3 recheck, during the paid run, is not detected.")
+    expect(text).toContain(SCHEDULE_FILE)
+    expect(text).toContain(START_MARKER_FILE)
+  })
+
+  test("the \"Checked, and not a gate\" paragraph is PAIRED_NON_GATES", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(PAIRED_NON_GATES.length).toBeGreaterThan(0)
+    for (const entry of PAIRED_NON_GATES) {
+      const paragraph = between(text, `**Checked, and not a gate: ${entry.name}.**`, " ### ", `the non-gate paragraph for ${entry.name}`)
+      expect(paragraph).toContain(`Evidence: ${entry.evidence.replace(/\s+/g, " ")}.`)
+      expect(paragraph).toContain(`It becomes a gate when ${entry.reopensWhen.replace(/\s+/g, " ")}.`)
+    }
+  })
+
+  test("the opening summary names gates 1, 2 and 4 as the refusal, and gate 3 as not consulted", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain("gates 1, 2 and 4 below are OPEN and are required for the evaluation")
+    expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
+    const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN").map((gate) => gate.number)
+    expect(required).toEqual([1, 2, 4])
+  })
+
+  test("--server and its default are documented", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain(`\`--server <url>\` names the opencode server; its default is \`${DEFAULT_SERVER}\``)
+  })
+
+  test("the runner section points at the command", async () => {
+    const runner = between(await liveRunDoc(), "## The paired block runner (story 2-5c)", "### Reading a paired bundle", "the paired runner section")
+    expect(runner).toContain("`bun run paired`")
+    expect(runner).not.toContain("a library, not a command")
   })
 })

@@ -282,10 +282,12 @@ Scoring calls no model and bills nothing.
   above are over the hand-built cases for this change. They say nothing about another
   change, and nothing exact about how the aligner treated the findings this run raised.
 
-## The paired block runner (story 2-5c): a library, not a command
+## The paired block runner (story 2-5c)
 
-`ablation/paired.ts` runs the protocol's three paired blocks. It has no CLI flag, and
-`scripts/ablation.ts` does not call it. Nothing in this section authorizes billing.
+`ablation/paired.ts` runs the protocol's three paired blocks. `scripts/ablation.ts` does not
+call it. Its one caller is `bun run paired` (see *The paired launcher (story 2-8b)* below),
+which refuses while any paired gate the evaluation requires is OPEN. Nothing in this section
+authorizes billing.
 
 Two calls, kept apart on purpose:
 
@@ -731,18 +733,20 @@ belongs to `paired-journal.jsonl`, and this report neither reads nor re-derives 
 blocks into a total. A failed prefix has no arm manifests, so its spend stays a gap here and the report
 points at `paired-journal.jsonl`. A missing arm manifest is also a gap with its reason, never a zero.
 
-**What story 2-8b still owns.** The three blocks over a real change, the retained outcomes, the
-manifest-linked report and its confounds and limits, and the real-host request-accounting check that
-must pass before anything bills. Nothing in this report is live evidence, and it closes neither story
-2.8, FR11 nor the epic.
+**What stories 2-8c and 2-8d still own.** Story 2-8c owns the real-host request-accounting check and
+the shared gates verified on a real host (paired gates 1 and 2 below), billing only a bounded probe
+whose spend the budget owner has authorized. Story 2-8d owns the three blocks over a real change, the
+retained outcomes, the manifest-linked report and its confounds and limits; it is gated on the
+launcher, on 2-8c and on its own budget authorization. Nothing in this report is live evidence, and it
+closes neither story 2.8, FR11 nor the epic.
 
 ### What the fake-backed tests do not establish
 
 - **The runner's semantics, and nothing about a host.** Every test drives port calls on
   fakes. They do not show how many physical requests a real host makes per port call.
   The port forbids backend retries, but whether the opencode host honours that, and whether
-  each host subcall is accounted for, is unverified. Story 2.8 owns that check, and it must
-  pass before anything bills.
+  each host subcall is accounted for, is unverified. Story 2-8c owns that check (paired gate 1),
+  and it must pass before anything bills.
 - **A residual confound between the two arms of a block.** Each branch is a new run with
   its own run id, and the judge's anonymizer seeds its order from the run id and the finding
   id (`core/run/review.ts`, the `runId` passed to `judge`). So the two arms can show the judge
@@ -789,6 +793,144 @@ In every case, keep `paired-journal.jsonl`, `paired-schedule.json`, `paired-star
 and `paired-slots.jsonl` as they are. They are the evidence of what was scheduled, admitted
 and billed. A started schedule is never executed again, so a new evaluation starts from a
 new bundle root.
+
+## The paired launcher (story 2-8b)
+
+```
+bun run paired --live \
+  --pin anthropic/claude-sonnet-4-5 \
+  --directory /scratch/mad-labelled-change \
+  --out /scratch/mad-paired-2026-09-23
+```
+
+`--server <url>` names the opencode server; its default is `http://localhost:4096`, and anything but
+an `http:` or `https:` URL is refused.
+
+`scripts/paired.ts` runs the three paired blocks over the sealed labelled change, behind a
+preflight. **With the shipped gate table it always refuses:** gates 1, 2 and 4 below are OPEN and
+are required for the evaluation, so the command prints every check and exits 1 before any client,
+schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
+evaluation. Nothing in this section authorizes billing, and the command's existence is not
+authorization.
+
+### The paired gates
+
+`ablation/paired-gates.ts` holds `PAIRED_GATES`: each gate's number, name, kind (`engineering` or
+`authorization`), the phase it is required for (`accounting-probe` or `evaluation`), its owner, its
+status and, when CLOSED, its evidence. **Authority lives only in the repository.** No flag,
+environment variable or file read at run time can close a gate; a gate closes by a reviewed change to
+that file. The launcher checks the `evaluation` phase only, so a gate required for story 2-8c's probe
+alone never lets the three blocks run. A table with an unknown kind, phase or status, a CLOSED gate
+with no evidence, an OPEN gate carrying evidence, a repeated number, or no authorization gate for the
+evaluation is refused.
+
+1. **host request accounting — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: how many physical requests the opencode host makes per port call, and whether each is accounted for, verified on a real host.
+2. **shared gates verified on a real host — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request.
+3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it.
+4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend. No story closes it.
+5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
+6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
+
+**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
+`PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
+suite's and not this list.
+
+**Checked, and not a gate: bounded review-path reads (`adapters/opencode/repo.ts`).** It reads the change through the host shell with no deadline (adversarial prerequisite 7). Evidence: a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for `repo.change(`) in scripts/paired.ts, ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and `runPairedBlocks`. It becomes a gate when the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`.
+
+### The preflight, in one fixed sequence
+
+Each stage gates the next, and a failure at any stage exits 1 with no schedule and no bill:
+
+- **Stage 1 — offline checks.** Flags, containment, the bundle root, the frozen protocol, the gate
+  table, the Tools wiring and the first worktree-identity comparison. Every independent check runs and
+  every failure prints together; a check that throws (a permission error, say) is a failed check, and
+  the others still print. A check whose prerequisite is missing or invalid prints
+  `not evaluated: <prerequisite>` instead of running — for a rejected flag, with the reason, such as
+  `not evaluated: --directory (rejected: not absolute)`. No opencode client and no network call exist
+  until all of them pass.
+- **Stage 2 — client and roster.** The client is created and the shipped default roster (three
+  discovery slots, no lenses) resolved with `--pin` as its pin. A pin that fills no slot, a roster short
+  of three slots, or a `roster-pin-unhonoured` or `roster-underfilled` warning refuses. No model session,
+  no billable request.
+- **Stage 3 — the recheck**, immediately before the schedule: the worktree identity, the `--out`
+  containment and the bundle root, all checked again.
+- **Stage 4 — `createSchedule`, then `runPairedBlocks`**, both handed `SEEDED_CHANGE` and
+  `LABELLED_CHANGE_SEAL`, with `provenance: live`.
+
+No model request, coin toss, start marker, or write under `--out` or into `--directory` happens before
+stage 3 passes. The one thing the preflight creates is a private scratch directory holding a reference
+copy, removed on success, on refusal, on a thrown error and on SIGINT or SIGTERM.
+
+### What it refuses, before anything bills
+
+- a missing `--live`, `--pin`, `--directory` or `--out`, a relative `--directory` or `--out`, a flag
+  given twice, `--live=<value>`, a bad `--server`, any flag it does not know, and any positional or
+  single-dash argument;
+- **`--target`**, as a second authority on what is reviewed: the launcher reviews the sealed change
+  and never reads a ref range;
+- a `--directory` that is this repository, is inside it, or contains it; an `--out` inside this
+  repository or inside `--directory`;
+- a bundle root that already holds `paired-schedule.json` or `paired-start.json`: a schedule is never
+  re-tossed and a started one never run again, so start from a new bundle root. The refusal names the
+  file and leaves it untouched;
+- any evaluation gate that is OPEN, or a table that is not well formed;
+- a Tools port that is not the production one;
+- a roster that does not hold the pinned model or is short of its slots;
+- a worktree that is not exactly the sealed labelled change.
+
+Every refusal says what was refused, why, and the next step.
+
+### What "exactly the sealed labelled change" means
+
+A reference copy is written into the scratch directory by `writeLabelledTree`, the same code
+`bun run materialize-change` uses, with the diff applied from a file outside the reference. The handed
+`--directory` must then match it:
+
+- **outside `.git`:** the same set of paths, each a regular file with one hard link or a directory (a
+  symlink, FIFO, socket or device is refused outright), the same sizes, byte-equal contents and the
+  same executable bits, compared on disk rather than through the repository's `core.fileMode`. The walk
+  stops once it has seen more entries than the sealed tree holds, and a file larger than its sealed
+  counterpart is refused without being read. That bounds how much is walked and read; it does not bound
+  a slow filesystem;
+- **inside `.git`,** where a model can read it or where it changes git's answers: the local config
+  (`git config --local --list`, with the root path normalized), the files under `.git/info/`, and no
+  hook that is not a git `*.sample`;
+- **through git:** an equal `HEAD^{tree}`, equal `git status --porcelain=v1 --untracked-files=all`
+  output, exactly one commit reachable from any ref, and that commit's author name and email, committer
+  name and email and message. Commit dates are not compared: every materialization is made at a
+  different time.
+
+Each difference is named: the path, the config line, the hook, or the commit field; a commit-history
+mismatch names the observed count.
+
+Every git call in the reference build and the comparison runs through the bounded launcher
+(`adapters/opencode/blame-exec.ts`) with fixed deadlines of 60,000 ms and a 5,000 ms cleanup budget,
+which are constants and not flags. It runs with every `GIT_*` environment variable removed, with no
+standard input, and with `core.fsmonitor=false` and a hooks path that cannot exist, so neither the
+operator's shell nor the handed repository's own config can point it elsewhere or run code. A call
+that times out refuses the run and says whether termination was confirmed, naming the process id when
+it was not.
+
+**The worktree cannot be made immutable here.** A change made after the stage-3 recheck, during the
+paid run, is not detected. Story 2-8d must carry that limit into its report.
+
+### The Tools port
+
+The launcher asks its Tools factory for a port and checks what the factory reports: the adapter must be
+`opencodeTools` and both blame deadlines the shipped defaults (60,000 ms and 5,000 ms). The shipped
+factory builds `opencodeTools` with no deadline override. `config.tools` records the same three facts,
+so the sealed schedule names them. When `opencodeTools` reports that a blame's cleanup is unconfirmed,
+the launcher aborts the run through the runner's signal and prints the process id to check by hand.
+
+### When it runs
+
+The command prints each slot's terminal status, the journal's halt and stop, and the late-usage
+`flush()`, then points at `bun run eval-read --bundle <out>`. It exits 0 only when the runner's result
+reads `complete: true`, and 1 otherwise; an incomplete run keeps all of its evidence. SIGINT or SIGTERM
+during the run aborts it through the same signal. If stage 4 throws, the command prints `INCOMPLETE`
+with the error, any process whose cleanup is unconfirmed, and — when the start marker exists — the
+`bun run eval-read --bundle` pointer, and exits 1. The run path behind the checks is tested only with
+injected CLOSED gates and scripted backends (`scripts/paired.test.ts`); no test sends a model request.
 
 ## The adversarial suite (story 2-7b): a library, not a command
 

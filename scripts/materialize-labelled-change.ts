@@ -195,6 +195,102 @@ export interface MaterializeOverrides {
   baseTree?: Record<string, string>
 }
 
+export interface WriteLabelledTreeInput {
+  /** The destination. Created when absent; the caller has already checked it. */
+  root: string
+  git: RunGit
+  /** The base tree to write. Defaults to the fixture's own. */
+  baseTree?: Record<string, string>
+  /**
+   * A file holding `SEEDED_CHANGE.diff`, applied from there instead of from
+   * standard input. It must lie OUTSIDE `root`, so the patch never appears among
+   * the tree's paths or in its status. A caller whose `git` gives the child no
+   * standard input (`adapters/opencode/blame-exec.ts`) needs this. A file inside
+   * `root` is refused before anything is written.
+   */
+  diffFile?: string
+}
+
+export type TreeWritten = { ok: true } | { ok: false; step: string; detail: string }
+
+/**
+ * The tree-writing core: `BASE_TREE` committed once, then `SEEDED_CHANGE.diff`
+ * applied and left uncommitted. It refuses nothing about the destination — `main`
+ * does that — and it lets a throw from `git` propagate, so a caller whose runner
+ * throws on a non-returned process keeps that outcome as its own.
+ *
+ * `scripts/paired.ts` builds its reference copy with this same function, so the
+ * launcher's statement of what the sealed tree looks like on disk is this
+ * script's statement and not a second one.
+ */
+export async function writeLabelledTree(input: WriteLabelledTreeInput): Promise<TreeWritten> {
+  const { root, git } = input
+  const baseTree = input.baseTree ?? BASE_TREE
+  if (input.diffFile !== undefined) {
+    const file = resolve(input.diffFile)
+    const tree = resolve(root)
+    if (file === tree || file.startsWith(tree.endsWith(sep) ? tree : tree + sep)) {
+      return {
+        ok: false,
+        step: "diff file",
+        detail: `the diff file \`${file}\` lies inside \`${tree}\`, where it would become one of the tree's paths; nothing was written`,
+      }
+    }
+  }
+  await mkdir(root, { recursive: true })
+
+  for (const [path, contents] of Object.entries(baseTree)) {
+    const file = join(root, path)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, contents, "utf8")
+  }
+
+  const steps: { label: string; args: string[]; stdin?: string }[] = [
+    { label: "git init", args: ["init", "--quiet", "--initial-branch=base"] },
+    // THE OPERATOR'S GLOBAL GITIGNORE MUST NOT REACH THIS TREE (review finding
+    // P14, 2026-09-11). `core.excludesFile` / `~/.gitignore` is inherited by
+    // every repository on the machine, and BOTH halves of this fixture run
+    // through it: `git add --all` below builds the base commit, and the live
+    // run's own `git ls-files --others --exclude-standard`
+    // (`adapters/opencode/repo.ts`) is what finds `refund.ts` and
+    // `refund-notice.ts` as untracked files. An operator who ignores `*-notice.*`
+    // or a `billing/` build directory would have silently reviewed a PARTIAL
+    // change — a smaller diff, fewer of the thirteen loci present, and a recall
+    // number measured against defects that were never shown to the model.
+    //
+    // The setting is written into the MATERIALIZED repository's own config, not
+    // passed per command, precisely because the command that matters is run later
+    // by someone else. The path names a file inside `.git` that this script never
+    // creates: git ignores a missing excludes file, and a path that does not
+    // exist is the portable spelling of "no excludes" (`/dev/null` is not one on
+    // every host).
+    {
+      label: "git config core.excludesFile",
+      args: ["config", "core.excludesFile", join(root, ".git", "no-global-excludes")],
+    },
+    { label: "git add", args: ["add", "--all"] },
+    {
+      label: "git commit",
+      args: [...GIT_IDENTITY, "commit", "--quiet", "--message", "base tree, before the change"],
+    },
+    // `--whitespace=nowarn` because the fixture's diff writes empty context lines
+    // EMPTY where git writes them as a single space, and a warning on stderr for
+    // every one of them would bury a real failure. The patch still has to apply
+    // cleanly; nothing about what it does is relaxed.
+    input.diffFile === undefined
+      ? { label: "git apply", args: ["apply", "--whitespace=nowarn", "-"], stdin: SEEDED_CHANGE.diff }
+      : { label: "git apply", args: ["apply", "--whitespace=nowarn", input.diffFile] },
+  ]
+
+  for (const step of steps) {
+    const result = await git(root, step.args, step.stdin)
+    if (result.exitCode !== 0) {
+      return { ok: false, step: step.label, detail: result.stderr.trim() || result.stdout.trim() || "git reported no detail" }
+    }
+  }
+  return { ok: true }
+}
+
 /**
  * The shared containment check's words, with a `--out` line in front of them
  * (review finding P12, 2026-09-11).
@@ -339,62 +435,17 @@ export async function main(
     )
   }
 
-  await mkdir(root, { recursive: true })
-
-  for (const [path, contents] of Object.entries(baseTree)) {
-    const file = join(root, path)
-    await mkdir(dirname(file), { recursive: true })
-    await writeFile(file, contents, "utf8")
-  }
-
-  const steps: { label: string; args: string[]; stdin?: string }[] = [
-    { label: "git init", args: ["init", "--quiet", "--initial-branch=base"] },
-    // THE OPERATOR'S GLOBAL GITIGNORE MUST NOT REACH THIS TREE (review finding
-    // P14, 2026-09-11). `core.excludesFile` / `~/.gitignore` is inherited by
-    // every repository on the machine, and BOTH halves of this fixture run
-    // through it: `git add --all` below builds the base commit, and the live
-    // run's own `git ls-files --others --exclude-standard`
-    // (`adapters/opencode/repo.ts`) is what finds `refund.ts` and
-    // `refund-notice.ts` as untracked files. An operator who ignores `*-notice.*`
-    // or a `billing/` build directory would have silently reviewed a PARTIAL
-    // change — a smaller diff, fewer of the thirteen loci present, and a recall
-    // number measured against defects that were never shown to the model.
-    //
-    // The setting is written into the MATERIALIZED repository's own config, not
-    // passed per command, precisely because the command that matters is run later
-    // by someone else. The path names a file inside `.git` that this script never
-    // creates: git ignores a missing excludes file, and a path that does not
-    // exist is the portable spelling of "no excludes" (`/dev/null` is not one on
-    // every host).
-    {
-      label: "git config core.excludesFile",
-      args: ["config", "core.excludesFile", join(root, ".git", "no-global-excludes")],
-    },
-    { label: "git add", args: ["add", "--all"] },
-    {
-      label: "git commit",
-      args: [...GIT_IDENTITY, "commit", "--quiet", "--message", "base tree, before the change"],
-    },
-    // `--whitespace=nowarn` because the fixture's diff writes empty context lines
-    // EMPTY where git writes them as a single space, and a warning on stderr for
-    // every one of them would bury a real failure. The patch still has to apply
-    // cleanly; nothing about what it does is relaxed.
-    { label: "git apply", args: ["apply", "--whitespace=nowarn", "-"], stdin: SEEDED_CHANGE.diff },
-  ]
-
-  for (const step of steps) {
-    const result = await git(root, step.args, step.stdin)
-    if (result.exitCode !== 0) {
-      console.log(
-        `materialize-labelled-change — \`${step.label}\` failed in \`${root}\` and the tree is INCOMPLETE.\n` +
-          "\n" +
-          `  ${result.stderr.trim() || result.stdout.trim() || "git reported no detail"}\n` +
-          "\n" +
-          "Delete the directory before trying again. A partly applied patch is not the change\n" +
-          "under review, and a run over it would measure something nobody labelled.",
-      )
-      return 1
-    }
+  const written = await writeLabelledTree({ root, git, baseTree })
+  if (!written.ok) {
+    console.log(
+      `materialize-labelled-change — \`${written.step}\` failed in \`${root}\` and the tree is INCOMPLETE.\n` +
+        "\n" +
+        `  ${written.detail}\n` +
+        "\n" +
+        "Delete the directory before trying again. A partly applied patch is not the change\n" +
+        "under review, and a run over it would measure something nobody labelled.",
+    )
+    return 1
   }
 
   console.log(

@@ -18,7 +18,8 @@
     "cross-arm-rates": "bun run scripts/cross-arm-rates.ts",
     "ablation": "bun run scripts/ablation.ts",
     "materialize-change": "bun run scripts/materialize-labelled-change.ts",
-    "eval-read": "bun run scripts/eval-read.ts"
+    "eval-read": "bun run scripts/eval-read.ts",
+    "paired": "bun run scripts/paired.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.18",

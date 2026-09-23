@@ -33,7 +33,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-import { main as materializeMain, parseGitVersion } from "./materialize-labelled-change.ts"
+import { main as materializeMain, parseGitVersion, writeLabelledTree } from "./materialize-labelled-change.ts"
 import { BASE_TREE, SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
 import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
 
@@ -580,5 +580,27 @@ describe("a failing git step stops rather than leaving a half-built tree", () =>
     expect(text).toContain("`git apply` failed")
     expect(text).toContain("the tree is INCOMPLETE")
     expect(text).toContain("patch does not apply")
+  })
+})
+
+describe("writeLabelledTree's own precondition (story 2-8b)", () => {
+  test("a diff file inside the destination is refused before anything is written or run", async () => {
+    const root = await freshOut()
+    const calls: string[][] = []
+    const written = await writeLabelledTree({
+      root,
+      diffFile: join(root, "change.diff"),
+      git: async (_cwd, args) => {
+        calls.push([...args])
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+    expect(written.ok).toBe(false)
+    if (!written.ok) {
+      expect(written.step).toBe("diff file")
+      expect(written.detail).toContain("lies inside")
+    }
+    expect(calls).toEqual([])
+    expect(await stat(root).catch(() => undefined)).toBeUndefined()
   })
 })
