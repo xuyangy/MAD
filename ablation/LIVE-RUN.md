@@ -671,8 +671,8 @@ report's counts.
 results into the frozen protocol's reporting contract (`evaluation-protocol.md` v1 §3, §4 and §6).
 Each of those readers runs once. If the labelled or adjudication reader throws, its error reaches this
 report as an unavailable reason: its own quantities are unavailable, and coverage, cost and treatment
-still print. It bills nothing, prints and gates nothing, and always exits 0. A bundle with no sealed
-schedule gets no evaluation report.
+still print. It bills nothing and gates nothing; it only prints, and always exits 0. A bundle with
+no sealed schedule gets no evaluation report.
 
 **Provenance comes first.** A schedule sealed with `provenance: scripted` opens the report with a
 **SYNTHETIC** banner, before any number. That evidence supports one milestone only:
@@ -717,8 +717,10 @@ schedule gets no evaluation report.
 - An arm that threw, was cancelled or did not finish makes the block execution incomplete: its spend
   still prints, marked `INCOMPLETE`, and no contrast is taken against it.
 - One block whose composition fails is unavailable with the message, and the other blocks still
-  read. When the report cannot be composed at all, for example because the paired reader threw, it
-  prints `MAD EVALUATION REPORT — NOT COMPOSED` and the reason.
+  read. When `readEvaluationReport` is handed a paired result it cannot compose from (the paired
+  reader threw, or refused the bundle), it prints `MAD EVALUATION REPORT — NOT COMPOSED` and the
+  reason. `eval-read` hands it only a paired result that read, so through `eval-read` this line
+  does not print.
 
 Availability prints as `n/3` separately for each quantity: `precision difference`,
 `planted-defect matcher recall change`, `lost true candidates`, `cost contrast` and

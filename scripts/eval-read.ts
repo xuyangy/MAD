@@ -159,7 +159,7 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
         if (labelled.kind === "threw") console.log(`MAD labelled reader — ${labelled.message}`)
         else if (labelled.value.kind !== "not-applicable") console.log(renderLabelledBundle(labelled.value))
       } catch (error) {
-        console.log(`MAD labelled reader — ${error instanceof Error ? error.message : String(error)}`)
+        console.log(`MAD labelled report could not be rendered — ${error instanceof Error ? error.message : String(error)}`)
       }
       // The adjudication reader makes the same promise, settled on its own so
       // that a labelled reader that broke it does not take this report with it.
@@ -168,7 +168,7 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
         if (adjudication.kind === "threw") console.log(`MAD adjudication reader — ${adjudication.message}`)
         else if (adjudication.value.kind !== "not-applicable") console.log(renderAdjudicationBundle(adjudication.value))
       } catch (error) {
-        console.log(`MAD adjudication reader — ${error instanceof Error ? error.message : String(error)}`)
+        console.log(`MAD adjudication report could not be rendered — ${error instanceof Error ? error.message : String(error)}`)
       }
       // The evaluation report reads no file. It composes the three results
       // above, a reader's error included, in its own `try`.

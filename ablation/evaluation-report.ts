@@ -209,6 +209,8 @@ export type ArmCost =
       attributed: Slice
       executedHere: Slice
       inherited: Slice
+      /** The inherited tokens by kind, so one shared execution is compared field by field and not by its sum. */
+      inheritedKinds: string
       /** Whether the continuation's own usage is complete. */
       continuation: "exact" | "lower-bound"
       /** Why it is only a lower bound. */
@@ -352,11 +354,13 @@ function compose(
 
     const prefixRunId = block === undefined ? null : prefixOf(block)
     let duplicate: string | null = null
+    // Only a measured block supplies its prefix's one pair. A withheld block is
+    // still checked against the prefixes already supplied, but supplies none.
     if (prefixRunId !== null) {
       const earlier = prefixSeen.get(prefixRunId)
       if (earlier !== undefined) {
         duplicate = `it continues prefix \`${prefixRunId}\`, which block ${earlier} already supplied; ${ONE_PREFIX_ONE_PAIR}`
-      } else {
+      } else if (block?.result.kind === "measured") {
         prefixSeen.set(prefixRunId, number)
       }
     }
@@ -449,7 +453,7 @@ function composeBlock(input: BlockInput): EvaluationBlock {
     if (precision.kind === "read") precision = { ...precision, difference: { kind: "unavailable", reason: duplicate } }
     recall = { ...recall, change: { kind: "unavailable", reason: duplicate }, lost: { kind: "unavailable", reasons: [duplicate] } }
     const arms = cost.kind === "read" ? [cost.on, cost.off] : cost.arms
-    cost = { kind: "unavailable", reasons: [duplicate], arms }
+    cost = { kind: "unavailable", reasons: [duplicate, ...(cost.kind === "unavailable" ? cost.reasons : [])], arms }
     treatment = { ...treatment, opportunity: { kind: "unknown", why: duplicate } }
   }
   return { block: number, prefixRunId, precision, recall, cost, treatment }
@@ -838,6 +842,7 @@ export function armCost(arm: PairedArm): ArmCost {
     attributed,
     executedHere,
     inherited,
+    inheritedKinds: kindsOf((origin.inherited as { tokens: Record<string, unknown> }).tokens),
     continuation,
     why,
     prefixRunId: arm.experiment.prefixRunId,
@@ -846,11 +851,17 @@ export function armCost(arm: PairedArm): ArmCost {
   }
 }
 
+const TOKEN_KINDS = ["input", "output", "reasoning", "cacheRead", "cacheWrite"]
+
+/** A slice's tokens by kind, as text. Only called on a slice `sliceOf` accepted. */
+function kindsOf(tokens: Record<string, unknown>): string {
+  return TOKEN_KINDS.map((field) => `${field} ${String(tokens[field])}`).join(", ")
+}
+
 function sliceOf(raw: unknown): Slice | null {
   if (!isRecord(raw) || !isRecord(raw.tokens) || !isCount(raw.turns) || !isCount(raw.unknown)) return null
-  const fields = ["input", "output", "reasoning", "cacheRead", "cacheWrite"]
   let tokens = 0
-  for (const field of fields) {
+  for (const field of TOKEN_KINDS) {
     const value = raw.tokens[field]
     if (!isCount(value)) return null
     tokens += value
@@ -858,9 +869,18 @@ function sliceOf(raw: unknown): Slice | null {
   return { tokens, turns: raw.turns, unknown: raw.unknown }
 }
 
-/** Whether both arms inherited ONE prefix execution, or every reason they are not shown to. */
-function prefixIdentity(on: ArmCost & { kind: "read" }, off: ArmCost & { kind: "read" }): PrefixCost {
+/**
+ * Whether both arms inherited ONE prefix execution, or every reason they are not
+ * shown to. The block's prefix evidence counts too: evidence the paired reader
+ * refused, or evidence naming another run, establishes no shared prefix.
+ */
+function prefixIdentity(on: ArmCost & { kind: "read" }, off: ArmCost & { kind: "read" }, evidence: PairedBlock["prefix"]): PrefixCost {
   const reasons: string[] = []
+  if (evidence.problem !== null) {
+    reasons.push(`the paired reader does not accept this block's prefix evidence: ${evidence.problem}`)
+  } else if (evidence.evidence?.prefixRunId.kind === "known" && evidence.evidence.prefixRunId.value !== on.prefixRunId) {
+    reasons.push(`the prefix evidence records prefix run \`${evidence.evidence.prefixRunId.value}\`, not the arms' \`${on.prefixRunId}\``)
+  }
   if (on.prefixRunId !== off.prefixRunId) {
     reasons.push(`the arms name different prefixes (on \`${on.prefixRunId}\`, off \`${off.prefixRunId}\`)`)
   }
@@ -876,6 +896,8 @@ function prefixIdentity(on: ArmCost & { kind: "read" }, off: ArmCost & { kind: "
       `the inherited slices differ (on ${a.tokens} tokens over ${a.turns} turn(s), ${a.unknown} unknown; off ` +
         `${b.tokens} tokens over ${b.turns} turn(s), ${b.unknown} unknown)`,
     )
+  } else if (on.inheritedKinds !== off.inheritedKinds) {
+    reasons.push(`the inherited tokens differ by kind (on ${on.inheritedKinds}; off ${off.inheritedKinds})`)
   }
   for (const arm of [on, off]) {
     if (arm.inherited.unknown > arm.inheritedUnknownIds.length) {
@@ -958,7 +980,7 @@ export function blockCost(block: PairedBlock): BlockCost {
     return { kind: "unavailable", reasons, arms: [on, off] }
   }
 
-  const prefix = prefixIdentity(on, off)
+  const prefix = prefixIdentity(on, off, block.prefix)
   const stopped = [on, off].filter((arm) => arm.stopped !== null)
   let contrast: CostContrast
   if (prefix.kind !== "established") {
@@ -981,7 +1003,11 @@ export function blockCost(block: PairedBlock): BlockCost {
     const tokens = prefix.slice.tokens + on.executedHere.tokens + off.executedHere.tokens
     const turns = prefix.slice.turns + on.executedHere.turns + off.executedHere.turns
     const unquantified: string[] = []
-    if (!prefix.audited) unquantified.push("an arm's usage is not audited, so the prefix it inherited is unaudited too")
+    for (const arm of [on, off]) {
+      if (arm.usageCompleteness !== "complete" && arm.usageCompleteness !== "incomplete") {
+        unquantified.push(`arm ${arm.arm}'s usage is \`${arm.usageCompleteness}\`, so the prefix it inherited is not audited either`)
+      }
+    }
     if (prefix.slice.unknown > 0) unquantified.push(`the shared prefix holds ${prefix.slice.unknown} execution(s) with UNKNOWN usage`)
     for (const arm of [on, off]) if (arm.continuation === "lower-bound") unquantified.push(`the ${arm.arm} continuation: ${arm.why}`)
     const stoppedReasons = stopped.map((arm) => `arm ${arm.arm}: ${arm.stopped}`)
@@ -1316,7 +1342,10 @@ function costLines(block: EvaluationBlock): string[] {
   if (cost.kind === "unavailable") {
     lines.push("    cost UNAVAILABLE:")
     for (const reason of cost.reasons) lines.push(`      ${reason}`)
-    for (const arm of cost.arms) if (arm.kind === "read") lines.push(...armCostLines(arm))
+    // An unavailable arm prints unless its reason is already one of the block's.
+    for (const arm of cost.arms) {
+      if (arm.kind === "read" || !cost.reasons.includes(`arm ${arm.arm}: ${arm.reason}`)) lines.push(...armCostLines(arm))
+    }
     return lines
   }
   if (cost.prefix.kind === "established") {

@@ -48,7 +48,7 @@ import { known, unknownValue } from "./manifest.ts"
 import { readPairedBundle, type PairedReadResult } from "./paired-read.ts"
 import { pairedBundleAt, pairedFake, PROTOCOL_FILE, type ArmSpec, type PairedBundleOptions } from "./paired-read.fixture.ts"
 import { writeBundle, type Fake } from "./read-bundle.fixture.ts"
-import { readFrozenProtocol, SCHEDULE_FILE, type PairedSchedule } from "./schedule.ts"
+import { appendSlotStatus, readFrozenProtocol, SCHEDULE_FILE, type PairedSchedule } from "./schedule.ts"
 
 const scratch: string[] = []
 
@@ -588,9 +588,20 @@ describe("precision", () => {
     expect(text).toContain(DIRECTION_UNRESOLVED)
   })
 
+  test("a planned mean's bound spanning both signs does not resolve direction", async () => {
+    const spans: Candidate[] = [
+      { id: "t", on: "upheld", off: "upheld", label: "true-defect" },
+      { id: "u1", on: "upheld", off: "judge-ruled-invalid", label: "unresolved" },
+      { id: "u2", on: "judge-ruled-invalid", off: "upheld", label: null },
+    ]
+    const { root } = await bundleAt({ blocks: { 1: spans, 2: spans, 3: spans } })
+    const precision = section(await textOf(root), "PRECISION — ")
+    const spread = precision.slice(precision.indexOf("OBSERVED SPREAD"))
+    expect(spread).toContain(`the planned mean's bound: ${DIRECTION_UNRESOLVED}`)
+  })
+
   test("all three pairs points: each difference, then exact mean, min and max", async () => {
     const rejectC3: Candidate[] = BLOCK.map((candidate) => (candidate.id === "c3" ? { ...candidate, on: "judge-ruled-invalid" as const } : candidate))
-    // Pair differences 1/3, 1/3 and 1/4; their mean is 11/36.
     const offC3: Candidate[] = BLOCK.map((candidate) => (candidate.id === "c3" ? { ...candidate, off: "upheld" as const } : candidate))
     const { root } = await bundleAt({ blocks: { 2: rejectC3, 3: offC3 } })
     const text = await textOf(root)
@@ -684,6 +695,8 @@ describe("failed and cancelled arms, and a failed prefix", () => {
     expect(block2).toContain("block execution (prefix once + both continuations): observed 520 tokens over 10 turn(s), INCOMPLETE")
     expect(block2).not.toMatch(/block execution[^\n]*exposure quantified/)
     expect(section(text, "PRECISION — ")).toContain("the paired block is withheld")
+    expect(text).toContain("no three-pair summary")
+    expect(text).not.toContain("observed spread: mean")
   })
 
   test("a cancelled arm is read as a failed one", async () => {
@@ -699,16 +712,27 @@ describe("failed and cancelled arms, and a failed prefix", () => {
     expect(block3).not.toMatch(/block execution[^\n]*exposure quantified/)
   })
 
-  test("a failed prefix: not completed, and its cost points at the journal", async () => {
-    const { root } = await bundleAt({
+  test("a failed prefix: not completed, its slots not attempted, and its cost points at the journal", async () => {
+    const { root, schedule } = await bundleAt({
       written: (fakes) => fakes.filter((fake) => fake.repeatId !== 0),
       paired: {
         prefixOver: { 1: { failure: "discovery threw", forked: false, prefixRunId: unknownValue("no run was minted") } },
         slots: "absent",
       },
     })
+    for (const slot of schedule.slots) {
+      await appendSlotStatus(root, {
+        ...slot,
+        status: slot.block === 1 ? "not-attempted" : "completed",
+        reason: slot.block === 1 ? "the prefix failed before this slot" : "the continuation returned a record",
+        at: "2026-09-14T00:00:02.000Z",
+      })
+    }
     const text = await textOf(root)
     expect(text).toContain("completed: 2 of 3")
+    const coverage = section(text, "EXECUTION COVERAGE — ")
+    expect(coverage).toContain("block 1 on: not-attempted — the prefix failed before this slot")
+    expect(coverage).toContain("block 1 off: not-attempted — the prefix failed before this slot")
     const cost = section(text, "COST — ")
     const block1 = cost.slice(cost.indexOf("BLOCK 1"), cost.indexOf("BLOCK 2"))
     expect(block1).toContain("the prefix FAILED (discovery threw)")
@@ -718,6 +742,52 @@ describe("failed and cancelled arms, and a failed prefix", () => {
 })
 
 describe("cost", () => {
+  test("a failed prefix still names an arm whose cost is unavailable", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const block = paired.blocks.find((entry) => entry.block === 1)!
+    block.prefix = { ...block.prefix, evidence: { ...block.prefix.evidence!, failure: "discovery threw" } }
+    delete (block.arms.find((arm) => arm.arm === "on")!.row.manifest.spend as unknown as { origin?: unknown }).origin
+    const report = readEvaluationReport(
+      { kind: "read", value: paired },
+      await settle(() => readLabelledBundle(paired)),
+      await settle(() => readAdjudicationBundle(paired)),
+    )
+    const cost = section(renderEvaluationReport(report), "COST — ")
+    const block1 = cost.slice(cost.indexOf("BLOCK 1"), cost.indexOf("BLOCK 2"))
+    expect(block1).toContain("the prefix FAILED (discovery threw)")
+    expect(block1).toContain("arm on, run `run-on-0`: cost UNAVAILABLE — its manifest carries no `spend.origin`")
+    expect(block1).toContain("arm off, run `run-off-0`")
+  })
+
+  test("inherited tokens that differ by kind establish no prefix", async () => {
+    const byKind = { input: 50, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const { root } = await bundleAt({
+      arm: (spec) => {
+        if (spec.block !== 1 || spec.arm !== "off") return spec
+        const origin = spec.over!.origin as { attributed: object; executedHere: object; inherited: object }
+        const total = { input: 170, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+        return {
+          ...spec,
+          over: {
+            ...spec.over,
+            total,
+            origin: {
+              ...origin,
+              attributed: { ...origin.attributed, tokens: total },
+              inherited: { ...origin.inherited, tokens: byKind },
+            },
+          },
+        }
+      },
+    })
+    const cost = section(await textOf(root), "COST — ")
+    const block1 = cost.slice(cost.indexOf("BLOCK 1"), cost.indexOf("BLOCK 2"))
+    expect(block1).toContain("ONE SHARED PREFIX IS NOT ESTABLISHED")
+    expect(block1).toContain("the inherited tokens differ by kind (on input 100, output 0")
+    expect(block1).not.toContain("ON − OFF newly executed: exactly")
+  })
+
   test("unknown usage in the prefix only: an exact incremental contrast, and an unquantified block", async () => {
     const withPrefixUnknown = (_block: number, arm: "on" | "off"): SpendSpec => ({
       ...DEFAULT_SPEND[arm],
@@ -746,7 +816,48 @@ describe("cost", () => {
     const { root } = await bundleAt({
       spend: (_block, arm) => (arm === "off" ? { ...DEFAULT_SPEND.off, here: { tokens: 120, turns: 3, unknown: ["exec-off"] } } : DEFAULT_SPEND.on),
     })
-    expect(section(await textOf(root), "COST — ")).toContain("ON − OFF newly executed: at most 180 tokens")
+    const cost = section(await textOf(root), "COST — ")
+    expect(cost).toContain("ON − OFF newly executed: at most 180 tokens, at most 2 turn(s) — a one-sided bound")
+    expect(cost).toContain("the OFF continuation is a lower bound: 1 execution(s) it issued itself have UNKNOWN usage")
+    expect(cost).toContain("OBSERVED LOWER BOUND")
+    expect(cost).not.toContain("exactly")
+  })
+
+  test("arms naming different prefixes: nothing cancels, and no contrast is counted", async () => {
+    const { root } = await bundleAt({
+      arm: (spec) => (spec.block === 2 && spec.arm === "off" ? { ...spec, prefixRunId: "run-prefix-other" } : spec),
+    })
+    const text = await textOf(root)
+    const cost = section(text, "COST — ")
+    const block2 = cost.slice(cost.indexOf("BLOCK 2"), cost.indexOf("BLOCK 3"))
+    expect(block2).toContain("ONE SHARED PREFIX IS NOT ESTABLISHED")
+    expect(block2).toContain("the arms name different prefixes (on `run-prefix-2`, off `run-prefix-other`)")
+    expect(block2).not.toContain("ON − OFF newly executed: exactly")
+    const report = await reportOf(root)
+    expect(report.availability.find((entry) => entry.quantity === "cost contrast")!.available).toBe(2)
+  })
+
+  test("prefix evidence the paired reader refuses: nothing cancels, and no contrast is counted", async () => {
+    const { root } = await bundleAt({ paired: { prefixOver: { 2: { forked: false } } } })
+    const text = await textOf(root)
+    expect(text).toContain("block 2: WITHHELD")
+    const cost = section(text, "COST — ")
+    const block2 = cost.slice(cost.indexOf("BLOCK 2"), cost.indexOf("BLOCK 3"))
+    expect(block2).toContain("ONE SHARED PREFIX IS NOT ESTABLISHED")
+    expect(block2).toContain("the paired reader does not accept this block's prefix evidence")
+    expect(block2).toContain("`forked: false`")
+    expect(block2).not.toContain("ON − OFF newly executed: exactly")
+    const report = await reportOf(root)
+    expect(report.availability.find((entry) => entry.quantity === "cost contrast")!.available).toBe(2)
+  })
+
+  test("prefix evidence naming another run: nothing cancels", async () => {
+    const { root } = await bundleAt({ paired: { prefixOver: { 3: { prefixRunId: known("run-prefix-elsewhere") } } } })
+    const cost = section(await textOf(root), "COST — ")
+    const block3 = cost.slice(cost.indexOf("BLOCK 3"))
+    expect(block3).toContain("ONE SHARED PREFIX IS NOT ESTABLISHED")
+    expect(block3).toContain("the prefix evidence records prefix run `run-prefix-elsewhere`, not the arms' `run-prefix-3`")
+    expect(block3).not.toContain("ON − OFF newly executed: exactly")
   })
 
   test("unknown usage on both sides: no contrast, and nothing subtracted", async () => {
@@ -823,6 +934,7 @@ describe("cost", () => {
       inherited: { tokens: 0, turns: 0, unknown: 0 },
       prefixRunId: "p",
       forkedFrom: "p",
+      inheritedKinds: "",
       inheritedUnknownIds: [],
     }
     const on = { ...base, arm: "on" as const, executedHere: { tokens: 10, turns: 1, unknown: 1 }, continuation: "lower-bound" as const, why: "unknown" }
@@ -844,6 +956,27 @@ describe("treatment opportunity", () => {
 })
 
 describe("a repeated prefix, coverage lists and missing manifests", () => {
+  test("a withheld block supplies no pair, so a later measured block on its prefix is counted", async () => {
+    const { root } = await bundleAt({
+      prefixRunIds: { 2: "run-prefix-1" },
+      written: (fakes) =>
+        fakes.map((fake) =>
+          fake.repeatId === 0 && fake.armId === "on"
+            ? {
+                ...fake,
+                completion: "unfinished",
+                finishedAt: unknownValue("the continuation threw"),
+                experiment: { ...(fake.experiment as object), failure: "the provider hung up" },
+              }
+            : fake,
+        ),
+    })
+    const text = await textOf(root)
+    expect(text).toContain("block 1: WITHHELD")
+    expect(text).not.toContain("NOT COUNTED")
+    expect(text).toContain("completed: 2 of 3")
+  })
+
   test("two blocks continuing one prefix: the second block's quantities are unavailable, and it is not counted", async () => {
     const { root } = await bundleAt({ prefixRunIds: { 2: "run-prefix-1" } })
     const text = await textOf(root)
@@ -863,6 +996,22 @@ describe("a repeated prefix, coverage lists and missing manifests", () => {
       expect(entry.available, entry.quantity).toBe(2)
       expect(entry.missing[0]!.reason, entry.quantity).toContain(reason)
     }
+  })
+
+  test("a repeated prefix keeps its block's own cost reasons beside the repeat", async () => {
+    const { root } = await bundleAt({ prefixRunIds: { 2: "run-prefix-1" } })
+    const paired = await pairedOf(root)
+    const block = paired.blocks.find((entry) => entry.block === 2)!
+    block.prefix = { ...block.prefix, evidence: { ...block.prefix.evidence!, failure: "discovery threw" } }
+    const report = readEvaluationReport(
+      { kind: "read", value: paired },
+      await settle(() => readLabelledBundle(paired)),
+      await settle(() => readAdjudicationBundle(paired)),
+    )
+    const cost = section(renderEvaluationReport(report), "COST — ")
+    const block2 = cost.slice(cost.indexOf("BLOCK 2"), cost.indexOf("BLOCK 3"))
+    expect(block2).toContain("which block 1 already supplied")
+    expect(block2).toContain(`the prefix FAILED (discovery threw); what it spent is recorded in \`${JOURNAL_FILE}\``)
   })
 
   test("coverage lists unfinished slots, an excluded arm, a withheld block's reasons and the halt marker", async () => {
@@ -969,6 +1118,25 @@ describe("upstream results that cannot be read", () => {
     const positions = order.map((line) => text.indexOf(line))
     for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThanOrEqual(0)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  test("one reader throwing alone suppresses nothing the other reader supplies", async () => {
+    const { root } = await bundleAt()
+    const labelledThrew = await captured(() =>
+      evalReadMain(["bun", "eval-read", "--bundle", root], { labelled: () => Promise.reject(new Error("labelled blew up")) }),
+    )
+    const precision = section(labelledThrew.text, "PRECISION — ")
+    expect(precision).toContain("arm on, run `run-on-0`: point 1")
+    expect(precision).toContain("pair difference ON − OFF")
+    expect(section(labelledThrew.text, "FINAL RECALL — ")).toContain("the labelled reader threw: labelled blew up")
+
+    const adjudicationThrew = await captured(() =>
+      evalReadMain(["bun", "eval-read", "--bundle", root], { adjudication: () => Promise.reject(new Error("adjudication blew up")) }),
+    )
+    const recall = section(adjudicationThrew.text, "FINAL RECALL — ")
+    expect(recall).not.toContain("the labelled reader threw")
+    expect(recall).toMatch(/matcher recall[^\n]*\d+ of \d+/)
+    expect(section(adjudicationThrew.text, "PRECISION — ")).toContain("the adjudication reader threw: adjudication blew up")
   })
 
   test("an explicit `undefined` reader keeps the shipped reader", async () => {

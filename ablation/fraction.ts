@@ -62,9 +62,9 @@ export function average(values: readonly Fraction[]): Fraction {
 
 /** Negative, zero or positive as `a` is below, equal to or above `b`. */
 export function compare(a: Fraction, b: Fraction): number {
-  const difference = a.num * b.den - b.num * a.den
-  if (!Number.isSafeInteger(difference)) throw new Error("compare: the cross products leave the safe-integer range")
-  return Math.sign(difference)
+  const parts = [a.num * b.den, b.num * a.den]
+  if (!parts.every(Number.isSafeInteger)) throw new Error("compare: a cross product leaves the safe-integer range")
+  return Math.sign(parts[0]! - parts[1]!)
 }
 
 export function minOf(values: readonly Fraction[]): Fraction {
