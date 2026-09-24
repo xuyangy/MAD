@@ -25,6 +25,10 @@
  *   it is the implementation's to record, and it refuses every later admission.
  *   A repeat with an identical settlement is a no-op; a conflicting repeat is an
  *   integrity failure the implementation records.
+ * - An `ok` admission may carry a `turn` handle (story 2-8c2). A stage passes it,
+ *   wrapped in its own ledger gate, to `runTurn`, so a backend that meters
+ *   physical requests can admit and settle each request after the first. Without
+ *   one, the stage's settlement is the attempt's only settlement, as before.
  *
  * Types only; the one implementation is the paired runner's journal
  * (`ablation/journal.ts`).
@@ -41,6 +45,12 @@ export interface AdmissionRequest {
   slot: string
   /** 1 for the first attempt, 2 for the one retry. */
   attempt: number
+  /**
+   * Story 2-8c2 — which physical request inside the attempt: absent for the
+   * first, 2, 3, … for each later one (a host tool step). Only a `turn` handle
+   * asks for a step.
+   */
+  step?: number
 }
 
 /**
@@ -72,8 +82,32 @@ export type SettleRequest = (settlement: AdmissionSettlement) => Promise<void>
 export type AdmissionRefusalCause = "budget" | "halted" | "runner-stop"
 
 export type AdmissionDecision =
-  | { ok: true; settle: SettleRequest }
+  | { ok: true; settle: SettleRequest; turn?: AdmittedTurn }
   | { ok: false; cause: AdmissionRefusalCause; reason: string }
+
+/** Story 2-8c2 — the answer for one physical request after an attempt's first. */
+export type StepDecision =
+  | { ok: true; step: number; settle: SettleRequest }
+  | { ok: false; cause: AdmissionRefusalCause; reason: string }
+
+/**
+ * Story 2-8c2 — one admitted attempt, as a backend that meters its physical
+ * requests sees it.
+ *
+ * - `admitStep` asks for the attempt's next physical request. It passes the same
+ *   gates the attempt passed, in the same order: the stage's ledger gate (the
+ *   stage wraps the handle with it), then the experiment's. It never rejects, and
+ *   an `ok` step is durable before it resolves. The returned `settle` has the
+ *   contract of an attempt's.
+ * - `settleFirst` settles the attempt's first physical request with that
+ *   request's own figure. Once it is called, the stage's later settlement of the
+ *   attempt is a cross-check against the sum of the attempt's physical requests.
+ *   It writes nothing and cannot change any request's state. It never rejects.
+ */
+export interface AdmittedTurn {
+  admitStep(): Promise<StepDecision>
+  settleFirst(settlement: AdmissionSettlement): Promise<void>
+}
 
 export interface RequestAdmission {
   admit(request: AdmissionRequest): Promise<AdmissionDecision>

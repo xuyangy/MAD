@@ -33,6 +33,7 @@ import {
 } from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
 import { PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
 import { SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
@@ -212,16 +213,25 @@ function scripted(before?: (context: PairedPhaseContext) => void) {
 function overridesFor(
   env: { scratchParent: string },
   extra: PairedOverrides = {},
-): { overrides: PairedOverrides; clientCalls: unknown[]; backend: ReturnType<typeof scripted>; host: ReturnType<typeof scriptedHost> } {
+): {
+  overrides: PairedOverrides
+  clientCalls: unknown[]
+  backend: ReturnType<typeof scripted>
+  host: ReturnType<typeof scriptedHost>
+  meter: ReturnType<typeof scriptedMeter>
+} {
   const clientCalls: unknown[] = []
   const backend = scripted()
   const host = scriptedHost()
+  const meter = scriptedMeter()
   return {
     clientCalls,
     backend,
     host,
+    meter,
     overrides: {
       startHost: host.startHost,
+      startMeter: meter.startMeter,
       env: { [KEY_ENV]: KEY },
       createClient: (init) => {
         clientCalls.push(init)
@@ -244,6 +254,31 @@ function overridesFor(
   }
 }
 
+const RELAY_URL = "http://127.0.0.1:9/relay"
+const RELAY_HOST_KEY = "mad-relay-host-key-test"
+
+/** A relay that listens nowhere: it records what it was started with and how often it was stopped. */
+function scriptedMeter() {
+  const started: RequestMeterOptions[] = []
+  let stops = 0
+  return {
+    started,
+    stops: () => stops,
+    startMeter: (options: RequestMeterOptions): RequestMeter => {
+      started.push(options)
+      return {
+        baseURL: RELAY_URL,
+        hostKey: RELAY_HOST_KEY,
+        open: () => ({ close: async () => ({ kind: "usage", tokens: emptyTokenUsage(), physicalRequests: 0 }) }),
+        events: () => [],
+        stop: async () => {
+          stops += 1
+        },
+      }
+    },
+  }
+}
+
 async function nothingScheduled(out: string, scratchParent: string): Promise<void> {
   expect(existsSync(join(out, SCHEDULE_FILE))).toBe(false)
   expect(existsSync(join(out, START_MARKER_FILE))).toBe(false)
@@ -251,7 +286,7 @@ async function nothingScheduled(out: string, scratchParent: string): Promise<voi
 }
 
 describe("the shipped gate table", () => {
-  test("prints every gate with its owner and status, names gates 1-4 OPEN, creates no client and writes nothing", async () => {
+  test("prints every gate with its owner and status, names gate 4 the refusal, creates no client and writes nothing", async () => {
     const env = await setup()
     const { overrides, clientCalls, backend, host } = overridesFor(env)
     // No `gates` override: `main` reads the shipped table itself.
@@ -260,10 +295,9 @@ describe("the shipped gate table", () => {
 
     expect(result.code).toBe(1)
     expect(result.text).toContain("FAIL  paired gates (ablation/paired-gates.ts, phase evaluation)")
-    for (const number of [1, 4]) {
-      const gate = PAIRED_GATES.find((entry) => entry.number === number)!
-      expect(result.text).toContain(`REFUSED: gate ${number} (${gate.name}) is OPEN; owner: ${gate.owner}`)
-    }
+    const four = PAIRED_GATES.find((entry) => entry.number === 4)!
+    expect(result.text).toContain(`REFUSED: gate 4 (${four.name}) is OPEN; owner: ${four.owner}`)
+    expect(result.text).not.toContain("REFUSED: gate 1 ")
     expect(result.text).not.toContain("REFUSED: gate 2 ")
     expect(result.text).toContain(
       "gate 3 — accounting-probe spend authorization — authorization, required for accounting-probe (not consulted for evaluation), owner the human budget owner — OPEN",
@@ -272,7 +306,7 @@ describe("the shipped gate table", () => {
       expect(result.text).toContain(`gate ${gate.number} — ${gate.name}`)
       expect(result.text).toContain(`owner ${gate.owner} — ${gate.status}`)
     }
-    for (const number of [1, 3, 4]) {
+    for (const number of [3, 4]) {
       const gate = PAIRED_GATES.find((entry) => entry.number === number)!
       expect(gate.status).toBe("OPEN")
       expect(result.text).toContain(`gate ${number} — ${gate.name}`)
@@ -352,16 +386,20 @@ describe("the gate table must be the committed one", () => {
 describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
   test("the schedule is sealed, three blocks run, exit 0, and eval-read reads the bundle", async () => {
     const env = await setup()
-    const { overrides, clientCalls, host } = overridesFor(env, { gates: closedGates })
+    const { overrides, clientCalls, host, meter } = overridesFor(env, { gates: closedGates })
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.code, result.text).toBe(0)
+    // The relay holds the credential and the provider URL; the host is pointed at
+    // the relay and holds only the placeholder.
+    expect(meter.started).toEqual([{ upstream: PROVIDER_URL, credential: KEY }])
     expect(host.started.map((asked) => ({ block: asked.block, credential: asked.credential, signals: asked.signals }))).toEqual([
       {
-        block: { id: "anthropic", npm: OPENAI_COMPATIBLE_NPM, baseURL: PROVIDER_URL, apiKeyEnv: KEY_ENV, models: MODELS },
-        credential: KEY,
+        block: { id: "anthropic", npm: OPENAI_COMPATIBLE_NPM, baseURL: RELAY_URL, apiKeyEnv: KEY_ENV, models: MODELS },
+        credential: RELAY_HOST_KEY,
         signals: null,
       },
     ])
+    expect(meter.stops()).toBe(1)
     expect(clientCalls).toEqual([{ baseUrl: HOST_URL, directory: env.directory }])
     expect(host.stops()).toBe(1)
     expect(result.text).toContain("Managed host stopped: process 777")
@@ -1422,11 +1460,28 @@ describe("the managed host (story 2-8c)", () => {
     for (const options of built) {
       expect(String(options.serverUrl)).toBe(HOST_URL)
       expect(options.directory).toBe(env.directory)
+      // Every backend meters its turns through the one relay the launcher started.
+      expect(options.meter?.open).toBeDefined()
     }
+    expect(new Set(built.map((options) => options.meter)).size).toBe(1)
     // One journal holds every phase's execution ids, so no two backends may share a prefix.
     const prefixes = built.map((options) => options.executionIdPrefix)
     expect(prefixes).toContain("block-1-prefix/")
     expect(new Set(prefixes).size).toBe(built.length)
+  })
+
+  test("a host that cannot start still stops the relay, which holds the credential", async () => {
+    const env = await setup()
+    const { overrides, meter } = overridesFor(env, {
+      gates: closedGates,
+      startHost: async () => {
+        throw new Error("no opencode binary")
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(meter.stops()).toBe(1)
+    expect(result.text).not.toContain(KEY)
   })
 
   test("the host's config is verified for the reviewed --directory too", async () => {
@@ -1556,14 +1611,15 @@ describe("the managed host (story 2-8c)", () => {
     expect(result.text).toContain("The managed host's plugin install left @opencode-ai/plugin 1.18.32 in its config directory.")
   })
 
-  test("with the shipped gates and valid flags, gates 1 and 4 are named OPEN, exit 1, and no host is started", async () => {
+  test("with the shipped gates and valid flags, gate 4 is named OPEN, exit 1, and no host or relay is started", async () => {
     const env = await setup()
-    const { overrides, host } = overridesFor(env)
+    const { overrides, host, meter } = overridesFor(env)
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.code).toBe(1)
-    expect(result.text).toContain("REFUSED: gate 1 (host request accounting) is OPEN")
+    expect(result.text).not.toContain("REFUSED: gate 1 ")
     expect(result.text).toContain("REFUSED: gate 4 (evaluation spend authorization) is OPEN")
     expect(result.text).toContain("PASS  managed host provider block")
     expect(host.started).toEqual([])
+    expect(meter.started).toEqual([])
   })
 })

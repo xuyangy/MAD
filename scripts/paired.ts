@@ -85,6 +85,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
 import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
+import { startRequestMeter, type RequestMeter, type RequestMeterOptions } from "../ablation/request-meter.ts"
 import { DEFAULT_DISCOVERY_SLOTS } from "../adapters/opencode/plugin.ts"
 import { enumerateCandidates, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
 import {
@@ -248,6 +249,8 @@ export interface PairedOverrides {
   gates?: readonly PairedGate[]
   /** Starts the managed host. Defaults to `startManagedHost`. */
   startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
+  /** Starts the relay between the host and the provider. Defaults to `startRequestMeter`. */
+  startMeter?: (options: RequestMeterOptions) => RequestMeter
   /** Where the credential variable is read. Defaults to `process.env`. */
   env?: Record<string, string | undefined>
   createClient?: (init: { baseUrl: string; directory: string }) => unknown
@@ -849,6 +852,25 @@ interface ManagedSlot {
   stopped?: Promise<boolean>
   /** The credential's forms, set before the host is started; every error printed after that is redacted with them. */
   secrets?: string[]
+  /** The relay, started before the host and stopped after it. */
+  meter?: RequestMeter
+  meterStopped?: Promise<void>
+}
+
+/** Stop the relay, once. It holds the credential, so every way out stops it. */
+function stopMeter(managed: ManagedSlot): Promise<void> {
+  if (managed.meter === undefined) return Promise.resolve()
+  const meter = managed.meter
+  managed.meterStopped ??= meter.stop().then(
+    () => {
+      const events = meter.events()
+      const refused = events.filter((event) => event.outcome === "refused")
+      console.log(`\nRelay stopped: ${events.length - refused.length} request(s) forwarded, ${refused.length} refused.`)
+      for (const event of refused) console.log(`  refused ${event.path} (session ${event.session ?? "none"}): ${event.reason}`)
+    },
+    (error: unknown) => console.log(`\nRELAY STOP FAILED: ${messageOf(error)}`),
+  )
+  return managed.meterStopped
 }
 
 /** An error's message, redacted with the managed host's credential once one is known. */
@@ -864,7 +886,7 @@ function managedMessage(managed: ManagedSlot, error: unknown): string {
  */
 function stopManaged(managed: ManagedSlot): Promise<boolean> {
   const stop = managed.stop ?? managed.host?.stop
-  if (stop === undefined) return Promise.resolve(true)
+  if (stop === undefined) return stopMeter(managed).then(() => true)
   managed.stopped ??= (async () => {
     if (managed.host !== undefined) {
       const plugin = await managed.host.pluginInstall().catch((error: unknown) => ({ installed: false as const, why: messageOf(error) }))
@@ -885,6 +907,7 @@ function stopManaged(managed: ManagedSlot): Promise<boolean> {
         ? `\nManaged host stopped: process ${outcome.pid} ${outcome.how}.`
         : `\nMANAGED HOST STOP UNCONFIRMED — check process ${outcome.pid} by hand before anything else runs: ${outcome.why}.`,
     )
+    await stopMeter(managed)
     return outcome.confirmed
   })()
   return managed.stopped
@@ -916,7 +939,7 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
  * credentialed host's exit is confirmed.
  */
 async function stopHolding(managed: ManagedSlot, signals: SignalSource): Promise<boolean> {
-  if (managed.stop === undefined && managed.host === undefined) return true
+  if (managed.stop === undefined && managed.host === undefined && managed.meter === undefined) return true
   const hold = (): void => {
     console.log("\nINTERRUPTED — the managed host is already being stopped; waiting for its exit to be confirmed.")
   }
@@ -1147,9 +1170,14 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     let started: ManagedHostStart
     managed.secrets = secretForms(credential)
     try {
+      // The relay holds the credential and forwards to the provider; the host is
+      // pointed at the relay and given only a placeholder key.
+      const meter = (overrides.startMeter ?? startRequestMeter)({ upstream: provider.baseURL, credential })
+      managed.meter = meter
+      console.log(`  relay ${meter.baseURL} -> ${provider.baseURL} (the host holds the relay's key, not the credential)`)
       started = await (overrides.startHost ?? startManagedHost)({
-        block: provider,
-        credential,
+        block: { ...provider, baseURL: meter.baseURL },
+        credential: meter.hostKey,
         verifyDirectories: [directory],
         signals: null,
         onSpawn: (spawned) => {
@@ -1326,6 +1354,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           lateUsage,
           // One journal holds every phase's execution ids, and each phase gets its own backend.
           executionIdPrefix: `block-${context.block}-${context.phase}/`,
+          ...(managed.meter === undefined ? {} : { meter: managed.meter }),
         }))
     const outcome = await runner.runPairedBlocks({
       ...base,

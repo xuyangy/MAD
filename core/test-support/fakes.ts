@@ -8,7 +8,7 @@ import type { ZodType } from "zod"
 import type { Candidate } from "../domain/roster.ts"
 import { CODING_AGGREGATE, CODING_EVIDENCE_EXTRACT, CODING_FACT_CHECK, CODING_LOGIC_EVAL } from "../instructions/coding/judge.ts"
 import { emptyTokenUsage, type TokenUsage } from "../domain/run-record.ts"
-import type { AdmissionRequest, AdmissionSettlement, RequestAdmission } from "../ports/admission.ts"
+import type { AdmissionRequest, AdmissionSettlement, AdmittedTurn, RequestAdmission } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import {
   cancelledTurn,
@@ -155,6 +155,8 @@ export const DEFAULT_JUDGE_ANSWERS: Record<JudgeRoleTag, unknown> = {
  */
 export class FakeBackend implements ModelBackend {
   readonly calls: { slot: string; attempt: number; role?: JudgeRoleTag }[] = []
+  /** Story 2-8c2 — the admission handle each issued turn was handed, in call order. */
+  readonly admittedTurns: (AdmittedTurn | undefined)[] = []
   private readonly attempts = new Map<string, number>()
 
   constructor(
@@ -198,6 +200,7 @@ export class FakeBackend implements ModelBackend {
     _input: string,
     schema: ZodType<T>,
     signal?: AbortSignal,
+    admitted?: AdmittedTurn,
   ): Promise<Envelope<T>> {
     const role = judgeRoleOf(instructions)
 
@@ -212,6 +215,7 @@ export class FakeBackend implements ModelBackend {
     const attempt = (this.attempts.get(key) ?? 0) + 1
     this.attempts.set(key, attempt)
     this.calls.push(role === undefined ? { slot, attempt } : { slot, attempt, role })
+    this.admittedTurns.push(admitted)
 
     this.inFlight += 1
     this.peakInFlight = Math.max(this.peakInFlight, this.inFlight)
@@ -475,12 +479,16 @@ export function settleAudit(): string[] {
 export function fakeAdmission(
   refuse: (request: AdmissionRequest, index: number) => boolean = () => false,
   whileAdmitting?: (request: AdmissionRequest) => Promise<void> | void,
+  /** Story 2-8c2 — hand each admitted attempt a `turn` handle whose steps are recorded in `steps`. */
+  withTurns = false,
 ): {
   admission: RequestAdmission
   asked: AdmissionRequest[]
   settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[]
   admitted: AdmittedByFake[]
+  steps: AdmissionRequest[]
 } {
+  const steps: AdmissionRequest[] = []
   const asked: AdmissionRequest[] = []
   const settlements: { request: AdmissionRequest; settlement: AdmissionSettlement }[] = []
   const admitted: AdmittedByFake[] = []
@@ -488,6 +496,7 @@ export function fakeAdmission(
     asked,
     settlements,
     admitted,
+    steps,
     admission: {
       async admit(request) {
         const index = asked.length
@@ -503,6 +512,18 @@ export function fakeAdmission(
             entry.settles.push(settlement)
             settlements.push({ request: { ...request }, settlement })
           },
+          ...(withTurns
+            ? {
+                turn: {
+                  async admitStep() {
+                    const step = steps.filter((asked) => asked.slot === request.slot && asked.attempt === request.attempt).length + 2
+                    steps.push({ ...request, step })
+                    return { ok: true, step, settle: async () => undefined }
+                  },
+                  async settleFirst() {},
+                },
+              }
+            : {}),
         }
       },
     },

@@ -63,19 +63,25 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "host request accounting",
     kind: "engineering",
     phase: "evaluation",
-    owner: "story 2-8c",
-    status: "OPEN",
+    owner: "story 2-8c2",
+    status: "CLOSED",
     requires:
-      "one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured " +
-      "host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-24.json) " +
-      "measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent " +
-      "6 times in each of 2 admitted attempts and a 429 was followed by 1 further request; a header timeout was sent 6 times in the 2026-09-23 " +
-      "spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by " +
-      "default, a tool step costs an extra request and only the last step's usage is returned; N2, with only " +
-      "StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real " +
-      "provider emits one under tool_choice required is not established); H1, in the hang scenario the host held the " +
-      "provider request open 15046 ms after MAD settled the attempt as unknown, until the probe stopped the host. Closing it needs the " +
-      "request-accounting story filed in deferred-work.md, re-measured by the probe",
+      "every physical provider request individually admitted and accounted, with host retries refused, on the measured " +
+      "host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with " +
+      "the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is " +
+      "refused, never forwarded",
+    evidence:
+      "`bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) " +
+      "to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past " +
+      "the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received " +
+      "had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or " +
+      "`unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). " +
+      "Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its " +
+      "attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the " +
+      "measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode " +
+      "contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover " +
+      "on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: " +
+      "ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts",
   },
   {
     number: 2,
@@ -90,8 +96,10 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real " +
       "OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the " +
       "journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix " +
-      "phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence file: " +
-      "ablation/evidence/host-accounting-2026-09-24.json. Tests: scripts/accounting-probe.test.ts",
+      "phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the " +
+      "probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: " +
+      "ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: " +
+      "ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts",
   },
   {
     number: 3,

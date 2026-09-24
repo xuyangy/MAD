@@ -15,7 +15,8 @@ import { z } from "zod"
 import type { RosterSlot } from "../../core/domain/roster.ts"
 import type { TokenUsage } from "../../core/domain/run-record.ts"
 import type { LateUsageReport, LateUsageReporter } from "../../core/ports/late-usage.ts"
-import { OpencodeModelBackend } from "./model-backend.ts"
+import type { AdmittedTurn } from "../../core/ports/admission.ts"
+import { OpencodeModelBackend, type MeteredUsage, type RequestMeterPort } from "./model-backend.ts"
 
 const SCHEMA = z.object({ findings: z.array(z.object({ claim: z.string() })) })
 const PAYLOAD = { findings: [{ claim: "off-by-one in the retry loop" }] }
@@ -1017,3 +1018,99 @@ describe("runTurn — late usage, awaited by nothing (AC2)", () => {
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
+
+describe("runTurn — a metered turn (story 2-8c2)", () => {
+  const HANDLE: AdmittedTurn = { admitStep: async () => ({ ok: false, cause: "budget", reason: "unused" }), settleFirst: async () => {} }
+  const MEASURED: TokenUsage = { input: 300, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+
+  function meteredBackend(options: FakeV2Options, measured: MeteredUsage, tuning: { timeoutMs?: number; lateUsage?: LateUsageReporter } = {}) {
+    const fake = fakeV2(options)
+    const events: string[] = []
+    const opened: { sessionID: string; admitted: AdmittedTurn }[] = []
+    const meter: RequestMeterPort = {
+      open(sessionID, admitted) {
+        events.push(`open ${sessionID} (prompts so far: ${fake.calls.prompt.length})`)
+        opened.push({ sessionID, admitted })
+        return {
+          close: async () => {
+            events.push(`close (deletes so far: ${fake.calls.delete.length})`)
+            return measured
+          },
+        }
+      },
+    }
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://localhost:4096",
+      directory: "/repo",
+      slots: SLOTS,
+      client: fake.client as never,
+      meter,
+      cleanupTimeoutMs: 10,
+      ...(tuning.timeoutMs === undefined ? {} : { timeoutMs: tuning.timeoutMs }),
+      ...(tuning.lateUsage === undefined ? {} : { lateUsage: tuning.lateUsage }),
+    })
+    return { backend, events, opened, calls: fake.calls, settlePrompt: fake.settlePrompt }
+  }
+
+  test("the session is opened on the meter before the prompt and closed before it is deleted", async () => {
+    const { backend, events, opened } = meteredBackend(
+      { reply: { data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } } },
+      { kind: "usage", tokens: MEASURED, physicalRequests: 2 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA, undefined, HANDLE)
+    expect(events).toEqual(["open ses_test (prompts so far: 0)", "close (deletes so far: 0)"])
+    expect(opened[0]!.admitted).toBe(HANDLE)
+    // The meter's sum, not the host's settled message.
+    expect(result.ok).toBe(true)
+    expect(result.tokens).toEqual(MEASURED)
+    expect(result.usageUnknown).toBeUndefined()
+  })
+
+  test("an unknown physical request makes the turn unknown, whatever the host reported", async () => {
+    const { backend } = meteredBackend(
+      { reply: { data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } } },
+      { kind: "unknown", why: "the provider answered HTTP 500", physicalRequests: 1 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA, undefined, HANDLE)
+    expect(result.tokens).toBeUndefined()
+    expect(result.usageUnknown?.why).toContain("the provider answered HTTP 500")
+    expect(result.usageUnknown?.executionId).toMatch(/^exec-\d+$/)
+  })
+
+  test("a timed-out turn closes its meter session and reports no late usage", async () => {
+    const lateUsage = collectingReporter()
+    const { backend, events, settlePrompt } = meteredBackend(
+      { pendingPrompt: true },
+      { kind: "unknown", why: "aborted when the attempt ended", physicalRequests: 1 },
+      { timeoutMs: 10, lateUsage },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA, undefined, HANDLE)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(events).toContain("close (deletes so far: 0)")
+    expect(result.usageUnknown?.why).toContain("aborted when the attempt ended")
+    settlePrompt({ data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } })
+    await flush()
+    expect(lateUsage.reports).toEqual([])
+  })
+
+  test("a cancelled turn closes its meter session too", async () => {
+    const { backend, events } = meteredBackend({ hang: true }, { kind: "unknown", why: "aborted", physicalRequests: 1 })
+    const controller = new AbortController()
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal, HANDLE)
+    controller.abort()
+    const result = await pending
+    expect(!result.ok && result.failure).toBe("cancelled")
+    expect(events).toContain("close (deletes so far: 0)")
+    expect(result.usageUnknown).toBeDefined()
+  })
+
+  test("without a handle nothing is opened, and the host's figure stands", async () => {
+    const { backend, opened } = meteredBackend(
+      { reply: { data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } } },
+      { kind: "usage", tokens: MEASURED, physicalRequests: 1 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(opened).toHaveLength(0)
+    expect(result.tokens).toEqual(HOST_TOKENS_MAPPED)
+  })
+})

@@ -102,10 +102,10 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
-import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
-import { settlementOf } from "./settlement.ts"
+import { settlementOf, stageGatedTurn } from "./settlement.ts"
 
 /**
  * AD-11 / AD-12 — the schema constrains ONLY the fields MAD computes on:
@@ -374,6 +374,7 @@ async function runWithOneRetry(
     // on I/O: a stop that landed meanwhile settles the request as never issued.
     // Nothing is awaited between that check and `runTurn`.
     let settle: SettleRequest | undefined
+    let admitted: AdmittedTurn | undefined
     if (input.admission !== undefined) {
       const decision = await input.admission.admit({ stage: "discover", slot, attempt })
       if (!decision.ok) {
@@ -389,6 +390,7 @@ async function runWithOneRetry(
         }
       }
       settle = decision.settle
+      admitted = stageGatedTurn(decision.turn, () => mayISpend(input.ledger, "discover"), "discover")
     }
     let envelope: Envelope<DiscoveryEnvelope>
     let threw = false
@@ -399,6 +401,7 @@ async function runWithOneRetry(
         input.input,
         discoveryEnvelopeSchema,
         input.signal,
+        admitted,
       )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,

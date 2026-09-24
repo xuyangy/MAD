@@ -1307,6 +1307,30 @@ describe("discover — a session MAD could not delete (story 2.3, AC3)", () => {
 })
 
 describe("discover — the per-request admission seam (story 2-5c)", () => {
+  test("story 2-8c2 — each turn is handed its attempt's handle, wrapped in the stage's ledger gate", async () => {
+    const admission = fakeAdmission(undefined, undefined, true)
+    const { result, backend, ledger } = admitted({ "discovery-1": [{ kind: "ok", value: ONE_FINDING }] }, admission)
+    await result
+    expect(backend.admittedTurns).toHaveLength(1)
+    const handle = backend.admittedTurns[0]!
+    expect(await handle.admitStep()).toMatchObject({ ok: true, step: 2 })
+    expect(admission.steps).toEqual([{ stage: "discover", slot: "discovery-1", attempt: 1, step: 2 }])
+    // Once the run's own ledger refuses, a step is refused before the experiment is asked.
+    ledger.cap = 1
+    ledger.total = { ...ledger.total, input: ledger.total.input + 10 }
+    const refused = await handle.admitStep()
+    expect(refused).toMatchObject({ ok: false, cause: "budget" })
+    expect(refused.ok ? "" : refused.reason).toContain("the run's own ledger refused a further discover request")
+    expect(admission.steps).toHaveLength(1)
+  })
+
+  test("story 2-8c2 — an admission that hands out no handle passes none to the backend", async () => {
+    const admission = fakeAdmission()
+    const { result, backend } = admitted({ "discovery-1": [{ kind: "ok", value: ONE_FINDING }] }, admission)
+    await result
+    expect(backend.admittedTurns).toEqual([undefined])
+  })
+
   function admitted(
     script: Record<string, SlotScript>,
     admission: ReturnType<typeof fakeAdmission>,

@@ -97,9 +97,9 @@ import type { Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
-import { settlementOf } from "./settlement.ts"
+import { settlementOf, stageGatedTurn } from "./settlement.ts"
 import { listCell, material, oneLine } from "../prompt/material.ts"
 
 /**
@@ -420,6 +420,7 @@ async function runDebateTurn(
     // resolves the signal is read again, and nothing is awaited between that
     // check and `runTurn`.
     let settle: SettleRequest | undefined
+    let admitted: AdmittedTurn | undefined
     if (input.admission !== undefined) {
       const failure = last === undefined ? {} : { failure: last }
       if (!mayISpend(input.ledger, "debate")) return { refused: true, attempts: attempt - 1, ...failure }
@@ -430,6 +431,7 @@ async function runDebateTurn(
         return { refused: false, envelope: cancelledTurn<DebateEnvelope>(slot), attempts: attempt - 1 }
       }
       settle = decision.settle
+      admitted = stageGatedTurn(decision.turn, () => mayISpend(input.ledger, "debate"), "debate")
     }
     let envelope: Envelope<DebateEnvelope>
     let threw = false
@@ -440,6 +442,7 @@ async function runDebateTurn(
         prompt,
         debateEnvelopeSchema,
         input.signal,
+        admitted,
       )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,

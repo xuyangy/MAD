@@ -37,6 +37,8 @@
  * AD-1: this tree may import from `core/`; nothing under `core/` imports it.
  */
 
+import { RELAY_KEY_PREFIX } from "./request-meter.ts"
+
 export type StubBehaviour = "ok" | "500" | "429" | "400" | "hang" | `tool:${string}`
 
 export interface ServedUsage {
@@ -65,6 +67,10 @@ export interface StubRequest {
   toolChoice?: unknown
   /** The usage this request was answered with; absent when it served none. */
   servedUsage?: ServedUsage
+  /** Story 2-8c2 — the session the request named in `x-session-affinity`, when it named one. */
+  session?: string
+  /** Story 2-8c2 — whether the request carried the host's relay key rather than the credential the relay holds. */
+  placeholderKey: boolean
   /** For `hang`: when the connection closed, and who closed it, if it did. */
   closed?: {
     at: number
@@ -154,6 +160,8 @@ export function startAccountingStub(): AccountingStub {
       ...(typeof body.stream === "boolean" ? { stream: body.stream } : {}),
       toolsOffered: toolNames(body.tools),
       ...(body.tool_choice === undefined ? {} : { toolChoice: body.tool_choice }),
+      ...(request.headers.get("x-session-affinity") === null ? {} : { session: request.headers.get("x-session-affinity")! }),
+      placeholderKey: (request.headers.get("authorization") ?? "").includes(RELAY_KEY_PREFIX),
     }
     recorded.push(entry)
     if (!isModel) return new Response("not found", { status: 404 })

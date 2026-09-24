@@ -50,7 +50,8 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } fro
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 
-import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
+import { OpencodeModelBackend, type RequestMeterPort } from "../adapters/opencode/model-backend.ts"
+import { startRequestMeter, type RelayEvent, type RequestMeter } from "../ablation/request-meter.ts"
 import {
   startAccountingStub,
   startRefusingProxy,
@@ -123,7 +124,12 @@ export interface Scenario {
   turnTimeoutMs: number
   /** How long the stub is watched after `discover` returns. */
   observeAfterMs: number
+  /** Journal lines written before the scenario runs, so a gate refuses partway through it. */
+  seed?: JournalLine[]
 }
+
+/** How far below block 1's prefix allowance the step-refusal scenario starts: less than one stub answer. */
+export const STEP_REFUSAL_HEADROOM = 500
 
 export const SCENARIOS: readonly Scenario[] = [
   { name: "success", what: "the stub answers every request with a StructuredOutput call", queue: [], otherwise: "ok", turnTimeoutMs: SCENARIO_TURN_TIMEOUT_MS, observeAfterMs: 0 },
@@ -155,16 +161,28 @@ export const SCENARIOS: readonly Scenario[] = [
     turnTimeoutMs: SCENARIO_TURN_TIMEOUT_MS,
     observeAfterMs: 0,
   },
+  {
+    name: "step refused mid-turn",
+    what:
+      `the first answer calls \`glob\`; block 1's prefix is seeded ${STEP_REFUSAL_HEADROOM} tokens short of its allowance, so ` +
+      "the first request's usage exhausts it and the journal refuses the tool step",
+    queue: ["tool:glob"],
+    otherwise: "ok",
+    turnTimeoutMs: SCENARIO_TURN_TIMEOUT_MS,
+    observeAfterMs: 0,
+    seed: seededSpend("blocks", 1, "prefix", PAIRED_ALLOWANCES.prefix - STEP_REFUSAL_HEADROOM),
+  },
 ]
 
 // ---------------------------------------------------------------------------
 // The verdict logic (pure; unit-tested with fakes)
 // ---------------------------------------------------------------------------
 
-/** One admitted attempt: how many model requests the stub had received when it asked, and when it settled. */
+/** One admitted attempt: the session its backend opened on the relay, and when the stage settled it. */
 export interface AdmissionMark {
   attempt: number
-  modelRequestsBefore: number
+  /** The session the backend opened on the relay for this attempt; absent when it opened none. */
+  session?: string
   settledAt?: number
 }
 
@@ -174,24 +192,32 @@ export type RecordedUsage =
   | { kind: "not-issued" }
   | { kind: "missing" }
 
-export interface AttemptRecord {
-  attempt: number
+/** One physical request: what the relay forwarded, what the stub received and served, and what the journal holds. */
+export interface PhysicalRecord {
+  /** The request's place in its attempt: 1 for the first, 2… for each step. */
+  step: number
   issued: IssuedLine | null
   settled: SettledLine | null
-  /** The physical model requests the stub received for this attempt. */
-  requests: StubRequest[]
-  physicalRequests: number
-  /** Requests beyond the first within this one attempt: retries or steps the port call did not show. */
-  hiddenRequests: number
-  served: { input: number; output: number; requestsThatServed: number }
-  /** What MAD settled: `usage` tokens, or the kind of settlement when it carries none. */
+  /** The stub's record of it; `null` when it never reached the stub. */
+  stub: StubRequest | null
+  served: { input: number; output: number } | null
   recorded: RecordedUsage
-  /**
-   * For a request that never answered: how long the host kept it open after this
-   * attempt settled, and whether it closed on its own or when the probe stopped
-   * the host. Absent when every request answered.
-   */
-  upstream?: { heldOpenAfterSettleMs: number | null; closedBy: "client" | "host-stopping" | "still open" }
+  /** For a request that never answered: how long after the attempt ended the relay closed it, and who closed it. */
+  upstream?: { closedAfterAttemptMs: number | null; closedBy: "client" | "host-stopping" | "still open" }
+  verdict: Verdict
+  why: string
+}
+
+export interface AttemptRecord {
+  attempt: number
+  session: string | null
+  issued: IssuedLine | null
+  /** Every physical request the relay forwarded for this attempt, in order. */
+  physical: PhysicalRecord[]
+  /** Step admissions that were granted and then not forwarded, and how each was settled. */
+  admittedNotForwarded: { step: number; recorded: RecordedUsage }[]
+  /** What the relay refused for this attempt's session, in order. */
+  relayRefusals: string[]
   /** Why this attempt's verdict is incomplete, or `null`. */
   incomplete: string | null
   verdict: Verdict
@@ -203,36 +229,26 @@ export interface ScenarioTotals {
   /** MAD's own discover retry: admitted attempts beyond the first. */
   madRetries: number
   refusedAdmissions: number
+  /** Model requests the stub received: the physical requests that reached the provider. */
   physicalRequests: number
-  /** Physical requests beyond one per admitted attempt. */
-  hiddenHostRequests: number
-  /** Model requests that arrived before the first admission was asked for. */
+  /** Requests the relay forwarded after admitting them as steps. */
+  admittedSteps: number
+  /** Requests the relay refused as the host retrying a failed one. */
+  hostRetriesRefused: number
+  /** Requests the relay refused for any other reason (a step whose admission was refused, a closed attempt…). */
+  otherRelayRefusals: number
+  /** Model requests no forwarded request accounts for. */
   unattributedRequests: number
   servedInput: number
   servedOutput: number
   recordedInput: number
   recordedOutput: number
+  /** Forwarded requests settled `unknown`. */
+  unknownRequests: number
 }
 
-/**
- * Split the stub's model requests between the admitted attempts, by order.
- *
- * `modelRequestsBefore` is the stub's model-request count when the attempt asked
- * for admission. Attempt k owns every model request from its own count up to the
- * next admitted attempt's count; the last attempt owns every request after its
- * count, to the end of the observation. The requests before the first attempt's
- * count are unattributed — with no admitted attempt, that is all of them. A
- * scenario runs one slot on its own host, so its attempts never overlap.
- */
-export function attributeRequests(marks: readonly AdmissionMark[], requests: readonly StubRequest[]): { byAttempt: StubRequest[][]; unattributed: StubRequest[] } {
-  const model = requests.filter((request) => request.model)
-  const byAttempt = marks.map((mark, index) => {
-    const end = index + 1 < marks.length ? marks[index + 1]!.modelRequestsBefore : model.length
-    return model.slice(mark.modelRequestsBefore, end)
-  })
-  const unattributed = marks.length === 0 ? model : model.slice(0, marks[0]!.modelRequestsBefore)
-  return { byAttempt, unattributed }
-}
+/** How long after an attempt ended the relay may take to close a request still open upstream. */
+export const UPSTREAM_CLOSE_BOUND_MS = 5_000
 
 /** The settlement as the probe records it. A kind it does not recognise is recorded as unknown, named. */
 export function recordedOf(settled: SettledLine | null): RecordedUsage {
@@ -243,94 +259,6 @@ export function recordedOf(settled: SettledLine | null): RecordedUsage {
   if (settlement.kind === "unknown") return { kind: "unknown", why: String(settlement.why) }
   if (settlement.kind === "not-issued") return { kind: "not-issued" }
   return { kind: "unknown", why: `the settlement's kind ${JSON.stringify(settlement.kind)} is not one the probe recognises` }
-}
-
-/** One admitted attempt against the invariant: one physical request, and the usage served is the usage recorded. */
-export function attemptRecord(
-  attempt: number,
-  issued: IssuedLine | null,
-  settled: SettledLine | null,
-  requests: StubRequest[],
-  extra: { incomplete?: string; settledAt?: number } = {},
-): AttemptRecord {
-  const servedBy = requests.filter((request) => request.servedUsage !== undefined)
-  const served = {
-    input: servedBy.reduce((sum, request) => sum + request.servedUsage!.prompt_tokens, 0),
-    output: servedBy.reduce((sum, request) => sum + request.servedUsage!.completion_tokens, 0),
-    requestsThatServed: servedBy.length,
-  }
-  const recorded = recordedOf(settled)
-  const hung = requests.filter((request) => request.behaviour === "hang")
-  const upstream: AttemptRecord["upstream"] =
-    hung.length === 0
-      ? undefined
-      : (() => {
-          const last = hung.at(-1)!
-          if (last.closed === undefined) return { heldOpenAfterSettleMs: null, closedBy: "still open" as const }
-          return {
-            heldOpenAfterSettleMs: extra.settledAt === undefined ? null : last.closed.at - extra.settledAt,
-            closedBy: last.closed.by,
-          }
-        })()
-  const incompleteReasons = [
-    ...(extra.incomplete === undefined ? [] : [extra.incomplete]),
-    ...(issued === null ? ["the journal holds no `issued` line for it"] : []),
-    ...(recorded.kind === "missing" ? ["the journal holds no `settled` line for it"] : []),
-  ]
-  const problems: string[] = [...incompleteReasons]
-  if (recorded.kind === "not-issued" && requests.length > 0) {
-    problems.push(`MAD settled it not-issued, but ${requests.length} physical request(s) reached the provider`)
-  }
-  if (requests.length > 1) {
-    problems.push(`${requests.length} physical requests stood behind one admitted port call (${requests.length - 1} the port call did not show)`)
-  }
-  if (recorded.kind === "usage") {
-    const tokens = recorded.tokens
-    if (tokens.input !== served.input || tokens.output !== served.output) {
-      problems.push(
-        `MAD recorded ${tokens.input} in / ${tokens.output} out; the stub served ${served.input} in / ${served.output} out ` +
-          `over ${served.requestsThatServed} request(s)`,
-      )
-    }
-    if (tokens.reasoning + tokens.cacheRead + tokens.cacheWrite !== 0) problems.push("MAD recorded reasoning or cache tokens the stub never served")
-  } else if (served.requestsThatServed > 0) {
-    problems.push(`MAD recorded no figure (${recorded.kind}); the stub served ${served.input} in / ${served.output} out`)
-  }
-  // A provider request still open after MAD settled the attempt could still be served, and nothing observed its usage.
-  let held = ""
-  if (upstream !== undefined) {
-    const after = upstream.heldOpenAfterSettleMs === null ? "" : `for ${upstream.heldOpenAfterSettleMs} ms `
-    if (upstream.closedBy === "client") {
-      held = `; the host closed the provider request ${upstream.heldOpenAfterSettleMs === null ? "" : `${upstream.heldOpenAfterSettleMs} ms `}after the adapter gave up, while it was observed`
-    } else {
-      problems.push(
-        (upstream.closedBy === "host-stopping"
-          ? `the host held the provider request open ${after}after the adapter gave up and MAD settled the attempt as ${recorded.kind}, until the probe stopped the host`
-          : `the provider request was still open when the stub stopped recording, after MAD settled the attempt as ${recorded.kind}`) +
-          "; whether the host would have reported that request's usage later was not observed",
-      )
-    }
-  }
-  const holds = problems.length === 0
-  return {
-    attempt,
-    issued,
-    settled,
-    requests,
-    physicalRequests: requests.length,
-    hiddenRequests: Math.max(0, requests.length - 1),
-    served,
-    recorded,
-    ...(upstream === undefined ? {} : { upstream }),
-    incomplete: incompleteReasons.length === 0 ? null : incompleteReasons.join("; "),
-    verdict: holds ? "HOLDS" : "FAILS",
-    why:
-      (holds
-        ? requests.length === 1
-          ? `one physical request, and ${recorded.kind === "usage" ? "the usage MAD recorded is the usage served" : `MAD recorded it as ${recorded.kind}; the stub served no usage for it`}`
-          : `no physical request, and MAD recorded ${recorded.kind === "usage" ? "no spend" : recorded.kind}`
-        : problems.join("; ")) + held,
-  }
 }
 
 /** The journal's lines, paired by physical id, in issue order. */
@@ -347,56 +275,202 @@ export function pairLines(lines: readonly JournalLine[]): { issued: IssuedLine; 
 }
 
 /**
- * Every admitted attempt with its journal pair, matched on the attempt number.
- * When the journal's pairs and the admissions do not correspond one to one, every
- * attempt is marked incomplete rather than paired by position.
+ * One forwarded request against the invariant: it was admitted by a durable
+ * `issued` line, it reached the stub once, and the journal settled it with what
+ * the stub served, or `unknown` when the stub served nothing.
+ */
+export function physicalRecord(
+  step: number,
+  pair: { issued: IssuedLine; settled: SettledLine | null } | undefined,
+  stub: StubRequest | null,
+  event: RelayEvent,
+): PhysicalRecord {
+  const recorded = recordedOf(pair?.settled ?? null)
+  const served = stub?.servedUsage === undefined ? null : { input: stub.servedUsage.prompt_tokens, output: stub.servedUsage.completion_tokens }
+  const problems: string[] = []
+  if (pair === undefined) problems.push("the relay forwarded it with no `issued` line in the journal")
+  if (stub === null) problems.push("the relay forwarded it and the stub never received it")
+  if (stub?.placeholderKey === true) problems.push("it reached the stub with the host's placeholder key, not the relay's credential")
+  if (recorded.kind === "missing" && pair !== undefined) problems.push("the journal holds no `settled` line for it")
+  if (recorded.kind === "not-issued") problems.push("it reached the provider, and MAD settled it not-issued")
+  if (recorded.kind === "usage") {
+    if (served === null) problems.push(`MAD recorded ${recorded.tokens.input} in / ${recorded.tokens.output} out, and the stub served no usage`)
+    else if (recorded.tokens.input !== served.input || recorded.tokens.output !== served.output) {
+      problems.push(`MAD recorded ${recorded.tokens.input} in / ${recorded.tokens.output} out; the stub served ${served.input} in / ${served.output} out`)
+    }
+    if (recorded.tokens.reasoning + recorded.tokens.cacheRead + recorded.tokens.cacheWrite !== 0) problems.push("MAD recorded reasoning or cache tokens the stub never served")
+  } else if (recorded.kind === "unknown" && served !== null) {
+    problems.push(`MAD recorded it unknown, and the stub served ${served.input} in / ${served.output} out`)
+  }
+  let upstream: PhysicalRecord["upstream"]
+  if (stub !== null && stub.behaviour === "hang") {
+    const closedBy = stub.closed === undefined ? ("still open" as const) : stub.closed.by
+    upstream = { closedAfterAttemptMs: event.closedAfterClose ?? null, closedBy }
+    if (closedBy !== "client") {
+      problems.push(
+        closedBy === "host-stopping"
+          ? "the provider request stayed open after the attempt ended, until the probe stopped the host"
+          : "the provider request was still open when the stub stopped recording",
+      )
+    } else if (upstream.closedAfterAttemptMs === null || upstream.closedAfterAttemptMs > UPSTREAM_CLOSE_BOUND_MS) {
+      problems.push(
+        `the provider request was closed ${upstream.closedAfterAttemptMs === null ? "before the attempt ended, by the host" : `${upstream.closedAfterAttemptMs} ms after the attempt ended`}, ` +
+          `not by the relay within ${UPSTREAM_CLOSE_BOUND_MS} ms of it`,
+      )
+    }
+  }
+  const holds = problems.length === 0
+  const figure =
+    recorded.kind === "usage"
+      ? "settled with the usage the stub served"
+      : recorded.kind === "unknown"
+        ? `settled unknown (${recorded.why}); the stub served no usage`
+        : `settled ${recorded.kind}`
+  return {
+    step,
+    issued: pair?.issued ?? null,
+    settled: pair?.settled ?? null,
+    stub,
+    served,
+    recorded,
+    ...(upstream === undefined ? {} : { upstream }),
+    verdict: holds ? "HOLDS" : "FAILS",
+    why: holds
+      ? `admitted before it was forwarded, reached the stub once, ${figure}` +
+        (upstream === undefined ? "" : `; the relay closed it ${upstream.closedAfterAttemptMs} ms after the attempt ended`)
+      : problems.join("; "),
+  }
+}
+
+const RETRY_REFUSAL = "it follows a failed request of the same attempt"
+const UNATTRIBUTED_REFUSALS = ["it names no session", "its two session headers disagree", "its session was not opened with an admitted attempt"]
+
+/**
+ * Every admitted attempt, with each physical request the relay forwarded for it.
+ *
+ * The relay's forwarded events and the stub's model requests are paired by
+ * session and, within a session, by order: the relay is the stub's only client
+ * and passes the session header on. The events are split between attempts by the
+ * session each attempt's backend opened, and each is paired with the journal's
+ * `issued` line for its attempt and step. A forwarded request no admitted
+ * attempt's session accounts for is unattributed, as is a stub request no
+ * forwarded one does.
  */
 export function attemptsOf(
   marks: readonly AdmissionMark[],
   pairs: readonly { issued: IssuedLine; settled: SettledLine | null }[],
+  events: readonly RelayEvent[],
   requests: readonly StubRequest[],
-): { attempts: AttemptRecord[]; unattributed: StubRequest[] } {
-  const { byAttempt, unattributed } = attributeRequests(marks, requests)
+): { attempts: AttemptRecord[]; unattributed: StubRequest[]; unattributedRefusals: RelayEvent[] } {
+  const model = requests.filter((request) => request.model)
+  const forwarded = events.filter((event) => event.outcome === "forwarded")
+  const stubOf = new Map<RelayEvent, StubRequest | null>()
+  const used = new Set<StubRequest>()
+  for (const event of forwarded) {
+    const stub = model.find((request) => !used.has(request) && request.session === event.session) ?? null
+    if (stub !== null) used.add(stub)
+    stubOf.set(event, stub)
+  }
+  const sessions = new Set(marks.flatMap((mark) => (mark.session === undefined ? [] : [mark.session])))
+  const orphans = forwarded.filter((event) => event.session === null || !sessions.has(event.session))
+  // A stub request with no forwarded counterpart, or behind a forwarded request no attempt accounts for.
+  const unattributed = [
+    ...model.filter((request) => !used.has(request)),
+    ...orphans.flatMap((event) => (stubOf.get(event) === null || stubOf.get(event) === undefined ? [] : [stubOf.get(event)!])),
+  ]
+  const unattributedRefusals = [
+    ...events.filter((event) => event.outcome === "refused" && UNATTRIBUTED_REFUSALS.includes(event.reason ?? "")),
+    // A forwarded request whose session no admitted attempt opened, recorded as such even when it never reached the stub.
+    ...orphans.filter((event) => stubOf.get(event) === null).map((event) => ({ ...event, reason: "forwarded for a session no admitted attempt opened" })),
+  ]
+  const firstPairs = pairs.filter((pair) => pair.issued.step === undefined)
   const mismatch =
-    pairs.length === marks.length
+    firstPairs.length === marks.length
       ? undefined
-      : `the journal holds ${pairs.length} issued line(s) for ${marks.length} admitted attempt(s), so no attempt can be paired with its lines`
-  const used = new Set<number>()
-  const attempts = marks.map((mark, index) => {
-    const at = mismatch === undefined ? pairs.findIndex((pair, position) => !used.has(position) && pair.issued.attempt === mark.attempt) : -1
-    if (at >= 0) used.add(at)
-    const pair = at >= 0 ? pairs[at]! : undefined
-    return attemptRecord(mark.attempt, pair?.issued ?? null, pair?.settled ?? null, byAttempt[index]!, {
-      ...(mismatch === undefined ? {} : { incomplete: mismatch }),
-      ...(mark.settledAt === undefined ? {} : { settledAt: mark.settledAt }),
-    })
+      : `the journal holds ${firstPairs.length} attempt line(s) for ${marks.length} admitted attempt(s), so no attempt can be paired with its lines`
+  const attempts = marks.map((mark): AttemptRecord => {
+    const own = pairs.filter((pair) => pair.issued.attempt === mark.attempt)
+    const pairFor = (step: number) => own.find((pair) => (pair.issued.step ?? 1) === step)
+    const sessionEvents = mark.session === undefined ? [] : events.filter((event) => event.session === mark.session)
+    const physical = sessionEvents
+      .filter((event) => event.outcome === "forwarded")
+      .map((event) => physicalRecord(event.step ?? 0, mismatch === undefined ? pairFor(event.step ?? 0) : undefined, stubOf.get(event) ?? null, event))
+    const forwardedSteps = new Set(physical.map((record) => record.step))
+    const admittedNotForwarded = own
+      .filter((pair) => !forwardedSteps.has(pair.issued.step ?? 1))
+      .map((pair) => ({ step: pair.issued.step ?? 1, recorded: recordedOf(pair.settled) }))
+    const relayRefusals = sessionEvents.filter((event) => event.outcome === "refused").map((event) => event.reason ?? "no reason recorded")
+    const incompleteReasons = [
+      ...(mismatch === undefined ? [] : [mismatch]),
+      ...(pairFor(1) === undefined ? ["the journal holds no `issued` line for its first request"] : []),
+      ...own.filter((pair) => pair.settled === null).map((pair) => `the journal holds no \`settled\` line for request ${pair.issued.step ?? 1}`),
+    ]
+    const problems = [
+      ...incompleteReasons,
+      ...physical.filter((record) => record.verdict === "FAILS").map((record) => `request ${record.step}: ${record.why}`),
+      ...admittedNotForwarded
+        .filter((entry) => entry.step === 1 ? !(entry.recorded.kind === "usage" && spentOf(entry.recorded.tokens) === 0) : entry.recorded.kind !== "not-issued")
+        .map((entry) => `request ${entry.step} was admitted and never forwarded, and was settled ${entry.recorded.kind}${entry.recorded.kind === "usage" ? " with a non-zero figure" : ""}`),
+    ]
+    const retries = relayRefusals.filter((reason) => reason.startsWith(RETRY_REFUSAL)).length
+    return {
+      attempt: mark.attempt,
+      session: mark.session ?? null,
+      issued: pairFor(1)?.issued ?? null,
+      physical,
+      admittedNotForwarded,
+      relayRefusals,
+      incomplete: incompleteReasons.length === 0 ? null : incompleteReasons.join("; "),
+      verdict: problems.length === 0 ? "HOLDS" : "FAILS",
+      why:
+        problems.length === 0
+          ? `${physical.length} physical request(s), each admitted before it was forwarded and settled with its own figure` +
+            (retries === 0 ? "" : `; ${retries} host retr${retries === 1 ? "y" : "ies"} refused by the relay, none forwarded`) +
+            (relayRefusals.length > retries ? `; ${relayRefusals.length - retries} other request(s) refused by the relay` : "")
+          : problems.join("; "),
+    }
   })
-  return { attempts, unattributed }
+  return { attempts, unattributed, unattributedRefusals }
+}
+
+function spentOf(tokens: TokenUsage): number {
+  return tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead + tokens.cacheWrite
 }
 
 export function scenarioVerdict(
   attempts: readonly AttemptRecord[],
   unattributed: readonly StubRequest[],
+  unattributedRefusals: readonly RelayEvent[],
   refusedAdmissions: number,
+  integrity: readonly string[],
 ): { verdict: Verdict; complete: boolean; why: string; totals: ScenarioTotals } {
-  const sum = (pick: (attempt: AttemptRecord) => number) => attempts.reduce((total, attempt) => total + pick(attempt), 0)
+  const physical = attempts.flatMap((attempt) => attempt.physical)
+  const refusals = attempts.flatMap((attempt) => attempt.relayRefusals)
+  const retries = refusals.filter((reason) => reason.startsWith(RETRY_REFUSAL)).length
+  const known = physical.flatMap((record) => (record.recorded.kind === "usage" ? [record.recorded.tokens] : []))
   const totals: ScenarioTotals = {
     admittedAttempts: attempts.length,
     madRetries: Math.max(0, attempts.length - 1),
     refusedAdmissions,
-    physicalRequests: sum((attempt) => attempt.physicalRequests) + unattributed.length,
-    hiddenHostRequests: sum((attempt) => attempt.hiddenRequests),
+    physicalRequests: physical.filter((record) => record.stub !== null).length + unattributed.length,
+    admittedSteps: physical.filter((record) => record.step > 1).length,
+    hostRetriesRefused: retries,
+    otherRelayRefusals: refusals.length - retries + unattributedRefusals.length,
     unattributedRequests: unattributed.length,
-    servedInput: sum((attempt) => attempt.served.input) + unattributed.reduce((total, request) => total + (request.servedUsage?.prompt_tokens ?? 0), 0),
-    servedOutput: sum((attempt) => attempt.served.output) + unattributed.reduce((total, request) => total + (request.servedUsage?.completion_tokens ?? 0), 0),
-    recordedInput: sum((attempt) => (attempt.recorded.kind === "usage" ? attempt.recorded.tokens.input : 0)),
-    recordedOutput: sum((attempt) => (attempt.recorded.kind === "usage" ? attempt.recorded.tokens.output : 0)),
+    servedInput: [...physical.map((record) => record.served?.input ?? 0), ...unattributed.map((request) => request.servedUsage?.prompt_tokens ?? 0)].reduce((a, b) => a + b, 0),
+    servedOutput: [...physical.map((record) => record.served?.output ?? 0), ...unattributed.map((request) => request.servedUsage?.completion_tokens ?? 0)].reduce((a, b) => a + b, 0),
+    recordedInput: known.reduce((total, tokens) => total + tokens.input, 0),
+    recordedOutput: known.reduce((total, tokens) => total + tokens.output, 0),
+    unknownRequests: physical.filter((record) => record.recorded.kind === "unknown").length,
   }
   const complete = attempts.length > 0 && attempts.every((attempt) => attempt.incomplete === null)
-  const failing = attempts.filter((attempt) => attempt.verdict === "FAILS")
   const reasons = [
-    ...failing.map((attempt) => `attempt ${attempt.attempt}: ${attempt.why}`),
-    ...(unattributed.length > 0 ? [`${unattributed.length} physical request(s) arrived before any admission`] : []),
+    ...attempts.filter((attempt) => attempt.verdict === "FAILS").map((attempt) => `attempt ${attempt.attempt}: ${attempt.why}`),
+    ...(unattributed.length > 0 ? [`${unattributed.length} physical request(s) reached the stub that the relay did not forward`] : []),
+    ...(unattributedRefusals.length > 0
+      ? [`the relay could not attribute ${unattributedRefusals.length} request(s) to an admitted attempt (${[...new Set(unattributedRefusals.map((event) => event.reason))].join("; ")})`]
+      : []),
+    ...integrity.map((reason) => `the journal recorded an integrity failure: ${reason}`),
     ...(attempts.length === 0 ? ["no attempt was admitted"] : []),
   ]
   return {
@@ -404,7 +478,8 @@ export function scenarioVerdict(
     complete,
     why:
       reasons.length === 0
-        ? `every admitted attempt (${attempts.length}) made one physical request, and what MAD settled matches what the stub served`
+        ? `every physical request (${totals.physicalRequests}) was admitted before it was forwarded and settled with its own figure` +
+          (retries === 0 ? "" : `; ${retries} host retr${retries === 1 ? "y was" : "ies were"} refused by the relay and never reached the stub`)
         : reasons.join("; "),
     totals,
   }
@@ -458,7 +533,11 @@ export interface ScenarioRecord {
   turnTimeoutMs: number
   attempts: AttemptRecord[]
   unattributedRequests: StubRequest[]
+  /** Relay refusals no admitted attempt's session accounts for. */
+  unattributedRefusals: RelayEvent[]
   refusedAdmissions: { cause: string; reason: string }[]
+  /** The journal's integrity failures, including the stage's cross-check of each attempt's sum. */
+  integrity: string[]
   totals: ScenarioTotals
   verdict: Verdict
   complete: boolean
@@ -482,7 +561,7 @@ export interface HostIdentity {
 
 export interface ProbeEvidence {
   kind: string
-  story: "2-8c"
+  story: "2-8c2"
   measuredAt: string
   paidTokens: string
   isolation: string[]
@@ -499,46 +578,44 @@ export interface ProbeEvidence {
 /** The findings, each stated from what this run's scenarios measured, naming the scenario. */
 export function findingsFrom(scenarios: readonly ScenarioRecord[]): { id: string; text: string }[] {
   const named = (name: string) => scenarios.find((scenario) => scenario.name === name)
-  const perAttempt = (scenario: ScenarioRecord) => scenario.attempts.map((attempt) => attempt.physicalRequests).join(", ")
-  const usageGap = (scenario: ScenarioRecord) =>
+  const missing = (name: string) => `scenario \`${name}\` did not run, so this run measured nothing for it`
+  const figures = (scenario: ScenarioRecord) =>
     `MAD recorded ${scenario.totals.recordedInput} in / ${scenario.totals.recordedOutput} out; the stub served ` +
     `${scenario.totals.servedInput} in / ${scenario.totals.servedOutput} out`
-  const missing = (name: string) => `scenario \`${name}\` did not run, so this run measured nothing for it`
-  const fiveHundred = named("persistent 500")
-  const fourTwoNine = named("429 then success")
-  const tool = named("host-tool step")
-  const unoffered = named("unoffered tool")
+  const retried = (name: string) => {
+    const scenario = named(name)
+    return scenario === undefined
+      ? missing(name)
+      : `\`${name}\`: ${scenario.totals.physicalRequests} request(s) reached the stub, ${scenario.totals.hostRetriesRefused} host retr` +
+          `${scenario.totals.hostRetriesRefused === 1 ? "y was" : "ies were"} refused by the relay, and ${scenario.totals.unknownRequests} ` +
+          `forwarded request(s) were settled unknown`
+  }
+  const stepped = (name: string) => {
+    const scenario = named(name)
+    return scenario === undefined
+      ? missing(name)
+      : `\`${name}\`: ${scenario.totals.admittedSteps} step(s) admitted before forwarding, ${scenario.totals.physicalRequests} ` +
+          `request(s) reached the stub, and ${figures(scenario)}`
+  }
   const hang = named("hang past the adapter timeout")
-  const held = hang?.attempts.find((attempt) => attempt.upstream !== undefined)?.upstream
+  const held = hang?.attempts.flatMap((attempt) => attempt.physical).find((record) => record.upstream !== undefined)?.upstream
+  const refused = named("step refused mid-turn")
+  const forwarded = scenarios.flatMap((scenario) => scenario.attempts.flatMap((attempt) => attempt.physical))
+  const unattributable = scenarios.reduce((total, scenario) => total + scenario.unattributedRefusals.length, 0)
   return [
     {
       id: "F2",
       text:
-        "whether the host retries a failed provider request itself. Measured here: a persistent 500 was sent " +
-        (fiveHundred === undefined ? `— ${missing("persistent 500")}` : `${perAttempt(fiveHundred)} time(s) in its ${fiveHundred.attempts.length} admitted attempt(s)`) +
-        "; a first 429 was followed by " +
-        (fourTwoNine === undefined ? `— ${missing("429 then success")}` : `${fourTwoNine.totals.hiddenHostRequests} further request(s) within its admitted attempt(s)`) +
-        ". Measured in the 2026-09-23 spike, not by this probe: a header timeout (headerTimeout 3000 ms) was sent 6 times. " +
-        "The network-error case comes from reading the host binary, not from a measurement. A source search found no switch " +
-        "to turn the loop off; that search does not prove no switch exists",
+        "the host's own retry of a failed provider request. Measured through the relay: " +
+        ["persistent 500", "429 then success", "400"].map(retried).join("; ") +
+        ". A refused retry never reaches the provider, and a failed request is settled unknown, which latches the journal's halt",
     },
-    {
-      id: "F3",
-      text:
-        tool === undefined
-          ? `host tools, offered by default: ${missing("host-tool step")}`
-          : `host tools are offered by default; with one tool step, ${perAttempt(tool)} physical request(s) stood behind the ` +
-            `admitted attempt(s), and ${usageGap(tool)} (scenario \`host-tool step\`)`,
-    },
+    { id: "F3", text: `a host tool step, with host tools offered by default. ${stepped("host-tool step")}` },
     {
       id: "N2",
       text:
-        (unoffered === undefined
-          ? `a call to a tool that was not offered: ${missing("unoffered tool")}`
-          : 'with only StructuredOutput offered (`tools: {"*":false,"StructuredOutput":true}`), a stub answer that called ' +
-            `another tool left ${perAttempt(unoffered)} physical request(s) behind the admitted attempt(s), and ${usageGap(unoffered)} ` +
-            "(scenario `unoffered tool`)") +
-        '. Whether a real provider emits such a call under `tool_choice: "required"` is not established',
+        `a call to a tool that was not offered (\`tools: {"*":false,"StructuredOutput":true}\`). ${stepped("unoffered tool")}. ` +
+        'Whether a real provider emits such a call under `tool_choice: "required"` is not established',
     },
     {
       id: "H1",
@@ -548,10 +625,23 @@ export function findingsFrom(scenarios: readonly ScenarioRecord[]): { id: string
           : held === undefined
             ? "in the hang scenario every provider request answered, so nothing was held open"
             : held.closedBy === "client"
-              ? `in the hang scenario the host closed the provider request ${held.heldOpenAfterSettleMs ?? "an unmeasured number of"} ms after MAD settled the attempt`
-              : `in the hang scenario the host held the provider request open ${held.heldOpenAfterSettleMs === null ? "" : `${held.heldOpenAfterSettleMs} ms `}` +
-                `after MAD settled the attempt, ${held.closedBy === "host-stopping" ? "until the probe stopped the host" : "and it was still open when the stub stopped recording"}; ` +
-                `the stub was watched for ${HANG_OBSERVE_MS} ms after the adapter gave up, and this says nothing about later`,
+              ? `in the hang scenario the relay closed the provider request ${held.closedAfterAttemptMs ?? "an unmeasured number of"} ms after the attempt ended`
+              : `in the hang scenario the provider request stayed open after the attempt ended, ${held.closedBy === "host-stopping" ? "until the probe stopped the host" : "and it was still open when the stub stopped recording"}`,
+    },
+    {
+      id: "S1",
+      text:
+        refused === undefined
+          ? `a step whose admission is refused: ${missing("step refused mid-turn")}`
+          : `a step whose admission the journal refused mid-turn: ${refused.totals.otherRelayRefusals} request(s) refused by the relay, ` +
+            `${refused.totals.physicalRequests} reached the stub, and ${figures(refused)}`,
+    },
+    {
+      id: "A1",
+      text:
+        `attribution by the host's session headers: ${forwarded.length} request(s) were forwarded, each naming an attempt's session ` +
+        `in both \`x-session-affinity\` and \`X-Session-Id\`, and ${unattributable} request(s) were refused because they did not. ` +
+        "This is a fact about the measured host, not an opencode contract",
     },
   ]
 }
@@ -570,21 +660,24 @@ export function buildEvidence(input: {
 }): ProbeEvidence {
   return {
     kind: EVIDENCE_KIND,
-    story: "2-8c",
+    story: "2-8c2",
     measuredAt: input.measuredAt,
     paidTokens:
-      "none. The host held no paid credential (its one credential variable carried a fixed dummy string), and its only " +
-      "configured provider was the local stub on 127.0.0.1, which bills nothing.",
+      "none. The host held only the relay's placeholder key, its only configured provider was the relay on 127.0.0.1, " +
+      "and the relay's one upstream was the local stub on 127.0.0.1, with a fixed dummy key. Nothing bills.",
     isolation: [
       "the host's environment was built from nothing (as `env -i`): a fixed system PATH, HOME and " +
         "XDG_CONFIG/DATA/CACHE/STATE_HOME in private temporary directories, OPENCODE_CONFIG, " +
-        "OPENCODE_DISABLE_MODELS_FETCH=1, OPENCODE_DISABLE_PROJECT_CONFIG=1, the dummy credential variable, and " +
+        "OPENCODE_DISABLE_MODELS_FETCH=1, OPENCODE_DISABLE_PROJECT_CONFIG=1, the credential variable set to the relay's placeholder key, and " +
         "HTTP(S)_PROXY at a local refusing proxy with NO_PROXY=127.0.0.1",
       "the effective config was the fixed host settings plus one `@ai-sdk/openai-compatible` provider block, verified " +
         "through `GET /config` (for the host's directory and the session directory) and `GET /config/providers` before " +
         "any client call, on every host start",
-      "a fresh host was started for every scenario and every gate-2 case, and each one's exit was confirmed: see each " +
-        "record's `hostStop`",
+      "a fresh host and a fresh relay were started for every scenario and every gate-2 case, and each host's exit was " +
+        "confirmed: see each record's `hostStop`",
+      "the host's provider block pointed at the relay (`ablation/request-meter.ts`), which admitted each physical request " +
+        "through the journal before forwarding it to the stub, and set the stub's key in place of the host's placeholder: " +
+        "see each stub request's `placeholderKey`",
       "the host is not offline: the first time it runs a prompt it tries `npm install @opencode-ai/plugin`, and " +
         (input.proxyAttempts.some((attempt) => attempt.line.includes("registry.npmjs.org"))
           ? "its attempts to reach registry.npmjs.org appear among the refused proxy attempts"
@@ -604,12 +697,14 @@ export function buildEvidence(input: {
       `opencode ${input.host.version} (binary sha256 ${input.host.sha256}) on this machine, one provider package ` +
         `(${OPENAI_COMPATIBLE_NPM}), one model, one-slot discover, the scripted behaviours above; not every host, build, ` +
         "provider, stage or failure",
-      "requests are attributed to attempts by order: a scenario runs one slot on its own host, so attempts never overlap",
+      "each forwarded request is attributed to its attempt by the session the attempt's backend opened on the relay, and to " +
+        "the stub's record of it by order: the relay is the stub's only client",
       `the adapter's turn deadline was ${SCENARIO_TURN_TIMEOUT_MS} ms (${HANG_TURN_TIMEOUT_MS} ms in the hang scenario); ` +
         `the production default is ${PRODUCTION_TURN_TIMEOUT_MS} ms, which also outlasts the host's six-try retry series`,
       `the hang scenario watched the stub for ${HANG_OBSERVE_MS} ms after the adapter gave up, and says nothing about later`,
-      "a HOLDS verdict is about request count and usage for that scenario only; it does not close paired gate 1",
+      "a HOLDS verdict is about admission, forwarding and usage for that scenario only",
       "the stub's 429 carries no Retry-After or rate-limit header; F2's 429 figure covers that one response shape",
+      `the relay is given ${UPSTREAM_CLOSE_BOUND_MS} ms to close a request still open when its attempt ends`,
     ],
   }
 }
@@ -640,19 +735,36 @@ export interface ProbeContext {
   /** Fires when the probe deadline passes: no further host is started and no further scenario runs. */
   signal: AbortSignal
   identity?: HostIdentity
+  /** The relay the current host's provider block points at; set for each host before it starts. */
+  relay?: RequestMeter
   /** Starts a host for one scenario. The default is the verified managed host. */
   startHost?: (context: ProbeContext) => Promise<ProbeHost>
   /** Builds the backend a scenario's discover turn uses. The default is `OpencodeModelBackend`. */
   backendFor?: (
     host: ProbeHost,
-    options: { directory: string; slots: RosterSlot[]; timeoutMs: number; lateUsage: LateUsageReporter; tools?: Record<string, boolean> },
+    options: {
+      directory: string
+      slots: RosterSlot[]
+      timeoutMs: number
+      lateUsage: LateUsageReporter
+      meter: RequestMeterPort
+      tools?: Record<string, boolean>
+    },
   ) => ModelBackend
+  /** Starts the relay for one host. The default is `startRequestMeter` in front of the stub. */
+  startRelay?: (context: ProbeContext) => RequestMeter
 }
 
 const slug = (name: string) => name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()
 
-function stubBlock(stub: AccountingStub): ProviderBlock {
-  return { id: STUB_PROVIDER, npm: OPENAI_COMPATIBLE_NPM, baseURL: stub.baseURL, apiKeyEnv: STUB_KEY_ENV, models: [STUB_MODEL] }
+/** The host's provider block: the relay, which forwards to the stub. */
+function relayBlock(relay: RequestMeter): ProviderBlock {
+  return { id: STUB_PROVIDER, npm: OPENAI_COMPATIBLE_NPM, baseURL: relay.baseURL, apiKeyEnv: STUB_KEY_ENV, models: [STUB_MODEL] }
+}
+
+/** The relay in front of the stub, holding the stub's dummy key; the host gets the placeholder. */
+function stubRelay(context: ProbeContext): RequestMeter {
+  return startRequestMeter({ upstream: context.stub.baseURL, credential: STUB_KEY })
 }
 
 function stopIfAborted(context: ProbeContext, what: string): void {
@@ -662,9 +774,10 @@ function stopIfAborted(context: ProbeContext, what: string): void {
 /** The real managed host, registered in `live` the moment it is spawned. */
 export async function managedProbeHost(context: ProbeContext): Promise<ProbeHost> {
   let spawned: Stoppable | undefined
+  if (context.relay === undefined) throw new Error("no relay was started for this host")
   const started = await startManagedHost({
-    block: stubBlock(context.stub),
-    credential: STUB_KEY,
+    block: relayBlock(context.relay),
+    credential: context.relay.hostKey,
     proxy: context.proxy.url,
     scratchParent: context.scratchParent,
     verifyDirectories: [context.workDir],
@@ -710,31 +823,47 @@ async function stopHost(context: ProbeContext, host: ProbeHost): Promise<string>
 function countingBackend(inner: ModelBackend, calls: { count: number }): ModelBackend {
   return {
     capabilities: (slot) => inner.capabilities(slot),
-    runTurn(slot, instructions, input, schema, signal) {
+    runTurn(slot, instructions, input, schema, signal, admitted) {
       calls.count += 1
-      return inner.runTurn(slot, instructions, input, schema, signal)
+      return inner.runTurn(slot, instructions, input, schema, signal, admitted)
     },
   }
 }
 
-function markingAdmission(inner: RequestAdmission, stub: AccountingStub, marks: AdmissionMark[], refusals: { cause: string; reason: string }[]): RequestAdmission {
+function markingAdmission(inner: RequestAdmission, marks: AdmissionMark[], refusals: { cause: string; reason: string }[]): RequestAdmission {
   return {
     async admit(request: AdmissionRequest): Promise<AdmissionDecision> {
-      const before = stub.modelRequests()
       const decision = await inner.admit(request)
       if (!decision.ok) {
         refusals.push({ cause: decision.cause, reason: decision.reason })
         return decision
       }
-      const mark: AdmissionMark = { attempt: request.attempt, modelRequestsBefore: before }
+      const mark: AdmissionMark = { attempt: request.attempt }
       marks.push(mark)
       return {
-        ok: true,
+        ...decision,
         settle: async (settlement) => {
           mark.settledAt ??= Date.now()
           await decision.settle(settlement)
         },
       }
+    },
+  }
+}
+
+/**
+ * The relay, recording which admitted attempt opened each session. One slot runs
+ * at a time, so the n-th session opened belongs to the n-th admitted attempt.
+ */
+function markingMeter(relay: RequestMeterPort, marks: AdmissionMark[], unmarked: string[]): RequestMeterPort {
+  let opened = 0
+  return {
+    open(sessionID, admitted) {
+      const mark = marks[opened]
+      opened += 1
+      if (mark !== undefined) mark.session = sessionID
+      else unmarked.push(sessionID)
+      return relay.open(sessionID, admitted)
     },
   }
 }
@@ -752,7 +881,15 @@ async function discoverOnce(
   context: ProbeContext,
   root: string,
   options: { tools?: Record<string, boolean>; turnTimeoutMs: number; observeAfterMs: number },
-): Promise<{ marks: AdmissionMark[]; refusals: { cause: string; reason: string }[]; backendCalls: number; hostStop: string }> {
+): Promise<{
+  marks: AdmissionMark[]
+  refusals: { cause: string; reason: string }[]
+  backendCalls: number
+  hostStop: string
+  events: RelayEvent[]
+  integrity: string[]
+  runId: string
+}> {
   stopIfAborted(context, "another host")
   const clock = systemClock()
   const taken = await acquireLock(root, clock.now())
@@ -769,7 +906,14 @@ async function discoverOnce(
   let host: ProbeHost | undefined
   let failure: { error: unknown } | undefined
   let hostStop = ""
+  const runId = `probe-${slug(root.split("/").pop() ?? "run")}`
+  let relay: RequestMeter | undefined
+  let events: RelayEvent[] = []
+  let integrity: string[] = []
+  const unmarked: string[] = []
   try {
+    relay = (context.startRelay ?? stubRelay)(context)
+    context.relay = relay
     host = await (context.startHost ?? managedProbeHost)(context)
     const roster = selectRoster([{ providerId: STUB_PROVIDER, modelId: STUB_MODEL, toolcall: true }], { slots: 1, providerConfigKey: "provider" }).roster
     const backendOptions = {
@@ -777,10 +921,10 @@ async function discoverOnce(
       slots: roster.slots,
       timeoutMs: options.turnTimeoutMs,
       lateUsage: journal.reporter(),
+      meter: markingMeter(relay, marks, unmarked),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
     }
     const backend = (context.backendFor ?? ((probeHost, given) => new OpencodeModelBackend({ serverUrl: probeHost.url, ...given })))(host, backendOptions)
-    const runId = `probe-${slug(root.split("/").pop() ?? "run")}`
     await discover({
       roster,
       backend: countingBackend(backend, calls),
@@ -788,9 +932,15 @@ async function discoverOnce(
       input: PROBE_INPUT,
       clock,
       ledger: emptyLedger(),
-      admission: markingAdmission(journal.admission({ block: 1, phase: "prefix", runId: () => runId }), context.stub, marks, refusals),
+      admission: markingAdmission(journal.admission({ block: 1, phase: "prefix", runId: () => runId }), marks, refusals),
     })
     if (options.observeAfterMs > 0) await new Promise((done) => setTimeout(done, options.observeAfterMs))
+    // Read before the host stops: what the relay did while MAD's turns ran, not what the stop does.
+    events = relay.events()
+    integrity = [
+      ...journal.bill().integrity.map((failure) => failure.reason),
+      ...unmarked.map((session) => `session \`${session}\` was opened on the relay with no admitted attempt to own it`),
+    ]
     hostStop = await stopHost(context, host)
     host = undefined
   } catch (error) {
@@ -805,6 +955,8 @@ async function discoverOnce(
       console.error(`the managed host's exit is UNCONFIRMED: check process ${outcome.pid} by hand (${outcome.why})`)
     }
   }
+  await relay?.stop().catch((error: unknown) => console.error(`warning: the relay did not stop cleanly: ${messageOf(error)}`))
+  context.relay = undefined
   try {
     const closed = await journal.close()
     if (closed.releaseError !== null) console.error(`warning: ${closed.releaseError}`)
@@ -813,18 +965,20 @@ async function discoverOnce(
     else console.error(`warning: the journal in \`${root}\` could not be closed: ${messageOf(error)}`)
   }
   if (failure !== undefined) throw failure.error
-  return { marks, refusals, backendCalls: calls.count, hostStop }
+  return { marks, refusals, backendCalls: calls.count, hostStop, events, integrity, runId }
 }
 
 export async function runScenario(context: ProbeContext, scenario: Scenario): Promise<ScenarioRecord> {
   stopIfAborted(context, `scenario \`${scenario.name}\``)
   const root = join(context.out, "scenarios", slug(scenario.name))
   await mkdir(root, { recursive: true })
+  if (scenario.seed !== undefined) await writeFile(join(root, JOURNAL_FILE), scenario.seed.map((line) => `${JSON.stringify(line)}\n`).join(""), "utf8")
   context.stub.reset({ queue: scenario.queue, otherwise: scenario.otherwise })
   const proxyBefore = context.proxy.attempts().length
   const run = await discoverOnce(context, root, scenario)
-  const { attempts, unattributed } = attemptsOf(run.marks, pairLines(await journalLines(root)), context.stub.requests())
-  const verdict = scenarioVerdict(attempts, unattributed, run.refusals.length)
+  const own = pairLines(await journalLines(root)).filter((pair) => pair.issued.runId === run.runId)
+  const { attempts, unattributed, unattributedRefusals } = attemptsOf(run.marks, own, run.events, context.stub.requests())
+  const verdict = scenarioVerdict(attempts, unattributed, unattributedRefusals, run.refusals.length, run.integrity)
   return {
     name: scenario.name,
     what: scenario.what,
@@ -833,7 +987,9 @@ export async function runScenario(context: ProbeContext, scenario: Scenario): Pr
     turnTimeoutMs: scenario.turnTimeoutMs,
     attempts,
     unattributedRequests: unattributed,
+    unattributedRefusals,
     refusedAdmissions: run.refusals,
+    integrity: run.integrity,
     ...verdict,
     hostStop: run.hostStop,
     proxyAttempts: context.proxy.attempts().slice(proxyBefore),
@@ -849,7 +1005,7 @@ export const GATE_TWO_SEEDS: readonly { gate: GateName; expected: string; seeded
     gate: "global",
     expected: "global cap is exhausted",
     seeded: `one settled Pilot request of ${PAIRED_ALLOWANCES.global} tokens: the global cap is reached, the Blocks allowance is untouched`,
-    lines: seed("pilot", null, null, PAIRED_ALLOWANCES.global),
+    lines: seededSpend("pilot", null, null, PAIRED_ALLOWANCES.global),
   },
   {
     gate: "Blocks",
@@ -857,7 +1013,7 @@ export const GATE_TWO_SEEDS: readonly { gate: GateName; expected: string; seeded
     seeded:
       `one settled block-3 ON request of ${PAIRED_ALLOWANCES.blocks} tokens: the Blocks allowance is reached, the global ` +
       "cap and block 1's prefix are not",
-    lines: seed("blocks", 3, "on", PAIRED_ALLOWANCES.blocks),
+    lines: seededSpend("blocks", 3, "on", PAIRED_ALLOWANCES.blocks),
   },
   {
     gate: "phase",
@@ -865,11 +1021,11 @@ export const GATE_TWO_SEEDS: readonly { gate: GateName; expected: string; seeded
     seeded:
       `one settled block-1 prefix request of ${PAIRED_ALLOWANCES.prefix} tokens: block 1's prefix allowance is reached, ` +
       "the Blocks and global ones are not",
-    lines: seed("blocks", 1, "prefix", PAIRED_ALLOWANCES.prefix),
+    lines: seededSpend("blocks", 1, "prefix", PAIRED_ALLOWANCES.prefix),
   },
 ]
 
-function seed(category: IssuedLine["category"], block: number | null, phase: IssuedLine["phase"], input: number): JournalLine[] {
+function seededSpend(category: IssuedLine["category"], block: number | null, phase: IssuedLine["phase"], input: number): JournalLine[] {
   const physicalId = "seed-1"
   return [
     { type: "issued", physicalId, category, block, phase, stage: "discover", slot: "seed", attempt: 1, runId: `seed-${category}` },
@@ -905,24 +1061,28 @@ function usageText(input: number, output: number): string {
 }
 
 function printTable(scenarios: readonly ScenarioRecord[], gateTwo: readonly GateTwoRecord[]): void {
-  console.log("\nPer attempt (physical = model requests the stub received for that admitted attempt):")
+  console.log("\nPer physical request (forwarded by the relay; served = what the stub answered with):")
   for (const scenario of scenarios) {
     for (const attempt of scenario.attempts) {
-      const recorded =
-        attempt.recorded.kind === "usage" ? usageText(attempt.recorded.tokens.input, attempt.recorded.tokens.output) : attempt.recorded.kind
-      console.log(
-        `  ${scenario.name.padEnd(30)} attempt ${attempt.attempt}  physical ${String(attempt.physicalRequests).padStart(2)}  ` +
-          `served ${usageText(attempt.served.input, attempt.served.output).padEnd(11)} recorded ${recorded.padEnd(11)} ${attempt.verdict} — ${attempt.why}`,
-      )
+      for (const record of attempt.physical) {
+        const recorded =
+          record.recorded.kind === "usage" ? usageText(record.recorded.tokens.input, record.recorded.tokens.output) : record.recorded.kind
+        const served = record.served === null ? "none" : usageText(record.served.input, record.served.output)
+        console.log(
+          `  ${scenario.name.padEnd(30)} attempt ${attempt.attempt} request ${record.step}  served ${served.padEnd(11)} ` +
+            `recorded ${recorded.padEnd(11)} ${record.verdict} — ${record.why}`,
+        )
+      }
+      for (const reason of attempt.relayRefusals) console.log(`  ${scenario.name.padEnd(30)} attempt ${attempt.attempt} refused by the relay — ${reason}`)
     }
   }
   console.log("\nPer scenario:")
-  console.log(`  ${"scenario".padEnd(30)} admitted  MAD retries  refused  physical  hidden host  served in/out  recorded in/out  verdict`)
+  console.log(`  ${"scenario".padEnd(30)} admitted  refused  physical  steps  retries refused  served in/out  recorded in/out  verdict`)
   for (const scenario of scenarios) {
     const t = scenario.totals
     console.log(
-      `  ${scenario.name.padEnd(30)} ${String(t.admittedAttempts).padStart(8)}  ${String(t.madRetries).padStart(11)}  ` +
-        `${String(t.refusedAdmissions).padStart(7)}  ${String(t.physicalRequests).padStart(8)}  ${String(t.hiddenHostRequests).padStart(11)}  ` +
+      `  ${scenario.name.padEnd(30)} ${String(t.admittedAttempts).padStart(8)}  ${String(t.refusedAdmissions).padStart(7)}  ` +
+        `${String(t.physicalRequests).padStart(8)}  ${String(t.admittedSteps).padStart(5)}  ${String(t.hostRetriesRefused).padStart(15)}  ` +
         `${usageText(t.servedInput, t.servedOutput).padStart(13)}  ${usageText(t.recordedInput, t.recordedOutput).padStart(15)}  ${scenario.verdict}`,
     )
   }
@@ -972,7 +1132,7 @@ const probeWith = (hooks: ProbeHooks): ProbeBody => async (out, scratch, live, s
     ...(hooks.startHost === undefined ? {} : { startHost: hooks.startHost }),
     ...(hooks.backendFor === undefined ? {} : { backendFor: hooks.backendFor }),
   }
-  console.log(`MAD host request accounting probe — story 2-8c\nstub ${stub.baseURL}; refusing proxy ${proxy.url}; out ${out}`)
+  console.log(`MAD host request accounting probe — stories 2-8c and 2-8c2\nstub ${stub.baseURL}; refusing proxy ${proxy.url}; out ${out}`)
 
   const scenarios: ScenarioRecord[] = []
   for (const scenario of hooks.scenarios ?? SCENARIOS) {
@@ -1013,9 +1173,9 @@ const probeWith = (hooks: ProbeHooks): ProbeBody => async (out, scratch, live, s
   console.log(
     `\nProxy attempts refused: ${proxy.attempts().length} (${[...new Set(proxy.attempts().map((attempt) => attempt.line))].join("; ") || "none"}).` +
       "\nDirect egress was not shown to be blocked; only proxy-honouring attempts are listed." +
-      "\nNo paid token was spent: the host's only provider was the local stub, and its one credential was a dummy." +
+      "\nNo paid token was spent: the host's only provider was the relay, whose only upstream was the local stub, with a dummy key." +
       `\nEvidence: ${join(out, EVIDENCE_FILE)}` +
-      "\nExit 0 means every scenario ran, every verdict is complete and every gate-2 case was refused. It does not mean paired gate 1 passed.",
+      "\nExit 0 means every scenario ran, every verdict is complete and every gate-2 case was refused. Paired gate 1 needs every scenario to HOLD, and a reviewed change to close it.",
   )
   return 0
 }

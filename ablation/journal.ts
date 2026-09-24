@@ -47,7 +47,9 @@ import type {
   AdmissionRefusalCause,
   AdmissionRequest,
   AdmissionSettlement,
+  AdmittedTurn,
   RequestAdmission,
+  StepDecision,
 } from "../core/ports/admission.ts"
 import type { LateUsageReport, LateUsageReporter } from "../core/ports/late-usage.ts"
 import {
@@ -164,6 +166,8 @@ export interface IssuedLine {
   stage: string
   slot: string
   attempt: number
+  /** Story 2-8c2 — the physical request's place in its attempt, from 2; absent for the first. */
+  step?: number
   runId: string
 }
 
@@ -193,6 +197,7 @@ export interface BilledRequest {
   stage: string
   slot: string
   attempt: number
+  step?: number
   runId: string
   state: RequestState
   /** The settled figure (`usage`). */
@@ -387,6 +392,7 @@ function requestProblem(request: AdmissionRequest): string | null {
   if (!ADMISSION_STAGES.includes(request.stage)) return `its stage ${JSON.stringify(request.stage)} is not discover, debate or judge`
   if (typeof request.slot !== "string" || request.slot.length === 0) return "it names no slot"
   if (!isWhole(request.attempt, 1)) return `its attempt ${JSON.stringify(request.attempt)} is not a whole number from 1`
+  if (request.step !== undefined && !isWhole(request.step, 2)) return `its step ${JSON.stringify(request.step)} is not a whole number from 2`
   return null
 }
 
@@ -666,6 +672,7 @@ function isLine(value: unknown): value is JournalLine {
       typeof line.slot === "string" &&
       line.slot.length > 0 &&
       isWhole(line.attempt, 1) &&
+      (line.step === undefined || isWhole(line.step, 2)) &&
       typeof line.runId === "string" &&
       line.runId.length > 0
     )
@@ -1051,6 +1058,12 @@ export async function openJournal(
     reason: `the ${runner} stopped admitting: ${state.stop}. No model failed.`,
   })
 
+  /** A step is admitted only through its attempt's turn handle, which cross-checks it; asked for directly, it stops the runner. */
+  const stepOutsideTurn = (request: AdmissionRequest): AdmissionDecision => {
+    state.stop ??= `a request was asked to be admitted as step ${JSON.stringify(request.step)} outside its attempt's turn handle`
+    return refuseAsStop()
+  }
+
   /** Where a refused request would have been spent, read defensively off a caller's value. */
   const whereOf = (request: AdmissionRequest): { stage: string; slot: string; attempt: number } => {
     try {
@@ -1084,7 +1097,12 @@ export async function openJournal(
     before?: () => Promise<void>
   }
 
-  const admitWith = (request: AdmissionRequest, spec: AdmitSpec): Promise<AdmissionDecision> => {
+  const admitWith = (
+    request: AdmissionRequest,
+    spec: AdmitSpec,
+    /** Called inside the queue with a step's physical id, once its line is durable. */
+    issued?: (physicalId: string) => void,
+  ): Promise<AdmissionDecision> => {
     const refuse = (decision: AdmissionDecision & { ok: false }): AdmissionDecision => {
       spec.record(decision, request)
       return decision
@@ -1123,6 +1141,7 @@ export async function openJournal(
           stage: request.stage,
           slot: request.slot,
           attempt: request.attempt,
+          ...(request.step === undefined ? {} : { step: request.step }),
           runId,
         }
         try {
@@ -1137,7 +1156,11 @@ export async function openJournal(
           return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
         }
         state.apply(line)
-        return { ok: true, settle: settleFor(line.physicalId) }
+        if (request.step !== undefined) {
+          issued?.(line.physicalId)
+          return { ok: true, settle: settleFor(line.physicalId) }
+        }
+        return meteredAttempt(line.physicalId, request, spec)
       },
       (error) => {
         state.stop ??= `an admission could not be decided: ${messageOf(error)}`
@@ -1150,6 +1173,7 @@ export async function openJournal(
     admission(binding) {
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
+          if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
           return admitWith(request, {
             gate: () => requestGate(state.view(), { block: binding.block, phase: binding.phase }),
             line: { category: "blocks", block: binding.block, phase: binding.phase },
@@ -1178,6 +1202,7 @@ export async function openJournal(
     adversarialAdmission(binding) {
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
+          if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
           return admitWith(request, {
             // A halt marker written at the root after this journal opened (by
             // the arm governor, or by hand) latches the halt before the gate reads
@@ -1280,6 +1305,86 @@ export async function openJournal(
    * precedes its settlement. After `close()` it writes nothing: the settlement is
    * held for `flush()`, which appends it under a freshly taken lock.
    */
+  /**
+   * Story 2-8c2 — an admitted attempt with its `turn` handle.
+   *
+   * Until a backend calls `settleFirst`, the stage's settlement is the first
+   * request's, as it always was. After it, every physical request of the attempt
+   * has its own settlement, and the stage's figure is only compared with their
+   * sum: it writes no line and changes no request. A disagreement, or a request
+   * still in flight when the stage settles, is an integrity failure.
+   */
+  function meteredAttempt(firstId: string, request: AdmissionRequest, spec: AdmitSpec): AdmissionDecision {
+    const steps: string[] = []
+    let metered = false
+    let settledByStage = false
+    let nextStep = 2
+    const settleFirst = settleFor(firstId)
+    const turn: AdmittedTurn = {
+      async admitStep(): Promise<StepDecision> {
+        if (settledByStage) {
+          return { ok: false, cause: "runner-stop", reason: "the attempt was already settled, so no further request may be admitted in it" }
+        }
+        const step = nextStep
+        nextStep += 1
+        const decision = await admitWith(
+          { stage: request.stage, slot: request.slot, attempt: request.attempt, step },
+          spec,
+          (physicalId) => steps.push(physicalId),
+        )
+        if (!decision.ok) return decision
+        return { ok: true, step, settle: decision.settle }
+      },
+      async settleFirst(settlement): Promise<void> {
+        metered = true
+        await settleFirst(settlement)
+      },
+    }
+    const settle = async (given: AdmissionSettlement): Promise<void> => {
+      settledByStage = true
+      // With no step admitted and nothing settled by a meter, the stage's figure is the first request's, as it always was.
+      if (!metered && steps.length === 0) return settleFirst(given)
+      try {
+        crossCheck(firstId, [firstId, ...steps], normalizedSettlement(given))
+      } catch (error) {
+        state.stop ??= `a settlement could not be cross-checked: ${messageOf(error)}`
+      }
+    }
+    return { ok: true, settle, turn }
+  }
+
+  function crossCheck(firstId: string, ids: readonly string[], given: AdmissionSettlement): void {
+    // A step settled not-issued never reached the provider and counts for nothing.
+    const requests = ids.map((id) => state.requests.get(id)!).filter((request) => request.state !== "not-issued")
+    const open = requests.find((request) => request.state === "in-flight" || request.state === "uncertain")
+    let expected: AdmissionSettlement
+    if (open !== undefined) {
+      state.fail({
+        reason: `the attempt of request \`${firstId}\` was settled while its physical request \`${open.physicalId}\` was still in flight`,
+        physicalId: firstId,
+      })
+      watchHalt()
+      return
+    }
+    const unknown = requests.find((request) => request.state !== "usage")
+    if (unknown !== undefined) {
+      if (given.kind === "unknown") return
+      expected = { kind: "unknown", why: unknown.why ?? `request \`${unknown.physicalId}\` has no known figure` }
+    } else {
+      const sum = requests.reduce((total, request) => addTokens(total, request.tokens!), emptyTokenUsage())
+      expected = { kind: "usage", tokens: sum }
+      if (given.kind === "usage" && sameJson(tokensOf(given.tokens), sum)) return
+    }
+    state.fail({
+      reason:
+        `the attempt of request \`${firstId}\` was settled with a figure that is not the sum of its ` +
+        `${requests.length} physical request(s)`,
+      physicalId: firstId,
+      payloads: [expected, given],
+    })
+    watchHalt()
+  }
+
   function settleFor(physicalId: string): (settlement: AdmissionSettlement) => Promise<void> {
     return async (given) => {
       try {

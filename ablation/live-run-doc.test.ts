@@ -480,11 +480,12 @@ describe("LIVE-RUN.md documents the evaluation report that is actually shipped",
     expect(text).toContain("makes the block execution incomplete")
   })
 
-  test("what stories 2-8c and 2-8d still own is stated, and nothing here closes 2.8", async () => {
-    const text = await section()
-    expect(text).toContain("What stories 2-8c and 2-8d still own.")
+  test("what stories 2-8c, 2-8c2 and 2-8d own is stated, and nothing here closes 2.8", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain("What stories 2-8c, 2-8c2 and 2-8d own.")
     expect(text).not.toContain("What story 2-8b still owns.")
-    expect(text).toContain("Story 2-8c owns the real-host request-accounting check")
+    expect(text).toContain("Story 2-8c owns the shared gates verified on a real host")
+    expect(text).toContain("Story 2-8c2 owns the host request accounting")
     expect(text).toContain("Story 2-8d owns the three blocks over a real change")
     expect(text).toContain("it closes neither story 2.8, FR11 nor the epic")
   })
@@ -543,12 +544,33 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     }
   })
 
-  test("the opening summary names gates 1 and 4 as the refusal, and gate 3 as not consulted", async () => {
+  test("the opening summary names gate 4 as the refusal, and gate 3 as not consulted", async () => {
     const text = (await section()).replace(/\s+/g, " ")
-    expect(text).toContain("gates 1 and 4 below are OPEN and are required for the evaluation")
+    expect(text).toContain("gate 4 below is OPEN and is required for the evaluation")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
     const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN").map((gate) => gate.number)
-    expect(required).toEqual([1, 4])
+    expect(required).toEqual([4])
+  })
+
+  test("the relay is documented: attribution, admission before forwarding, refused retries, unknown on error, the credential", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).toContain("### The relay (story 2-8c2)")
+    for (const phrase of [
+      "`x-session-affinity` and `X-Session-Id`",
+      "not an opencode contract",
+      "first passes the stage's own ledger gate and then its own journal admission",
+      "The relay refuses it with a local `400`",
+      "**one provider error stops the paid run**",
+      "The host is given only the relay's host key.",
+      "the relay forwards nothing that does not carry it",
+      "`stream_options.include_usage`",
+      "AD-6(b)'s one retry never runs",
+      "A figure that reports cache writes is unknown too",
+      "the code it fetches at run time is not hashed",
+      "The shipped plugin runs no relay",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
   })
 
   test("--server is refused, and the provider flags and the managed host are documented", async () => {
@@ -578,7 +600,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
  */
 describe("LIVE-RUN.md documents the host request accounting probe that was actually run", () => {
   const section = async (): Promise<string> =>
-    between(await liveRunDoc(), "## Host request accounting probe (story 2-8c)", "\n## ", "the accounting probe section")
+    between(await liveRunDoc(), "## Host request accounting probe (stories 2-8c and 2-8c2)", "\n## ", "the accounting probe section")
 
   test("the measured table is the committed evidence, row for row", async () => {
     const text = await section()
@@ -587,48 +609,62 @@ describe("LIVE-RUN.md documents the host request accounting probe that was actua
       scenarios: {
         name: string
         verdict: string
-        attempts: { recorded: { kind: string }; upstream?: { heldOpenAfterSettleMs: number | null; closedBy: string } }[]
-        totals: { admittedAttempts: number; physicalRequests: number; hiddenHostRequests: number; servedInput: number; servedOutput: number; recordedInput: number; recordedOutput: number }
+        attempts: { physical: { recorded: { kind: string }; upstream?: { closedAfterAttemptMs: number | null; closedBy: string } }[] }[]
+        totals: {
+          admittedAttempts: number
+          physicalRequests: number
+          admittedSteps: number
+          hostRetriesRefused: number
+          servedInput: number
+          servedOutput: number
+          recordedInput: number
+          recordedOutput: number
+        }
       }[]
     }
     expect(text).toContain(`opencode ${evidence.host.version} (binary sha256 \`${evidence.host.sha256}\`)`)
-    const rows = [...text.matchAll(/^\| (?!Scenario|---)(.+?) \| (\d+) \| (\d+) \| (\d+) \| (\S+) \| (\S+) \| (HOLDS|FAILS) \| (.+?) \|$/gm)]
+    expect(text).toContain(`committed as \`${MEASURED_HOST.evidence}\``)
+    const rows = [...text.matchAll(/^\| (?!Scenario|---)(.+?) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\S+) \| (\S+) \| (HOLDS|FAILS) \| (.+?) \|$/gm)]
     expect(rows.map((row) => row[1])).toEqual(evidence.scenarios.map((scenario) => scenario.name))
     for (const [index, row] of rows.entries()) {
       const scenario = evidence.scenarios[index]!
       const t = scenario.totals
-      const unknown = scenario.attempts.every((attempt) => attempt.recorded.kind === "unknown")
-      const upstream = scenario.attempts.find((attempt) => attempt.upstream !== undefined)?.upstream
+      const physical = scenario.attempts.flatMap((attempt) => attempt.physical)
+      const unknown = physical.length > 0 && physical.every((record) => record.recorded.kind === "unknown")
+      const upstream = physical.find((record) => record.upstream !== undefined)?.upstream
       expect(row.slice(2), scenario.name).toEqual([
         String(t.admittedAttempts),
         String(t.physicalRequests),
-        String(t.hiddenHostRequests),
+        String(t.admittedSteps),
+        String(t.hostRetriesRefused),
         `${t.servedInput}/${t.servedOutput}`,
         unknown ? "unknown" : `${t.recordedInput}/${t.recordedOutput}`,
         scenario.verdict,
         upstream === undefined
           ? "every request answered"
-          : upstream.closedBy === "host-stopping"
-            ? `held open ${upstream.heldOpenAfterSettleMs} ms after the adapter gave up, until the probe stopped the host`
-            : `closed by the host (${upstream.closedBy}) after ${upstream.heldOpenAfterSettleMs} ms`,
+          : upstream.closedBy === "client"
+            ? `closed by the relay ${upstream.closedAfterAttemptMs} ms after the attempt ended`
+            : `left open (${upstream.closedBy})`,
       ])
     }
   })
 
-  test("it states its scope: zero bill, direct egress not shown blocked, F2, F3, N2, gate 1 OPEN", async () => {
+  test("it states its scope: zero bill, direct egress not shown blocked, the findings, gate 1 closed on this file", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("bun run accounting-probe --out /tmp/mad-probe")
     expect(text).toContain("**It bills nothing, by construction.**")
     expect(text).toContain("**Direct egress is not shown to be blocked**")
     expect(text).toContain("The probe spent no paid tokens.")
-    for (const finding of ["**F2 — host retries.**", "**F3 — host-tool steps.**", "**N2 — an unoffered tool.**"]) expect(text).toContain(finding)
-    expect(text).toContain("The network-error case is read from the host binary, not measured.")
+    for (const finding of ["**F2 — host retries.**", "**F3 — host-tool steps.**", "**N2 — an unoffered tool.**", "**H1 — the hang.**", "**S1 — a step refused mid-turn.**", "**A1 — attribution.**"]) {
+      expect(text).toContain(finding)
+    }
     expect(text).toContain('whether a real provider emits one under `tool_choice: "required"` is not established')
     expect(text).toContain("refused inside the journal's admission, before any backend call")
     expect(text).toContain("Only block 1's prefix phase was exercised")
     expect(text).toContain("### Re-measuring")
     expect(text).toContain("600,000 ms")
-    expect(text).toContain("it does not mean gate 1 passed. **Gate 1 stays OPEN**")
+    expect(text).toContain("gate 1 is closed on this file by a reviewed change to `ablation/paired-gates.ts`")
+    expect(text).toContain("ablation/evidence/host-accounting-2026-09-24.json")
     expect(text).not.toContain("evaluation complete")
   })
 })

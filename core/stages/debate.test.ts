@@ -2178,6 +2178,36 @@ describe("debate — a session MAD could not delete (story 2.3, AC3)", () => {
 })
 
 describe("debate — the per-request admission seam (story 2-5c)", () => {
+  test("story 2-8c2 — every participant's turn is handed its attempt's handle", async () => {
+    const admission = fakeAdmission(undefined, undefined, true)
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+    await run([contested()], {}, { admission: admission.admission, maxRounds: 1, backend })
+    expect(backend.admittedTurns).toHaveLength(2)
+    for (const handle of backend.admittedTurns) expect(await handle!.admitStep()).toMatchObject({ ok: true, step: 2 })
+    expect(admission.steps.map((step) => `${step.stage}/${step.slot}/${step.step}`).sort()).toEqual(["debate/discovery-1/2", "debate/discovery-2/2"])
+  })
+
+  test("story 2-8c2 — a debate step the run's own ledger refuses never reaches the experiment", async () => {
+    const admission = fakeAdmission(undefined, undefined, true)
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [says({ findingId: "f-1", position: "upholds" })],
+    })
+    const ledger = emptyLedger() as BudgetLedger
+    await run([contested()], {}, { admission: admission.admission, maxRounds: 1, backend, ledger })
+    ledger.cap = 1
+    ledger.total = { ...ledger.total, input: ledger.total.input + 10 }
+    for (const handle of backend.admittedTurns) {
+      const refused = await handle!.admitStep()
+      expect(refused).toMatchObject({ ok: false, cause: "budget" })
+      expect(refused.ok ? "" : refused.reason).toContain("further debate request")
+    }
+    expect(admission.steps).toEqual([])
+  })
+
   test("every participant's attempt asks, and is settled", async () => {
     const admission = fakeAdmission()
     const finding = contested()

@@ -1603,6 +1603,30 @@ describe("judge — a session MAD could not delete (story 2.3, AC3)", () => {
 })
 
 describe("judge — the per-request admission seam (story 2-5c)", () => {
+  test("story 2-8c2 — every role's turn is handed its attempt's handle", async () => {
+    const admission = fakeAdmission(undefined, undefined, true)
+    const backend = new FakeBackend({})
+    await run([argued()], { admission: admission.admission, backend })
+    expect(backend.admittedTurns).toHaveLength(4)
+    for (const handle of backend.admittedTurns) expect(await handle!.admitStep()).toMatchObject({ ok: true })
+    expect(admission.steps.map((step) => step.stage)).toEqual(["judge", "judge", "judge", "judge"])
+  })
+
+  test("story 2-8c2 — a judge step the run's own ledger refuses never reaches the experiment", async () => {
+    const admission = fakeAdmission(undefined, undefined, true)
+    const backend = new FakeBackend({})
+    const ledger = emptyLedger() as BudgetLedger
+    await run([argued()], { admission: admission.admission, backend, ledger })
+    ledger.cap = 1
+    ledger.total = { ...ledger.total, input: ledger.total.input + 10 }
+    for (const handle of backend.admittedTurns) {
+      const refused = await handle!.admitStep()
+      expect(refused).toMatchObject({ ok: false, cause: "budget" })
+      expect(refused.ok ? "" : refused.reason).toContain("further judge request")
+    }
+    expect(admission.steps).toEqual([])
+  })
+
   test("every role asks, and every admitted attempt is settled", async () => {
     const admission = fakeAdmission()
     await run([argued()], { admission: admission.admission })

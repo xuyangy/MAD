@@ -1,5 +1,5 @@
 /**
- * Story 2-8c — the accounting probe's verdict logic and evidence shape, over
+ * Stories 2-8c and 2-8c2 — the accounting probe's verdict logic and evidence shape, over
  * fakes. No test here starts a host: the real-host run is `bun run
  * accounting-probe`, and its committed output is checked by the evidence tests
  * at the bottom.
@@ -17,11 +17,12 @@ import { startAccountingStub, startRefusingProxy, type StubRequest } from "../ab
 import { PAIRED_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type IssuedLine, type SettledLine } from "../ablation/journal.ts"
 import { MEASURED_HOST, type StopOutcome } from "../ablation/managed-host.ts"
+import type { RequestMeterPort } from "../adapters/opencode/model-backend.ts"
+import type { RelayEvent } from "../ablation/request-meter.ts"
+import type { AdmittedTurn } from "../core/ports/admission.ts"
 import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
 import {
-  attemptRecord,
   attemptsOf,
-  attributeRequests,
   buildEvidence,
   EVIDENCE_FILE,
   EVIDENCE_KIND,
@@ -32,30 +33,35 @@ import {
   outProblem,
   pairLines,
   parseOut,
+  physicalRecord,
   recordedOf,
   runGateTwo,
   runScenario,
   SCENARIOS,
   scenarioVerdict,
   STUB_KEY,
+  STEP_REFUSAL_HEADROOM,
+  UPSTREAM_CLOSE_BOUND_MS,
   type HostIdentity,
   type ProbeContext,
   type Stoppable,
   type ProbeEvidence,
 } from "./accounting-probe.ts"
 
-const request = (index: number, served: boolean, model = true): StubRequest => ({
+const request = (index: number, served: boolean, model = true, session = "s1"): StubRequest => ({
   index,
+  session,
   at: index,
   method: "POST",
   path: "/v1/chat/completions",
   model,
   behaviour: served ? "ok" : "500",
   toolsOffered: [],
+  placeholderKey: false,
   ...(served ? { servedUsage: { prompt_tokens: 1000 + index, completion_tokens: 10 + index, total_tokens: 1010 + 2 * index } } : {}),
 })
 
-const issued = (physicalId: string, attempt: number): IssuedLine => ({
+const issued = (physicalId: string, attempt: number, step?: number): IssuedLine => ({
   type: "issued",
   physicalId,
   category: "blocks",
@@ -64,6 +70,7 @@ const issued = (physicalId: string, attempt: number): IssuedLine => ({
   stage: "discover",
   slot: "discovery-1",
   attempt,
+  ...(step === undefined ? {} : { step }),
   runId: "probe",
 })
 
@@ -73,82 +80,116 @@ const usage = (physicalId: string, input: number, output: number): SettledLine =
   settlement: { kind: "usage", tokens: { input, output, reasoning: 0, cacheRead: 0, cacheWrite: 0 } },
 })
 
-describe("attributing requests to attempts", () => {
-  test("every request after an admission and before the next belongs to it; earlier ones are unattributed", () => {
-    const requests = [request(1, false), request(2, false), request(3, true), request(4, true, false), request(5, true)]
-    const { byAttempt, unattributed } = attributeRequests(
-      [
-        { attempt: 1, modelRequestsBefore: 1 },
-        { attempt: 2, modelRequestsBefore: 3 },
-      ],
-      requests,
-    )
-    expect(unattributed.map((entry) => entry.index)).toEqual([1])
-    expect(byAttempt.map((entries) => entries.map((entry) => entry.index))).toEqual([[2, 3], [5]])
-  })
-})
+const unknown = (physicalId: string, why = "the provider answered HTTP 500"): SettledLine => ({ type: "settled", physicalId, settlement: { kind: "unknown", why } })
 
-describe("one attempt's verdict", () => {
-  test("one request whose served usage is the usage settled HOLDS", () => {
-    const record = attemptRecord(1, issued("request-1", 1), usage("request-1", 1001, 11), [request(1, true)])
+const forwarded = (session: string, step: number, extra: Partial<RelayEvent> = {}): RelayEvent => ({ at: 0, session, path: "/chat/completions", outcome: "forwarded", step, ...extra })
+const refusedEvent = (session: string | null, reason: string): RelayEvent => ({ at: 0, session, path: "/chat/completions", outcome: "refused", reason })
+
+describe("one physical request's verdict", () => {
+  test("admitted, forwarded once, and settled with what was served HOLDS", () => {
+    const record = physicalRecord(1, { issued: issued("request-1", 1), settled: usage("request-1", 1001, 11) }, request(1, true), forwarded("s", 1))
     expect(record.verdict).toBe("HOLDS")
-    expect(record.hiddenRequests).toBe(0)
+    expect(record.why).toContain("admitted before it was forwarded")
   })
 
-  test("a host retry FAILS, naming the count the port call did not show", () => {
-    const requests = [1, 2, 3, 4, 5, 6].map((index) => request(index, false))
-    const record = attemptRecord(1, issued("request-1", 1), usage("request-1", 0, 0), requests)
-    expect(record.verdict).toBe("FAILS")
-    expect(record.why).toContain("6 physical requests stood behind one admitted port call (5 the port call did not show)")
+  test("a forwarded request with no issued line, or one the stub never received, FAILS", () => {
+    expect(physicalRecord(1, undefined, request(1, true), forwarded("s", 1)).why).toContain("with no `issued` line")
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: usage("r", 0, 0) }, null, forwarded("s", 1)).why).toContain("never received it")
   })
 
-  test("a tool step whose first step's usage was dropped FAILS on the count and on the usage", () => {
-    const record = attemptRecord(1, issued("request-1", 1), usage("request-1", 1002, 12), [request(1, true), request(2, true)])
-    expect(record.verdict).toBe("FAILS")
-    expect(record.why).toContain("MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out over 2 request(s)")
+  test("the host's placeholder key reaching the stub FAILS", () => {
+    const leaked = { ...request(1, true), placeholderKey: true }
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: usage("r", 1001, 11) }, leaked, forwarded("s", 1)).why).toContain("placeholder key")
   })
 
-  test("an unknown settlement for a request that served nothing HOLDS; one that hid served usage FAILS", () => {
-    const unknown: SettledLine = { type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "timed out" } }
-    expect(attemptRecord(1, issued("request-1", 1), unknown, [request(1, false)]).verdict).toBe("HOLDS")
-    const hidden = attemptRecord(1, issued("request-1", 1), unknown, [request(1, true)])
-    expect(hidden.verdict).toBe("FAILS")
-    expect(hidden.why).toContain("MAD recorded no figure (unknown)")
+  test("a figure that is not the one served FAILS; unknown for a served figure FAILS; unknown for none HOLDS", () => {
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: usage("r", 5, 5) }, request(1, true), forwarded("s", 1)).why).toContain(
+      "MAD recorded 5 in / 5 out; the stub served 1001 in / 11 out",
+    )
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: unknown("r") }, request(1, true), forwarded("s", 1)).verdict).toBe("FAILS")
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: unknown("r") }, request(1, false), forwarded("s", 1)).verdict).toBe("HOLDS")
+    // A known figure for a request that served nothing is the known zero Decision 2 forbids.
+    expect(physicalRecord(1, { issued: issued("r", 1), settled: usage("r", 0, 0) }, request(1, false), forwarded("s", 1)).why).toContain("the stub served no usage")
   })
 
-  test("a not-issued settlement that a physical request stood behind FAILS", () => {
-    const notIssued: SettledLine = { type: "settled", physicalId: "request-1", settlement: { kind: "not-issued" } }
-    const record = attemptRecord(1, issued("request-1", 1), notIssued, [request(1, false)])
-    expect(record.verdict).toBe("FAILS")
-    expect(record.why).toContain("MAD settled it not-issued, but 1 physical request(s) reached the provider")
-    expect(attemptRecord(1, issued("request-1", 1), notIssued, []).verdict).toBe("HOLDS")
-  })
-
-  test("a missing settled line is an incomplete verdict", () => {
-    const record = attemptRecord(1, issued("request-1", 1), null, [request(1, false)])
-    expect(record.recorded.kind).toBe("missing")
-    expect(scenarioVerdict([record], [], 0).complete).toBe(false)
+  test("a hung request the relay closed promptly HOLDS; one held until the host stopped FAILS", () => {
+    const hung: StubRequest = { ...request(1, false), behaviour: "hang", closed: { at: 6_100, afterMs: 5_100, by: "client" } }
+    const prompt = physicalRecord(1, { issued: issued("r", 1), settled: unknown("r", "aborted") }, hung, forwarded("s", 1, { closedAfterClose: 40 }))
+    expect(prompt.verdict).toBe("HOLDS")
+    expect(prompt.upstream).toEqual({ closedAfterAttemptMs: 40, closedBy: "client" })
+    const held = physicalRecord(1, { issued: issued("r", 1), settled: unknown("r") }, { ...hung, closed: { at: 21_000, afterMs: 20_000, by: "host-stopping" } }, forwarded("s", 1))
+    expect(held.verdict).toBe("FAILS")
+    expect(held.why).toContain("until the probe stopped the host")
+    const late = physicalRecord(1, { issued: issued("r", 1), settled: unknown("r") }, hung, forwarded("s", 1, { closedAfterClose: UPSTREAM_CLOSE_BOUND_MS + 1 }))
+    expect(late.verdict).toBe("FAILS")
   })
 })
 
-describe("a scenario's totals", () => {
-  test("MAD's own retry is kept apart from the host's hidden requests", () => {
-    const first = attemptRecord(1, issued("request-1", 1), usage("request-1", 0, 0), [1, 2, 3].map((index) => request(index, false)))
-    const second = attemptRecord(2, issued("request-2", 2), usage("request-2", 0, 0), [4, 5, 6].map((index) => request(index, false)))
-    const verdict = scenarioVerdict([first, second], [], 0)
-    expect(verdict.totals).toMatchObject({ admittedAttempts: 2, madRetries: 1, physicalRequests: 6, hiddenHostRequests: 4 })
-    expect(verdict.verdict).toBe("FAILS")
-    expect(verdict.complete).toBe(true)
+describe("attempts, from the relay's events, the stub and the journal", () => {
+  test("a tool step is paired with its step line; each request settles with its own figure", () => {
+    const pairs = pairLines([issued("request-1", 1), issued("request-2", 1, 2), usage("request-1", 1001, 11), usage("request-2", 1002, 12)])
+    const { attempts, unattributed } = attemptsOf([{ attempt: 1, session: "s1" }], pairs, [forwarded("s1", 1), forwarded("s1", 2)], [request(1, true), request(2, true)])
+    expect(unattributed).toEqual([])
+    expect(attempts[0]!.physical.map((record) => [record.step, record.issued?.physicalId, record.verdict])).toEqual([
+      [1, "request-1", "HOLDS"],
+      [2, "request-2", "HOLDS"],
+    ])
+    const verdict = scenarioVerdict(attempts, [], [], 0, [])
+    expect(verdict.verdict).toBe("HOLDS")
+    expect(verdict.totals).toMatchObject({ physicalRequests: 2, admittedSteps: 1, servedInput: 2003, recordedInput: 2003 })
   })
 
-  test("an unattributed request fails the scenario, and no admission is not a HOLDS", () => {
-    const ok = attemptRecord(1, issued("request-1", 1), usage("request-1", 1002, 12), [request(2, true)])
-    expect(scenarioVerdict([ok], [request(1, false)], 0).verdict).toBe("FAILS")
-    // Usage served on an unattributed request counts in the served totals, as the request counts in the physical ones.
-    expect(scenarioVerdict([ok], [request(1, true)], 0).totals).toMatchObject({ physicalRequests: 2, servedInput: 2003, servedOutput: 23, recordedInput: 1002 })
-    const none = scenarioVerdict([], [], 1)
-    expect(none.verdict).toBe("FAILS")
-    expect(none.complete).toBe(false)
+  test("host retries refused by the relay are counted, and MAD's own retry is a second attempt", () => {
+    const pairs = pairLines([issued("request-1", 1), unknown("request-1")])
+    const events = [forwarded("s1", 1), refusedEvent("s1", "it follows a failed request of the same attempt, and MAD's retry policy is the only retry")]
+    const { attempts } = attemptsOf([{ attempt: 1, session: "s1" }], pairs, events, [request(1, false)])
+    const verdict = scenarioVerdict(attempts, [], [], 1, [])
+    expect(verdict.verdict).toBe("HOLDS")
+    expect(verdict.totals).toMatchObject({ admittedAttempts: 1, refusedAdmissions: 1, physicalRequests: 1, hostRetriesRefused: 1, unknownRequests: 1 })
+    expect(verdict.why).toContain("1 host retry was refused by the relay")
+  })
+
+  test("a step admitted and not forwarded must be settled not-issued; a first request never sent must be a known zero", () => {
+    const pairs = pairLines([issued("request-1", 1), usage("request-1", 0, 0), issued("request-2", 1, 2), { type: "settled", physicalId: "request-2", settlement: { kind: "not-issued" } }])
+    expect(attemptsOf([{ attempt: 1, session: "s1" }], pairs, [], []).attempts[0]!.verdict).toBe("HOLDS")
+    const wrong = pairLines([issued("request-1", 1), usage("request-1", 3, 0)])
+    expect(attemptsOf([{ attempt: 1, session: "s1" }], wrong, [], []).attempts[0]!.why).toContain("admitted and never forwarded")
+  })
+
+  test("a stub request the relay did not forward, an unattributable refusal and an integrity failure each FAIL the scenario", () => {
+    const pairs = pairLines([issued("request-1", 1), usage("request-1", 1001, 11)])
+    const run = attemptsOf([{ attempt: 1, session: "s1" }], pairs, [forwarded("s1", 1), refusedEvent(null, "it names no session")], [request(1, true), request(2, true)])
+    expect(run.unattributed.map((entry) => entry.index)).toEqual([2])
+    const verdict = scenarioVerdict(run.attempts, run.unattributed, run.unattributedRefusals, 0, ["the attempt of request `request-1` was settled with a figure that is not the sum"])
+    expect(verdict.verdict).toBe("FAILS")
+    expect(verdict.why).toContain("1 physical request(s) reached the stub that the relay did not forward")
+    expect(verdict.why).toContain("could not attribute 1 request(s)")
+    expect(verdict.why).toContain("integrity failure")
+    expect(scenarioVerdict([], [], [], 1, []).verdict).toBe("FAILS")
+  })
+
+  test("stub records pair by session, and a forwarded request no admitted attempt opened is unattributed", () => {
+    const pairs = pairLines([issued("request-1", 1), usage("request-1", 1002, 12)])
+    // The stub saw the orphan's request first; pairing by session still gives attempt 1 its own.
+    const run = attemptsOf([{ attempt: 1, session: "s1" }], pairs, [forwarded("s9", 1), forwarded("s1", 1)], [request(1, true, true, "s9"), request(2, true)])
+    expect(run.attempts[0]!.physical[0]!.verdict).toBe("HOLDS")
+    expect(run.unattributed.map((entry) => entry.index)).toEqual([1])
+    expect(scenarioVerdict(run.attempts, run.unattributed, run.unattributedRefusals, 0, []).verdict).toBe("FAILS")
+  })
+
+  test("a count mismatch between attempt lines and admissions marks every attempt incomplete", () => {
+    const pairs = pairLines([issued("a", 1), usage("a", 1001, 11)])
+    const short = attemptsOf(
+      [
+        { attempt: 1, session: "s1" },
+        { attempt: 2, session: "s2" },
+      ],
+      pairs,
+      [],
+      [],
+    ).attempts
+    for (const attempt of short) expect(attempt.incomplete).toContain("1 attempt line(s) for 2 admitted attempt(s)")
+    expect(scenarioVerdict(short, [], [], 0, []).complete).toBe(false)
   })
 
   test("journal lines are paired by physical id in issue order", () => {
@@ -187,7 +228,7 @@ describe("gate 2", () => {
 })
 
 describe("the scenarios and the command line", () => {
-  test("the seven scenarios the story names, in order", () => {
+  test("the seven scenarios story 2-8c named, and the refused step, in order", () => {
     expect(SCENARIOS.map((scenario) => scenario.name)).toEqual([
       "success",
       "persistent 500",
@@ -196,7 +237,13 @@ describe("the scenarios and the command line", () => {
       "hang past the adapter timeout",
       "host-tool step",
       "unoffered tool",
+      "step refused mid-turn",
     ])
+    // The refused step starts less than one stub answer short of block 1's prefix allowance.
+    const seeded = SCENARIOS.find((scenario) => scenario.name === "step refused mid-turn")!.seed!
+    const spent = seeded.flatMap((line) => (line.type === "settled" && line.settlement.kind === "usage" ? [line.settlement.tokens.input] : []))
+    expect(spent).toEqual([PAIRED_ALLOWANCES.prefix - STEP_REFUSAL_HEADROOM])
+    expect(STEP_REFUSAL_HEADROOM).toBeLessThan(1001)
     expect(SCENARIOS.find((scenario) => scenario.name === "unoffered tool")!.tools).toEqual({ "*": false, StructuredOutput: true })
     // Only the unoffered-tool scenario sets `tools`: no tool policy is changed anywhere else.
     expect(SCENARIOS.filter((scenario) => scenario.tools !== undefined).map((scenario) => scenario.name)).toEqual(["unoffered tool"])
@@ -231,7 +278,8 @@ describe("the evidence shape", () => {
     expect(evidence.egress).toContain("direct egress was NOT shown to be blocked")
     expect(evidence.egress).not.toContain("every outbound attempt was")
     expect(evidence.isolation.join(" ")).toContain("its attempts to reach registry.npmjs.org appear among the refused proxy attempts")
-    expect(evidence.findings.map((finding) => finding.id)).toEqual(["F2", "F3", "N2", "H1"])
+    expect(evidence.findings.map((finding) => finding.id)).toEqual(["F2", "F3", "N2", "H1", "S1", "A1"])
+    expect(evidence.story).toBe("2-8c2")
     expect(evidence.proxyAttempts).toHaveLength(1)
   })
 
@@ -239,10 +287,13 @@ describe("the evidence shape", () => {
     const quiet = buildEvidence({ measuredAt: "2026-09-23T00:00:00.000Z", host, scenarios: [], gateTwo: [], proxyAttempts: [] })
     expect(quiet.isolation.join(" ")).toContain("no attempt to reach registry.npmjs.org was among the refused proxy attempts")
     expect(quiet.findings.find((finding) => finding.id === "F2")!.text).toContain("scenario `persistent 500` did not run")
-    const five = attemptRecord(1, issued("request-1", 1), usage("request-1", 0, 0), [1, 2, 3].map((index) => request(index, false)))
-    const scenario = { name: "persistent 500", attempts: [five], ...scenarioVerdict([five], [], 0) } as unknown as ProbeEvidence["scenarios"][number]
+    const events = [forwarded("s1", 1), refusedEvent("s1", "it follows a failed request of the same attempt, and MAD's retry policy is the only retry")]
+    const run = attemptsOf([{ attempt: 1, session: "s1" }], pairLines([issued("request-1", 1), unknown("request-1")]), events, [request(1, false)])
+    const scenario = { name: "persistent 500", attempts: run.attempts, unattributedRefusals: [], ...scenarioVerdict(run.attempts, [], [], 1, []) } as unknown as ProbeEvidence["scenarios"][number]
     const measured = buildEvidence({ measuredAt: "2026-09-23T00:00:00.000Z", host, scenarios: [scenario], gateTwo: [], proxyAttempts: [] })
-    expect(measured.findings.find((finding) => finding.id === "F2")!.text).toContain("a persistent 500 was sent 3 time(s) in its 1 admitted attempt(s)")
+    expect(measured.findings.find((finding) => finding.id === "F2")!.text).toContain(
+      "`persistent 500`: 1 request(s) reached the stub, 1 host retry was refused by the relay, and 1 forwarded request(s) were settled unknown",
+    )
   })
 })
 
@@ -258,18 +309,34 @@ describe(`the committed evidence (${MEASURED_HOST.evidence})`, () => {
     expect(evidence.host.matchesMeasuredHost).toBe(true)
   })
 
-  test("success HOLDS with one request; 500, host-tool and unoffered-tool FAIL with their counts", async () => {
+  test("every scenario HOLDS: each physical request admitted, forwarded once and settled with its own figure", async () => {
     const evidence = await read()
     const by = (name: string) => evidence.scenarios.find((scenario) => scenario.name === name)!
+    expect(evidence.story).toBe("2-8c2")
     expect(evidence.scenarios.map((scenario) => scenario.name)).toEqual(SCENARIOS.map((scenario) => scenario.name))
-    for (const scenario of evidence.scenarios) expect(scenario.complete, scenario.name).toBe(true)
-    expect(by("success").verdict).toBe("HOLDS")
-    expect(by("success").totals.physicalRequests).toBe(1)
-    for (const name of ["persistent 500", "host-tool step", "unoffered tool"]) {
-      expect(by(name).verdict, name).toBe("FAILS")
-      expect(by(name).totals.hiddenHostRequests, name).toBeGreaterThan(0)
+    for (const scenario of evidence.scenarios) {
+      expect(scenario.complete, scenario.name).toBe(true)
+      expect(scenario.verdict, `${scenario.name}: ${scenario.why}`).toBe("HOLDS")
+      expect(scenario.integrity, scenario.name).toEqual([])
+      expect(scenario.unattributedRequests, scenario.name).toEqual([])
     }
-    expect(by("hang past the adapter timeout").verdict).toBe("FAILS")
+    expect(by("success").totals.physicalRequests).toBe(1)
+    // F2: the host still retries; the relay refuses every retry, and none reaches the stub.
+    for (const name of ["persistent 500", "429 then success"]) expect(by(name).totals.hostRetriesRefused, name).toBeGreaterThan(0)
+    // F3 and N2: the tool step is admitted as step 2 and its usage is recorded.
+    for (const name of ["host-tool step", "unoffered tool"]) {
+      expect(by(name).totals.admittedSteps, name).toBe(1)
+      expect(by(name).totals.recordedInput, name).toBe(by(name).totals.servedInput)
+    }
+    // H1: the relay closed the hung request when the attempt ended.
+    const hung = by("hang past the adapter timeout").attempts.flatMap((attempt) => attempt.physical).find((record) => record.upstream !== undefined)!
+    expect(hung.upstream!.closedBy).toBe("client")
+    // The refused step reached nothing.
+    expect(by("step refused mid-turn").totals.physicalRequests).toBe(1)
+    // No stub request carried the host's placeholder key.
+    for (const scenario of evidence.scenarios) {
+      for (const record of scenario.attempts.flatMap((attempt) => attempt.physical)) expect(record.stub?.placeholderKey, scenario.name).toBe(false)
+    }
   })
 
   test("its findings are the ones its own scenarios give", async () => {
@@ -464,41 +531,6 @@ describe("recorded settlements and pairing", () => {
     expect(recordedOf(null)).toEqual({ kind: "missing" })
   })
 
-  test("pairs are matched on the attempt number, and a count mismatch marks every attempt incomplete", () => {
-    const marks = [
-      { attempt: 1, modelRequestsBefore: 0 },
-      { attempt: 2, modelRequestsBefore: 1 },
-    ]
-    const requests = [request(1, true), request(2, true)]
-    // Issue order swapped: matching is by attempt, not by position.
-    const pairs = pairLines([issued("b", 2), usage("b", 1002, 12), issued("a", 1), usage("a", 1001, 11)])
-    const matched = attemptsOf(marks, pairs, requests).attempts
-    expect(matched.map((attempt) => attempt.issued?.physicalId)).toEqual(["a", "b"])
-    expect(matched.every((attempt) => attempt.verdict === "HOLDS")).toBe(true)
-    const short = attemptsOf(marks, pairs.slice(0, 1), requests).attempts
-    for (const attempt of short) {
-      expect(attempt.incomplete).toContain("1 issued line(s) for 2 admitted attempt(s)")
-      expect(attempt.verdict).toBe("FAILS")
-    }
-    expect(scenarioVerdict(short, [], 0).complete).toBe(false)
-  })
-
-  test("a hung request the host held open after MAD settled FAILS, naming the observed window only", () => {
-    const hung: StubRequest = { ...request(1, false), behaviour: "hang", closed: { at: 21_000, afterMs: 20_000, by: "host-stopping" } }
-    const unknown: SettledLine = { type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "timed out" } }
-    const record = attemptRecord(1, issued("request-1", 1), unknown, [hung], { settledAt: 6_000 })
-    expect(record.verdict).toBe("FAILS")
-    expect(record.upstream).toEqual({ heldOpenAfterSettleMs: 15_000, closedBy: "host-stopping" })
-    expect(record.why).toContain(
-      "the host held the provider request open for 15000 ms after the adapter gave up and MAD settled the attempt as unknown, until the probe stopped the host",
-    )
-    expect(record.why).toContain("whether the host would have reported that request's usage later was not observed")
-    // A request the host closed itself while it was watched is recorded, and fails nothing.
-    const closed: StubRequest = { ...hung, closed: { at: 7_000, afterMs: 6_000, by: "client" } }
-    const byClient = attemptRecord(1, issued("request-1", 1), unknown, [closed], { settledAt: 6_000 })
-    expect(byClient.verdict).toBe("HOLDS")
-    expect(byClient.why).toContain("the host closed the provider request 1000 ms after the adapter gave up")
-  })
 })
 
 describe("the gate-2 seeds, against the real journal", () => {
@@ -556,14 +588,18 @@ describe("runScenario and runGateTwo, with a stand-in host and backend", () => {
         scratchParent: parent,
         live: new Set(),
         signal: new AbortController().signal,
-        startHost: async () => ({
-          url: "http://127.0.0.1:1",
-          stop: async (): Promise<StopOutcome> => {
-            counts.hostStops += 1
-            return { confirmed: true, pid: 1, how: "exited (status 143) after SIGTERM" }
-          },
-        }),
-        backendFor: () => callingBackend(stub.baseURL, counts),
+        // The stand-in host's URL is the relay's, so the stand-in backend reaches the stub through it.
+        startHost: async (context) => {
+          relayKey.value = context.relay!.hostKey
+          return {
+            url: context.relay!.baseURL,
+            stop: async (): Promise<StopOutcome> => {
+              counts.hostStops += 1
+              return { confirmed: true, pid: 1, how: "exited (status 143) after SIGTERM" }
+            },
+          }
+        },
+        backendFor: (host, options) => callingBackend({ url: host.url, hostKey: relayKey.value }, options.meter, counts),
       }
       await run(context, counts)
     } finally {
@@ -584,18 +620,30 @@ describe("runScenario and runGateTwo, with a stand-in host and backend", () => {
     })
   })
 
-  test("a tool step records two requests behind one attempt and the lost usage", async () => {
+  test("a tool step is admitted as step 2, forwarded, and recorded with its own usage", async () => {
     await withContext(async (context) => {
       const record = await runScenario(context, { ...SCENARIOS.find((scenario) => scenario.name === "host-tool step")!, turnTimeoutMs: 5_000 })
-      expect(record.verdict).toBe("FAILS")
-      expect(record.totals).toMatchObject({ admittedAttempts: 1, physicalRequests: 2, hiddenHostRequests: 1, servedInput: 2003, recordedInput: 1002 })
+      expect(record.verdict, record.why).toBe("HOLDS")
+      expect(record.totals).toMatchObject({ admittedAttempts: 1, physicalRequests: 2, admittedSteps: 1, servedInput: 2003, recordedInput: 2003 })
+      expect(record.integrity).toEqual([])
     })
   })
 
-  test("a persistent 500 is retried once by MAD, kept apart from host requests", async () => {
+  test("a persistent 500: the retry is refused by the relay, the request is unknown, and MAD's retry is refused by the halt", async () => {
     await withContext(async (context) => {
       const record = await runScenario(context, { ...SCENARIOS.find((scenario) => scenario.name === "persistent 500")!, turnTimeoutMs: 5_000 })
-      expect(record.totals).toMatchObject({ admittedAttempts: 2, madRetries: 1, physicalRequests: 2, hiddenHostRequests: 0 })
+      expect(record.verdict, record.why).toBe("HOLDS")
+      expect(record.totals).toMatchObject({ admittedAttempts: 1, refusedAdmissions: 1, physicalRequests: 1, hostRetriesRefused: 1, unknownRequests: 1 })
+      expect(record.refusedAdmissions[0]!.cause).toBe("halted")
+    })
+  })
+
+  test("a step refused mid-turn reaches nothing, and the first request keeps its figure", async () => {
+    await withContext(async (context) => {
+      const record = await runScenario(context, { ...SCENARIOS.find((scenario) => scenario.name === "step refused mid-turn")!, turnTimeoutMs: 5_000 })
+      expect(record.verdict, record.why).toBe("HOLDS")
+      expect(record.totals).toMatchObject({ physicalRequests: 1, admittedSteps: 0, recordedInput: 1001 })
+      expect(record.attempts[0]!.relayRefusals[0]).toContain("shared prefix allowance is exhausted")
     })
   })
 
@@ -652,17 +700,17 @@ describe("the probe body writes evidence only for a complete run", () => {
         scenarios: [{ ...SCENARIOS[0]!, turnTimeoutMs: 5_000 }],
         ...(hooks.gateTwoSeeds === undefined ? {} : { gateTwoSeeds: hooks.gateTwoSeeds }),
         startHost: async (context) => {
-          stubUrl.value = context.stub.baseURL
           if (hooks.recordIdentity) context.identity ??= identity
+          relayKey.value = context.relay!.hostKey
           const host: Stoppable & { url: string } = {
-            url: "http://127.0.0.1:1",
+            url: context.relay!.baseURL,
             stop: async (): Promise<StopOutcome> =>
               hooks.stopConfirmed === false ? { confirmed: false, pid: 31, why: "no exit" } : { confirmed: true, pid: 31, how: "exited (status 143) after SIGTERM" },
           }
           context.live.add(host)
           return host
         },
-        backendFor: () => callingBackend(stubUrl.value, counts),
+        backendFor: (host, options) => callingBackend({ url: host.url, hostKey: relayKey.value }, options.meter, counts),
       })
       return { code, errors: errors.join("\n"), written: existsSync(join(out, EVIDENCE_FILE)), evidence: existsSync(join(out, EVIDENCE_FILE)) ? ((await Bun.file(join(out, EVIDENCE_FILE)).json()) as ProbeEvidence) : undefined }
     } finally {
@@ -671,8 +719,6 @@ describe("the probe body writes evidence only for a complete run", () => {
       await rm(parent, { recursive: true, force: true })
     }
   }
-  // The body starts its own stub; the stand-in host hands its URL to the stand-in backend.
-  const stubUrl = { value: "" }
 
   test("a complete run writes the evidence and exits 0", async () => {
     const result = await runMain({ recordIdentity: true })
@@ -705,28 +751,48 @@ describe("the probe body writes evidence only for a complete run", () => {
   })
 })
 
-/** A backend that sends its turn straight to the stub, as the host would, following one tool step. */
-function callingBackend(baseURL: string, counts: { backendCalls: number }): ModelBackend {
-  const call = async () => {
-    const response = await fetch(`${baseURL}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "m1", stream: false, tools: [{ type: "function", function: { name: "StructuredOutput" } }] }),
-    })
-    return { status: response.status, body: (await response.json().catch(() => ({}))) as { choices?: { message?: { tool_calls?: { function: { name: string; arguments: string } }[] } }[]; usage?: { prompt_tokens: number; completion_tokens: number } } }
-  }
+/** The host key of the relay the stand-in host was started behind, for the stand-in backend. */
+const relayKey = { value: "" }
+
+/**
+ * A backend that behaves as the measured host does behind one port call: it opens
+ * a session on the meter, sends each request to the relay with the session in
+ * both headers and the placeholder key, follows one tool step, and retries a
+ * failed request once. The turn's usage is the meter's.
+ */
+function callingBackend(relay: { url: string; hostKey: string }, meter: RequestMeterPort, counts: { backendCalls: number }): ModelBackend {
+  let sessions = 0
   return {
     capabilities: () => ({ tools: true }),
-    async runTurn<T>(slot: string, _instructions: string, _input: string, schema: ZodType<T>): Promise<Envelope<T>> {
+    async runTurn<T>(slot: string, _instructions: string, _input: string, schema: ZodType<T>, _signal?: AbortSignal, admitted?: AdmittedTurn): Promise<Envelope<T>> {
       counts.backendCalls += 1
-      let answer = await call()
-      if (answer.body.choices?.[0]?.message?.tool_calls?.[0]?.function.name === "glob") answer = await call()
-      if (answer.status !== 200) {
-        return { ok: false, slot, failure: "model-error", message: `HTTP ${answer.status}`, tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }
+      sessions += 1
+      const session = `ses_stand_in_${sessions}`
+      const metered = admitted === undefined ? undefined : meter.open(session, admitted)
+      const call = async () => {
+        const response = await fetch(`${relay.url}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${relay.hostKey}`,
+            "x-session-affinity": session,
+            "X-Session-Id": session,
+          },
+          body: JSON.stringify({ model: "m1", stream: false, tools: [{ type: "function", function: { name: "StructuredOutput" } }] }),
+        })
+        return { status: response.status, body: (await response.json().catch(() => ({}))) as { choices?: { message?: { tool_calls?: { function: { name: string; arguments: string } }[] } }[] } }
       }
+      let answer = await call()
+      if (answer.status === 500 || answer.status === 429) answer = await call()
+      if (answer.body.choices?.[0]?.message?.tool_calls?.[0]?.function.name === "glob") answer = await call()
+      const measured = metered === undefined ? undefined : await metered.close()
+      const usage =
+        measured === undefined || measured.kind === "unknown"
+          ? { usageUnknown: { executionId: `exec-${sessions}`, why: measured?.why ?? "not metered" } }
+          : { tokens: measured.tokens }
+      if (answer.status !== 200) return { ok: false, slot, failure: "model-error", message: `HTTP ${answer.status}`, ...usage }
       const args = JSON.parse(answer.body.choices![0]!.message!.tool_calls![0]!.function.arguments) as unknown
-      const usage = answer.body.usage!
-      return { ok: true, slot, value: schema.parse(args), tokens: { input: usage.prompt_tokens, output: usage.completion_tokens, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }
+      return { ok: true, slot, value: schema.parse(args), ...usage }
     },
   }
 }

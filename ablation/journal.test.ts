@@ -500,6 +500,8 @@ describe("replay validation refuses a malformed journal (story 2-5c review)", ()
     ["another category with a phase", { ...issued, category: "calibration", block: null, phase: "on" }],
     ["an empty run id", { ...issued, runId: "" }],
     ["an empty slot", { ...issued, slot: "" }],
+    ["step 1", { ...issued, step: 1 }],
+    ["a fractional step", { ...issued, step: 2.5 }],
   ])("%s", async (_name, line) => {
     const root = await tempDir()
     const rows = line.type === "settled" ? [issued, line] : [line]
@@ -1067,5 +1069,174 @@ describe("A RESTART DOES NOT UNDO THE QUARANTINE (story 2-7c)", () => {
     await journal.close()
     const restart = await acquireLock(root, now())
     expect(restart.ok).toBe(true)
+  })
+})
+
+describe("physical requests inside an admitted attempt (story 2-8c2)", () => {
+  async function metered(root: string) {
+    const journal = await opened(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-m" })
+    const decision = await admission.admit(discover())
+    if (!decision.ok || decision.turn === undefined) throw new Error("expected an admitted attempt with a turn handle")
+    return { journal, admission, decision, turn: decision.turn }
+  }
+
+  test("a step is its own durable `issued` line, and each request settles with its own figure", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    expect(step).toMatchObject({ ok: true, step: 2 })
+    expect((await lines(root)).filter((line) => line.type === "issued")).toEqual([
+      expect.objectContaining({ physicalId: "request-1", attempt: 1 }),
+      { type: "issued", physicalId: "request-2", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, step: 2, runId: "run-m" },
+    ])
+    if (!step.ok) return
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await step.settle({ kind: "usage", tokens: usage(200, 2) })
+    // The stage settles the attempt with the sum: a cross-check that writes nothing.
+    await decision.settle({ kind: "usage", tokens: usage(300, 3) })
+    const settled = (await lines(root)).filter((line) => line.type === "settled")
+    expect(settled).toEqual([
+      { type: "settled", physicalId: "request-1", settlement: { kind: "usage", tokens: usage(100, 1) } },
+      { type: "settled", physicalId: "request-2", settlement: { kind: "usage", tokens: usage(200, 2) } },
+    ])
+    const bill = journal.bill()
+    expect(bill.known).toEqual(usage(300, 3))
+    expect(bill.integrity).toHaveLength(0)
+    expect(bill.halt).toBeNull()
+    await journal.close()
+  })
+
+  test("a stage figure that is not the sum is an integrity failure, and it changes no request", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await step.settle({ kind: "usage", tokens: usage(200, 2) })
+    // Counting request 1 alone, as the host's last-step figure would.
+    await decision.settle({ kind: "usage", tokens: usage(200, 2) })
+    const bill = journal.bill()
+    expect(bill.integrity).toHaveLength(1)
+    expect(bill.integrity[0]!.reason).toContain("not the sum of its 2 physical request(s)")
+    expect(bill.known).toEqual(usage(300, 3))
+    expect((await lines(root)).filter((line) => line.type === "settled")).toHaveLength(2)
+    await journal.close()
+  })
+
+  test("an unknown request makes an unknown stage figure the only consistent one", async () => {
+    const root = await tempDir()
+    const { journal, admission, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await step.settle({ kind: "unknown", why: "the provider answered HTTP 500" })
+    await decision.settle({ kind: "unknown", why: "the relay has no usage figure" })
+    const bill = journal.bill()
+    expect(bill.integrity).toHaveLength(0)
+    expect(bill.halt).toContain("billed an UNKNOWN amount")
+    // The halt latched by the unknown request stays latched.
+    expect(await admission.admit(discover("discovery-2"))).toMatchObject({ ok: false, cause: "halted" })
+    await journal.close()
+  })
+
+  test("a known stage figure over an unknown request is an integrity failure", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    await turn.settleFirst({ kind: "unknown", why: "aborted when the attempt ended" })
+    await decision.settle({ kind: "usage", tokens: usage(0) })
+    expect(journal.bill().integrity).toHaveLength(1)
+    await journal.close()
+  })
+
+  test("the stage settling while a step is still in flight is an integrity failure", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await decision.settle({ kind: "usage", tokens: usage(100, 1) })
+    expect(journal.bill().integrity[0]!.reason).toContain("still in flight")
+    await journal.close()
+  })
+
+  test("without `settleFirst`, the stage's settlement is the attempt's, as before", async () => {
+    const root = await tempDir()
+    const { journal, decision } = await metered(root)
+    await decision.settle({ kind: "usage", tokens: usage(7) })
+    expect(journal.bill().known).toEqual(usage(7))
+    await journal.close()
+  })
+
+  test("a step passes the same experiment gates as its attempt", async () => {
+    const root = await tempDir()
+    const { journal, turn } = await metered(root)
+    await turn.settleFirst({ kind: "usage", tokens: usage(60_000) })
+    // Block 1's prefix allowance is 60,000: the step is refused before any line is written.
+    const step = await turn.admitStep()
+    expect(step).toMatchObject({ ok: false, cause: "budget" })
+    expect((await lines(root)).filter((line) => line.type === "issued")).toHaveLength(1)
+    await journal.close()
+  })
+
+  test("a step settled not-issued counts for nothing in the cross-check", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await step.settle({ kind: "not-issued" })
+    await decision.settle({ kind: "usage", tokens: usage(100, 1) })
+    const bill = journal.bill()
+    expect(bill.integrity).toHaveLength(0)
+    expect(bill.halt).toBeNull()
+    await journal.close()
+  })
+
+  test("no step is admitted once the stage has settled the attempt", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    await turn.settleFirst({ kind: "usage", tokens: usage(1) })
+    await decision.settle({ kind: "usage", tokens: usage(1) })
+    expect(await turn.admitStep()).toMatchObject({ ok: false, cause: "runner-stop" })
+    expect((await lines(root)).filter((line) => line.type === "issued")).toHaveLength(1)
+    await journal.close()
+  })
+
+  test("steps admitted with no metered first request make the stage's figure a cross-check, which fails", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await step.settle({ kind: "usage", tokens: usage(2) })
+    await decision.settle({ kind: "usage", tokens: usage(2) })
+    expect(journal.bill().integrity[0]!.reason).toContain("still in flight")
+    await journal.close()
+  })
+
+  test("a step asked for outside its attempt's handle stops the runner, and nothing is written", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-x" })
+    const decision = await admission.admit({ ...discover(), step: 2 })
+    expect(decision).toMatchObject({ ok: false, cause: "runner-stop" })
+    expect(existsSync(join(root, JOURNAL_FILE)) ? await lines(root) : []).toEqual([])
+    expect(journal.bill().stop).toContain("outside its attempt's turn handle")
+    await journal.close()
+  })
+
+  test("a journal with step lines replays", async () => {
+    const root = await tempDir()
+    const { journal, decision, turn } = await metered(root)
+    const step = await turn.admitStep()
+    if (!step.ok) throw new Error("refused")
+    await turn.settleFirst({ kind: "usage", tokens: usage(100, 1) })
+    await step.settle({ kind: "usage", tokens: usage(200, 2) })
+    await decision.settle({ kind: "usage", tokens: usage(300, 3) })
+    await journal.close()
+    const reopened = await opened(root)
+    expect(reopened.bill().known).toEqual(usage(300, 3))
+    expect(reopened.bill().requests.map((request) => request.step)).toEqual([undefined, 2])
+    await reopened.close()
   })
 })

@@ -19,6 +19,7 @@ import { z, type ZodType } from "zod"
 
 import type { RosterSlot } from "../../core/domain/roster.ts"
 import type { TokenUsage } from "../../core/domain/run-record.ts"
+import type { AdmittedTurn } from "../../core/ports/admission.ts"
 import type { LateUsageReporter } from "../../core/ports/late-usage.ts"
 import {
   abandonedTurn,
@@ -192,6 +193,33 @@ export interface OpencodeBackendOptions {
    * journal, and `scripts/paired.ts` names each with its block and phase. Absent, the ids are the bare `exec-N`.
    */
   executionIdPrefix?: string
+  /**
+   * Story 2-8c2 — the relay that admits and measures every physical request of a
+   * metered turn (`ablation/request-meter.ts`). Absent, a turn's usage is the
+   * host's settled message, as it always was; the shipped plugin passes none.
+   *
+   * With one, a turn that was handed its admission handle opens its session on
+   * the meter, and the envelope's usage is the meter's: the sum of the figures
+   * the provider returned for each physical request, or unknown when any of them
+   * returned none. The host's reported tokens are not used, and no late usage is
+   * reported, because the meter's figure is final.
+   */
+  meter?: RequestMeterPort
+}
+
+/** Story 2-8c2 — what a meter measured for one attempt's physical requests. */
+export type MeteredUsage =
+  | { kind: "usage"; tokens: TokenUsage; physicalRequests: number }
+  | { kind: "unknown"; why: string; physicalRequests: number }
+
+/** Story 2-8c2 — one attempt's session on the meter. `close` ends it and never rejects. */
+export interface MeteredSession {
+  close(): Promise<MeteredUsage>
+}
+
+/** Story 2-8c2 — where a backend registers each attempt's session. */
+export interface RequestMeterPort {
+  open(sessionID: string, admitted: AdmittedTurn): MeteredSession
 }
 
 /** Ten minutes: long enough for a slow frontier model on a large diff. */
@@ -407,6 +435,7 @@ export class OpencodeModelBackend implements ModelBackend {
   private readonly cleanupTimeoutMs: number
   private readonly lateUsage: LateUsageReporter | undefined
   private readonly executionIdPrefix: string
+  private readonly meter: RequestMeterPort | undefined
 
   /**
    * How many `executionId`s this backend has minted. See `nextExecutionId`.
@@ -431,6 +460,7 @@ export class OpencodeModelBackend implements ModelBackend {
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS
     this.lateUsage = options.lateUsage
     this.executionIdPrefix = options.executionIdPrefix ?? ""
+    this.meter = options.meter
   }
 
   /**
@@ -545,6 +575,25 @@ export class OpencodeModelBackend implements ModelBackend {
   }
 
   /**
+   * Story 2-8c2 — a metered turn's usage is what the meter measured, whatever the
+   * host reported. The meter's figure replaces the envelope's `tokens` and
+   * `usageUnknown` and nothing else, so a failed turn stays failed. A turn with
+   * no physical request is a known zero: the host holds no credential, so the
+   * relay is its only path to the provider.
+   */
+  private measured<T>(envelope: Envelope<T>, usage: MeteredUsage): Envelope<T> {
+    const { tokens: _tokens, usageUnknown, ...rest } = envelope
+    if (usage.kind === "usage") return { ...rest, tokens: usage.tokens } as Envelope<T>
+    return {
+      ...rest,
+      usageUnknown: {
+        executionId: usageUnknown?.executionId ?? this.nextExecutionId(),
+        why: `the relay has no usage figure for a physical request of this attempt: ${usage.why}`,
+      },
+    } as Envelope<T>
+  }
+
+  /**
    * AD-2 — the core reads this declaration rather than assuming.
    *
    * AD-13 AMENDMENT FLAGGED: AD-13 assumed MAD declares a backend's tool
@@ -563,6 +612,7 @@ export class OpencodeModelBackend implements ModelBackend {
     input: string,
     schema: ZodType<T>,
     signal?: AbortSignal,
+    admitted?: AdmittedTurn,
   ): Promise<Envelope<T>> {
     const rosterSlot = this.bySlot.get(slot)
     if (!rosterSlot) {
@@ -625,7 +675,11 @@ export class OpencodeModelBackend implements ModelBackend {
     //   turn into a failed one. `session-cleanup-unresolved` is a DISCLOSURE.
     // - **Nothing throws through the port.** `disposeSession` returns its
     //   outcome and raises nothing, so this `await` cannot reject.
-    const envelope = await this.promptAndParse({
+    // Story 2-8c2 — registered before the prompt, so the relay knows the session
+    // before the host's first request names it. Without a handle nothing is
+    // registered, and the relay refuses every request the session sends.
+    const metered = this.meter !== undefined && admitted !== undefined ? this.meter.open(sessionID, admitted) : undefined
+    let envelope = await this.promptAndParse({
       sessionID,
       rosterSlot,
       slot,
@@ -633,7 +687,14 @@ export class OpencodeModelBackend implements ModelBackend {
       input,
       schema,
       signal,
+      metered: metered !== undefined,
     })
+    if (metered !== undefined) {
+      const usage = await metered.close().catch(
+        (error: unknown): MeteredUsage => ({ kind: "unknown", why: `the meter could not be closed: ${describeError(error)}`, physicalRequests: 0 }),
+      )
+      envelope = this.measured(envelope, usage)
+    }
     const unresolved = await this.disposeSession(sessionID)
     if (!unresolved) return envelope
     return { ...envelope, cleanupUnresolved: unresolved }
@@ -662,8 +723,9 @@ export class OpencodeModelBackend implements ModelBackend {
     input: string
     schema: ZodType<T>
     signal?: AbortSignal
+    metered: boolean
   }): Promise<Envelope<T>> {
-    const { sessionID, rosterSlot, slot, instructions, input, schema, signal } = request
+    const { sessionID, rosterSlot, slot, instructions, input, schema, signal, metered } = request
 
     // A schema zod cannot render as JSON Schema is a programmer error, but it
     // must not throw THROUGH the port — `runTurn` returns failures, it does not
@@ -709,7 +771,7 @@ export class OpencodeModelBackend implements ModelBackend {
         // AC2 — passed ONLY when a sink was injected, so an ordinary review
         // attaches no continuation to anything and a fresh install holds no
         // abandoned promise for a run that has already finished.
-        this.lateUsage
+        this.lateUsage && !metered
           ? (settled: PromptResultLike) => this.reportLateUsage(executionId, settled)
           : undefined,
       )

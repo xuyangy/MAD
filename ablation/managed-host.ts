@@ -70,12 +70,13 @@ import { join } from "node:path"
  * The opencode build the accounting probe measured. The managed host refuses any
  * other. It binds the launcher to this one machine's binary: another install of
  * the same version has another hash until it is re-measured (`ablation/LIVE-RUN.md`,
- * "Re-measuring"). Set from `ablation/evidence/host-accounting-2026-09-24.json`.
+ * "Re-measuring"). Set from `ablation/evidence/host-accounting-2026-09-24-relay.json`, the
+ * probe's run through the relay (story 2-8c2), taken on the same build as story 2-8c's.
  */
 export const MEASURED_HOST = {
   version: "1.18.32",
   sha256: "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
-  evidence: "ablation/evidence/host-accounting-2026-09-24.json",
+  evidence: "ablation/evidence/host-accounting-2026-09-24-relay.json",
 } as const
 
 /** The one provider package the managed host accepts. */

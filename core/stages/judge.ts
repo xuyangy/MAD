@@ -113,7 +113,7 @@ import {
 import { assignJudgeSlots, JUDGE_ROLES, type JudgeRole, type JudgeSlots } from "../judge/slots.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
-import type { RequestAdmission, SettleRequest } from "../ports/admission.ts"
+import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import {
@@ -130,7 +130,7 @@ import type {
   ToolTerminalOutcome,
 } from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
-import { settlementOf } from "./settlement.ts"
+import { settlementOf, stageGatedTurn } from "./settlement.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
 
@@ -362,6 +362,7 @@ async function runJudgeTurn<T>(
     // the signal is read again, and nothing is awaited between that check and
     // `runTurn`.
     let settle: SettleRequest | undefined
+    let admitted: AdmittedTurn | undefined
     if (input.admission !== undefined) {
       const failure = last === undefined ? {} : { failure: last as Envelope<unknown> }
       if (!mayISpend(input.ledger, "judge")) return { refused: true, attempts: attempt - 1, ...failure }
@@ -372,11 +373,12 @@ async function runJudgeTurn<T>(
         return { refused: false, envelope: cancelledTurn<T>(slot), attempts: attempt - 1 }
       }
       settle = decision.settle
+      admitted = stageGatedTurn(decision.turn, () => mayISpend(input.ledger, "judge"), "judge")
     }
     let envelope: Envelope<T>
     let threw = false
     try {
-      envelope = await input.backend.runTurn(slot, instructions, prompt, schema, input.signal)
+      envelope = await input.backend.runTurn(slot, instructions, prompt, schema, input.signal, admitted)
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). One judge role throwing must not cost the finding its verdict,

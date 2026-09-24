@@ -733,22 +733,23 @@ belongs to `paired-journal.jsonl`, and this report neither reads nor re-derives 
 blocks into a total. A failed prefix has no arm manifests, so its spend stays a gap here and the report
 points at `paired-journal.jsonl`. A missing arm manifest is also a gap with its reason, never a zero.
 
-**What stories 2-8c and 2-8d still own.** Story 2-8c owns the real-host request-accounting check and
-the shared gates verified on a real host (paired gates 1 and 2 below). Its zero-bill probe closed gate
-2 and measured gate 1's invariant false, so gate 1 stays OPEN (see "Host request accounting probe
-(story 2-8c)" below). Story 2-8d owns the three blocks over a real change, the
-retained outcomes, the manifest-linked report and its confounds and limits; it is gated on the
-launcher, on 2-8c and on its own budget authorization. Nothing in this report is live evidence, and it
+**What stories 2-8c, 2-8c2 and 2-8d own.** Story 2-8c owns the shared gates verified on a real host
+(paired gate 2 below), closed by its zero-bill probe. Story 2-8c2 owns the host request accounting
+(paired gate 1): the relay that admits and measures every physical request, closed by the same probe
+run through the relay (see "Host request accounting probe (stories 2-8c and 2-8c2)" below). Story 2-8d
+owns the three blocks over a real change, the retained outcomes, the manifest-linked report and its
+confounds and limits; it is gated on the launcher, on 2-8c and 2-8c2, and on its own budget
+authorization. Nothing in this report is live evidence, and it
 closes neither story 2.8, FR11 nor the epic.
 
 ### What the fake-backed tests do not establish
 
 - **The runner's semantics, and nothing about a host.** Every test drives port calls on
   fakes. They do not show how many physical requests a real host makes per port call.
-  Story 2-8c's zero-bill probe measured that on opencode 1.18.32, and the host does not honour
-  the port's rule: it retries, and a tool step costs a request whose usage MAD never sees (see
-  "Host request accounting probe (story 2-8c)"). Paired gate 1 stays OPEN on that evidence, and
-  nothing bills while it is OPEN.
+  Story 2-8c's zero-bill probe measured that on opencode 1.18.32: the host retries a failed
+  request itself, and a tool step costs a request whose usage the settled message does not carry.
+  Story 2-8c2's relay puts each of those requests under admission and measures it (see "Host
+  request accounting probe (stories 2-8c and 2-8c2)").
 - **A residual confound between the two arms of a block.** Each branch is a new run with
   its own run id, and the judge's anonymizer seeds its order from the run id and the finding
   id (`core/run/review.ts`, the `runId` passed to `judge`). So the two arms can show the judge
@@ -810,12 +811,13 @@ bun run paired --live \
 
 The launcher starts its own opencode host (see "The managed host" below) and never connects to one it
 did not start: `--server` is refused. The host's one provider is an `@ai-sdk/openai-compatible` block
-built from `--provider-url`, `--provider-key-env` (the NAME of the variable that holds the credential,
-never the credential itself) and one `--provider-model` per model. Its provider id is the one in
-`--pin`.
+with one `--provider-model` per model, whose provider id is the one in `--pin`. The block points at
+MAD's relay (see "The relay" below), not at the provider: the relay forwards to `--provider-url` and
+holds the credential read from `--provider-key-env` (the NAME of the variable that holds it, never the
+credential itself). The host is given only the relay's host key.
 
 `scripts/paired.ts` runs the three paired blocks over the sealed labelled change, behind a
-preflight. **With the shipped gate table it always refuses:** gates 1 and 4 below are OPEN and are
+preflight. **With the shipped gate table it always refuses:** gate 4 below is OPEN and is
 required for the evaluation, so the command prints every check and exits 1 before any host, client,
 schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
 evaluation. Nothing in this section authorizes billing, and the command's existence is not
@@ -834,8 +836,8 @@ alone never lets the three blocks run. A table with an unknown kind, phase or st
 with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate the human
 budget owner does not own, or no authorization gate for the evaluation is refused.
 
-1. **host request accounting — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-24.json) measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent 6 times in each of 2 admitted attempts and a 429 was followed by 1 further request; a header timeout was sent 6 times in the 2026-09-23 spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by default, a tool step costs an extra request and only the last step's usage is returned; N2, with only StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real provider emits one under tool_choice required is not established); H1, in the hang scenario the host held the provider request open 15046 ms after MAD settled the attempt as unknown, until the probe stopped the host. Closing it needs the request-accounting story filed in deferred-work.md, re-measured by the probe.
-2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence file: ablation/evidence/host-accounting-2026-09-24.json. Tests: scripts/accounting-probe.test.ts.
+1. **host request accounting — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c2. Requires: every physical provider request individually admitted and accounted, with host retries refused, on the measured host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is refused, never forwarded. Evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts.
+2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts.
 3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it. Note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub.
 4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend. No story closes it.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
@@ -951,8 +953,9 @@ the launcher aborts the run through the runner's signal and prints the process i
 (`autoupdate: false`, `share: "disabled"`, an empty `plugin` list, `enabled_providers` naming only the
 one provider, and that provider's first model as `model` and `small_model`) plus exactly one provider
 block, which must use `@ai-sdk/openai-compatible`. Only its URL, its credential variable and its model
-ids vary. The credential reaches the host as `{env:NAME}` in the config and as that one variable in
-its environment, never on a command line. The block is refused when its URL is not https (plain http
+ids vary. The key reaches the host as `{env:NAME}` in the config and as that one variable in its
+environment, never on a command line. On the launcher path that key is the relay's host key, and the
+block's URL is the relay's. The block is refused when its URL is not https (plain http
 only to 127.0.0.1, ::1 or localhost) or carries a user name, password, query string or fragment, when
 the credential variable's name is one the host itself sets, and when a model id is blank, padded,
 repeated or contains `/`.
@@ -987,7 +990,51 @@ version has another hash, and is refused until it is re-measured (see "Re-measur
 The managed host is not offline. The first time it runs a prompt it tries
 `npm install @opencode-ai/plugin` into its config directory; on the launcher path, which sets no proxy,
 that install reaches the registry. Before stopping the host the launcher prints what the install left
-(`@opencode-ai/plugin` and its version, or that nothing was installed).
+(`@opencode-ai/plugin` and its version, or that nothing was installed). The host no longer holds the
+credential, but the code it fetches at run time is not hashed, and it can still change what the host
+does and so the measured pathway.
+
+### The relay (story 2-8c2)
+
+`ablation/request-meter.ts` runs on 127.0.0.1, between the managed host and the provider. The launcher
+starts it before the host and stops it after the host, on every way out. It holds the credential and
+sets it on each request it forwards. The host is given a host key the relay makes at random when it
+starts; the relay forwards nothing that does not carry it, and the key never leaves the machine. It is
+what paired gate 1 is closed on:
+
+- **Attribution.** Each attempt's backend opens one host session, and registers it on the relay with
+  the attempt's admission handle before the prompt. The measured host sends that session id in
+  `x-session-affinity` and `X-Session-Id` on every provider request. The relay forwards a request only
+  when both headers name one open, registered session; it refuses anything else. The header is a fact
+  about the measured build, which the probe re-checks, not an opencode contract.
+- **Only completion requests, with their usage asked for.** Only a `POST` to a completion path is
+  forwarded. A streamed one must ask for the usage chunk (`stream_options.include_usage`), which the
+  measured host does for every `@ai-sdk/openai-compatible` provider; one that does not is refused
+  before it is forwarded, since its figure could not be measured.
+- **Admission before forwarding.** An attempt's first request is the one its stage admitted. Every
+  later request in the same session, a host tool step, first passes the stage's own ledger gate and
+  then its own journal admission, as step 2, 3, …, and is forwarded only once that admission is on
+  disk. The journal has one `issued` and one `settled` line per physical request. The ledger records
+  an attempt when it settles, so the steps already taken in an attempt are not in what the ledger gate
+  reads: the same overshoot the ledger already has for concurrent attempts.
+- **Host retries refused.** After a forwarded request fails (an error status, or a response that
+  broke off), the next request in its session is the host retrying it. The relay refuses it with a local `400`, which the host does not retry; MAD's own retry
+  is the only retry. A second request while one is open is refused the same way.
+- **Usage measured at the relay.** Each request is settled with the `usage` the provider returned for
+  it. A forwarded request that returned none, including any error status, is `unknown`, and the
+  journal's halt latches: **one provider error stops the paid run**. An error status does not prove
+  nothing was billed. The halt also refuses MAD's own retry, so on this path AD-6(b)'s one retry never
+  runs: a failed turn is a drop-out. A figure that reports cache writes is unknown too, because the
+  relay cannot tell how a provider counts them; check the provider's usage shape before a paid run. The turn's figure is the sum of its requests, or unknown; the host's own settled
+  tokens are not used, and a metered turn reports no late usage. When the stage settles the attempt,
+  the journal only checks that figure against the sum of the attempt's requests.
+- **Nothing stays open.** When a turn ends, by success, error, timeout or cancel, the relay aborts its
+  open upstream request, waits for a step admission still being decided (settling that step
+  not-issued), and refuses whatever the host sends afterwards. A request that has not settled within
+  the backend's cleanup wait is settled unknown then, so no journal line is left in flight.
+
+The shipped plugin runs no relay: a review outside the paired launcher still reads a turn's usage from
+the host's settled message.
 
 ### When it runs
 
@@ -1000,64 +1047,68 @@ with the error, any process whose cleanup is unconfirmed, and — when the start
 injected CLOSED gates, a scripted managed host that starts no process, and scripted backends
 (`scripts/paired.test.ts`); no test starts a host that holds a credential or sends a model request.
 
-## Host request accounting probe (story 2-8c)
+## Host request accounting probe (stories 2-8c and 2-8c2)
 
 ```
 bun run accounting-probe --out /tmp/mad-probe
 ```
 
-`scripts/accounting-probe.ts` measures how many physical provider requests the opencode host makes
-behind one admitted port call, and whether the usage MAD records is the usage served. Paired gate 1's
-invariant is **one physical request per admitted port call, no host retry, and every subcall
-accounted**. It also shows the journal's gates refusing on a real host (paired gate 2).
+`scripts/accounting-probe.ts` drives the measured host through the relay and checks every physical
+provider request against paired gate 1's invariant: **every physical request individually admitted and
+accounted, with host retries refused**. It also shows the journal's gates refusing on a real host
+(paired gate 2).
 
-**It bills nothing, by construction.** The host is the managed host above, whose only provider is a
-local OpenAI-compatible stub (`ablation/accounting-stub.ts`) that counts every request it receives,
-with a dummy credential. HTTP(S)_PROXY points at a local proxy that refuses and lists every attempt,
-with `NO_PROXY=127.0.0.1`. That covers clients that honour the proxy variables. **Direct egress is not
-shown to be blocked**, so the evidence lists the proxy attempts it refused and never claims to list
-every outbound attempt. On 2026-09-24 the refused attempts were `CONNECT registry.npmjs.org:443` (the
-host's `npm install @opencode-ai/plugin`) and `CONNECT github.com:443`. The probe spent no paid tokens.
+**It bills nothing, by construction.** The host is the managed host above, whose only provider is the
+relay. The relay's one upstream is a local OpenAI-compatible stub (`ablation/accounting-stub.ts`) that
+counts every request it receives, with a dummy key. HTTP(S)_PROXY points at a local proxy that refuses
+and lists every attempt, with `NO_PROXY=127.0.0.1`. That covers clients that honour the proxy
+variables. **Direct egress is not shown to be blocked**, so the evidence lists the proxy attempts it
+refused and never claims to list every outbound attempt. On 2026-09-24 the refused attempts were
+`CONNECT registry.npmjs.org:443` (the host's `npm install @opencode-ai/plugin`) and
+`CONNECT github.com:443`. The probe spent no paid tokens.
 
 **It drives the production path.** Each scenario runs the real `discover` stage with a one-slot roster,
-a real `OpencodeModelBackend` and a real journal's `admission`, on a fresh host, in its own bundle root.
-For each admitted attempt it records the journal's `issued` and `settled` lines, the physical requests
-the stub received for that attempt, and the usage the stub served against the usage MAD recorded. MAD's
-own discover retry (a second admitted attempt) is counted apart from the host's hidden requests within
-one attempt. The adapter's turn deadline was 150,000 ms (5,000 ms in the hang scenario); the
-production default is 600,000 ms, which also outlasts the host's roughly 71-second six-try retry series.
+a real `OpencodeModelBackend` with the relay as its meter, and a real journal's `admission`, on a fresh
+host and a fresh relay, in its own bundle root. For each request the relay forwarded it records the
+journal's `issued` and `settled` lines, the stub's record of the request, and the usage the stub served
+against the usage MAD settled. A forwarded request is paired with its attempt by the session the
+attempt's backend opened, and with the stub's record by order. The adapter's turn deadline was 150,000
+ms (5,000 ms in the hang scenario); the production default is 600,000 ms.
 
 Measured on opencode 1.18.32 (binary sha256 `5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e`),
-committed as `ablation/evidence/host-accounting-2026-09-24.json` (`host-accounting-2026-09-23.json`, beside it, is an
-earlier run on the same build, kept as a record; its findings text was not derived from its scenarios, and its hang row
-reads HOLDS):
+committed as `ablation/evidence/host-accounting-2026-09-24-relay.json`:
 
-| Scenario | Admitted attempts | Physical requests | Hidden host requests | Served in/out | Recorded in/out | Verdict | Upstream request |
-|---|---|---|---|---|---|---|---|
-| success | 1 | 1 | 0 | 1001/11 | 1001/11 | HOLDS | every request answered |
-| persistent 500 | 2 | 12 | 10 | 0/0 | 0/0 | FAILS | every request answered |
-| 429 then success | 1 | 2 | 1 | 1002/12 | 1002/12 | FAILS | every request answered |
-| 400 | 2 | 2 | 0 | 1002/12 | 1002/12 | HOLDS | every request answered |
-| hang past the adapter timeout | 1 | 1 | 0 | 0/0 | unknown | FAILS | held open 15046 ms after the adapter gave up, until the probe stopped the host |
-| host-tool step | 1 | 2 | 1 | 2003/23 | 1002/12 | FAILS | every request answered |
-| unoffered tool | 1 | 2 | 1 | 2003/23 | 1002/12 | FAILS | every request answered |
+| Scenario | Admitted attempts | Physical requests | Admitted steps | Host retries refused | Served in/out | Recorded in/out | Verdict | Upstream request |
+|---|---|---|---|---|---|---|---|---|
+| success | 1 | 1 | 0 | 0 | 1001/11 | 1001/11 | HOLDS | every request answered |
+| persistent 500 | 1 | 1 | 0 | 1 | 0/0 | unknown | HOLDS | every request answered |
+| 429 then success | 1 | 1 | 0 | 1 | 0/0 | unknown | HOLDS | every request answered |
+| 400 | 1 | 1 | 0 | 0 | 0/0 | unknown | HOLDS | every request answered |
+| hang past the adapter timeout | 1 | 1 | 0 | 0 | 0/0 | unknown | HOLDS | closed by the relay 1 ms after the attempt ended |
+| host-tool step | 1 | 2 | 1 | 0 | 2003/23 | 2003/23 | HOLDS | every request answered |
+| unoffered tool | 1 | 2 | 1 | 0 | 2003/23 | 2003/23 | HOLDS | every request answered |
+| step refused mid-turn | 1 | 1 | 0 | 0 | 1001/11 | 1001/11 | HOLDS | every request answered |
 
-- **F2 — host retries.** The host retries a failed provider request itself. Measured here: a persistent
-  500 was sent 6 times per admitted attempt, and a 429 was retried once before the success. Measured in
-  the 2026-09-23 spike: a header timeout (`headerTimeout` 3000 ms) was sent 6 times. The network-error
-  case is read from the host binary, not measured. A source search found no switch to turn the loop off;
-  that search does not prove no switch exists. A 400 is not retried by the host; MAD's own retry is the
-  second attempt.
-- **F3 — host-tool steps.** With host tools offered (the adapter's default), a tool step costs an extra
-  request, and MAD records only the last step's usage: 1002/12 of the 2003/23 served.
+- **F2 — host retries.** The host still retries a failed request: story 2-8c measured a persistent 500
+  sent 6 times per admitted attempt without the relay. Through the relay, the retry is refused with a
+  `400`, the host stops, and nothing past the first request reaches the provider. The failed request
+  is settled unknown, which latches the halt, so MAD's own retry is refused too. A 400 is not retried
+  by the host.
+- **F3 — host-tool steps.** With host tools offered (the adapter's default), the tool step is admitted
+  as step 2, forwarded, and recorded with its own usage: 2003/23 recorded of 2003/23 served. Without
+  the relay, story 2-8c measured 1002/12 recorded.
 - **N2 — an unoffered tool.** Under `tools: {"*":false,"StructuredOutput":true}`, a stub that returned a
-  call to an unoffered tool still caused a second request, with the same loss. That was measured with a
-  stub; whether a real provider emits one under `tool_choice: "required"` is not established.
-- **H1 — the hang.** The adapter gave up at 5,000 ms, MAD recorded the attempt as unknown, and the halt
-  refused MAD's retry. No further request arrived in the 15,000 ms the stub was watched afterwards, and
-  the host held the one provider request open that whole time: it closed only when the probe stopped
-  the host. A request still open after MAD settled its attempt could still be served, so the scenario
-  FAILS; whether the host would have reported that usage later was not observed.
+  call to an unoffered tool still caused a second request; the relay admitted and recorded it the same
+  way. That was measured with a stub; whether a real provider emits one under `tool_choice: "required"`
+  is not established.
+- **H1 — the hang.** The adapter gave up at 5,000 ms, and the relay closed the provider request when the
+  attempt ended; the attempt is unknown. Without the relay, story 2-8c measured the host holding it open
+  15,046 ms, until the probe stopped the host.
+- **S1 — a step refused mid-turn.** Block 1's prefix was seeded 500 tokens short of its allowance. The
+  first request's usage exhausted it, the journal refused the tool step, and the relay refused the
+  request: nothing reached the stub for it.
+- **A1 — attribution.** Every forwarded request named its attempt's session in both headers, and no
+  request was refused for failing to.
 
 Gate 2: each of the global, Blocks and phase gates was made to refuse by its own seeded journal. On the
 measured host each refused inside the journal's admission, before any backend call, and 0 requests
@@ -1065,13 +1116,12 @@ reached the stub. Only block 1's prefix phase was exercised, with one slot; no c
 admission was tested.
 
 **Scope.** One build on one machine, one provider package, one model, one-slot discover, the scripted
-behaviours above. Requests are attributed to attempts by order, which holds because each scenario runs
-one slot on its own host. A HOLDS verdict is about that scenario only. Exit 0 means every scenario ran,
-every verdict is complete and every gate-2 case was refused; it does not mean gate 1 passed. **Gate 1 stays OPEN**: every failure
-shares one root, that MAD reads a turn's usage from the one settled message and not from the physical
-requests. Fixing that is a separate story (`_bmad-output/implementation-artifacts/deferred-work.md`). No
-tool policy was changed: denying host tools is not an accounting fix, and AD-13's host-tool fallback
-depends on them.
+behaviours above. A HOLDS verdict is about that scenario only. Exit 0 means every scenario ran, every
+verdict is complete and every gate-2 case was refused. Every scenario HOLDS, and gate 1 is closed on
+this file by a reviewed change to `ablation/paired-gates.ts`. Story 2-8c's run without the relay is
+`ablation/evidence/host-accounting-2026-09-24.json` (and `host-accounting-2026-09-23.json`, an earlier
+run on the same build). No tool policy was changed: host tools stay offered, and each tool step is
+admitted and paid for like any other request.
 
 ### Re-measuring
 
@@ -1081,13 +1131,15 @@ refuses every other. After an opencode upgrade, or on another machine:
 1. The probe runs on the managed host, which refuses any build but `MEASURED_HOST`'s, so name the new
    build first. Read its identity: `shasum -a 256 "$(realpath "$(which opencode)")"` and
    `opencode --version`. Set `MEASURED_HOST`'s `sha256` and `version` to them, and its `evidence` to
-   `ablation/evidence/host-accounting-<date>.json`.
+   `ablation/evidence/host-accounting-<date>-relay.json`. A new build must also be re-checked for the
+   session headers the relay attributes by (finding A1).
 2. Run `bun run accounting-probe --out <an empty or absent directory>`; a non-empty `--out` is
    refused. It must exit 0: every scenario complete and every gate-2 case REFUSED. It exits 1, and
    writes no `host-accounting.json`, otherwise.
 3. Copy `<out>/host-accounting.json` to the `evidence` path from step 1, and check that its `host`
    block names the identity step 1 set.
 4. Update the table above and gate 1's and gate 2's text in `ablation/paired-gates.ts` from that file.
+   Gate 1 stays CLOSED only if every scenario HOLDS; otherwise a reviewed change re-opens it.
    The evidence tests read the file `MEASURED_HOST.evidence` names; `ablation/live-run-doc.test.ts`
    and `scripts/accounting-probe.test.ts` fail until the table, the findings and the file agree.
 
@@ -1218,8 +1270,9 @@ The live execution is a separate task, and it stays open until each of these hol
 1. **Host accounting — OPEN.** How many physical requests the opencode host makes per port
    call, and whether each is accounted for, is verified on a real host. Story 2-8c's zero-bill
    probe measured it on opencode 1.18.32 and found that invariant false (F2, F3 and N2 in "Host
-   request accounting probe (story 2-8c)"), so it stays OPEN until the request-accounting story
-   filed in `deferred-work.md` fixes it.
+   request accounting probe (stories 2-8c and 2-8c2)"). Story 2-8c2's relay fixes it on the paired
+   launcher's path only. The adversarial runner does not run behind the relay, so this stays OPEN
+   until it does.
 2. **Billing authorization — OPEN.** A named person with authority over the budget must
    authorize the Adversarial allowance's spend (400,000 ledger tokens, `ablation/governor.ts`)
    before the first paid request. This is a decision, not an engineering task: no code can

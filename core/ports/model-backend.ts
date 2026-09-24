@@ -23,6 +23,7 @@
 import type { ZodType } from "zod"
 
 import type { TokenUsage } from "../domain/run-record.ts"
+import type { AdmittedTurn } from "./admission.ts"
 
 /**
  * AD-2 — each backend declares its capabilities and the core reads the
@@ -309,6 +310,11 @@ export interface ModelBackend {
    * else. In particular it must not report an aborted request as a
    * `transport-error`, which would make the user's stop indistinguishable from a
    * provider failure and earn it AD-6(b)'s retry.
+   *
+   * `admitted` (story 2-8c2) is the attempt's admission handle, passed only when
+   * an evaluation admitted the attempt. A backend that meters physical requests
+   * admits and settles each one after the first through it; any other backend
+   * ignores it.
    */
   runTurn<T>(
     slot: string,
@@ -316,5 +322,6 @@ export interface ModelBackend {
     input: string,
     schema: ZodType<T>,
     signal?: AbortSignal,
+    admitted?: AdmittedTurn,
   ): Promise<Envelope<T>>
 }
