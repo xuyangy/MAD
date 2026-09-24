@@ -603,4 +603,19 @@ describe("writeLabelledTree's own precondition (story 2-8b)", () => {
     expect(calls).toEqual([])
     expect(await stat(root).catch(() => undefined)).toBeUndefined()
   })
+
+  test("a relative diff file is handed to `git apply` resolved, since git runs in the destination", async () => {
+    const root = await freshOut()
+    const applied: string[][] = []
+    const written = await writeLabelledTree({
+      root,
+      diffFile: "change.diff",
+      git: async (_cwd, args) => {
+        if (args[0] === "apply") applied.push([...args])
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+    expect(written.ok).toBe(true)
+    expect(applied).toEqual([["apply", "--whitespace=nowarn", resolve("change.diff")]])
+  })
 })

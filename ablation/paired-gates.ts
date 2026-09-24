@@ -7,7 +7,8 @@
  * No flag, environment variable or file read at run time can close a gate. A
  * gate closes by a reviewed change to this file that sets its status to
  * `CLOSED` and records its evidence. `scripts/paired.ts` reads this table and
- * nothing else about readiness.
+ * nothing else about readiness, refuses while this file differs from HEAD, and
+ * records its committed blob and every gate's status in the sealed schedule.
  *
  * ## Two phases, and no probe exception
  *
@@ -149,7 +150,10 @@ export const PAIRED_NON_GATES: readonly CheckedNonGate[] = [
       "a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for " +
       "`repo.change(`) in scripts/paired.ts, " +
       "ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and " +
-      "`runPairedBlocks`",
+      "`runPairedBlocks`. repo.ts is still in the launcher's import closure, through `DEFAULT_DISCOVERY_SLOTS` from " +
+      "adapters/opencode/plugin.ts, whose tool handler is the one caller of `opencodeRepo`, and through `GitError` " +
+      "from adapters/opencode/tools.ts; a second test walks that closure and finds plugin.ts and tools.ts its only " +
+      "importers, taking those two names alone",
     reopensWhen: "the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`",
   },
 ]
@@ -166,7 +170,8 @@ export interface GatePreflight {
  * Check the gates required for `phase`. A gate for another phase is printed and
  * never consulted. A table that is not well formed refuses: an unknown kind, phase
  * or status, a CLOSED gate with no evidence, an OPEN gate carrying evidence, a
- * duplicate or non-positive number, a note that is not one non-empty line, or no
+ * duplicate or non-positive number, a note that is not one non-empty line, an
+ * authorization gate that the human budget owner does not own, or no
  * authorization gate for the phase (a table that cannot say who authorized the
  * spend authorizes nothing).
  */
@@ -190,6 +195,9 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): G
     }
     if (gate.status !== "OPEN" && gate.status !== "CLOSED") {
       problems.push(`gate ${gate.number} (${gate.name}) has status ${JSON.stringify(gate.status)}, which is neither OPEN nor CLOSED`)
+    }
+    if (gate.kind === "authorization" && gate.owner !== HUMAN_BUDGET_OWNER) {
+      problems.push(`gate ${gate.number} (${gate.name}) is an authorization gate owned by ${gate.owner}; only ${HUMAN_BUDGET_OWNER} owns an authorization`)
     }
     if (gate.status === "OPEN" && gate.evidence !== undefined) {
       problems.push(`gate ${gate.number} (${gate.name}) is OPEN but carries evidence; a gate with evidence must say CLOSED, and one without it OPEN`)

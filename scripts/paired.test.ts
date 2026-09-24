@@ -12,9 +12,9 @@
 
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { appendFile, chmod, link, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises"
+import { appendFile, chmod, link, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import type { ZodType } from "zod"
 
@@ -43,6 +43,9 @@ import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { main as evalReadMain } from "./eval-read.ts"
 import { main as materializeMain } from "./materialize-labelled-change.ts"
 import {
+  GATE_TABLE_FILE,
+  gatesIdentity,
+  gateTableState,
   guarded,
   main,
   nonReturnedReason,
@@ -126,6 +129,7 @@ const argvFor = (directory: string, out: string, extra: string[] = []) => [
 ]
 
 const HOST_URL = "http://127.0.0.1:47001"
+const GATES_BLOB = "0123456789abcdef0123456789abcdef01234567"
 
 /** A managed host that starts no process: it records what it was asked to start and how often it was stopped. */
 function scriptedHost(
@@ -231,6 +235,8 @@ function overridesFor(
       clock: fakeClock("2026-09-23T00:00:00.000Z"),
       coin: () => "heads",
       codeRevision: async () => known({ commit: "abc123", dirty: false }),
+      // The gate table's committed state is tested on its own below; here it reads as committed.
+      gateTable: async () => ({ ok: true, blob: GATES_BLOB }),
       scratchParent: env.scratchParent,
       ...extra,
     },
@@ -282,6 +288,66 @@ describe("the shipped gate table", () => {
   })
 })
 
+describe("the gate table must be the committed one", () => {
+  const repoWithTable = async () => {
+    const root = await tempDir()
+    await git(root, ["init", "--quiet"])
+    await mkdir(join(root, "ablation"))
+    await writeFile(join(root, GATE_TABLE_FILE), "export const PAIRED_GATES = []\n")
+    await git(root, ["add", "--all"])
+    await git(root, [...IDENTITY, "commit", "--quiet", "--message", "table"])
+    return root
+  }
+  const run = (root: string) => gateTableState(async (cwd, args) => {
+    const spawned = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+    return { exitCode: await spawned.exited, stdout, stderr }
+  }, root)
+
+  test("a committed table reads as HEAD's blob", async () => {
+    const root = await repoWithTable()
+    const state = await run(root)
+    expect(state).toEqual({ ok: true, blob: (await git(root, ["rev-parse", `HEAD:${GATE_TABLE_FILE}`])).trim() })
+  })
+
+  test("an unstaged edit and a staged edit are both refused", async () => {
+    const root = await repoWithTable()
+    await appendFile(join(root, GATE_TABLE_FILE), "// gate 4 CLOSED\n")
+    const unstaged = await run(root)
+    expect(unstaged.ok).toBe(false)
+    if (!unstaged.ok) expect(unstaged.why).toContain(`${GATE_TABLE_FILE} differs from HEAD`)
+    await git(root, ["add", "--all"])
+    expect((await run(root)).ok).toBe(false)
+  })
+
+  test("a table HEAD does not hold is refused", async () => {
+    const root = await tempDir()
+    await git(root, ["init", "--quiet"])
+    await writeFile(join(root, "README"), "x\n")
+    await git(root, ["add", "--all"])
+    await git(root, [...IDENTITY, "commit", "--quiet", "--message", "no table"])
+    const state = await run(root)
+    expect(state.ok).toBe(false)
+    if (!state.ok) expect(state.why).toContain(`${GATE_TABLE_FILE} is not in HEAD`)
+  })
+
+  test("with every gate CLOSED, an uncommitted table refuses at stage 1 and nothing is scheduled", async () => {
+    const env = await setup()
+    const { overrides, clientCalls, host } = overridesFor(env, {
+      gates: closedGates,
+      gateTable: async () => ({ ok: false, why: `${GATE_TABLE_FILE} differs from HEAD (\` M ${GATE_TABLE_FILE}\`)` }),
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("FAIL  gate table committed")
+    expect(result.text).toContain(`${GATE_TABLE_FILE} differs from HEAD`)
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks)")
+    expect(host.started).toEqual([])
+    expect(clientCalls).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+})
+
 describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
   test("the schedule is sealed, three blocks run, exit 0, and eval-read reads the bundle", async () => {
     const env = await setup()
@@ -306,6 +372,8 @@ describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
     expect(schedule.config.provenance).toBe("live")
     expect(schedule.fixture).toEqual(LABELLED_CHANGE_SEAL)
     expect(schedule.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`)[0]).toBe("anthropic/claude-sonnet-4-5")
+    expect(schedule.config.gates).toBe(gatesIdentity(GATES_BLOB, closedGates))
+    expect(String(schedule.config.gates)).toContain("gate 4 CLOSED")
     const identity = String(schedule.config.tools)
     expect(identity).toBe(toolsIdentity(productionTools({ worktree: env.directory })!))
     expect(identity).toContain("opencodeTools")
@@ -499,6 +567,11 @@ describe("flags", () => {
       [["bun", "paired", "--live", "--pin", "a/b", "--directory", env.directory, "--out", "relative/bundle"], "--out must be an absolute path"],
       [argvFor(env.directory, env.out, ["--out", "/tmp/other"]), "--out was given 2 times"],
       [argvFor(env.directory, env.out, ["--cap", "5"]), "`--cap` is not a flag this command knows"],
+      ...["anthropic/ ", " /claude-sonnet-4-5", "anthropic"].map((pin): [string[], string] => [
+        argvFor(env.directory, env.out).map((arg) => (arg === "anthropic/claude-sonnet-4-5" ? pin : arg)),
+        // The flag value arrives trimmed, so the message shows it trimmed.
+        `--pin must be provider/model. It received \`${pin.trim()}\`.`,
+      ]),
     ]
     for (const [argv, message] of cases) {
       const { overrides, clientCalls } = overridesFor(env, { gates: closedGates })
@@ -653,6 +726,35 @@ describe("the source keeps the four stages in order", () => {
       expect(text, file).not.toContain("adapters/opencode/repo.ts")
     }
   })
+
+  test("repo.ts reaches the launcher's import closure only for GitError and through plugin.ts's one constant", async () => {
+    const transpiler = new Bun.Transpiler({ loader: "ts" })
+    const sourceOf = async (file: string) => (await Bun.file(file).text()).replace(/^#!.*\n/, "")
+    const launcher = resolve(import.meta.dir, "paired.ts")
+    const importers = new Map<string, string[]>()
+    const seen = new Set<string>()
+    const queue = [launcher]
+    while (queue.length > 0) {
+      const file = queue.shift()!
+      if (seen.has(file)) continue
+      seen.add(file)
+      for (const found of transpiler.scanImports(await sourceOf(file))) {
+        if (!found.path.startsWith(".")) continue
+        const target = resolve(dirname(file), found.path)
+        importers.set(target, [...(importers.get(target) ?? []), file])
+        queue.push(target)
+      }
+    }
+    const repo = resolve(REPO_ROOT, "adapters/opencode/repo.ts")
+    const plugin = resolve(REPO_ROOT, "adapters/opencode/plugin.ts")
+    const tools = resolve(REPO_ROOT, "adapters/opencode/tools.ts")
+    expect([...(importers.get(repo) ?? [])].sort()).toEqual([plugin, tools].sort())
+    expect(importers.get(plugin)).toEqual([launcher])
+    const named = async (file: string, from: string) =>
+      (await sourceOf(file)).match(new RegExp(`import \\{([^}]*)\\} from "${from.replace(/[./]/g, "\\$&")}"`))?.[1]?.trim()
+    expect(await named(launcher, "../adapters/opencode/plugin.ts")).toBe("DEFAULT_DISCOVERY_SLOTS")
+    expect(await named(tools, "./repo.ts")).toBe("GitError")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -763,6 +865,29 @@ describe("the identity check's filesystem rules", () => {
       await link(copy, file)
     })
     expect(text).toContain("`src/billing/ledger.ts` has 2 hard links; a sealed file has exactly one")
+  })
+
+  test("a .git that is a symlink to a byte-equal repository elsewhere is refused", async () => {
+    const elsewhere = await tempDir()
+    const text = await identityRefusal(async (directory) => {
+      await rename(join(directory, ".git"), join(elsewhere, ".git"))
+      await symlink(join(elsewhere, ".git"), join(directory, ".git"))
+    })
+    expect(text).toContain(".git` is a symlink; the sealed materialization is a repository with its own .git directory")
+  })
+
+  test("a .git that is a gitfile (a linked worktree) is refused", async () => {
+    const elsewhere = await tempDir()
+    const text = await identityRefusal(async (directory) => {
+      await rename(join(directory, ".git"), join(elsewhere, ".git"))
+      await writeFile(join(directory, ".git"), `gitdir: ${join(elsewhere, ".git")}\n`)
+    })
+    expect(text).toContain(".git` is not a directory; the sealed materialization is a repository with its own .git directory")
+  })
+
+  test("a missing .git is refused", async () => {
+    const text = await identityRefusal((directory) => rm(join(directory, ".git"), { recursive: true, force: true }))
+    expect(text).toContain(".git` is missing; the sealed materialization is a repository with its own .git directory")
   })
 
   test("the executable bit is compared on disk", async () => {
@@ -936,6 +1061,44 @@ describe("stage 4 errors", () => {
     expect(result.text).toContain("INCOMPLETE — stage 4 threw: disk full")
     expect(result.text).toContain("No start marker exists, so nothing was billed.")
     expect(result.text).not.toContain("bun run eval-read --bundle")
+  })
+
+  test("a throw when the start marker's presence cannot be read does not claim nothing was billed", async () => {
+    const env = await setup()
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      runner: {
+        createSchedule: async () => {
+          await mkdir(env.out)
+          await chmod(env.out, 0o000)
+          throw new Error("disk full")
+        },
+      },
+    })
+    try {
+      const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("could not be established")
+      expect(result.text).toContain("so whether anything was billed is unknown")
+      expect(result.text).not.toContain("nothing was billed")
+    } finally {
+      await chmod(env.out, 0o755)
+    }
+  })
+
+  test("a runPairedBlocks refusal before its start marker exits 1, keeps the schedule and says nothing was billed", async () => {
+    const env = await setup()
+    const { overrides, backend } = overridesFor(env, {
+      gates: closedGates,
+      runner: { runPairedBlocks: async () => ({ ok: false, reason: "the schedule does not match its binding" }) },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED by runPairedBlocks before its start marker: the schedule does not match its binding")
+    expect(result.text).toContain("Nothing was billed.")
+    expect(existsSync(join(env.out, SCHEDULE_FILE))).toBe(true)
+    expect(existsSync(join(env.out, START_MARKER_FILE))).toBe(false)
+    expect(backend.calls).toEqual([])
   })
 
   test("a createSchedule refusal gets a next step matched to its reason", async () => {
@@ -1259,6 +1422,10 @@ describe("the managed host (story 2-8c)", () => {
       expect(String(options.serverUrl)).toBe(HOST_URL)
       expect(options.directory).toBe(env.directory)
     }
+    // One journal holds every phase's execution ids, so no two backends may share a prefix.
+    const prefixes = built.map((options) => options.executionIdPrefix)
+    expect(prefixes).toContain("block-1-prefix/")
+    expect(new Set(prefixes).size).toBe(built.length)
   })
 
   test("the host's config is verified for the reviewed --directory too", async () => {

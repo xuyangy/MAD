@@ -47,7 +47,9 @@
  *
  * Readiness is `PAIRED_GATES` and nothing else: no flag, environment variable or
  * file read at run time can close a gate. While any gate the evaluation phase
- * requires is OPEN, this command refuses at stage 1.
+ * requires is OPEN, or `ablation/paired-gates.ts` differs from HEAD, this command
+ * refuses at stage 1. The schedule's `config.gates` records the committed blob and
+ * every gate's status.
  *
  * ## The change is the sealed one, and the worktree is proved
  *
@@ -69,7 +71,10 @@
  * through its signal and the process id is printed.
  *
  * Exit codes: 0 when the three blocks ran and the runner's result reads
- * `complete: true`; 1 for every refusal and every incomplete run.
+ * `complete: true`; 1 for every refusal and every incomplete run; 130 when
+ * SIGINT or SIGTERM arrives during stages 1-3, after the scratch copy is removed
+ * and any managed host is stopped. An interrupt during stage 4 aborts the run
+ * through its signal and exits 1.
  */
 
 import { rmSync } from "node:fs"
@@ -166,6 +171,36 @@ export const productionTools: ToolsFactory = (options) => ({
   blameCleanupTimeoutMs: options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS,
 })
 
+/** The gate table, as the repository holds it. */
+export const GATE_TABLE_FILE = "ablation/paired-gates.ts"
+
+/** Whether the gate table is the committed one, and if so its blob at HEAD. */
+export type GateTableState = { ok: true; blob: string } | { ok: false; why: string }
+
+/**
+ * A gate closes only by a reviewed change, so the table the launcher reads must be
+ * the one committed at HEAD: no staged, unstaged or untracked change to it.
+ */
+export async function gateTableState(git: RunGit, root: string): Promise<GateTableState> {
+  const status = await git(root, ["status", "--porcelain=v1", "--untracked-files=all", "--", GATE_TABLE_FILE])
+  if (status.exitCode !== 0) {
+    return { ok: false, why: `\`git status\` on ${GATE_TABLE_FILE} exited ${status.exitCode}: ${status.stderr.trim() || "no detail"}` }
+  }
+  if (status.stdout.trim().length > 0) {
+    return { ok: false, why: `${GATE_TABLE_FILE} differs from HEAD (\`${status.stdout.trim()}\`); a gate closes only by a committed change` }
+  }
+  const blob = await git(root, ["rev-parse", `HEAD:${GATE_TABLE_FILE}`])
+  if (blob.exitCode !== 0) {
+    return { ok: false, why: `${GATE_TABLE_FILE} is not in HEAD: ${blob.stderr.trim() || "no detail"}` }
+  }
+  return { ok: true, blob: blob.stdout.trim() }
+}
+
+/** The `config.gates` identity: the committed table's blob and every gate's status. */
+export function gatesIdentity(blob: string, gates: readonly PairedGate[]): string {
+  return `${GATE_TABLE_FILE} blob ${blob}; ${gates.map((gate) => `gate ${gate.number} ${gate.status}`).join(", ")}`
+}
+
 /** The `config.tools` identity: the adapter and both blame deadlines, as the factory reported them. */
 export function toolsIdentity(wiring: ToolsWiring): string {
   return (
@@ -224,6 +259,8 @@ export interface PairedOverrides {
   clock?: Clock
   coin?: () => CoinFace
   codeRevision?: () => Promise<Maybe<CodeRevision>>
+  /** Whether the gate table is committed. Defaults to `gateTableState` over this repository. */
+  gateTable?: () => Promise<GateTableState>
   /** The bounded launcher's spawn, for the preflight's git calls. Defaults to `preflightSpawn`. */
   spawnGit?: SpawnBlame
   /** Test-only: the preflight's git deadlines. The shipped values are the constants above. */
@@ -269,11 +306,13 @@ function valueFlag(args: readonly string[], name: string): FlagValue {
   return { ok: true, value: raw.trim() }
 }
 
-/** `provider/model`, split at the first slash. */
+/** `provider/model`, split at the first slash; neither side may be blank. */
 function parsePin(value: string): Pin | undefined {
   const cut = value.indexOf("/")
-  if (cut <= 0 || cut === value.length - 1) return undefined
-  return { providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() }
+  if (cut < 0) return undefined
+  const providerId = value.slice(0, cut).trim()
+  const modelId = value.slice(cut + 1).trim()
+  return providerId.length === 0 || modelId.length === 0 ? undefined : { providerId, modelId }
 }
 
 export interface ParsedFlags {
@@ -895,14 +934,26 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   const preflightInterrupt = (): void => {
     interrupted = true
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true })
-    console.log("\nINTERRUPTED during the preflight. The scratch copy was removed; nothing was scheduled and nothing was billed.")
+    console.log(
+      "\nINTERRUPTED during the preflight. The scratch copy was removed; nothing was scheduled and nothing was billed.\n" +
+        "Next step: run the command again when ready.",
+    )
     if (managed.stop === undefined && managed.host === undefined) exit(130)
     else void stopManaged(managed).then(() => exit(130))
   }
   signals.on("SIGINT", preflightInterrupt)
   signals.on("SIGTERM", preflightInterrupt)
 
-  let prepared: { pin: Pin; directory: string; out: string; host: ManagedHost; wiring: ToolsWiring; roster: Roster; warnings: Warning[] }
+  let prepared: {
+    pin: Pin
+    directory: string
+    out: string
+    host: ManagedHost
+    wiring: ToolsWiring
+    roster: Roster
+    warnings: Warning[]
+    gatesBlob: string
+  }
   try {
     // ---- STAGE 1: offline checks ----
     console.log("bun run paired — stage 1 of 4: offline checks (no client, no network call, nothing written)")
@@ -952,13 +1003,24 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     )
 
     const gateCheck = gatePreflight(gates, "evaluation")
+    let table: GateTableState
+    try {
+      table = await (overrides.gateTable ?? (() => gateTableState(git, REPO_ROOT)))()
+    } catch (error) {
+      table = { ok: false, why: `whether ${GATE_TABLE_FILE} is committed could not be established: ${messageOf(error)}` }
+    }
+    checks.push(
+      table.ok
+        ? pass("gate table committed", [`${GATE_TABLE_FILE} is HEAD's blob ${table.blob}`])
+        : fail("gate table committed", [table.why]),
+    )
     checks.push(
       gateCheck.ok
         ? pass("paired gates (ablation/paired-gates.ts, phase evaluation)", gateCheck.lines)
         : fail("paired gates (ablation/paired-gates.ts, phase evaluation)", [
             ...gateCheck.lines,
             ...gateCheck.problems.map((problem) => `REFUSED: ${problem}`),
-            "A gate closes only by a reviewed change to ablation/paired-gates.ts; no flag, variable or file can close one.",
+            "A gate closes only by a reviewed, committed change to ablation/paired-gates.ts; no flag, variable or file can close one.",
           ]),
     )
 
@@ -1037,7 +1099,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       directory === undefined ||
       out === undefined ||
       wiring === undefined ||
-      reference === undefined
+      reference === undefined ||
+      !table.ok
     ) {
       return refusal(
         "stage 1 (offline checks)",
@@ -1046,7 +1109,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           ...skipped.map((check) => (check.state === "not-evaluated" ? `${check.name} was not evaluated (${check.prerequisite})` : check.name)),
         ],
         "fix every failure printed above and run the command again. An OPEN gate is closed only by its owner, " +
-          "through a reviewed change to ablation/paired-gates.ts.",
+          "through a reviewed, committed change to ablation/paired-gates.ts.",
         preexisting,
       )
     }
@@ -1150,7 +1213,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     console.log(`  PASS  \`${directory}\` is still exactly the sealed labelled change`)
     if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
-    prepared = { pin: flags.pin, directory, out, host, wiring, roster, warnings }
+    prepared = { pin: flags.pin, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob }
   } finally {
     signals.off("SIGINT", preflightInterrupt)
     signals.off("SIGTERM", preflightInterrupt)
@@ -1162,10 +1225,13 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
 
   // ---- STAGE 4: schedule, then the three blocks ----
   console.log("\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks")
-  const { directory, out, wiring, roster, warnings } = prepared
+  const { directory, out, wiring, roster, warnings, gatesBlob } = prepared
   // SIGINT/SIGTERM during the run: abort through the runner's signal, which keeps every piece of evidence.
   const runInterrupt = (): void => {
-    console.log("\nINTERRUPTED — aborting the run through its signal; the evidence written so far is kept.")
+    console.log(
+      "\nINTERRUPTED — aborting the run through its signal; the evidence written so far is kept.\n" +
+        `Next step: once it stops, read what ran: bun run eval-read --bundle ${out}`,
+    )
     controller.abort(new Error("the operator interrupted the run"))
   }
   signals.on("SIGINT", runInterrupt)
@@ -1173,12 +1239,14 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   try {
     return await stageFour()
   } catch (error) {
-    const started = (await presence(join(out, START_MARKER_FILE))) === "present"
+    const marker = await presence(join(out, START_MARKER_FILE))
     console.log(
       `\nINCOMPLETE — stage 4 threw: ${messageOf(error)}\n` +
-        (started
+        (marker === "present"
           ? `The start marker exists, so the schedule is spent and its evidence is kept. Read it: bun run eval-read --bundle ${out}\n`
-          : "No start marker exists, so nothing was billed.\n") +
+          : marker === "absent"
+            ? "No start marker exists, so nothing was billed.\n"
+            : `${marker}, so whether anything was billed is unknown. Read the bundle: bun run eval-read --bundle ${out}\n`) +
         unresolved.map((fact) => `BLAME CLEANUP UNCONFIRMED: check process ${fact.pid} by hand (${fact.operation}: ${fact.why}).\n`).join("") +
         "Next step: keep the bundle root as it is and start any new evaluation from a new bundle root.",
     )
@@ -1197,7 +1265,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     } catch (error) {
       codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
     }
-    const config: PairedConfig = { provenance: "live", tools: toolsIdentity(wiring) }
+    const config: PairedConfig = { provenance: "live", tools: toolsIdentity(wiring), gates: gatesIdentity(gatesBlob, gates) }
     const base = {
       bundleRoot: out,
       protocolFile: PROTOCOL_FILE,
@@ -1220,12 +1288,14 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
 
     const backendFor =
       overrides.backendFor ??
-      ((_context: PairedPhaseContext, lateUsage: LateUsageReporter, resolved: Roster): ModelBackend =>
+      ((context: PairedPhaseContext, lateUsage: LateUsageReporter, resolved: Roster): ModelBackend =>
         (overrides.createBackend ?? ((options: OpencodeBackendOptions) => new OpencodeModelBackend(options)))({
           serverUrl: prepared.host.url,
           directory,
           slots: [...resolved.slots, ...resolved.lensSlots],
           lateUsage,
+          // One journal holds every phase's execution ids, and each phase gets its own backend.
+          executionIdPrefix: `block-${context.block}-${context.phase}/`,
         }))
     const outcome = await runner.runPairedBlocks({
       ...base,

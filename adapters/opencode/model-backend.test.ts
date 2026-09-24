@@ -186,7 +186,7 @@ function fakeV2(options: FakeV2Options = {}) {
  */
 function backendWith(
   options: FakeV2Options = {},
-  tuning: { timeoutMs?: number; cleanupTimeoutMs?: number; lateUsage?: LateUsageReporter } = {},
+  tuning: { timeoutMs?: number; cleanupTimeoutMs?: number; lateUsage?: LateUsageReporter; executionIdPrefix?: string } = {},
 ) {
   const fake = fakeV2(options)
   const backend = new OpencodeModelBackend({
@@ -197,6 +197,7 @@ function backendWith(
     ...(tuning.timeoutMs === undefined ? {} : { timeoutMs: tuning.timeoutMs }),
     ...(tuning.cleanupTimeoutMs === undefined ? {} : { cleanupTimeoutMs: tuning.cleanupTimeoutMs }),
     ...(tuning.lateUsage === undefined ? {} : { lateUsage: tuning.lateUsage }),
+    ...(tuning.executionIdPrefix === undefined ? {} : { executionIdPrefix: tuning.executionIdPrefix }),
   })
   return { backend, calls: fake.calls, settlePrompt: fake.settlePrompt, rejectPrompt: fake.rejectPrompt }
 }
@@ -630,6 +631,18 @@ describe("runTurn — usage the host did not report is UNKNOWN, never zero (AC1)
 
     expect(first.usageUnknown!.executionId).toBe("exec-1")
     expect(second.usageUnknown!.executionId).toBe("exec-2")
+  })
+
+  test("two backends with different `executionIdPrefix`es never mint the same id", async () => {
+    // One journal binds every id it sees, and a paired run hands it one backend per block and phase.
+    const reply = { reply: { data: { info: { structured: PAYLOAD } } } }
+    const prefix = backendWith(reply, { executionIdPrefix: "block-1-prefix/" }).backend
+    const on = backendWith(reply, { executionIdPrefix: "block-1-on/" }).backend
+    const a = await prefix.runTurn("discovery-1", "i", "d", SCHEMA)
+    const b = await on.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(a.usageUnknown!.executionId).toBe("block-1-prefix/exec-1")
+    expect(b.usageUnknown!.executionId).toBe("block-1-on/exec-1")
   })
 
   test("a turn that was never ISSUED consumes no `executionId`", async () => {

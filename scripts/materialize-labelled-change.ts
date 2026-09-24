@@ -226,14 +226,15 @@ export type TreeWritten = { ok: true } | { ok: false; step: string; detail: stri
 export async function writeLabelledTree(input: WriteLabelledTreeInput): Promise<TreeWritten> {
   const { root, git } = input
   const baseTree = input.baseTree ?? BASE_TREE
-  if (input.diffFile !== undefined) {
-    const file = resolve(input.diffFile)
+  // Resolved here, against this process's directory: `git apply` below runs in `root`, where a relative path means another file.
+  const diffFile = input.diffFile === undefined ? undefined : resolve(input.diffFile)
+  if (diffFile !== undefined) {
     const tree = resolve(root)
-    if (file === tree || file.startsWith(tree.endsWith(sep) ? tree : tree + sep)) {
+    if (diffFile === tree || diffFile.startsWith(tree.endsWith(sep) ? tree : tree + sep)) {
       return {
         ok: false,
         step: "diff file",
-        detail: `the diff file \`${file}\` lies inside \`${tree}\`, where it would become one of the tree's paths; nothing was written`,
+        detail: `the diff file \`${diffFile}\` lies inside \`${tree}\`, where it would become one of the tree's paths; nothing was written`,
       }
     }
   }
@@ -277,9 +278,9 @@ export async function writeLabelledTree(input: WriteLabelledTreeInput): Promise<
     // EMPTY where git writes them as a single space, and a warning on stderr for
     // every one of them would bury a real failure. The patch still has to apply
     // cleanly; nothing about what it does is relaxed.
-    input.diffFile === undefined
+    diffFile === undefined
       ? { label: "git apply", args: ["apply", "--whitespace=nowarn", "-"], stdin: SEEDED_CHANGE.diff }
-      : { label: "git apply", args: ["apply", "--whitespace=nowarn", input.diffFile] },
+      : { label: "git apply", args: ["apply", "--whitespace=nowarn", diffFile] },
   ]
 
   for (const step of steps) {

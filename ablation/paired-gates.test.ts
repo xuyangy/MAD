@@ -144,6 +144,15 @@ describe("gatePreflight", () => {
 })
 
 describe("gatePreflight refuses a malformed row (story 2-8b review)", () => {
+  test("an authorization gate owned by anyone but the human budget owner refuses, even when CLOSED", () => {
+    const gates = closedAll(PAIRED_GATES).map((gate) => (gate.number === 4 ? { ...gate, owner: "story 2-8d" } : gate))
+    const { ok, problems } = gatePreflight(gates, "evaluation")
+    expect(ok).toBe(false)
+    expect(problems).toContain(
+      `gate 4 (evaluation spend authorization) is an authorization gate owned by story 2-8d; only ${HUMAN_BUDGET_OWNER} owns an authorization`,
+    )
+  })
+
   test("an OPEN gate that carries evidence refuses", () => {
     const gates = closedAll(PAIRED_GATES).map((gate) => (gate.number === 2 ? { ...gate, status: "OPEN" as const } : gate))
     expect(gates.find((gate) => gate.number === 2)!.evidence).toBeDefined()

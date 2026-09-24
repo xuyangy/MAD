@@ -827,10 +827,12 @@ authorization.
 `authorization`), the phase it is required for (`accounting-probe` or `evaluation`), its owner, its
 status and, when CLOSED, its evidence. **Authority lives only in the repository.** No flag,
 environment variable or file read at run time can close a gate; a gate closes by a reviewed change to
-that file. The launcher checks the `evaluation` phase only, so a gate required for story 2-8c's probe
+that file, committed: the launcher refuses while `ablation/paired-gates.ts` differs from MAD's HEAD
+(staged, unstaged or untracked), and the sealed schedule's `config.gates` records the committed blob
+and every gate's status. The launcher checks the `evaluation` phase only, so a gate required for story 2-8c's probe
 alone never lets the three blocks run. A table with an unknown kind, phase or status, a CLOSED gate
-with no evidence, an OPEN gate carrying evidence, a repeated number, or no authorization gate for the
-evaluation is refused.
+with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate the human
+budget owner does not own, or no authorization gate for the evaluation is refused.
 
 1. **host request accounting — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-23.json) measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent 6 times per admitted attempt and a 429 was retried once; a header timeout was sent 6 times in the 2026-09-23 spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by default, a tool step costs an extra request and only the last step's usage is returned; N2, with only StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real provider emits one under tool_choice required is not established). In the hang scenario the host held the provider request open after the adapter gave up, until the probe stopped the host. Closing it needs the request-accounting story filed in deferred-work.md, re-measured by the probe.
 2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence: ablation/evidence/host-accounting-2026-09-23.json. Tests: scripts/accounting-probe.test.ts.
@@ -843,14 +845,14 @@ evaluation is refused.
 `PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
 suite's and not this list.
 
-**Checked, and not a gate: bounded review-path reads (`adapters/opencode/repo.ts`).** It reads the change through the host shell with no deadline (adversarial prerequisite 7). Evidence: a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for `repo.change(`) in scripts/paired.ts, ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and `runPairedBlocks`. It becomes a gate when the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`.
+**Checked, and not a gate: bounded review-path reads (`adapters/opencode/repo.ts`).** It reads the change through the host shell with no deadline (adversarial prerequisite 7). Evidence: a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for `repo.change(`) in scripts/paired.ts, ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and `runPairedBlocks`. repo.ts is still in the launcher's import closure, through `DEFAULT_DISCOVERY_SLOTS` from adapters/opencode/plugin.ts, whose tool handler is the one caller of `opencodeRepo`, and through `GitError` from adapters/opencode/tools.ts; a second test walks that closure and finds plugin.ts and tools.ts its only importers, taking those two names alone. It becomes a gate when the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`.
 
 ### The preflight, in one fixed sequence
 
 Each stage gates the next, and a failure at any stage exits 1 with no schedule and no bill:
 
 - **Stage 1 — offline checks.** Flags, containment, the bundle root, the frozen protocol, the gate
-  table, the provider block and its credential variable, the Tools wiring and the first
+  table and whether it is committed, the provider block and its credential variable, the Tools wiring and the first
   worktree-identity comparison. Every independent check runs and
   every failure prints together; a check that throws (a permission error, say) is a failed check, and
   the others still print. A check whose prerequisite is missing or invalid prints
@@ -970,7 +972,8 @@ text, so it is redacted before anything records it, and no credential value, raw
 appears in any message. The host is stopped on success, on every refusal, on a thrown error and on
 SIGINT or SIGTERM — including a signal that arrives while it is still starting — and its exit is
 confirmed; a stop that cannot be confirmed prints the process id and exits 1. After an interrupt nothing
-is scheduled and nothing is written under `--out`.
+is scheduled and nothing is written under `--out`. An interrupt during stages 1-3 exits 130, not 1; an
+interrupt during stage 4 aborts the run through its signal, keeps its evidence and exits 1.
 
 **`MEASURED_HOST` binds the launcher to this one machine's binary.** Another install of the same
 version has another hash, and is refused until it is re-measured (see "Re-measuring" below).

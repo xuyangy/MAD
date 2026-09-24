@@ -80,6 +80,11 @@ export interface PairedConfig {
    * identity here, and an identity with no port.
    */
   tools?: string
+  /**
+   * The identity of the gate table that let the run start (its committed blob and
+   * every gate's status), or absent when no launcher checked one.
+   */
+  gates?: string
 }
 
 export interface PairedSchedule {
@@ -176,6 +181,7 @@ export function pairedRunConfig(config: PairedConfig, change: ChangeSet, roster:
     allowances: { ...PAIRED_ALLOWANCES },
     instructionsDigest: instructionsDigestOf(roster),
     tools: config.tools ?? "no tools port",
+    ...(config.gates === undefined ? {} : { gates: config.gates }),
   }
 }
 

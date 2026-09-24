@@ -185,6 +185,13 @@ export interface OpencodeBackendOptions {
    * builds a sink and hands this half over when there is something to reconcile.
    */
   lateUsage?: LateUsageReporter
+  /**
+   * A prefix for every `executionId` this backend mints, so several backends
+   * that share one journal cannot mint the same id. `runPairedBlocks`
+   * (`ablation/paired.ts`) asks for one backend per block and phase over one
+   * journal, and `scripts/paired.ts` names each with its block and phase. Absent, the ids are the bare `exec-N`.
+   */
+  executionIdPrefix?: string
 }
 
 /** Ten minutes: long enough for a slow frontier model on a large diff. */
@@ -399,6 +406,7 @@ export class OpencodeModelBackend implements ModelBackend {
   private readonly timeoutMs: number
   private readonly cleanupTimeoutMs: number
   private readonly lateUsage: LateUsageReporter | undefined
+  private readonly executionIdPrefix: string
 
   /**
    * How many `executionId`s this backend has minted. See `nextExecutionId`.
@@ -422,6 +430,7 @@ export class OpencodeModelBackend implements ModelBackend {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS
     this.lateUsage = options.lateUsage
+    this.executionIdPrefix = options.executionIdPrefix ?? ""
   }
 
   /**
@@ -452,11 +461,12 @@ export class OpencodeModelBackend implements ModelBackend {
    * The `exec-N` shape is the one `core/test-support/fakes.ts` mints too, and
    * that is on purpose rather than a coincidence to be tidied away: a reader of
    * a `TokenLedger` should see one vocabulary of identities whichever backend
-   * filled it. They cannot collide, because a run holds one backend.
+   * filled it. Within one backend a counter cannot collide with itself; across
+   * backends that share a journal, `executionIdPrefix` keeps them apart.
    */
   private nextExecutionId(): string {
     this.executions += 1
-    return `exec-${this.executions}`
+    return `${this.executionIdPrefix}exec-${this.executions}`
   }
 
   /**
