@@ -2,7 +2,9 @@
 /**
  * Story 2-8b — the gated paired launcher.
  *
- *   bun run paired --live --pin anthropic/claude-sonnet-4-5 \
+ *   bun run paired --live --pin router/claude-sonnet-4-5 \
+ *     --provider-url https://router.example/v1 --provider-key-env ROUTER_API_KEY \
+ *     --provider-model claude-sonnet-4-5 --provider-model gpt-5 --provider-model gemini-2.5-pro \
  *     --directory /scratch/mad-labelled-change --out /scratch/mad-paired-2026-09-23
  *
  * It runs the protocol's three paired blocks (`ablation/paired.ts`) over the
@@ -10,22 +12,36 @@
  * which each stage gates the next:
  *
  * 1. **Offline checks.** Flags, containment, the bundle root, the frozen
- *    protocol, the paired gate table (`ablation/paired-gates.ts`), the Tools
- *    wiring and the first worktree-identity comparison. Every independent check
- *    runs and every failure prints together; a check whose prerequisite failed
- *    prints `not evaluated: <prerequisite>`. No opencode client exists and no
- *    network call is made until all of them pass.
- * 2. **Client and roster.** The client is created and the shipped default roster
- *    resolved with `--pin` as its pin. A pin that did not fill a slot, or a roster
- *    short of its slots, refuses. No model session, no billable request.
+ *    protocol, the paired gate table (`ablation/paired-gates.ts`), the provider
+ *    block, the Tools wiring and the first worktree-identity comparison. Every
+ *    independent check runs and every failure prints together; a check whose
+ *    prerequisite failed prints `not evaluated: <prerequisite>`. No host is
+ *    started, no opencode client exists and no network call is made until all of
+ *    them pass.
+ * 2. **Managed host, client and roster.** The managed host
+ *    (`ablation/managed-host.ts`) is started with the provider block from the
+ *    `--provider-*` flags, whose provider id is the one in `--pin`, and refused
+ *    unless it is the measured build running the generated config. The client is
+ *    created against it and the shipped default roster resolved from it with
+ *    `--pin` as its pin. A pin that did not fill a slot, or a roster short of its
+ *    slots, refuses. No model session, no billable request.
  * 3. **The recheck**, immediately before the schedule: the worktree identity, the
  *    `--out` containment and the bundle root, checked again.
  * 4. **`createSchedule`, then `runPairedBlocks`.**
  *
  * A failure at any stage exits 1 with no schedule and no bill. Nothing is written
- * under `--out` or into `--directory` before stage 3 passes. The one thing the
- * preflight creates is a private scratch directory holding the reference copy,
- * removed on success, on refusal, on a thrown error and on SIGINT/SIGTERM.
+ * under `--out` or into `--directory` before stage 3 passes. The preflight
+ * creates a private scratch directory holding the reference copy, removed on
+ * success, on refusal, on a thrown error and on SIGINT/SIGTERM.
+ *
+ * ## The host is MAD's own
+ *
+ * `--server` is refused. The launcher never trusts a host it did not start: the
+ * request-accounting facts behind paired gate 1 were measured on one opencode
+ * build with one shape of config, and the managed host is that build running
+ * that config or nothing. It is stopped, and its exit confirmed, on every exit
+ * path from stage 2 on; a stop that cannot be confirmed prints the process id
+ * and exits 1.
  *
  * ## Authority lives in the repository
  *
@@ -63,7 +79,7 @@ import { isAbsolute, join, resolve } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
-import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
+import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import { DEFAULT_DISCOVERY_SLOTS } from "../adapters/opencode/plugin.ts"
 import { enumerateCandidates, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
 import {
@@ -76,6 +92,18 @@ import {
 import { codeRevisionFrom } from "../ablation/bundle.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { runPairedBlocks, type PairedPhaseContext } from "../ablation/paired.ts"
+import {
+  OPENAI_COMPATIBLE_NPM,
+  providerBlockProblems,
+  redactText,
+  secretForms,
+  startManagedHost,
+  type ManagedHost,
+  type ManagedHostOptions,
+  type ManagedHostStart,
+  type ProviderBlock,
+  type StopOutcome,
+} from "../ablation/managed-host.ts"
 import { gatePreflight, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
@@ -100,7 +128,6 @@ import { writeLabelledTree, type GitResult, type RunGit } from "./materialize-la
 /** This repository: the reviewed worktree may neither be it, sit inside it, nor contain it. */
 const REPO_ROOT = resolve(import.meta.dir, "..")
 export const PROTOCOL_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md")
-export const DEFAULT_SERVER = "http://localhost:4096"
 
 /**
  * The preflight's git deadlines: fixed constants, not flags. Each git call in the
@@ -184,7 +211,13 @@ export interface Runner {
 /** What `main` takes from outside. Every default is the shipped behaviour. */
 export interface PairedOverrides {
   gates?: readonly PairedGate[]
+  /** Starts the managed host. Defaults to `startManagedHost`. */
+  startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
+  /** Where the credential variable is read. Defaults to `process.env`. */
+  env?: Record<string, string | undefined>
   createClient?: (init: { baseUrl: string; directory: string }) => unknown
+  /** Builds the stage-4 model backend. Defaults to `new OpencodeModelBackend(options)`. */
+  createBackend?: (options: OpencodeBackendOptions) => ModelBackend
   enumerate?: (client: unknown) => Promise<Candidate[]>
   backendFor?: (context: PairedPhaseContext, lateUsage: LateUsageReporter, roster: Roster) => ModelBackend
   tools?: ToolsFactory
@@ -210,7 +243,7 @@ export interface PairedOverrides {
 // Flags
 // ---------------------------------------------------------------------------
 
-const VALUE_FLAGS = new Set(["pin", "directory", "out", "server", "target"])
+const VALUE_FLAGS = new Set(["pin", "directory", "out", "provider-url", "provider-key-env", "provider-model", "server", "target"])
 const KNOWN_FLAGS = new Set<string>(["live", ...VALUE_FLAGS])
 
 const matchesFlag = (arg: string, name: string) => arg === `--${name}` || arg.startsWith(`--${name}=`)
@@ -248,7 +281,8 @@ export interface ParsedFlags {
   pin?: Pin
   directory?: string
   out?: string
-  server: string
+  /** The managed host's provider block, when every `--provider-*` flag and `--pin` were readable. */
+  provider?: ProviderBlock
   /** Why `--directory` or `--out` is unusable, in the words a dependent check prints. */
   unusable: { directory?: string; out?: string }
 }
@@ -257,14 +291,17 @@ export interface ParsedFlags {
 export function parseFlags(argv: readonly string[]): ParsedFlags {
   const args = argv.slice(2)
   const problems: string[] = []
-  const parsed: ParsedFlags = { problems, server: DEFAULT_SERVER, unusable: {} }
+  const parsed: ParsedFlags = { problems, unusable: {} }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!
     if (arg.startsWith("--")) {
       const name = arg.slice(2).split("=")[0]!
       if (!KNOWN_FLAGS.has(name)) {
-        problems.push(`\`${arg}\` is not a flag this command knows. It takes --live, --pin, --directory, --out and --server only.`)
+        problems.push(
+          `\`${arg}\` is not a flag this command knows. It takes --live, --pin, --directory, --out, --provider-url, ` +
+            "--provider-key-env and --provider-model only.",
+        )
       } else if (VALUE_FLAGS.has(name) && !arg.includes("=") && args[index + 1] !== undefined && !args[index + 1]!.startsWith("-")) {
         index += 1
       }
@@ -309,18 +346,36 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
     } else parsed[name] = resolve(flag.value)
   }
 
-  const server = valueFlag(args, "server")
-  if (!server.ok) problems.push(server.message)
-  else if (server.value !== undefined) {
-    let url: URL | undefined
-    try {
-      url = new URL(server.value)
-    } catch {
-      url = undefined
-    }
-    if (url === undefined || (url.protocol !== "http:" && url.protocol !== "https:")) {
-      problems.push(`--server must be an http(s) URL. It received \`${server.value}\`.`)
-    } else parsed.server = server.value
+  const url = valueFlag(args, "provider-url")
+  const keyEnv = valueFlag(args, "provider-key-env")
+  if (!url.ok) problems.push(url.message)
+  else if (url.value === undefined) problems.push("--provider-url is required: the OpenAI-compatible endpoint the managed host's one provider reaches.")
+  if (!keyEnv.ok) problems.push(keyEnv.message)
+  else if (keyEnv.value === undefined) {
+    problems.push("--provider-key-env is required: the NAME of the environment variable holding the provider's credential.")
+  }
+  const models: string[] = []
+  for (const [index, arg] of args.entries()) {
+    if (!matchesFlag(arg, "provider-model")) continue
+    const eq = arg.indexOf("=")
+    const raw = eq >= 0 ? arg.slice(eq + 1) : args[index + 1]
+    if (raw === undefined || raw.trim() === "" || raw.startsWith("-")) problems.push("--provider-model needs a value. Nothing readable followed it.")
+    // Not trimmed: a padded model id is refused by the provider-block check rather than silently repaired.
+    else models.push(raw)
+  }
+  if (models.length === 0 && !args.some((arg) => matchesFlag(arg, "provider-model"))) {
+    problems.push("--provider-model is required, once per model the managed host's provider offers.")
+  }
+  if (parsed.pin !== undefined && url.ok && url.value !== undefined && keyEnv.ok && keyEnv.value !== undefined && models.length > 0) {
+    parsed.provider = { id: parsed.pin.providerId, npm: OPENAI_COMPATIBLE_NPM, baseURL: url.value, apiKeyEnv: keyEnv.value, models }
+  }
+
+  if (args.some((arg) => matchesFlag(arg, "server"))) {
+    problems.push(
+      "--server is refused: the launcher starts its own managed host (ablation/managed-host.ts), bound to the measured " +
+        "opencode build and a config it generates, and never trusts a host it did not start. Drop it and pass the " +
+        "--provider-* flags.",
+    )
   }
 
   if (args.some((arg) => matchesFlag(arg, "target"))) {
@@ -744,8 +799,73 @@ function scheduleNextStep(reason: string): string {
 // The command
 // ---------------------------------------------------------------------------
 
+/**
+ * The managed host from the moment it is spawned: `stop` is handed over by
+ * `onSpawn` before any check runs, so an interrupt during startup can stop it;
+ * `host` is set once it is verified.
+ */
+interface ManagedSlot {
+  stop?: () => Promise<StopOutcome>
+  host?: ManagedHost
+  stopped?: Promise<boolean>
+}
+
+/**
+ * Stop the managed host, if one was spawned, and print the outcome once. True
+ * when no host is left unconfirmed. It never rejects: a stop that rejects is
+ * reported as UNCONFIRMED. Before stopping, it prints what the host's plugin
+ * install left, because stopping removes the host's directories.
+ */
+function stopManaged(managed: ManagedSlot): Promise<boolean> {
+  const stop = managed.stop ?? managed.host?.stop
+  if (stop === undefined) return Promise.resolve(true)
+  managed.stopped ??= (async () => {
+    if (managed.host !== undefined) {
+      const plugin = await managed.host.pluginInstall().catch((error: unknown) => ({ installed: false as const, why: messageOf(error) }))
+      console.log(
+        plugin.installed
+          ? `\nThe managed host's plugin install left @opencode-ai/plugin ${plugin.version} in its config directory.`
+          : `\nThe managed host's plugin install left nothing: ${plugin.why}.`,
+      )
+    }
+    let outcome: StopOutcome
+    try {
+      outcome = await stop()
+    } catch (error) {
+      outcome = { confirmed: false, pid: managed.host?.pid ?? 0, why: `the stop rejected: ${messageOf(error)}` }
+    }
+    console.log(
+      outcome.confirmed
+        ? `\nManaged host stopped: process ${outcome.pid} ${outcome.how}.`
+        : `\nMANAGED HOST STOP UNCONFIRMED — check process ${outcome.pid} by hand before anything else runs: ${outcome.why}.`,
+    )
+    return outcome.confirmed
+  })()
+  return managed.stopped
+}
+
+/**
+ * The command. The managed host, once stage 2 has spawned it, is stopped on every
+ * way out of `launch` — a return, a refusal or a throw — and a stop that cannot be
+ * confirmed exits 1 whatever the run's own result was. A throw is printed after
+ * the stop, so a failing stop cannot hide it.
+ */
 export async function main(argv: readonly string[] = Bun.argv, overrides: PairedOverrides = {}): Promise<number> {
+  const managed: ManagedSlot = {}
+  let code: number
+  try {
+    code = await launch(argv, overrides, managed)
+  } catch (error) {
+    await stopManaged(managed)
+    console.log(`\nINCOMPLETE — the launcher threw: ${messageOf(error)}`)
+    return 1
+  }
+  return (await stopManaged(managed)) ? code : 1
+}
+
+async function launch(argv: readonly string[], overrides: PairedOverrides, managed: ManagedSlot): Promise<number> {
   const gates = overrides.gates ?? PAIRED_GATES
+  const env = overrides.env ?? process.env
   const clock = overrides.clock ?? systemClock()
   const git = boundedGit({
     spawn: overrides.spawnGit ?? preflightSpawn,
@@ -771,17 +891,18 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
 
   let scratch: string | undefined
   let interrupted = false
-  // SIGINT/SIGTERM during stages 1-3: remove the scratch copy and exit; nothing else exists yet.
+  // SIGINT/SIGTERM during stages 1-3: remove the scratch copy, stop the managed host if stage 2 started it, and exit.
   const preflightInterrupt = (): void => {
     interrupted = true
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true })
     console.log("\nINTERRUPTED during the preflight. The scratch copy was removed; nothing was scheduled and nothing was billed.")
-    exit(130)
+    if (managed.stop === undefined && managed.host === undefined) exit(130)
+    else void stopManaged(managed).then(() => exit(130))
   }
   signals.on("SIGINT", preflightInterrupt)
   signals.on("SIGTERM", preflightInterrupt)
 
-  let prepared: { pin: Pin; directory: string; out: string; server: string; wiring: ToolsWiring; roster: Roster; warnings: Warning[] }
+  let prepared: { pin: Pin; directory: string; out: string; host: ManagedHost; wiring: ToolsWiring; roster: Roster; warnings: Warning[] }
   try {
     // ---- STAGE 1: offline checks ----
     console.log("bun run paired — stage 1 of 4: offline checks (no client, no network call, nothing written)")
@@ -841,6 +962,25 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
           ]),
     )
 
+    let credential: string | undefined
+    const provider = flags.provider
+    if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
+    else {
+      const problems = providerBlockProblems(provider)
+      const value = env[provider.apiKeyEnv]
+      if (value === undefined || value.trim().length === 0) {
+        problems.push(`the credential variable \`${provider.apiKeyEnv}\` is not set in this environment, or is empty or blank`)
+      } else credential = value
+      checks.push(
+        problems.length === 0
+          ? pass("managed host provider block", [
+              `provider \`${provider.id}\` (${provider.npm}) at ${provider.baseURL}; credential from \`${provider.apiKeyEnv}\`; ` +
+                `models ${provider.models.join(", ")}`,
+            ])
+          : fail("managed host provider block", problems),
+      )
+    }
+
     let wiring: ToolsWiring | undefined
     if (directory === undefined) checks.push(notEvaluated("production Tools wiring", directoryMissing))
     else {
@@ -892,6 +1032,8 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
       skipped.length > 0 ||
       interrupted ||
       flags.pin === undefined ||
+      provider === undefined ||
+      credential === undefined ||
       directory === undefined ||
       out === undefined ||
       wiring === undefined ||
@@ -909,12 +1051,48 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
       )
     }
 
-    // ---- STAGE 2: client and roster ----
-    console.log("\nbun run paired — stage 2 of 4: opencode client and roster (no model session, no billable request)")
+    // ---- STAGE 2: managed host, client and roster ----
+    console.log("\nbun run paired — stage 2 of 4: managed host, opencode client and roster (no model session, no billable request)")
+    let started: ManagedHostStart
+    try {
+      started = await (overrides.startHost ?? startManagedHost)({
+        block: provider,
+        credential,
+        verifyDirectories: [directory],
+        signals: null,
+        onSpawn: (spawned) => {
+          managed.stop = spawned.stop
+        },
+      })
+    } catch (error) {
+      started = {
+        ok: false,
+        reason: redactText(`the managed host could not be started: ${messageOf(error)}`, secretForms(credential)),
+        stopped: null,
+      }
+    }
+    if (!started.ok) {
+      return refusal(
+        "stage 2 (managed host)",
+        [
+          started.reason,
+          ...(started.stopped !== null && !started.stopped.confirmed
+            ? [`the refused host's exit is UNCONFIRMED: check process ${started.stopped.pid} by hand (${started.stopped.why})`]
+            : []),
+        ],
+        "run the command on the measured opencode build (`MEASURED_HOST` in ablation/managed-host.ts) with an " +
+          "OpenAI-compatible --provider-url, and run it again.",
+      )
+    }
+    const host = started.host
+    managed.host = host
+    managed.stop ??= host.stop
+    if (interrupted) return refusal("stage 2 (managed host)", ["the preflight was interrupted while the host was starting"], "run the command again.")
+    console.log(`  managed host ${host.url}: process ${host.pid}, opencode ${host.version}, binary sha256 ${host.sha256}`)
     let roster: Roster
     let warnings: Warning[]
     try {
-      const client = await (overrides.createClient ?? defaultCreateClient)({ baseUrl: flags.server, directory })
+      const client = await (overrides.createClient ?? defaultCreateClient)({ baseUrl: host.url, directory })
       const candidates = await (overrides.enumerate ?? ((value: unknown) => enumerateCandidates(value as never)))(client)
       const resolved = selectRoster(candidates, {
         slots: DEFAULT_DISCOVERY_SLOTS,
@@ -926,8 +1104,8 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
     } catch (error) {
       return refusal(
         "stage 2 (client and roster)",
-        [`the roster could not be resolved from ${flags.server}: ${messageOf(error)}`],
-        "start the opencode server (or pass --server), make sure the host has a provider configured, and run the command again.",
+        [`the roster could not be resolved from the managed host at ${host.url}: ${messageOf(error)}`],
+        "check that --provider-url answers and that each --provider-model is a model it serves, and run the command again.",
       )
     }
     for (const slot of roster.slots) console.log(`  ${slot.slot}: ${slot.providerId}/${slot.modelId}`)
@@ -937,8 +1115,8 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
       return refusal(
         "stage 2 (client and roster)",
         rosterProblems,
-        "configure the pinned model and enough distinct models in the host (the `provider` key in your opencode config), " +
-          "or pin a model the host offers, and run the command again.",
+        "name the pinned model and enough distinct models with --provider-model, or pin one of the --provider-model " +
+          "models, and run the command again.",
       )
     }
 
@@ -971,12 +1149,16 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
       )
     }
     console.log(`  PASS  \`${directory}\` is still exactly the sealed labelled change`)
-    prepared = { pin: flags.pin, directory, out, server: flags.server, wiring, roster, warnings }
+    if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
+    prepared = { pin: flags.pin, directory, out, host, wiring, roster, warnings }
   } finally {
     signals.off("SIGINT", preflightInterrupt)
     signals.off("SIGTERM", preflightInterrupt)
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
   }
+
+  // An interrupt that landed after the recheck, before the handlers came off: nothing is scheduled.
+  if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
 
   // ---- STAGE 4: schedule, then the three blocks ----
   console.log("\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks")
@@ -1039,8 +1221,8 @@ export async function main(argv: readonly string[] = Bun.argv, overrides: Paired
     const backendFor =
       overrides.backendFor ??
       ((_context: PairedPhaseContext, lateUsage: LateUsageReporter, resolved: Roster): ModelBackend =>
-        new OpencodeModelBackend({
-          serverUrl: prepared.server,
+        (overrides.createBackend ?? ((options: OpencodeBackendOptions) => new OpencodeModelBackend(options)))({
+          serverUrl: prepared.host.url,
           directory,
           slots: [...resolved.slots, ...resolved.lensSlots],
           lateUsage,

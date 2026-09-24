@@ -734,8 +734,9 @@ blocks into a total. A failed prefix has no arm manifests, so its spend stays a 
 points at `paired-journal.jsonl`. A missing arm manifest is also a gap with its reason, never a zero.
 
 **What stories 2-8c and 2-8d still own.** Story 2-8c owns the real-host request-accounting check and
-the shared gates verified on a real host (paired gates 1 and 2 below), billing only a bounded probe
-whose spend the budget owner has authorized. Story 2-8d owns the three blocks over a real change, the
+the shared gates verified on a real host (paired gates 1 and 2 below). Its zero-bill probe closed gate
+2 and measured gate 1's invariant false, so gate 1 stays OPEN (see "Host request accounting probe
+(story 2-8c)" below). Story 2-8d owns the three blocks over a real change, the
 retained outcomes, the manifest-linked report and its confounds and limits; it is gated on the
 launcher, on 2-8c and on its own budget authorization. Nothing in this report is live evidence, and it
 closes neither story 2.8, FR11 nor the epic.
@@ -744,9 +745,10 @@ closes neither story 2.8, FR11 nor the epic.
 
 - **The runner's semantics, and nothing about a host.** Every test drives port calls on
   fakes. They do not show how many physical requests a real host makes per port call.
-  The port forbids backend retries, but whether the opencode host honours that, and whether
-  each host subcall is accounted for, is unverified. Story 2-8c owns that check (paired gate 1),
-  and it must pass before anything bills.
+  Story 2-8c's zero-bill probe measured that on opencode 1.18.32, and the host does not honour
+  the port's rule: it retries, and a tool step costs a request whose usage MAD never sees (see
+  "Host request accounting probe (story 2-8c)"). Paired gate 1 stays OPEN on that evidence, and
+  nothing bills while it is OPEN.
 - **A residual confound between the two arms of a block.** Each branch is a new run with
   its own run id, and the judge's anonymizer seeds its order from the run id and the finding
   id (`core/run/review.ts`, the `runId` passed to `judge`). So the two arms can show the judge
@@ -798,17 +800,23 @@ new bundle root.
 
 ```
 bun run paired --live \
-  --pin anthropic/claude-sonnet-4-5 \
+  --pin router/claude-sonnet-4-5 \
+  --provider-url https://router.example/v1 \
+  --provider-key-env ROUTER_API_KEY \
+  --provider-model claude-sonnet-4-5 --provider-model gpt-5 --provider-model gemini-2.5-pro \
   --directory /scratch/mad-labelled-change \
   --out /scratch/mad-paired-2026-09-23
 ```
 
-`--server <url>` names the opencode server; its default is `http://localhost:4096`, and anything but
-an `http:` or `https:` URL is refused.
+The launcher starts its own opencode host (see "The managed host" below) and never connects to one it
+did not start: `--server` is refused. The host's one provider is an `@ai-sdk/openai-compatible` block
+built from `--provider-url`, `--provider-key-env` (the NAME of the variable that holds the credential,
+never the credential itself) and one `--provider-model` per model. Its provider id is the one in
+`--pin`.
 
 `scripts/paired.ts` runs the three paired blocks over the sealed labelled change, behind a
-preflight. **With the shipped gate table it always refuses:** gates 1, 2 and 4 below are OPEN and
-are required for the evaluation, so the command prints every check and exits 1 before any client,
+preflight. **With the shipped gate table it always refuses:** gates 1 and 4 below are OPEN and are
+required for the evaluation, so the command prints every check and exits 1 before any host, client,
 schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
 evaluation. Nothing in this section authorizes billing, and the command's existence is not
 authorization.
@@ -824,9 +832,9 @@ alone never lets the three blocks run. A table with an unknown kind, phase or st
 with no evidence, an OPEN gate carrying evidence, a repeated number, or no authorization gate for the
 evaluation is refused.
 
-1. **host request accounting — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: how many physical requests the opencode host makes per port call, and whether each is accounted for, verified on a real host.
-2. **shared gates verified on a real host — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request.
-3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it.
+1. **host request accounting — OPEN.** Engineering, required for evaluation. Owner: story 2-8c. Requires: one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-23.json) measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent 6 times per admitted attempt and a 429 was retried once; a header timeout was sent 6 times in the 2026-09-23 spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by default, a tool step costs an extra request and only the last step's usage is returned; N2, with only StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real provider emits one under tool_choice required is not established). In the hang scenario the host held the provider request open after the adapter gave up, until the probe stopped the host. Closing it needs the request-accounting story filed in deferred-work.md, re-measured by the probe.
+2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence: ablation/evidence/host-accounting-2026-09-23.json. Tests: scripts/accounting-probe.test.ts.
+3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it. Note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub.
 4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend. No story closes it.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
 6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
@@ -842,16 +850,18 @@ suite's and not this list.
 Each stage gates the next, and a failure at any stage exits 1 with no schedule and no bill:
 
 - **Stage 1 — offline checks.** Flags, containment, the bundle root, the frozen protocol, the gate
-  table, the Tools wiring and the first worktree-identity comparison. Every independent check runs and
+  table, the provider block and its credential variable, the Tools wiring and the first
+  worktree-identity comparison. Every independent check runs and
   every failure prints together; a check that throws (a permission error, say) is a failed check, and
   the others still print. A check whose prerequisite is missing or invalid prints
   `not evaluated: <prerequisite>` instead of running — for a rejected flag, with the reason, such as
-  `not evaluated: --directory (rejected: not absolute)`. No opencode client and no network call exist
-  until all of them pass.
-- **Stage 2 — client and roster.** The client is created and the shipped default roster (three
-  discovery slots, no lenses) resolved with `--pin` as its pin. A pin that fills no slot, a roster short
-  of three slots, or a `roster-pin-unhonoured` or `roster-underfilled` warning refuses. No model session,
-  no billable request.
+  `not evaluated: --directory (rejected: not absolute)`. No host, no opencode client and no network
+  call exist until all of them pass.
+- **Stage 2 — managed host, client and roster.** The managed host is started and verified. The client
+  is created against it and the shipped default roster (three discovery slots, no lenses) resolved from
+  it with `--pin` as its pin. A host that is not the measured build or not running the generated config,
+  a pin that fills no slot, a roster short of three slots, or a `roster-pin-unhonoured` or
+  `roster-underfilled` warning refuses. No model session, no billable request.
 - **Stage 3 — the recheck**, immediately before the schedule: the worktree identity, the `--out`
   containment and the bundle root, all checked again.
 - **Stage 4 — `createSchedule`, then `runPairedBlocks`**, both handed `SEEDED_CHANGE` and
@@ -863,9 +873,14 @@ copy, removed on success, on refusal, on a thrown error and on SIGINT or SIGTERM
 
 ### What it refuses, before anything bills
 
-- a missing `--live`, `--pin`, `--directory` or `--out`, a relative `--directory` or `--out`, a flag
-  given twice, `--live=<value>`, a bad `--server`, any flag it does not know, and any positional or
-  single-dash argument;
+- a missing `--live`, `--pin`, `--directory`, `--out`, `--provider-url`, `--provider-key-env` or
+  `--provider-model`, a relative `--directory` or `--out`, a flag given twice (`--provider-model` is
+  given once per model), `--live=<value>`, any flag it does not know, and any positional or single-dash
+  argument;
+- **`--server`**, in any form: the launcher trusts no host it did not start;
+- a provider URL that is not http(s) or carries a user name or password, a credential variable name
+  that is not one, a credential variable that is unset or empty, and a repeated or blank model id;
+- a host that is not the measured build, or whose effective config is not the generated one;
 - **`--target`**, as a second authority on what is reviewed: the launcher reviews the sealed change
   and never reads a ref range;
 - a `--directory` that is this repository, is inside it, or contains it; an `--out` inside this
@@ -922,6 +937,49 @@ factory builds `opencodeTools` with no deadline override. `config.tools` records
 so the sealed schedule names them. When `opencodeTools` reports that a blame's cleanup is unconfirmed,
 the launcher aborts the run through the runner's signal and prints the process id to check by hand.
 
+### The managed host
+
+`ablation/managed-host.ts` owns the host. It writes the whole effective config itself: fixed settings
+(`autoupdate: false`, `share: "disabled"`, an empty `plugin` list, `enabled_providers` naming only the
+one provider, and that provider's first model as `model` and `small_model`) plus exactly one provider
+block, which must use `@ai-sdk/openai-compatible`. Only its URL, its credential variable and its model
+ids vary. The credential reaches the host as `{env:NAME}` in the config and as that one variable in
+its environment, never on a command line. The block is refused when its URL is not https (plain http
+only to 127.0.0.1, ::1 or localhost) or carries a user name, password, query string or fragment, when
+the credential variable's name is one the host itself sets, and when a model id is blank, padded,
+repeated or contains `/`.
+
+It starts `opencode serve --hostname 127.0.0.1 --port 0` with an environment built from nothing: a fixed
+system `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME` and the four XDG directories in private
+temporary directories, `OPENCODE_CONFIG`, `OPENCODE_DISABLE_MODELS_FETCH=1`,
+`OPENCODE_DISABLE_PROJECT_CONFIG=1` and the credential variable. It reads the URL from the host's
+listening line. Before any client call it checks, each request bounded:
+
+- **the build:** the sha256 of the resolved `opencode` binary (its real path, which is also the path
+  spawned) and the version `/global/health` reports both equal `MEASURED_HOST` (opencode 1.18.32, the
+  build the probe measured);
+- **the config:** `GET /config`, for the host's own directory and for `--directory`, has an empty
+  `plugin` list, exactly one provider, and every other key equal to the generated config, allowing only
+  the empty defaults the host adds itself;
+- **the provider registry:** `GET /config/providers`, which the roster is read from, lists exactly the
+  one provider with exactly the `--provider-model` models, each implemented by
+  `@ai-sdk/openai-compatible`. A `--pin` provider id that is also a built-in provider's id is caught here.
+
+A refusal names both build identities, or each difference. `GET /config` echoes the credential in plain
+text, so it is redacted before anything records it, and no credential value, raw or JSON-escaped,
+appears in any message. The host is stopped on success, on every refusal, on a thrown error and on
+SIGINT or SIGTERM — including a signal that arrives while it is still starting — and its exit is
+confirmed; a stop that cannot be confirmed prints the process id and exits 1. After an interrupt nothing
+is scheduled and nothing is written under `--out`.
+
+**`MEASURED_HOST` binds the launcher to this one machine's binary.** Another install of the same
+version has another hash, and is refused until it is re-measured (see "Re-measuring" below).
+
+The managed host is not offline. The first time it runs a prompt it tries
+`npm install @opencode-ai/plugin` into its config directory; on the launcher path, which sets no proxy,
+that install reaches the registry. Before stopping the host the launcher prints what the install left
+(`@opencode-ai/plugin` and its version, or that nothing was installed).
+
 ### When it runs
 
 The command prints each slot's terminal status, the journal's halt and stop, and the late-usage
@@ -930,7 +988,91 @@ reads `complete: true`, and 1 otherwise; an incomplete run keeps all of its evid
 during the run aborts it through the same signal. If stage 4 throws, the command prints `INCOMPLETE`
 with the error, any process whose cleanup is unconfirmed, and — when the start marker exists — the
 `bun run eval-read --bundle` pointer, and exits 1. The run path behind the checks is tested only with
-injected CLOSED gates and scripted backends (`scripts/paired.test.ts`); no test sends a model request.
+injected CLOSED gates, a scripted managed host that starts no process, and scripted backends
+(`scripts/paired.test.ts`); no test starts a host that holds a credential or sends a model request.
+
+## Host request accounting probe (story 2-8c)
+
+```
+bun run accounting-probe --out /tmp/mad-probe
+```
+
+`scripts/accounting-probe.ts` measures how many physical provider requests the opencode host makes
+behind one admitted port call, and whether the usage MAD records is the usage served. Paired gate 1's
+invariant is **one physical request per admitted port call, no host retry, and every subcall
+accounted**. It also shows the journal's gates refusing on a real host (paired gate 2).
+
+**It bills nothing, by construction.** The host is the managed host above, whose only provider is a
+local OpenAI-compatible stub (`ablation/accounting-stub.ts`) that counts every request it receives,
+with a dummy credential. HTTP(S)_PROXY points at a local proxy that refuses and lists every attempt,
+with `NO_PROXY=127.0.0.1`. That covers clients that honour the proxy variables. **Direct egress is not
+shown to be blocked**, so the evidence lists the proxy attempts it refused and never claims to list
+every outbound attempt. On 2026-09-23 the refused attempts were `CONNECT registry.npmjs.org:443` (the
+host's `npm install @opencode-ai/plugin`) and `CONNECT github.com:443`. The probe spent no paid tokens.
+
+**It drives the production path.** Each scenario runs the real `discover` stage with a one-slot roster,
+a real `OpencodeModelBackend` and a real journal's `admission`, on a fresh host, in its own bundle root.
+For each admitted attempt it records the journal's `issued` and `settled` lines, the physical requests
+the stub received for that attempt, and the usage the stub served against the usage MAD recorded. MAD's
+own discover retry (a second admitted attempt) is counted apart from the host's hidden requests within
+one attempt. The adapter's turn deadline was 150,000 ms (5,000 ms in the hang scenario); the
+production default is 600,000 ms, which also outlasts the host's roughly 71-second six-try retry series.
+
+Measured on opencode 1.18.32 (binary sha256 `5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e`),
+committed as `ablation/evidence/host-accounting-2026-09-23.json`:
+
+| Scenario | Admitted attempts | Physical requests | Hidden host requests | Served in/out | Recorded in/out | Verdict | Upstream request |
+|---|---|---|---|---|---|---|---|
+| success | 1 | 1 | 0 | 1001/11 | 1001/11 | HOLDS | every request answered |
+| persistent 500 | 2 | 12 | 10 | 0/0 | 0/0 | FAILS | every request answered |
+| 429 then success | 1 | 2 | 1 | 1002/12 | 1002/12 | FAILS | every request answered |
+| 400 | 2 | 2 | 0 | 1002/12 | 1002/12 | HOLDS | every request answered |
+| hang past the adapter timeout | 1 | 1 | 0 | 0/0 | unknown | HOLDS | held open 15051 ms after the adapter gave up, until the probe stopped the host |
+| host-tool step | 1 | 2 | 1 | 2003/23 | 1002/12 | FAILS | every request answered |
+| unoffered tool | 1 | 2 | 1 | 2003/23 | 1002/12 | FAILS | every request answered |
+
+- **F2 — host retries.** The host retries a failed provider request itself. Measured here: a persistent
+  500 was sent 6 times per admitted attempt, and a 429 was retried once before the success. Measured in
+  the 2026-09-23 spike: a header timeout (`headerTimeout` 3000 ms) was sent 6 times. The network-error
+  case is read from the host binary, not measured. A source search found no switch to turn the loop off;
+  that search does not prove no switch exists. A 400 is not retried by the host; MAD's own retry is the
+  second attempt.
+- **F3 — host-tool steps.** With host tools offered (the adapter's default), a tool step costs an extra
+  request, and MAD records only the last step's usage: 1002/12 of the 2003/23 served.
+- **N2 — an unoffered tool.** Under `tools: {"*":false,"StructuredOutput":true}`, a stub that returned a
+  call to an unoffered tool still caused a second request, with the same loss. That was measured with a
+  stub; whether a real provider emits one under `tool_choice: "required"` is not established.
+- **The hang.** The adapter gave up at 5,000 ms, MAD recorded the attempt as unknown, and the halt
+  refused MAD's retry. No further request arrived in the 15,000 ms the stub was watched afterwards, and
+  the host held the one provider request open that whole time: it closed only when the probe stopped
+  the host.
+
+Gate 2: each of the global, Blocks and phase gates was made to refuse by its own seeded journal. On the
+measured host each refused inside the journal's admission, before any backend call, and 0 requests
+reached the stub. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot
+admission was tested.
+
+**Scope.** One build on one machine, one provider package, one model, one-slot discover, the scripted
+behaviours above. Requests are attributed to attempts by order, which holds because each scenario runs
+one slot on its own host. A HOLDS verdict is about that scenario only. Exit 0 means every scenario ran
+and every verdict is complete; it does not mean gate 1 passed. **Gate 1 stays OPEN**: every failure
+shares one root, that MAD reads a turn's usage from the one settled message and not from the physical
+requests. Fixing that is a separate story (`_bmad-output/implementation-artifacts/deferred-work.md`). No
+tool policy was changed: denying host tools is not an accounting fix, and AD-13's host-tool fallback
+depends on them.
+
+### Re-measuring
+
+`MEASURED_HOST` (`ablation/managed-host.ts`) names one binary on one machine, and the managed host
+refuses every other. After an opencode upgrade, or on another machine:
+
+1. Run `bun run accounting-probe --out <an empty or absent directory>`; a non-empty `--out` is
+   refused. It must exit 0.
+2. Copy `<out>/host-accounting.json` to `ablation/evidence/host-accounting-<date>.json`.
+3. Set `MEASURED_HOST`'s `version`, `sha256` and `evidence` from that file's `host` block, and update
+   the table above, gate 1's and gate 2's text in `ablation/paired-gates.ts`, and the evidence path the
+   tests read. `ablation/live-run-doc.test.ts` and `scripts/accounting-probe.test.ts` fail until the
+   table and the file agree.
 
 ## The adversarial suite (story 2-7b): a library, not a command
 
@@ -1057,15 +1199,20 @@ predicate, so a model that names the repository by its absolute path is not coun
 The live execution is a separate task, and it stays open until each of these holds:
 
 1. **Host accounting — OPEN.** How many physical requests the opencode host makes per port
-   call, and whether each is accounted for, is verified on a real host. Split into a story of
-   its own; it needs a live host and nothing in 2-7c touches it.
+   call, and whether each is accounted for, is verified on a real host. Story 2-8c's zero-bill
+   probe measured it on opencode 1.18.32 and found that invariant false (F2, F3 and N2 in "Host
+   request accounting probe (story 2-8c)"), so it stays OPEN until the request-accounting story
+   filed in `deferred-work.md` fixes it.
 2. **Billing authorization — OPEN.** A named person with authority over the budget must
    authorize the Adversarial allowance's spend (400,000 ledger tokens, `ablation/governor.ts`)
    before the first paid request. This is a decision, not an engineering task: no code can
    satisfy it and no story closes it. **Owner: the human who owns the budget.** It is recorded
    here because a prerequisite with no owner is one nobody notices is missing.
 3. **Verified shared gates — OPEN.** The global and Adversarial gates are verified against a
-   real host before the first paid request. Split into the same story as (1).
+   real host before the first paid request. Story 2-8c's probe showed, on the measured host, the
+   global gate refusing inside the journal's Blocks admission before any backend call, with 0
+   requests reaching its stub, for block 1's prefix phase and one slot only. The Adversarial gate
+   was not exercised, and no concurrent or multi-slot admission was tested.
 4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
    The blame path is addressed; the materializer is not. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.

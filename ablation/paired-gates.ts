@@ -43,6 +43,8 @@ export interface PairedGate {
   requires: string
   /** Present exactly when the gate is CLOSED: what establishes it, and the tests that check it. */
   evidence?: string
+  /** A fact about the gate that neither closes it nor is required to. Printed; never consulted. */
+  note?: string
 }
 
 /** A condition that was checked and found NOT to be a gate, with the condition that would make it one. */
@@ -63,8 +65,16 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     owner: "story 2-8c",
     status: "OPEN",
     requires:
-      "how many physical requests the opencode host makes per port call, and whether each is accounted for, " +
-      "verified on a real host",
+      "one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured " +
+      "host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-23.json) " +
+      "measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent " +
+      "6 times per admitted attempt and a 429 was retried once; a header timeout was sent 6 times in the 2026-09-23 " +
+      "spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by " +
+      "default, a tool step costs an extra request and only the last step's usage is returned; N2, with only " +
+      "StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real " +
+      "provider emits one under tool_choice required is not established). In the hang scenario the host held the " +
+      "provider request open after the adapter gave up, until the probe stopped the host. Closing it needs the " +
+      "request-accounting story filed in deferred-work.md, re-measured by the probe",
   },
   {
     number: 2,
@@ -72,8 +82,15 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     kind: "engineering",
     phase: "evaluation",
     owner: "story 2-8c",
-    status: "OPEN",
+    status: "CLOSED",
     requires: "the journal's global, Blocks and phase gates verified against a real host before the first paid request",
+    evidence:
+      "`bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the " +
+      "measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real " +
+      "OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the " +
+      "journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix " +
+      "phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence: " +
+      "ablation/evidence/host-accounting-2026-09-23.json. Tests: scripts/accounting-probe.test.ts",
   },
   {
     number: 3,
@@ -83,6 +100,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
     requires: "the budget owner authorizes story 2-8c's bounded accounting probe",
+    note: "story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub",
   },
   {
     number: 4,
@@ -148,8 +166,9 @@ export interface GatePreflight {
  * Check the gates required for `phase`. A gate for another phase is printed and
  * never consulted. A table that is not well formed refuses: an unknown kind, phase
  * or status, a CLOSED gate with no evidence, an OPEN gate carrying evidence, a
- * duplicate or non-positive number, or no authorization gate for the phase (a
- * table that cannot say who authorized the spend authorizes nothing).
+ * duplicate or non-positive number, a note that is not one non-empty line, or no
+ * authorization gate for the phase (a table that cannot say who authorized the
+ * spend authorizes nothing).
  */
 export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): GatePreflight {
   const lines: string[] = []
@@ -158,9 +177,10 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): G
   for (const gate of gates) {
     const required = gate.phase === phase
     const evidence = gate.status === "CLOSED" ? ` — evidence: ${gate.evidence ?? "NONE RECORDED"}` : ""
+    const note = gate.note === undefined ? "" : ` — note: ${gate.note}`
     lines.push(
       `gate ${gate.number} — ${gate.name} — ${gate.kind}, required for ${gate.phase}` +
-        `${required ? "" : ` (not consulted for ${phase})`}, owner ${gate.owner} — ${gate.status}${evidence}`,
+        `${required ? "" : ` (not consulted for ${phase})`}, owner ${gate.owner} — ${gate.status}${evidence}${note}`,
     )
     if (gate.kind !== "engineering" && gate.kind !== "authorization") {
       problems.push(`gate ${gate.number} (${gate.name}) has kind ${JSON.stringify(gate.kind)}, which is neither engineering nor authorization`)
@@ -173,6 +193,9 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): G
     }
     if (gate.status === "OPEN" && gate.evidence !== undefined) {
       problems.push(`gate ${gate.number} (${gate.name}) is OPEN but carries evidence; a gate with evidence must say CLOSED, and one without it OPEN`)
+    }
+    if (gate.note !== undefined && (typeof gate.note !== "string" || gate.note.trim().length === 0 || /[\r\n]/.test(gate.note))) {
+      problems.push(`gate ${gate.number} (${gate.name}) has a note that is not one non-empty line`)
     }
     if (!Number.isInteger(gate.number) || gate.number < 1) problems.push(`gate "${gate.name}" has no valid number`)
     else if (seen.has(gate.number)) problems.push(`gate number ${gate.number} appears twice`)

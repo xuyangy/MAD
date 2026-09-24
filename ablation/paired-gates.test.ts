@@ -28,7 +28,7 @@ describe("PAIRED_GATES", () => {
     const row = (gate: PairedGate) => [gate.number, gate.name, gate.kind, gate.phase, gate.owner, gate.status]
     expect(PAIRED_GATES.map(row)).toEqual([
       [1, "host request accounting", "engineering", "evaluation", "story 2-8c", "OPEN"],
-      [2, "shared gates verified on a real host", "engineering", "evaluation", "story 2-8c", "OPEN"],
+      [2, "shared gates verified on a real host", "engineering", "evaluation", "story 2-8c", "CLOSED"],
       [3, "accounting-probe spend authorization", "authorization", "accounting-probe", HUMAN_BUDGET_OWNER, "OPEN"],
       [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
       [5, "worktree identity", "engineering", "evaluation", "story 2-8b", "CLOSED"],
@@ -53,6 +53,31 @@ describe("PAIRED_GATES", () => {
     }
   })
 
+  test("gate 2 is closed on the probe's real-host refusals, and names the probe, the evidence file and its tests", () => {
+    const gate = PAIRED_GATES.find((entry) => entry.number === 2)!
+    expect(gate.status).toBe("CLOSED")
+    for (const text of ["bun run accounting-probe", "ablation/evidence/host-accounting-2026-09-23.json", "scripts/accounting-probe.test.ts", "0 backend calls and 0 stub requests"]) {
+      expect(gate.evidence).toContain(text)
+    }
+    for (const name of ["global", "Blocks", "phase"]) expect(gate.evidence).toContain(name)
+  })
+
+  test("gate 1 stays OPEN, and its requirement cites F2, F3 and N2 as measured, with the evidence file", () => {
+    const gate = PAIRED_GATES.find((entry) => entry.number === 1)!
+    expect(gate.status).toBe("OPEN")
+    expect(gate.evidence).toBeUndefined()
+    for (const text of ["F2", "F3", "N2", "measured this false", "ablation/evidence/host-accounting-2026-09-23.json"]) {
+      expect(gate.requires).toContain(text)
+    }
+  })
+
+  test("gate 3 stays OPEN and unused, with a note that 2-8c spent no paid tokens", () => {
+    const gate = PAIRED_GATES.find((entry) => entry.number === 3)!
+    expect(gate.status).toBe("OPEN")
+    expect(gate.note).toContain("spent no paid tokens")
+    expect(gatePreflight(PAIRED_GATES, "evaluation").lines[2]).toContain(`note: ${gate.note}`)
+  })
+
   test("the adversarial prerequisites' allowance is not a paired gate", () => {
     const text = JSON.stringify(PAIRED_GATES)
     expect(text).not.toContain("400,000")
@@ -70,14 +95,21 @@ describe("gatePreflight", () => {
   test("the shipped table refuses the evaluation, naming every open evaluation gate", () => {
     const result = gatePreflight(PAIRED_GATES, "evaluation")
     expect(result.ok).toBe(false)
-    for (const number of [1, 2, 4]) expect(result.problems.some((problem) => problem.startsWith(`gate ${number} `))).toBe(true)
-    // Gate 3 is printed but not consulted for the evaluation.
-    expect(result.problems.some((problem) => problem.startsWith("gate 3 "))).toBe(false)
+    for (const number of [1, 4]) expect(result.problems.some((problem) => problem.startsWith(`gate ${number} `))).toBe(true)
+    // Gate 2 is CLOSED; gate 3 is printed but not consulted for the evaluation.
+    for (const number of [2, 3]) expect(result.problems.some((problem) => problem.startsWith(`gate ${number} `))).toBe(false)
     expect(result.lines).toHaveLength(PAIRED_GATES.length)
   })
 
   test("every gate closed passes", () => {
     expect(gatePreflight(closedAll(PAIRED_GATES), "evaluation").ok).toBe(true)
+  })
+
+  test("gate 1 OPEN alone refuses every evaluation", () => {
+    const onlyOne = closedAll(PAIRED_GATES).map((gate) => (gate.number === 1 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    const result = gatePreflight(onlyOne, "evaluation")
+    expect(result.ok).toBe(false)
+    expect(result.problems).toEqual([`gate 1 (host request accounting) is OPEN; owner: story 2-8c; closing it requires: ${onlyOne[0]!.requires}`])
   })
 
   test("no gate with phase accounting-probe can satisfy an evaluation preflight", () => {
@@ -118,6 +150,15 @@ describe("gatePreflight refuses a malformed row (story 2-8b review)", () => {
     expect(gatePreflight(gates, "evaluation").problems.join("\n")).toContain(
       "gate 2 (shared gates verified on a real host) is OPEN but carries evidence",
     )
+  })
+
+  test("a blank or multi-line note refuses, even when every gate reads CLOSED", () => {
+    for (const note of ["", "  ", "two\nlines"]) {
+      const gates = closedAll(PAIRED_GATES).map((gate) => (gate.number === 3 ? { ...gate, note } : gate))
+      expect(gatePreflight(gates, "evaluation").problems.join("\n"), JSON.stringify(note)).toContain(
+        "gate 3 (accounting-probe spend authorization) has a note that is not one non-empty line",
+      )
+    }
   })
 
   test("an unknown kind, phase or status refuses, even when every gate reads CLOSED", () => {

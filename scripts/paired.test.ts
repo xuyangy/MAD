@@ -2,10 +2,12 @@
  * Story 2-8b — `bun run paired`, the gated paired launcher, driven through its
  * `main(argv, overrides)` seam over real git in temp directories.
  *
- * Every model backend here is scripted and every roster comes from an injected
- * candidate list: no test creates an opencode client that reaches a server, starts
- * a model session or sends a model request. The run path behind the checks is
- * exercised only with injected CLOSED gates; the shipped `PAIRED_GATES` refuses.
+ * Every model backend here is scripted, every managed host is a scripted stand-in
+ * that starts no process, and every roster comes from an injected candidate list:
+ * no test starts an opencode host, creates a client that reaches a server, holds a
+ * credential, starts a model session or sends a model request. The run path behind
+ * the checks is exercised only with injected CLOSED gates; the shipped
+ * `PAIRED_GATES` refuses.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
@@ -17,8 +19,18 @@ import { join, resolve } from "node:path"
 import type { ZodType } from "zod"
 
 import type { BlameExecOutcome, SpawnBlame, SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
+import type { OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import type { OpencodeToolsOptions } from "../adapters/opencode/tools.ts"
 import { known } from "../ablation/manifest.ts"
+import {
+  hostConfig,
+  MEASURED_HOST,
+  OPENAI_COMPATIBLE_NPM,
+  startManagedHost,
+  type ManagedHostOptions,
+  type ManagedHostStart,
+  type StopOutcome,
+} from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
 import { PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import { SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
@@ -89,18 +101,68 @@ async function setup() {
   return { parent, directory, out, scratchParent }
 }
 
+/** The credential variable the launcher reads, and a marker value that is no provider's key. */
+const KEY_ENV = "MAD_TEST_PROVIDER_KEY"
+const KEY = "test-marker-not-a-credential"
+const PROVIDER_URL = "http://127.0.0.1:1/v1"
+const MODELS = ["claude-sonnet-4-5", "gpt-5", "gemini-2.5-pro"]
+
 const argvFor = (directory: string, out: string, extra: string[] = []) => [
   "bun",
   "scripts/paired.ts",
   "--live",
   "--pin",
   "anthropic/claude-sonnet-4-5",
+  "--provider-url",
+  PROVIDER_URL,
+  "--provider-key-env",
+  KEY_ENV,
+  ...MODELS.flatMap((model) => ["--provider-model", model]),
   "--directory",
   directory,
   "--out",
   out,
   ...extra,
 ]
+
+const HOST_URL = "http://127.0.0.1:47001"
+
+/** A managed host that starts no process: it records what it was asked to start and how often it was stopped. */
+function scriptedHost(
+  options: { stop?: StopOutcome; refuse?: string; refusedStop?: StopOutcome; whileStarting?: () => void; stopRejects?: boolean } = {},
+) {
+  const started: ManagedHostOptions[] = []
+  let stops = 0
+  const stop = async (): Promise<StopOutcome> => {
+    stops += 1
+    if (options.stopRejects) throw new Error("the stop exploded")
+    return options.stop ?? { confirmed: true, pid: 777, how: "exited (status 143) after SIGTERM" }
+  }
+  const startHost = async (asked: ManagedHostOptions): Promise<ManagedHostStart> => {
+    started.push(asked)
+    asked.onSpawn?.({ pid: 777, stop })
+    options.whileStarting?.()
+    if (options.refuse !== undefined) {
+      return { ok: false, reason: options.refuse, stopped: options.refusedStop ?? { confirmed: true, pid: 777, how: "exited (status 143) after SIGTERM" } }
+    }
+    return {
+      ok: true,
+      host: {
+        url: HOST_URL,
+        pid: 777,
+        binary: "/opt/opencode",
+        sha256: MEASURED_HOST.sha256,
+        version: MEASURED_HOST.version,
+        config: hostConfig(asked.block),
+        reportedConfig: {},
+        environmentKeys: [],
+        pluginInstall: async () => ({ installed: true, version: "1.18.32" }),
+        stop,
+      },
+    }
+  }
+  return { startHost, started, stops: () => stops }
+}
 
 const closedGates: readonly PairedGate[] = PAIRED_GATES.map((gate) => ({
   ...gate,
@@ -145,13 +207,17 @@ function scripted(before?: (context: PairedPhaseContext) => void) {
 function overridesFor(
   env: { scratchParent: string },
   extra: PairedOverrides = {},
-): { overrides: PairedOverrides; clientCalls: unknown[]; backend: ReturnType<typeof scripted> } {
+): { overrides: PairedOverrides; clientCalls: unknown[]; backend: ReturnType<typeof scripted>; host: ReturnType<typeof scriptedHost> } {
   const clientCalls: unknown[] = []
   const backend = scripted()
+  const host = scriptedHost()
   return {
     clientCalls,
     backend,
+    host,
     overrides: {
+      startHost: host.startHost,
+      env: { [KEY_ENV]: KEY },
       createClient: (init) => {
         clientCalls.push(init)
         return { fake: true }
@@ -180,17 +246,18 @@ async function nothingScheduled(out: string, scratchParent: string): Promise<voi
 describe("the shipped gate table", () => {
   test("prints every gate with its owner and status, names gates 1-4 OPEN, creates no client and writes nothing", async () => {
     const env = await setup()
-    const { overrides, clientCalls, backend } = overridesFor(env)
+    const { overrides, clientCalls, backend, host } = overridesFor(env)
     // No `gates` override: `main` reads the shipped table itself.
     expect("gates" in overrides).toBe(false)
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
 
     expect(result.code).toBe(1)
     expect(result.text).toContain("FAIL  paired gates (ablation/paired-gates.ts, phase evaluation)")
-    for (const number of [1, 2, 4]) {
+    for (const number of [1, 4]) {
       const gate = PAIRED_GATES.find((entry) => entry.number === number)!
       expect(result.text).toContain(`REFUSED: gate ${number} (${gate.name}) is OPEN; owner: ${gate.owner}`)
     }
+    expect(result.text).not.toContain("REFUSED: gate 2 ")
     expect(result.text).toContain(
       "gate 3 — accounting-probe spend authorization — authorization, required for accounting-probe (not consulted for evaluation), owner the human budget owner — OPEN",
     )
@@ -198,7 +265,7 @@ describe("the shipped gate table", () => {
       expect(result.text).toContain(`gate ${gate.number} — ${gate.name}`)
       expect(result.text).toContain(`owner ${gate.owner} — ${gate.status}`)
     }
-    for (const number of [1, 2, 3, 4]) {
+    for (const number of [1, 3, 4]) {
       const gate = PAIRED_GATES.find((entry) => entry.number === number)!
       expect(gate.status).toBe("OPEN")
       expect(result.text).toContain(`gate ${number} — ${gate.name}`)
@@ -207,6 +274,7 @@ describe("the shipped gate table", () => {
     expect(result.text).toContain("PASS  worktree identity (first comparison)")
     expect(result.text).toContain("PASS  production Tools wiring")
     expect(result.text).toContain("REFUSED at stage 1 (offline checks)")
+    expect(host.started).toEqual([])
     expect(clientCalls).toEqual([])
     expect(backend.calls).toEqual([])
     expect(existsSync(env.out)).toBe(false)
@@ -217,10 +285,20 @@ describe("the shipped gate table", () => {
 describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
   test("the schedule is sealed, three blocks run, exit 0, and eval-read reads the bundle", async () => {
     const env = await setup()
-    const { overrides, clientCalls } = overridesFor(env, { gates: closedGates })
+    const { overrides, clientCalls, host } = overridesFor(env, { gates: closedGates })
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.code, result.text).toBe(0)
-    expect(clientCalls).toEqual([{ baseUrl: "http://localhost:4096", directory: env.directory }])
+    expect(host.started.map((asked) => ({ block: asked.block, credential: asked.credential, signals: asked.signals }))).toEqual([
+      {
+        block: { id: "anthropic", npm: OPENAI_COMPATIBLE_NPM, baseURL: PROVIDER_URL, apiKeyEnv: KEY_ENV, models: MODELS },
+        credential: KEY,
+        signals: null,
+      },
+    ])
+    expect(clientCalls).toEqual([{ baseUrl: HOST_URL, directory: env.directory }])
+    expect(host.stops()).toBe(1)
+    expect(result.text).toContain("Managed host stopped: process 777")
+    expect(result.text).not.toContain(KEY)
     expect(result.text).toContain(`bun run eval-read --bundle ${env.out}`)
     expect(await readdir(env.scratchParent)).toEqual([])
 
@@ -544,7 +622,8 @@ describe("the source keeps the four stages in order", () => {
       "gatePreflight(gates",
       "toolsWiringProblem(wiring)",
       "worktreeIdentity(directory, reference, git)",
-      "// ---- STAGE 2: client and roster ----",
+      "// ---- STAGE 2: managed host, client and roster ----",
+      "startManagedHost)({",
       "defaultCreateClient",
       "selectRoster(",
       "rosterProblemsFor(roster, warnings, flags.pin)",
@@ -913,12 +992,14 @@ describe("operator interrupts", () => {
     const env = await setup()
     const signals = fakeSignals()
     const exits: number[] = []
+    const stopsAtExit: number[] = []
     let scratchAfter: string[] | undefined
-    const { overrides } = overridesFor(env, {
+    const { overrides, host } = overridesFor(env, {
       gates: closedGates,
       signals: signals.source,
       exit: (code) => {
         exits.push(code)
+        stopsAtExit.push(host.stops())
       },
       beforeRecheck: async () => {
         expect((await readdir(env.scratchParent)).length).toBe(1)
@@ -928,6 +1009,9 @@ describe("operator interrupts", () => {
     })
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(exits).toEqual([130])
+    // The managed host was stopped before the process exited.
+    expect(stopsAtExit).toEqual([1])
+    expect(host.stops()).toBe(1)
     expect(scratchAfter).toEqual([])
     expect(result.text).toContain("INTERRUPTED during the preflight")
     expect(result.code).toBe(1)
@@ -1009,17 +1093,18 @@ describe("refusal wording and small guards", () => {
 describe("flag refusals, continued", () => {
   const refusal = async (extra: (env: Awaited<ReturnType<typeof setup>>) => string[]) => {
     const env = await setup()
-    const { overrides, clientCalls } = overridesFor(env, { gates: closedGates })
+    const { overrides, clientCalls, host } = overridesFor(env, { gates: closedGates })
     const result = await captured(() => main(extra(env), overrides))
     expect(result.code).toBe(1)
+    expect(host.started).toEqual([])
     expect(clientCalls).toEqual([])
     await nothingScheduled(env.out, env.scratchParent)
     return { text: result.text, env }
   }
 
-  test("a bad --server is refused", async () => {
-    const { text } = await refusal((env) => argvFor(env.directory, env.out, ["--server", "ftp://host"]))
-    expect(text).toContain("--server must be an http(s) URL. It received `ftp://host`.")
+  test("--server is refused: the launcher trusts no host it did not start", async () => {
+    const { text } = await refusal((env) => argvFor(env.directory, env.out, ["--server", "http://localhost:4096"]))
+    expect(text).toContain("--server is refused: the launcher starts its own managed host (ablation/managed-host.ts)")
   })
 
   test("--live=value is refused", async () => {
@@ -1045,5 +1130,230 @@ describe("flag refusals, continued", () => {
     const { text } = await refusal((env) => argvFor(env.directory, out))
     expect(text).toContain(`\`${out}\` is inside this repository (AD-16)`)
     expect(existsSync(out)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-8c: the managed host
+// ---------------------------------------------------------------------------
+
+describe("the managed host (story 2-8c)", () => {
+  test("the provider flags are required, and each missing one is named, with no host started", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env, { gates: closedGates })
+    const argv = ["bun", "paired", "--live", "--pin", "anthropic/claude-sonnet-4-5", "--directory", env.directory, "--out", env.out]
+    const result = await captured(() => main(argv, overrides))
+    expect(result.code).toBe(1)
+    for (const text of ["--provider-url is required", "--provider-key-env is required", "--provider-model is required"]) {
+      expect(result.text).toContain(text)
+    }
+    expect(result.text).toContain("managed host provider block — not evaluated: --pin and the --provider-* flags")
+    expect(host.started).toEqual([])
+  })
+
+  test("an unset credential variable and a bad provider URL are refused at stage 1, without printing a value", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env, { gates: closedGates, env: {} })
+    const argv = argvFor(env.directory, env.out).map((arg) => (arg === PROVIDER_URL ? "ftp://router.invalid/v1" : arg))
+    const result = await captured(() => main(argv, overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("FAIL  managed host provider block")
+    expect(result.text).toContain(`the credential variable \`${KEY_ENV}\` is not set in this environment, or is empty`)
+    expect(result.text).toContain("the provider URL `ftp://router.invalid/v1` is not an http(s) URL")
+    expect(host.started).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("a provider that is not openai-compatible is refused at stage 2 with the reason, and no client is created", async () => {
+    const env = await setup()
+    let spawned = false
+    const { overrides, clientCalls, backend } = overridesFor(env, {
+      gates: closedGates,
+      startHost: (options) =>
+        startManagedHost({
+          ...options,
+          block: { ...options.block, npm: "@ai-sdk/anthropic" },
+          spawn: () => {
+            spawned = true
+            throw new Error("no process may start in this test")
+          },
+        }),
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 2 (managed host)")
+    expect(result.text).toContain("accepts only `@ai-sdk/openai-compatible`")
+    expect(spawned).toBe(false)
+    expect(clientCalls).toEqual([])
+    expect(backend.calls).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("a host the managed-host check refuses is refused at stage 2, and nothing is scheduled", async () => {
+    const env = await setup()
+    const refusing = scriptedHost({ refuse: "the host is not the measured build (version 1.19.0)" })
+    const { overrides, clientCalls } = overridesFor(env, { gates: closedGates, startHost: refusing.startHost })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("the host is not the measured build (version 1.19.0)")
+    expect(clientCalls).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("the host is stopped when stage 2's roster refuses, when stage 3 refuses and when stage 4 throws", async () => {
+    const roster = await setup()
+    const narrow = overridesFor(roster, { gates: closedGates, enumerate: async () => [candidate("anthropic", "claude-sonnet-4-5")] })
+    expect((await captured(() => main(argvFor(roster.directory, roster.out), narrow.overrides))).code).toBe(1)
+    expect(narrow.host.stops()).toBe(1)
+
+    const recheck = await setup()
+    const tampered = overridesFor(recheck, {
+      gates: closedGates,
+      beforeRecheck: () => writeFile(join(recheck.directory, "src", "late.ts"), "export {}\n"),
+    })
+    const third = await captured(() => main(argvFor(recheck.directory, recheck.out), tampered.overrides))
+    expect(third.text).toContain("REFUSED at stage 3")
+    expect(tampered.host.stops()).toBe(1)
+
+    const thrown = await setup()
+    const throwing = overridesFor(thrown, {
+      gates: closedGates,
+      runner: {
+        createSchedule: () => {
+          throw new Error("scheduler exploded")
+        },
+      },
+    })
+    const fourth = await captured(() => main(argvFor(thrown.directory, thrown.out), throwing.overrides))
+    expect(fourth.code).toBe(1)
+    expect(fourth.text).toContain("scheduler exploded")
+    expect(throwing.host.stops()).toBe(1)
+  })
+
+  test("a host stop that cannot be confirmed prints the pid and exits 1, even after a complete run", async () => {
+    const env = await setup()
+    const stuck = scriptedHost({ stop: { confirmed: false, pid: 777, why: "no exit within 5000 ms of SIGKILL" } })
+    const { overrides } = overridesFor(env, { gates: closedGates, startHost: stuck.startHost })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.text).toContain("`complete: true`")
+    expect(result.text).toContain("MANAGED HOST STOP UNCONFIRMED — check process 777 by hand")
+    expect(result.code).toBe(1)
+  })
+
+  test("the stage-4 backend is built against the managed host's URL and the reviewed directory", async () => {
+    const env = await setup()
+    const built: OpencodeBackendOptions[] = []
+    const fake = scripted()
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      createBackend: (options) => {
+        built.push(options)
+        return fake.backendFor({} as PairedPhaseContext, options.lateUsage!)
+      },
+    })
+    delete overrides.backendFor
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(built.length).toBeGreaterThan(0)
+    for (const options of built) {
+      expect(String(options.serverUrl)).toBe(HOST_URL)
+      expect(options.directory).toBe(env.directory)
+    }
+  })
+
+  test("the host's config is verified for the reviewed --directory too", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env, { gates: closedGates })
+    await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(host.started[0]!.verifyDirectories).toEqual([env.directory])
+  })
+
+  test("a signal while the host is still starting stops it, exits 130, and nothing is scheduled", async () => {
+    const env = await setup()
+    const signals = fakeSignals()
+    const exits: number[] = []
+    const starting = scriptedHost({ whileStarting: () => signals.fire("SIGINT") })
+    const { overrides, clientCalls } = overridesFor(env, {
+      gates: closedGates,
+      signals: signals.source,
+      startHost: starting.startHost,
+      exit: (code) => {
+        exits.push(code)
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(exits).toEqual([130])
+    expect(starting.stops()).toBe(1)
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("the preflight was interrupted while the host was starting")
+    expect(clientCalls).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("a refused start whose host exit is unconfirmed names the pid", async () => {
+    const env = await setup()
+    const refusing = scriptedHost({ refuse: "the host is not the measured build", refusedStop: { confirmed: false, pid: 4321, why: "no exit within 5000 ms of SIGKILL" } })
+    const { overrides } = overridesFor(env, { gates: closedGates, startHost: refusing.startHost })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("the refused host's exit is UNCONFIRMED: check process 4321 by hand")
+  })
+
+  test("a startHost that rejects is the stage-2 refusal, with the credential redacted", async () => {
+    const env = await setup()
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      startHost: async () => {
+        throw new Error(`boom ${KEY}`)
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 2 (managed host)")
+    expect(result.text).toContain("the managed host could not be started: boom [REDACTED]")
+    expect(result.text).not.toContain(KEY)
+  })
+
+  test("a rejecting stop is reported UNCONFIRMED, and a launcher throw is still printed", async () => {
+    const env = await setup()
+    const rejecting = scriptedHost({ stopRejects: true })
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      startHost: rejecting.startHost,
+      beforeRecheck: async () => {
+        throw new Error("the recheck hook exploded")
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("MANAGED HOST STOP UNCONFIRMED — check process 777 by hand before anything else runs: the stop rejected: the stop exploded")
+    expect(result.text).toContain("INCOMPLETE — the launcher threw: the recheck hook exploded")
+  })
+
+  test("a credential variable that holds only whitespace is refused like an empty one", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env, { gates: closedGates, env: { [KEY_ENV]: "  \t " } })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`the credential variable \`${KEY_ENV}\` is not set in this environment, or is empty or blank`)
+    expect(host.started).toEqual([])
+  })
+
+  test("the plugin install the host left is printed before it is stopped", async () => {
+    const env = await setup()
+    const { overrides } = overridesFor(env, { gates: closedGates })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.text).toContain("The managed host's plugin install left @opencode-ai/plugin 1.18.32 in its config directory.")
+  })
+
+  test("with the shipped gates and valid flags, gates 1 and 4 are named OPEN, exit 1, and no host is started", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env)
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED: gate 1 (host request accounting) is OPEN")
+    expect(result.text).toContain("REFUSED: gate 4 (evaluation spend authorization) is OPEN")
+    expect(result.text).toContain("PASS  managed host provider block")
+    expect(host.started).toEqual([])
   })
 })
