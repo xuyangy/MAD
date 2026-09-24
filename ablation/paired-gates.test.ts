@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { MEASURED_HOST } from "./managed-host.ts"
 import { gatePreflight, HUMAN_BUDGET_OWNER, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
@@ -56,7 +57,7 @@ describe("PAIRED_GATES", () => {
   test("gate 2 is closed on the probe's real-host refusals, and names the probe, the evidence file and its tests", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 2)!
     expect(gate.status).toBe("CLOSED")
-    for (const text of ["bun run accounting-probe", "ablation/evidence/host-accounting-2026-09-23.json", "scripts/accounting-probe.test.ts", "0 backend calls and 0 stub requests"]) {
+    for (const text of ["bun run accounting-probe", MEASURED_HOST.evidence, "scripts/accounting-probe.test.ts", "0 backend calls and 0 stub requests"]) {
       expect(gate.evidence).toContain(text)
     }
     for (const name of ["global", "Blocks", "phase"]) expect(gate.evidence).toContain(name)
@@ -66,7 +67,7 @@ describe("PAIRED_GATES", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 1)!
     expect(gate.status).toBe("OPEN")
     expect(gate.evidence).toBeUndefined()
-    for (const text of ["F2", "F3", "N2", "measured this false", "ablation/evidence/host-accounting-2026-09-23.json"]) {
+    for (const text of ["F2", "F3", "N2", "H1", "measured this false", MEASURED_HOST.evidence]) {
       expect(gate.requires).toContain(text)
     }
   })

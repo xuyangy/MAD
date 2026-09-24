@@ -6,7 +6,7 @@
  *
  * A host reached through a URL is whatever happens to be listening there: any
  * build, any plugin, any provider, any config. The request-accounting facts in
- * `ablation/evidence/host-accounting-2026-09-23.json` were measured on ONE build
+ * `ablation/evidence/host-accounting-2026-09-24.json` were measured on ONE build
  * with ONE shape of config, and they say nothing about another. So the host is
  * started here, from a config generated here, and refused before any client
  * call unless it is that build running that config.
@@ -36,14 +36,16 @@
  * ## Verification, before any client call
  *
  * - **The build.** The sha256 of the resolved binary (the real path that is also
- *   the one spawned) and the version the host reports on `/global/health` both
- *   equal `MEASURED_HOST`.
+ *   the one spawned) equals `MEASURED_HOST`'s before anything is spawned, so an
+ *   unmeasured binary never runs with the credential; the version the host then
+ *   reports on `/global/health` equals it too.
  * - **The config.** `GET /config`, for the host's own directory and for every
  *   directory the caller names, has an empty `plugin` list, exactly one provider
  *   (the generated block), and every other key equal to the generated config,
  *   allowing only the defaults the host adds itself (`HOST_DEFAULTS`).
  * - **The provider registry.** `GET /config/providers`, which the roster is read
- *   from, lists exactly the one provider, with exactly the block's models, each
+ *   from, for the host's own directory and for every directory the caller names,
+ *   lists exactly the one provider, with exactly the block's models, each
  *   implemented by `@ai-sdk/openai-compatible`. A block whose id is also a
  *   built-in provider's is caught here, not by `GET /config`.
  *
@@ -68,12 +70,12 @@ import { join } from "node:path"
  * The opencode build the accounting probe measured. The managed host refuses any
  * other. It binds the launcher to this one machine's binary: another install of
  * the same version has another hash until it is re-measured (`ablation/LIVE-RUN.md`,
- * "Re-measuring"). Set from `ablation/evidence/host-accounting-2026-09-23.json`.
+ * "Re-measuring"). Set from `ablation/evidence/host-accounting-2026-09-24.json`.
  */
 export const MEASURED_HOST = {
   version: "1.18.32",
   sha256: "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
-  evidence: "ablation/evidence/host-accounting-2026-09-23.json",
+  evidence: "ablation/evidence/host-accounting-2026-09-24.json",
 } as const
 
 /** The one provider package the managed host accepts. */
@@ -116,6 +118,13 @@ const RESERVED_VARIABLES = new Set(
   ),
 )
 
+/**
+ * Prefixes of variables that configure how the host, its runtime or its `npm install`
+ * child runs, or where it connects. A credential under one of these names would be
+ * read as configuration.
+ */
+const RUNTIME_VARIABLE = /^(NODE_|BUN_|NPM_CONFIG_|LD_|DYLD_|SSL_CERT_|ALL_PROXY$)/
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "localhost"])
 
 export const REDACTED = "[REDACTED]"
@@ -155,6 +164,8 @@ export function providerBlockProblems(block: ProviderBlock): string[] {
     problems.push(`the credential variable name \`${block.apiKeyEnv}\` is not an environment variable name`)
   } else if (RESERVED_VARIABLES.has(block.apiKeyEnv.toUpperCase()) || block.apiKeyEnv.toUpperCase().startsWith("OPENCODE_")) {
     problems.push(`the credential variable name \`${block.apiKeyEnv}\` is one the managed host sets itself`)
+  } else if (RUNTIME_VARIABLE.test(block.apiKeyEnv.toUpperCase())) {
+    problems.push(`the credential variable name \`${block.apiKeyEnv}\` is one that configures the host's runtime or its connections`)
   }
   if (block.models.length === 0) problems.push("the provider block names no model")
   const seen = new Set<string>()
@@ -298,7 +309,8 @@ function providerDrift(entry: unknown, block: ProviderBlock, describe: (value: u
   const models = provider.models as Record<string, unknown> | undefined
   const expected = Object.fromEntries(block.models.map((model) => [model, { name: model }]))
   if (!sameJson(models, expected)) {
-    problems.push(`${where}'s models are ${describe(models === undefined ? undefined : Object.keys(models))}; the block names ${describe([...block.models])}`)
+    const listed = models === null || typeof models !== "object" ? models : Object.keys(models)
+    problems.push(`${where}'s models are ${describe(listed)}; the block names ${describe([...block.models])}`)
   }
   return problems
 }
@@ -376,7 +388,7 @@ export interface ManagedHostOptions {
   /** A proxy for HTTP(S)_PROXY, with `NO_PROXY=127.0.0.1`. Absent, no proxy variable is set. */
   proxy?: string
   /**
-   * Directories whose `GET /config` is verified too, besides the host's own: the
+   * Directories whose `GET /config` and `GET /config/providers` are verified too, besides the host's own: the
    * directories the caller's sessions will use.
    */
   verifyDirectories?: readonly string[]
@@ -448,7 +460,8 @@ export const DEFAULT_STARTUP_MS = 30_000
 export const DEFAULT_REQUEST_MS = 10_000
 export const DEFAULT_STOP_MS = 5_000
 
-const LISTENING = /opencode server listening on (http:\/\/127\.0\.0\.1:\d+)/
+/** The port must be followed by whitespace, so a line split across output chunks is never read short. */
+const LISTENING = /opencode server listening on (http:\/\/127\.0\.0\.1:\d+)\s/
 
 export async function sha256File(path: string): Promise<string> {
   const hasher = new Bun.CryptoHasher("sha256")
@@ -492,6 +505,17 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
     sha256 = await (options.hashFile ?? sha256File)(binary)
   } catch (error) {
     return { ok: false, reason: redact(`the opencode binary could not be identified: ${messageOf(error)}`), stopped: null }
+  }
+  // Refused before the spawn: an unmeasured binary never runs with the credential in its environment.
+  if (sha256 !== measured.sha256) {
+    return {
+      ok: false,
+      reason: redact(
+        `the host is not the measured build (binary sha256 ${sha256}, version not read: the binary was not started; measured sha256 ` +
+          `${measured.sha256}, version ${measured.version}): the binary \`${binary}\` has sha256 ${sha256}; the measured build's is ${measured.sha256}`,
+      ),
+      stopped: null,
+    }
   }
 
   const root = await mkdtemp(join(options.scratchParent ?? tmpdir(), "mad-managed-host-"))
@@ -612,10 +636,14 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
       reportedConfig ??= reported.value
     }
 
-    const registry = await readJson(doFetch, `${url}/config/providers?directory=${encodeURIComponent(dirs.cwd)}`, requestMs)
-    if (!registry.ok) return await refuse(`\`GET /config/providers\` could not be read: ${registry.why}`)
-    const registryDrift = providerRegistryDrift(registry.value, options.block, secrets)
-    if (registryDrift.length > 0) return await refuse(`the host's provider registry is not the one block: ${registryDrift.join("; ")}`)
+    for (const directory of [dirs.cwd, ...(options.verifyDirectories ?? [])]) {
+      const registry = await readJson(doFetch, `${url}/config/providers?directory=${encodeURIComponent(directory)}`, requestMs)
+      if (!registry.ok) return await refuse(`\`GET /config/providers\` for \`${directory}\` could not be read: ${registry.why}`)
+      const registryDrift = providerRegistryDrift(registry.value, options.block, secrets)
+      if (registryDrift.length > 0) {
+        return await refuse(`the host's provider registry for \`${directory}\` is not the one block: ${registryDrift.join("; ")}`)
+      }
+    }
     // A stop that arrived while the host was starting (through `onSpawn` or a signal) wins.
     if (stopping !== undefined) return await refuse("the host was stopped while it was starting")
 
@@ -655,11 +683,12 @@ async function pluginInstallIn(configHome: string): Promise<PluginInstall> {
 
 /** SIGTERM, then SIGKILL, each given `stopMs` to be confirmed by the process's exit. */
 async function stopChild(child: HostChild, stopMs: number): Promise<StopOutcome> {
-  const exitedWithin = async (ms: number): Promise<number | null> => {
+  // A rejected `exited` is no confirmation: the exit could not be observed.
+  const exitedWithin = async (ms: number): Promise<number | null | "unobservable"> => {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       return await Promise.race([
-        child.exited.then((code) => code, () => -1),
+        child.exited.then((code) => code, () => "unobservable" as const),
         new Promise<null>((resolve) => {
           timer = setTimeout(() => resolve(null), ms)
         }),
@@ -676,6 +705,7 @@ async function stopChild(child: HostChild, stopMs: number): Promise<StopOutcome>
       tried.push(`${signal} could not be sent (${messageOf(error)})`)
     }
     const code = await exitedWithin(stopMs)
+    if (code === "unobservable") return { confirmed: false, pid: child.pid, why: [...tried, `the process's exit could not be observed after ${signal}`].join("; ") }
     if (code !== null) return { confirmed: true, pid: child.pid, how: `exited (status ${code}) after ${signal}` }
     tried.push(`no exit within ${stopMs} ms of ${signal}`)
   }

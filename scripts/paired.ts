@@ -847,6 +847,13 @@ interface ManagedSlot {
   stop?: () => Promise<StopOutcome>
   host?: ManagedHost
   stopped?: Promise<boolean>
+  /** The credential's forms, set before the host is started; every error printed after that is redacted with them. */
+  secrets?: string[]
+}
+
+/** An error's message, redacted with the managed host's credential once one is known. */
+function managedMessage(managed: ManagedSlot, error: unknown): string {
+  return redactText(messageOf(error), managed.secrets ?? [])
 }
 
 /**
@@ -891,15 +898,36 @@ function stopManaged(managed: ManagedSlot): Promise<boolean> {
  */
 export async function main(argv: readonly string[] = Bun.argv, overrides: PairedOverrides = {}): Promise<number> {
   const managed: ManagedSlot = {}
+  const signals: SignalSource = overrides.signals ?? process
   let code: number
   try {
     code = await launch(argv, overrides, managed)
   } catch (error) {
-    await stopManaged(managed)
-    console.log(`\nINCOMPLETE — the launcher threw: ${messageOf(error)}`)
+    await stopHolding(managed, signals)
+    console.log(`\nINCOMPLETE — the launcher threw: ${managedMessage(managed, error)}`)
     return 1
   }
-  return (await stopManaged(managed)) ? code : 1
+  return (await stopHolding(managed, signals)) ? code : 1
+}
+
+/**
+ * `stopManaged`, with SIGINT and SIGTERM held while it runs: `launch` has taken its
+ * own handlers off, and a default signal would end the launcher before the
+ * credentialed host's exit is confirmed.
+ */
+async function stopHolding(managed: ManagedSlot, signals: SignalSource): Promise<boolean> {
+  if (managed.stop === undefined && managed.host === undefined) return true
+  const hold = (): void => {
+    console.log("\nINTERRUPTED — the managed host is already being stopped; waiting for its exit to be confirmed.")
+  }
+  signals.on("SIGINT", hold)
+  signals.on("SIGTERM", hold)
+  try {
+    return await stopManaged(managed)
+  } finally {
+    signals.off("SIGINT", hold)
+    signals.off("SIGTERM", hold)
+  }
 }
 
 async function launch(argv: readonly string[], overrides: PairedOverrides, managed: ManagedSlot): Promise<number> {
@@ -1117,6 +1145,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     // ---- STAGE 2: managed host, client and roster ----
     console.log("\nbun run paired — stage 2 of 4: managed host, opencode client and roster (no model session, no billable request)")
     let started: ManagedHostStart
+    managed.secrets = secretForms(credential)
     try {
       started = await (overrides.startHost ?? startManagedHost)({
         block: provider,
@@ -1167,7 +1196,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     } catch (error) {
       return refusal(
         "stage 2 (client and roster)",
-        [`the roster could not be resolved from the managed host at ${host.url}: ${messageOf(error)}`],
+        [`the roster could not be resolved from the managed host at ${host.url}: ${managedMessage(managed, error)}`],
         "check that --provider-url answers and that each --provider-model is a model it serves, and run the command again.",
       )
     }
@@ -1190,7 +1219,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     try {
       recheck = interrupted ? ["the preflight was interrupted"] : await worktreeIdentity(directory, reference, git)
     } catch (error) {
-      recheck = [messageOf(error)]
+      recheck = [managedMessage(managed, error)]
     }
     const outAgain = await outContainment(out, directory)
     const rootAgain = await bundleRoot(out)
@@ -1215,9 +1244,10 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
     prepared = { pin: flags.pin, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob }
   } finally {
+    // The scratch copy is removed while the handlers are still on, so no interrupt lands between the two stages' handlers.
+    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
     signals.off("SIGINT", preflightInterrupt)
     signals.off("SIGTERM", preflightInterrupt)
-    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
   }
 
   // An interrupt that landed after the recheck, before the handlers came off: nothing is scheduled.
@@ -1241,7 +1271,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   } catch (error) {
     const marker = await presence(join(out, START_MARKER_FILE))
     console.log(
-      `\nINCOMPLETE — stage 4 threw: ${messageOf(error)}\n` +
+      `\nINCOMPLETE — stage 4 threw: ${managedMessage(managed, error)}\n` +
         (marker === "present"
           ? `The start marker exists, so the schedule is spent and its evidence is kept. Read it: bun run eval-read --bundle ${out}\n`
           : marker === "absent"

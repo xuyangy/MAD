@@ -25,6 +25,7 @@ import {
   buildEvidence,
   EVIDENCE_FILE,
   EVIDENCE_KIND,
+  findingsFrom,
   gateTwoVerdict,
   GATE_TWO_SEEDS,
   main,
@@ -115,6 +116,14 @@ describe("one attempt's verdict", () => {
     expect(hidden.why).toContain("MAD recorded no figure (unknown)")
   })
 
+  test("a not-issued settlement that a physical request stood behind FAILS", () => {
+    const notIssued: SettledLine = { type: "settled", physicalId: "request-1", settlement: { kind: "not-issued" } }
+    const record = attemptRecord(1, issued("request-1", 1), notIssued, [request(1, false)])
+    expect(record.verdict).toBe("FAILS")
+    expect(record.why).toContain("MAD settled it not-issued, but 1 physical request(s) reached the provider")
+    expect(attemptRecord(1, issued("request-1", 1), notIssued, []).verdict).toBe("HOLDS")
+  })
+
   test("a missing settled line is an incomplete verdict", () => {
     const record = attemptRecord(1, issued("request-1", 1), null, [request(1, false)])
     expect(record.recorded.kind).toBe("missing")
@@ -135,6 +144,8 @@ describe("a scenario's totals", () => {
   test("an unattributed request fails the scenario, and no admission is not a HOLDS", () => {
     const ok = attemptRecord(1, issued("request-1", 1), usage("request-1", 1002, 12), [request(2, true)])
     expect(scenarioVerdict([ok], [request(1, false)], 0).verdict).toBe("FAILS")
+    // Usage served on an unattributed request counts in the served totals, as the request counts in the physical ones.
+    expect(scenarioVerdict([ok], [request(1, true)], 0).totals).toMatchObject({ physicalRequests: 2, servedInput: 2003, servedOutput: 23, recordedInput: 1002 })
     const none = scenarioVerdict([], [], 1)
     expect(none.verdict).toBe("FAILS")
     expect(none.complete).toBe(false)
@@ -150,7 +161,7 @@ describe("a scenario's totals", () => {
 })
 
 describe("gate 2", () => {
-  const base = { seeded: "x", backendCalls: 0, stubRequests: 0, issuedLinesAfter: 1, issuedLinesSeeded: 1 }
+  const base = { seeded: "x", backendCalls: 0, stubRequests: 0, issuedLinesAfter: 1, issuedLinesSeeded: 1, hostStop: "process 1 exited (status 143) after SIGTERM" }
 
   test("its own gate's budget refusal with nothing called, requested or issued holds", () => {
     const record = gateTwoVerdict({ ...base, gate: "phase", refusals: [{ cause: "budget", reason: "block 1's shared prefix allowance is exhausted: 60000 of 60000" }] }, "shared prefix allowance is exhausted")
@@ -219,15 +230,25 @@ describe("the evidence shape", () => {
     expect(evidence.paidTokens.startsWith("none.")).toBe(true)
     expect(evidence.egress).toContain("direct egress was NOT shown to be blocked")
     expect(evidence.egress).not.toContain("every outbound attempt was")
-    expect(evidence.isolation.join(" ")).toContain("npm install @opencode-ai/plugin")
-    expect(evidence.findings.map((finding) => finding.id)).toEqual(["F2", "F3", "N2"])
+    expect(evidence.isolation.join(" ")).toContain("its attempts to reach registry.npmjs.org appear among the refused proxy attempts")
+    expect(evidence.findings.map((finding) => finding.id)).toEqual(["F2", "F3", "N2", "H1"])
     expect(evidence.proxyAttempts).toHaveLength(1)
+  })
+
+  test("the plugin-install and findings text follow the run, not a fixed script", () => {
+    const quiet = buildEvidence({ measuredAt: "2026-09-23T00:00:00.000Z", host, scenarios: [], gateTwo: [], proxyAttempts: [] })
+    expect(quiet.isolation.join(" ")).toContain("no attempt to reach registry.npmjs.org was among the refused proxy attempts")
+    expect(quiet.findings.find((finding) => finding.id === "F2")!.text).toContain("scenario `persistent 500` did not run")
+    const five = attemptRecord(1, issued("request-1", 1), usage("request-1", 0, 0), [1, 2, 3].map((index) => request(index, false)))
+    const scenario = { name: "persistent 500", attempts: [five], ...scenarioVerdict([five], [], 0) } as unknown as ProbeEvidence["scenarios"][number]
+    const measured = buildEvidence({ measuredAt: "2026-09-23T00:00:00.000Z", host, scenarios: [scenario], gateTwo: [], proxyAttempts: [] })
+    expect(measured.findings.find((finding) => finding.id === "F2")!.text).toContain("a persistent 500 was sent 3 time(s) in its 1 admitted attempt(s)")
   })
 })
 
-describe("the committed evidence (ablation/evidence/host-accounting-2026-09-23.json)", () => {
-  const read = async (): Promise<ProbeEvidence> =>
-    JSON.parse(await Bun.file(new URL("../ablation/evidence/host-accounting-2026-09-23.json", import.meta.url)).text()) as ProbeEvidence
+describe(`the committed evidence (${MEASURED_HOST.evidence})`, () => {
+  const evidenceUrl = new URL(`../${MEASURED_HOST.evidence}`, import.meta.url)
+  const read = async (): Promise<ProbeEvidence> => JSON.parse(await Bun.file(evidenceUrl).text()) as ProbeEvidence
 
   test("it was taken on the measured build, and names it", async () => {
     const evidence = await read()
@@ -248,6 +269,12 @@ describe("the committed evidence (ablation/evidence/host-accounting-2026-09-23.j
       expect(by(name).verdict, name).toBe("FAILS")
       expect(by(name).totals.hiddenHostRequests, name).toBeGreaterThan(0)
     }
+    expect(by("hang past the adapter timeout").verdict).toBe("FAILS")
+  })
+
+  test("its findings are the ones its own scenarios give", async () => {
+    const evidence = await read()
+    expect(evidence.findings).toEqual(findingsFrom(evidence.scenarios))
   })
 
   test("each of global, Blocks and phase shows a refused admission with 0 backend calls and 0 stub requests", async () => {
@@ -255,6 +282,7 @@ describe("the committed evidence (ablation/evidence/host-accounting-2026-09-23.j
     expect(evidence.gateTwo.map((entry) => entry.gate)).toEqual(["global", "Blocks", "phase"])
     for (const entry of evidence.gateTwo) {
       expect(entry.holds, entry.gate).toBe(true)
+      expect(entry.hostStop, entry.gate).toContain("exited")
       expect(entry.refusals.length, entry.gate).toBeGreaterThan(0)
       expect(entry.backendCalls, entry.gate).toBe(0)
       expect(entry.stubRequests, entry.gate).toBe(0)
@@ -262,7 +290,7 @@ describe("the committed evidence (ablation/evidence/host-accounting-2026-09-23.j
   })
 
   test("it carries no credential value and states that no paid token was spent", async () => {
-    const text = await Bun.file(new URL("../ablation/evidence/host-accounting-2026-09-23.json", import.meta.url)).text()
+    const text = await Bun.file(evidenceUrl).text()
     expect(text).not.toContain(STUB_KEY)
     const evidence = JSON.parse(text) as ProbeEvidence
     expect(evidence.paidTokens.startsWith("none.")).toBe(true)
@@ -455,13 +483,21 @@ describe("recorded settlements and pairing", () => {
     expect(scenarioVerdict(short, [], 0).complete).toBe(false)
   })
 
-  test("a hung request closed when the probe stopped the host says the host held it open, and for how long", () => {
+  test("a hung request the host held open after MAD settled FAILS, naming the observed window only", () => {
     const hung: StubRequest = { ...request(1, false), behaviour: "hang", closed: { at: 21_000, afterMs: 20_000, by: "host-stopping" } }
     const unknown: SettledLine = { type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "timed out" } }
     const record = attemptRecord(1, issued("request-1", 1), unknown, [hung], { settledAt: 6_000 })
-    expect(record.verdict).toBe("HOLDS")
+    expect(record.verdict).toBe("FAILS")
     expect(record.upstream).toEqual({ heldOpenAfterSettleMs: 15_000, closedBy: "host-stopping" })
-    expect(record.why).toContain("the host held the provider request open for 15000 ms after the adapter gave up, until the probe stopped the host")
+    expect(record.why).toContain(
+      "the host held the provider request open for 15000 ms after the adapter gave up and MAD settled the attempt as unknown, until the probe stopped the host",
+    )
+    expect(record.why).toContain("whether the host would have reported that request's usage later was not observed")
+    // A request the host closed itself while it was watched is recorded, and fails nothing.
+    const closed: StubRequest = { ...hung, closed: { at: 7_000, afterMs: 6_000, by: "client" } }
+    const byClient = attemptRecord(1, issued("request-1", 1), unknown, [closed], { settledAt: 6_000 })
+    expect(byClient.verdict).toBe("HOLDS")
+    expect(byClient.why).toContain("the host closed the provider request 1000 ms after the adapter gave up")
   })
 })
 
@@ -583,6 +619,89 @@ describe("runScenario and runGateTwo, with a stand-in host and backend", () => {
       await expect(runScenario({ ...context, signal: controller.signal }, SCENARIOS[0]!)).rejects.toThrow("the probe deadline passed")
       expect(counts.hostStops).toBe(0)
     })
+  })
+})
+
+/**
+ * The shipped probe body, run through `main` with a stand-in host and backend and
+ * one scenario: what it writes, and when it refuses to write.
+ */
+describe("the probe body writes evidence only for a complete run", () => {
+  const identity: HostIdentity = {
+    binary: "/opt/opencode",
+    sha256: MEASURED_HOST.sha256,
+    version: MEASURED_HOST.version,
+    measuredHost: { version: MEASURED_HOST.version, sha256: MEASURED_HOST.sha256 },
+    matchesMeasuredHost: true,
+    environmentKeys: ["HOME"],
+    generatedConfig: {},
+    reportedConfig: {},
+  }
+  const runMain = async (hooks: { recordIdentity: boolean; gateTwoSeeds?: typeof GATE_TWO_SEEDS; stopConfirmed?: boolean }) => {
+    const parent = await mkdtemp(join(tmpdir(), "mad-probe-body-"))
+    const out = join(parent, "out")
+    const errors: string[] = []
+    const original = { log: console.log, error: console.error }
+    console.log = () => {}
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "))
+    }
+    try {
+      const counts = { backendCalls: 0 }
+      const code = await main(["bun", "probe", "--out", out], {
+        scenarios: [{ ...SCENARIOS[0]!, turnTimeoutMs: 5_000 }],
+        ...(hooks.gateTwoSeeds === undefined ? {} : { gateTwoSeeds: hooks.gateTwoSeeds }),
+        startHost: async (context) => {
+          stubUrl.value = context.stub.baseURL
+          if (hooks.recordIdentity) context.identity ??= identity
+          const host: Stoppable & { url: string } = {
+            url: "http://127.0.0.1:1",
+            stop: async (): Promise<StopOutcome> =>
+              hooks.stopConfirmed === false ? { confirmed: false, pid: 31, why: "no exit" } : { confirmed: true, pid: 31, how: "exited (status 143) after SIGTERM" },
+          }
+          context.live.add(host)
+          return host
+        },
+        backendFor: () => callingBackend(stubUrl.value, counts),
+      })
+      return { code, errors: errors.join("\n"), written: existsSync(join(out, EVIDENCE_FILE)), evidence: existsSync(join(out, EVIDENCE_FILE)) ? ((await Bun.file(join(out, EVIDENCE_FILE)).json()) as ProbeEvidence) : undefined }
+    } finally {
+      console.log = original.log
+      console.error = original.error
+      await rm(parent, { recursive: true, force: true })
+    }
+  }
+  // The body starts its own stub; the stand-in host hands its URL to the stand-in backend.
+  const stubUrl = { value: "" }
+
+  test("a complete run writes the evidence and exits 0", async () => {
+    const result = await runMain({ recordIdentity: true })
+    expect(result.errors).toBe("")
+    expect(result.code).toBe(0)
+    expect(result.written).toBe(true)
+    expect(result.evidence!.gateTwo.every((entry) => entry.holds && entry.hostStop.includes("exited"))).toBe(true)
+  })
+
+  test("a run with no host identity exits 1 and writes nothing", async () => {
+    const result = await runMain({ recordIdentity: false })
+    expect(result.code).toBe(1)
+    expect(result.errors).toContain("INCOMPLETE — no host identity was recorded")
+    expect(result.written).toBe(false)
+  })
+
+  test("a gate-2 case that does not hold exits 1 and writes nothing", async () => {
+    const unseeded = [{ ...GATE_TWO_SEEDS[0]!, seeded: "nothing: the journal is empty", lines: [] }]
+    const result = await runMain({ recordIdentity: true, gateTwoSeeds: unseeded })
+    expect(result.code).toBe(1)
+    expect(result.errors).toContain("gate 2's global case was not shown (no admission was refused")
+    expect(result.written).toBe(false)
+  })
+
+  test("a host stop that is not confirmed fails the run, names the pid, and writes nothing", async () => {
+    const result = await runMain({ recordIdentity: true, stopConfirmed: false })
+    expect(result.code).toBe(1)
+    expect(result.errors).toContain("the managed host's exit is UNCONFIRMED: check process 31 by hand")
+    expect(result.written).toBe(false)
   })
 })
 

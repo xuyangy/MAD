@@ -582,7 +582,7 @@ describe("LIVE-RUN.md documents the host request accounting probe that was actua
 
   test("the measured table is the committed evidence, row for row", async () => {
     const text = await section()
-    const evidence = JSON.parse(await Bun.file(new URL("./evidence/host-accounting-2026-09-23.json", import.meta.url)).text()) as {
+    const evidence = JSON.parse(await Bun.file(new URL(`../${MEASURED_HOST.evidence}`, import.meta.url)).text()) as {
       host: { version: string; sha256: string }
       scenarios: {
         name: string

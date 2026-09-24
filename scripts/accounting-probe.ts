@@ -38,10 +38,11 @@
  *
  * ## Exit status
  *
- * 0 when every scenario ran, every host stop was confirmed and every verdict is
- * complete. **Exit 0 does not mean gate 1 passed.** A deadline, a thrown error,
- * an unconfirmed host stop or an incomplete verdict exits 1, removes the scratch
- * directories and writes no `host-accounting.json`. `--out` must be empty or
+ * 0 when every scenario ran, every host stop was confirmed, every verdict is
+ * complete and every gate-2 case was refused. **Exit 0 does not mean gate 1
+ * passed.** A deadline, a thrown error, an unconfirmed host stop, an incomplete
+ * verdict or a gate-2 case that was not refused exits 1, removes the scratch
+ * directories and leaves no `host-accounting.json`. `--out` must be empty or
  * absent, so no earlier run's journal or evidence is ever read as this one's.
  */
 
@@ -277,6 +278,9 @@ export function attemptRecord(
     ...(recorded.kind === "missing" ? ["the journal holds no `settled` line for it"] : []),
   ]
   const problems: string[] = [...incompleteReasons]
+  if (recorded.kind === "not-issued" && requests.length > 0) {
+    problems.push(`MAD settled it not-issued, but ${requests.length} physical request(s) reached the provider`)
+  }
   if (requests.length > 1) {
     problems.push(`${requests.length} physical requests stood behind one admitted port call (${requests.length - 1} the port call did not show)`)
   }
@@ -292,14 +296,21 @@ export function attemptRecord(
   } else if (served.requestsThatServed > 0) {
     problems.push(`MAD recorded no figure (${recorded.kind}); the stub served ${served.input} in / ${served.output} out`)
   }
-  const held =
-    upstream === undefined
-      ? ""
-      : upstream.closedBy === "host-stopping"
-        ? `; the host held the provider request open ${upstream.heldOpenAfterSettleMs === null ? "" : `for ${upstream.heldOpenAfterSettleMs} ms `}after the adapter gave up, until the probe stopped the host`
-        : upstream.closedBy === "client"
-          ? `; the host closed the provider request ${upstream.heldOpenAfterSettleMs === null ? "" : `${upstream.heldOpenAfterSettleMs} ms `}after the adapter gave up, while it was observed`
-          : "; the provider request was still open when the stub stopped recording"
+  // A provider request still open after MAD settled the attempt could still be served, and nothing observed its usage.
+  let held = ""
+  if (upstream !== undefined) {
+    const after = upstream.heldOpenAfterSettleMs === null ? "" : `for ${upstream.heldOpenAfterSettleMs} ms `
+    if (upstream.closedBy === "client") {
+      held = `; the host closed the provider request ${upstream.heldOpenAfterSettleMs === null ? "" : `${upstream.heldOpenAfterSettleMs} ms `}after the adapter gave up, while it was observed`
+    } else {
+      problems.push(
+        (upstream.closedBy === "host-stopping"
+          ? `the host held the provider request open ${after}after the adapter gave up and MAD settled the attempt as ${recorded.kind}, until the probe stopped the host`
+          : `the provider request was still open when the stub stopped recording, after MAD settled the attempt as ${recorded.kind}`) +
+          "; whether the host would have reported that request's usage later was not observed",
+      )
+    }
+  }
   const holds = problems.length === 0
   return {
     attempt,
@@ -376,8 +387,8 @@ export function scenarioVerdict(
     physicalRequests: sum((attempt) => attempt.physicalRequests) + unattributed.length,
     hiddenHostRequests: sum((attempt) => attempt.hiddenRequests),
     unattributedRequests: unattributed.length,
-    servedInput: sum((attempt) => attempt.served.input),
-    servedOutput: sum((attempt) => attempt.served.output),
+    servedInput: sum((attempt) => attempt.served.input) + unattributed.reduce((total, request) => total + (request.servedUsage?.prompt_tokens ?? 0), 0),
+    servedOutput: sum((attempt) => attempt.served.output) + unattributed.reduce((total, request) => total + (request.servedUsage?.completion_tokens ?? 0), 0),
     recordedInput: sum((attempt) => (attempt.recorded.kind === "usage" ? attempt.recorded.tokens.input : 0)),
     recordedOutput: sum((attempt) => (attempt.recorded.kind === "usage" ? attempt.recorded.tokens.output : 0)),
   }
@@ -393,7 +404,7 @@ export function scenarioVerdict(
     complete,
     why:
       reasons.length === 0
-        ? `every admitted attempt (${attempts.length}) made one physical request and its usage is accounted`
+        ? `every admitted attempt (${attempts.length}) made one physical request, and what MAD settled matches what the stub served`
         : reasons.join("; "),
     totals,
   }
@@ -409,6 +420,8 @@ export interface GateTwoRecord {
   stubRequests: number
   issuedLinesAfter: number
   issuedLinesSeeded: number
+  /** How the case's host was stopped; a stop that is not confirmed fails the probe before this is recorded. */
+  hostStop: string
   holds: boolean
   why: string
 }
@@ -483,31 +496,65 @@ export interface ProbeEvidence {
   scope: string[]
 }
 
-/** The findings, each stated as what was measured and where it was measured. */
-export const FINDINGS = [
-  {
-    id: "F2",
-    text:
-      "the host retries a failed provider request itself. Measured here: a persistent 500 was sent 6 times per admitted " +
-      "attempt, and a 429 was retried once before the success (scenarios `persistent 500`, `429 then success`). Measured " +
-      "in the 2026-09-23 spike: a header timeout (headerTimeout 3000 ms) was sent 6 times. The network-error case comes " +
-      "from reading the host binary, not from a measurement. A source search found no switch to turn the loop off; that " +
-      "search does not prove no switch exists",
-  },
-  {
-    id: "F3",
-    text:
-      "host tools are offered by default; a tool step costs an extra request, and only the last step's usage is returned " +
-      "(scenario `host-tool step`)",
-  },
-  {
-    id: "N2",
-    text:
-      'even with only StructuredOutput offered (`tools: {"*":false,"StructuredOutput":true}`), a model that calls another ' +
-      "tool causes a second request (scenario `unoffered tool`). Measured with a stub that returned a call to an unoffered " +
-      'tool; whether a real provider emits one under `tool_choice: "required"` is not established',
-  },
-] as const
+/** The findings, each stated from what this run's scenarios measured, naming the scenario. */
+export function findingsFrom(scenarios: readonly ScenarioRecord[]): { id: string; text: string }[] {
+  const named = (name: string) => scenarios.find((scenario) => scenario.name === name)
+  const perAttempt = (scenario: ScenarioRecord) => scenario.attempts.map((attempt) => attempt.physicalRequests).join(", ")
+  const usageGap = (scenario: ScenarioRecord) =>
+    `MAD recorded ${scenario.totals.recordedInput} in / ${scenario.totals.recordedOutput} out; the stub served ` +
+    `${scenario.totals.servedInput} in / ${scenario.totals.servedOutput} out`
+  const missing = (name: string) => `scenario \`${name}\` did not run, so this run measured nothing for it`
+  const fiveHundred = named("persistent 500")
+  const fourTwoNine = named("429 then success")
+  const tool = named("host-tool step")
+  const unoffered = named("unoffered tool")
+  const hang = named("hang past the adapter timeout")
+  const held = hang?.attempts.find((attempt) => attempt.upstream !== undefined)?.upstream
+  return [
+    {
+      id: "F2",
+      text:
+        "whether the host retries a failed provider request itself. Measured here: a persistent 500 was sent " +
+        (fiveHundred === undefined ? `— ${missing("persistent 500")}` : `${perAttempt(fiveHundred)} time(s) in its ${fiveHundred.attempts.length} admitted attempt(s)`) +
+        "; a first 429 was followed by " +
+        (fourTwoNine === undefined ? `— ${missing("429 then success")}` : `${fourTwoNine.totals.hiddenHostRequests} further request(s) within its admitted attempt(s)`) +
+        ". Measured in the 2026-09-23 spike, not by this probe: a header timeout (headerTimeout 3000 ms) was sent 6 times. " +
+        "The network-error case comes from reading the host binary, not from a measurement. A source search found no switch " +
+        "to turn the loop off; that search does not prove no switch exists",
+    },
+    {
+      id: "F3",
+      text:
+        tool === undefined
+          ? `host tools, offered by default: ${missing("host-tool step")}`
+          : `host tools are offered by default; with one tool step, ${perAttempt(tool)} physical request(s) stood behind the ` +
+            `admitted attempt(s), and ${usageGap(tool)} (scenario \`host-tool step\`)`,
+    },
+    {
+      id: "N2",
+      text:
+        (unoffered === undefined
+          ? `a call to a tool that was not offered: ${missing("unoffered tool")}`
+          : 'with only StructuredOutput offered (`tools: {"*":false,"StructuredOutput":true}`), a stub answer that called ' +
+            `another tool left ${perAttempt(unoffered)} physical request(s) behind the admitted attempt(s), and ${usageGap(unoffered)} ` +
+            "(scenario `unoffered tool`)") +
+        '. Whether a real provider emits such a call under `tool_choice: "required"` is not established',
+    },
+    {
+      id: "H1",
+      text:
+        hang === undefined
+          ? `a request that outlives the adapter's deadline: ${missing("hang past the adapter timeout")}`
+          : held === undefined
+            ? "in the hang scenario every provider request answered, so nothing was held open"
+            : held.closedBy === "client"
+              ? `in the hang scenario the host closed the provider request ${held.heldOpenAfterSettleMs ?? "an unmeasured number of"} ms after MAD settled the attempt`
+              : `in the hang scenario the host held the provider request open ${held.heldOpenAfterSettleMs === null ? "" : `${held.heldOpenAfterSettleMs} ms `}` +
+                `after MAD settled the attempt, ${held.closedBy === "host-stopping" ? "until the probe stopped the host" : "and it was still open when the stub stopped recording"}; ` +
+                `the stub was watched for ${HANG_OBSERVE_MS} ms after the adapter gave up, and this says nothing about later`,
+    },
+  ]
+}
 
 export const GATE_TWO_SCOPE =
   "on the measured host, each of the global, Blocks and phase gates refused inside the journal's admission, before any " +
@@ -536,19 +583,23 @@ export function buildEvidence(input: {
       "the effective config was the fixed host settings plus one `@ai-sdk/openai-compatible` provider block, verified " +
         "through `GET /config` (for the host's directory and the session directory) and `GET /config/providers` before " +
         "any client call, on every host start",
-      "a fresh host was started for every scenario and every gate-2 case, and each one's exit was confirmed",
-      "the host is not offline: the first time it runs a prompt it tries `npm install @opencode-ai/plugin`, and that " +
-        "attempt appears among the refused proxy attempts",
+      "a fresh host was started for every scenario and every gate-2 case, and each one's exit was confirmed: see each " +
+        "record's `hostStop`",
+      "the host is not offline: the first time it runs a prompt it tries `npm install @opencode-ai/plugin`, and " +
+        (input.proxyAttempts.some((attempt) => attempt.line.includes("registry.npmjs.org"))
+          ? "its attempts to reach registry.npmjs.org appear among the refused proxy attempts"
+          : "no attempt to reach registry.npmjs.org was among the refused proxy attempts in this run"),
     ],
     egress:
-      "the proxy refused and listed every connection a proxy-honouring client made; direct egress was NOT shown to be " +
-      "blocked, so `proxyAttempts` lists the proxy attempts refused, not every outbound attempt",
+      "the proxy refused and listed the request line of every connection a proxy-honouring client opened to it and " +
+      "sent one on; direct egress was NOT shown to be blocked, so `proxyAttempts` lists the proxy attempts refused, not " +
+      "every outbound attempt",
     host: input.host,
     scenarios: input.scenarios,
     gateTwo: input.gateTwo,
     gateTwoScope: GATE_TWO_SCOPE,
     proxyAttempts: input.proxyAttempts,
-    findings: FINDINGS.map((finding) => ({ ...finding })),
+    findings: findingsFrom(input.scenarios),
     scope: [
       `opencode ${input.host.version} (binary sha256 ${input.host.sha256}) on this machine, one provider package ` +
         `(${OPENAI_COMPATIBLE_NPM}), one model, one-slot discover, the scripted behaviours above; not every host, build, ` +
@@ -558,6 +609,7 @@ export function buildEvidence(input: {
         `the production default is ${PRODUCTION_TURN_TIMEOUT_MS} ms, which also outlasts the host's six-try retry series`,
       `the hang scenario watched the stub for ${HANG_OBSERVE_MS} ms after the adapter gave up, and says nothing about later`,
       "a HOLDS verdict is about request count and usage for that scenario only; it does not close paired gate 1",
+      "the stub's 429 carries no Retry-After or rate-limit header; F2's 429 figure covers that one response shape",
     ],
   }
 }
@@ -842,6 +894,7 @@ export async function runGateTwo(context: ProbeContext, entry: (typeof GATE_TWO_
       stubRequests: context.stub.requests().length,
       issuedLinesAfter: issued,
       issuedLinesSeeded: entry.lines.filter((line) => line.type === "issued").length,
+      hostStop: run.hostStop,
     },
     entry.expected,
   )
@@ -891,7 +944,15 @@ export type ProbeBody = (
   signal: AbortSignal,
 ) => Promise<number>
 
-const probe: ProbeBody = async (out, scratch, live, servers, signal) => {
+/** What a test may put in place of the real host, backend, scenarios and gate-2 seeds. Absent, the shipped ones run. */
+export interface ProbeHooks {
+  startHost?: ProbeContext["startHost"]
+  backendFor?: ProbeContext["backendFor"]
+  scenarios?: readonly Scenario[]
+  gateTwoSeeds?: typeof GATE_TWO_SEEDS
+}
+
+const probeWith = (hooks: ProbeHooks): ProbeBody => async (out, scratch, live, servers, signal) => {
   const scratchParent = await mkdtemp(join(tmpdir(), "mad-accounting-probe-"))
   scratch.push(scratchParent)
   const workDir = join(scratchParent, "work")
@@ -900,25 +961,41 @@ const probe: ProbeBody = async (out, scratch, live, servers, signal) => {
   const stub = startAccountingStub()
   const proxy = startRefusingProxy()
   servers.push({ stop: () => stub.stop() }, proxy)
-  const context: ProbeContext = { out, stub, proxy, workDir, scratchParent, live, signal }
+  const context: ProbeContext = {
+    out,
+    stub,
+    proxy,
+    workDir,
+    scratchParent,
+    live,
+    signal,
+    ...(hooks.startHost === undefined ? {} : { startHost: hooks.startHost }),
+    ...(hooks.backendFor === undefined ? {} : { backendFor: hooks.backendFor }),
+  }
   console.log(`MAD host request accounting probe — story 2-8c\nstub ${stub.baseURL}; refusing proxy ${proxy.url}; out ${out}`)
 
   const scenarios: ScenarioRecord[] = []
-  for (const scenario of SCENARIOS) {
+  for (const scenario of hooks.scenarios ?? SCENARIOS) {
     console.log(`  running: ${scenario.name}`)
     scenarios.push(await runScenario(context, scenario))
   }
   const gateTwo: GateTwoRecord[] = []
-  for (const entry of GATE_TWO_SEEDS) {
+  for (const entry of hooks.gateTwoSeeds ?? GATE_TWO_SEEDS) {
     console.log(`  running: gate 2, ${entry.gate}`)
     gateTwo.push(await runGateTwo(context, entry))
   }
   printTable(scenarios, gateTwo)
 
-  const incomplete = scenarios.filter((scenario) => !scenario.complete)
+  // Gate 2's CLOSED status cites this file, so a case that does not hold leaves no evidence behind either.
+  const incomplete = [
+    ...scenarios.filter((scenario) => !scenario.complete).map((scenario) => scenario.name),
+    ...gateTwo.filter((entry) => !entry.holds).map((entry) => `gate 2's ${entry.gate} case was not shown (${entry.why})`),
+    ...(context.identity === undefined ? ["no host identity was recorded"] : []),
+    ...(signal.aborted ? ["the probe deadline passed"] : []),
+  ]
   if (context.identity === undefined || incomplete.length > 0) {
     console.error(
-      `\nINCOMPLETE — ${incomplete.map((scenario) => scenario.name).join(", ") || "no host identity was recorded"}. ` +
+      `\nINCOMPLETE — ${incomplete.join("; ")}. ` +
         `No ${EVIDENCE_FILE} was written, and nothing above may be quoted as a complete measurement.`,
     )
     return 1
@@ -938,7 +1015,7 @@ const probe: ProbeBody = async (out, scratch, live, servers, signal) => {
       "\nDirect egress was not shown to be blocked; only proxy-honouring attempts are listed." +
       "\nNo paid token was spent: the host's only provider was the local stub, and its one credential was a dummy." +
       `\nEvidence: ${join(out, EVIDENCE_FILE)}` +
-      "\nExit 0 means every scenario ran and every verdict is complete. It does not mean paired gate 1 passed.",
+      "\nExit 0 means every scenario ran, every verdict is complete and every gate-2 case was refused. It does not mean paired gate 1 passed.",
   )
   return 0
 }
@@ -977,8 +1054,8 @@ export async function outProblem(out: string, scratchRoot: string = tmpdir()): P
   return entries.length === 0 ? null : `--out \`${out}\` is not empty (${entries.length} entr${entries.length === 1 ? "y" : "ies"}); every run starts in an empty directory`
 }
 
-/** Test-only: a shorter deadline, a shorter settle bound and a fake body. The shipped values are the constants above and the real probe. */
-export interface ProbeSeams {
+/** Test-only: a shorter deadline, a shorter settle bound, a fake body or hooks into the real one. The shipped values are the constants above and the real probe. */
+export interface ProbeSeams extends ProbeHooks {
   deadlineMs?: number
   settleMs?: number
   body?: ProbeBody
@@ -1036,7 +1113,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: ProbeSeams
   let timer: ReturnType<typeof setTimeout> | undefined
   let settleTimer: ReturnType<typeof setTimeout> | undefined
   try {
-    const body = (seams.body ?? probe)(parsed.out, scratch, live, servers, controller.signal).then(
+    const body = (seams.body ?? probeWith(seams))(parsed.out, scratch, live, servers, controller.signal).then(
       (code) => ({ code }),
       (error: unknown) => ({ failed: messageOf(error) }),
     )
@@ -1059,6 +1136,8 @@ export async function main(argv: readonly string[] = Bun.argv, seams: ProbeSeams
     const problems = await cleanup()
     for (const problem of problems) console.error(problem)
     if (bounded === "timed-out") {
+      // A body that finished writing during the settle window leaves no evidence of a run that did not finish in time.
+      await rm(join(parsed.out, EVIDENCE_FILE), { force: true }).catch((error: unknown) => console.error(`${EVIDENCE_FILE} could not be removed: ${messageOf(error)}`))
       console.error(`the probe did not finish within ${deadlineMs} ms. NOTHING ABOVE IS A COMPLETE MEASUREMENT.`)
       return 1
     }

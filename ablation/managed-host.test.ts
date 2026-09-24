@@ -61,21 +61,28 @@ interface FakeHost {
   kills: (number | string | undefined)[]
 }
 
-function fakeHost(options: { listening?: string; exitsOn?: "SIGTERM" | "SIGKILL" | "never" } = {}): FakeHost {
+function fakeHost(options: { listening?: string | string[]; exitsOn?: "SIGTERM" | "SIGKILL" | "never"; exitedRejects?: boolean } = {}): FakeHost {
   const requests: FakeHost["requests"] = []
   const kills: FakeHost["kills"] = []
   const spawn: SpawnHost = (request) => {
     requests.push(request)
     let exit: (code: number) => void = () => {}
-    const exited = new Promise<number>((resolve) => {
-      exit = resolve
-    })
-    const line = options.listening ?? "opencode server listening on http://127.0.0.1:45678\n"
+    const exited = options.exitedRejects
+      ? Promise.reject(new Error("the exit status could not be read"))
+      : new Promise<number>((resolve) => {
+          exit = resolve
+        })
+    if (options.exitedRejects) exited.catch(() => undefined)
+    const lines = options.listening ?? "opencode server listening on http://127.0.0.1:45678\n"
+    const chunks = ["Warning: unsecured.\n", ...(Array.isArray(lines) ? lines : [lines])]
     const child: HostChild = {
       pid: 4242,
       stdout: new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(`Warning: unsecured.\n${line}`))
+        async start(controller) {
+          for (const chunk of chunks) {
+            controller.enqueue(new TextEncoder().encode(chunk))
+            await new Promise((done) => setTimeout(done, 5))
+          }
         },
       }),
       stderr: new ReadableStream({
@@ -169,6 +176,10 @@ describe("the generated config and the provider block", () => {
     for (const name of ["PATH", "HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG", "OPENCODE_ANYTHING", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"]) {
       expect(providerBlockProblems({ ...BLOCK, apiKeyEnv: name }).join("\n"), name).toContain("is one the managed host sets itself")
     }
+    for (const name of ["NODE_OPTIONS", "node_extra_ca_certs", "BUN_OPTIONS", "NPM_CONFIG_REGISTRY", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "SSL_CERT_FILE", "ALL_PROXY"]) {
+      expect(providerBlockProblems({ ...BLOCK, apiKeyEnv: name }).join("\n"), name).toContain("configures the host's runtime or its connections")
+    }
+    expect(providerBlockProblems({ ...BLOCK, apiKeyEnv: "ROUTER_KEY" })).toEqual([])
     expect(providerBlockProblems({ ...BLOCK, baseURL: "https://router.example/v1?key=x" }).join("\n")).toContain("query string or a fragment")
     expect(providerBlockProblems({ ...BLOCK, baseURL: "https://router.example/v1#x" }).join("\n")).toContain("query string or a fragment")
     expect(providerBlockProblems({ ...BLOCK, baseURL: "http://router.example/v1" }).join("\n")).toContain("plain http is allowed only to 127.0.0.1")
@@ -326,6 +337,43 @@ describe("starting and verifying", () => {
     expect(started.reason).toContain("effective config for `/work/tree` is not the generated one")
   })
 
+  test("the provider registry is verified for every named directory too", async () => {
+    const asked: string[] = []
+    const started = await start(fakeHost(), {
+      verifyDirectories: ["/work/tree"],
+      fetch: async (url: string) => {
+        if (url.endsWith("/global/health")) return Response.json({ healthy: true, version: MEASURED_HOST.version })
+        if (url.includes("/config/providers?")) {
+          asked.push(decodeURIComponent(url.split("directory=")[1]!))
+          const two = { providers: [...(registryFor(BLOCK) as { providers: unknown[] }).providers, { id: "opencode", models: {} }] }
+          return Response.json(url.includes(encodeURIComponent("/work/tree")) ? two : registryFor(BLOCK))
+        }
+        return Response.json(reportedFor(BLOCK))
+      },
+    })
+    expect(started.ok).toBe(false)
+    if (started.ok) return
+    expect(asked.at(-1)).toBe("/work/tree")
+    expect(started.reason).toContain("provider registry for `/work/tree` is not the one block")
+  })
+
+  test("a listening line split inside its port is read whole", async () => {
+    const started = await start(fakeHost({ listening: ["opencode server listening on http://127.0.0.1:45", "678\n"] }))
+    expect(started.ok).toBe(true)
+    if (started.ok) expect(started.host.url).toBe("http://127.0.0.1:45678")
+  })
+
+  test("a provider reported with null models is named as drift, not a failed start", () => {
+    const drift = configDrift(
+      reportedFor(BLOCK, (config) => {
+        ;((config.provider as Record<string, Record<string, unknown>>)[BLOCK.id]!).models = null
+      }),
+      hostConfig(BLOCK),
+      BLOCK,
+    )
+    expect(drift.join("\n")).toContain("models are null")
+  })
+
   test("pluginInstall reads the version the host's install left, or says none is there", async () => {
     const host = fakeHost()
     const started = await start(host)
@@ -357,13 +405,15 @@ describe("starting and verifying", () => {
     expect(host.kills).toEqual(["SIGTERM"])
   })
 
-  test("build drift: a different binary hash is refused naming both hashes", async () => {
+  test("build drift: a different binary hash is refused before the spawn, naming both identities", async () => {
     const host = fakeHost()
     const started = await start(host, { hashFile: async () => "0".repeat(64) })
     expect(started.ok).toBe(false)
     if (started.ok) return
     expect(started.reason).toContain(`has sha256 ${"0".repeat(64)}; the measured build's is ${MEASURED_HOST.sha256}`)
-    expect(started.stopped).toMatchObject({ confirmed: true })
+    expect(started.reason).toContain(`version not read: the binary was not started; measured sha256 ${MEASURED_HOST.sha256}, version ${MEASURED_HOST.version}`)
+    expect(started.stopped).toBeNull()
+    expect(host.requests).toEqual([])
   })
 
   const refusedFor = async (patch: (config: Record<string, unknown>) => void) => {
@@ -428,6 +478,14 @@ describe("starting and verifying", () => {
       why: "no exit within 20 ms of SIGTERM; no exit within 20 ms of SIGKILL",
     })
     expect(host.kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  test("an exit that cannot be observed is not a confirmed stop", async () => {
+    const started = await start(fakeHost({ exitedRejects: true }), { stopMs: 20 })
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    const stopped = await started.host.stop()
+    expect(stopped).toEqual({ confirmed: false, pid: 4242, why: "the process's exit could not be observed after SIGTERM" })
   })
 
   test("SIGTERM stops the host, confirms it, then exits 130", async () => {

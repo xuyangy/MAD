@@ -1,0 +1,1550 @@
+{
+  "kind": "MEASURED RUNTIME CASES — the zero-bill real-host request accounting probe (story 2-8c): a real `opencode serve` whose only provider is a local stub",
+  "story": "2-8c",
+  "measuredAt": "2026-09-24T15:11:25.623Z",
+  "paidTokens": "none. The host held no paid credential (its one credential variable carried a fixed dummy string), and its only configured provider was the local stub on 127.0.0.1, which bills nothing.",
+  "isolation": [
+    "the host's environment was built from nothing (as `env -i`): a fixed system PATH, HOME and XDG_CONFIG/DATA/CACHE/STATE_HOME in private temporary directories, OPENCODE_CONFIG, OPENCODE_DISABLE_MODELS_FETCH=1, OPENCODE_DISABLE_PROJECT_CONFIG=1, the dummy credential variable, and HTTP(S)_PROXY at a local refusing proxy with NO_PROXY=127.0.0.1",
+    "the effective config was the fixed host settings plus one `@ai-sdk/openai-compatible` provider block, verified through `GET /config` (for the host's directory and the session directory) and `GET /config/providers` before any client call, on every host start",
+    "a fresh host was started for every scenario and every gate-2 case, and each one's exit was confirmed: see each record's `hostStop`",
+    "the host is not offline: the first time it runs a prompt it tries `npm install @opencode-ai/plugin`, and its attempts to reach registry.npmjs.org appear among the refused proxy attempts"
+  ],
+  "egress": "the proxy refused and listed the request line of every connection a proxy-honouring client opened to it and sent one on; direct egress was NOT shown to be blocked, so `proxyAttempts` lists the proxy attempts refused, not every outbound attempt",
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "matchesMeasuredHost": true,
+    "environmentKeys": [
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "MAD_PROBE_STUB_KEY",
+      "NO_PROXY",
+      "OPENCODE_CONFIG",
+      "OPENCODE_DISABLE_MODELS_FETCH",
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "PATH",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "generatedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "autoupdate": false,
+      "share": "disabled",
+      "plugin": [],
+      "enabled_providers": [
+        "stub"
+      ],
+      "model": "stub/m1",
+      "small_model": "stub/m1",
+      "provider": {
+        "stub": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "stub",
+          "options": {
+            "baseURL": "http://127.0.0.1:62295/v1",
+            "apiKey": "{env:MAD_PROBE_STUB_KEY}"
+          },
+          "models": {
+            "m1": {
+              "name": "m1"
+            }
+          }
+        }
+      }
+    },
+    "reportedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "command": {},
+      "plugin": [],
+      "share": "disabled",
+      "autoupdate": false,
+      "enabled_providers": [
+        "stub"
+      ],
+      "model": "stub/m1",
+      "small_model": "stub/m1",
+      "username": "unknown",
+      "mode": {},
+      "agent": {},
+      "provider": {
+        "stub": {
+          "name": "stub",
+          "npm": "@ai-sdk/openai-compatible",
+          "options": {
+            "apiKey": "[REDACTED]",
+            "baseURL": "http://127.0.0.1:62295/v1"
+          },
+          "models": {
+            "m1": {
+              "name": "m1"
+            }
+          }
+        }
+      }
+    },
+    "pluginInstall": {
+      "installed": false,
+      "why": "no `@opencode-ai/plugin` is installed in the host's config directory"
+    }
+  },
+  "scenarios": [
+    {
+      "name": "success",
+      "what": "the stub answers every request with a StructuredOutput call",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "ok"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-success"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 1001,
+                "output": 11,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262480070,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "ok",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1001,
+                "completion_tokens": 11,
+                "total_tokens": 1012
+              }
+            }
+          ],
+          "physicalRequests": 1,
+          "hiddenRequests": 0,
+          "served": {
+            "input": 1001,
+            "output": 11,
+            "requestsThatServed": 1
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 1001,
+              "output": 11,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "HOLDS",
+          "why": "one physical request, and the usage MAD recorded is the usage served"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "HOLDS",
+      "complete": true,
+      "why": "every admitted attempt (1) made one physical request, and what MAD settled matches what the stub served",
+      "totals": {
+        "admittedAttempts": 1,
+        "madRetries": 0,
+        "refusedAdmissions": 0,
+        "physicalRequests": 1,
+        "hiddenHostRequests": 0,
+        "unattributedRequests": 0,
+        "servedInput": 1001,
+        "servedOutput": 11,
+        "recordedInput": 1001,
+        "recordedOutput": 11
+      },
+      "hostStop": "process 94988 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262478930,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "persistent 500",
+      "what": "the stub answers every request with HTTP 500",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "500"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-persistent-500"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262485415,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 2,
+              "modelIndex": 2,
+              "at": 1790262487550,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 3,
+              "modelIndex": 3,
+              "at": 1790262492423,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 4,
+              "modelIndex": 4,
+              "at": 1790262501981,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 5,
+              "modelIndex": 5,
+              "at": 1790262521140,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 6,
+              "modelIndex": 6,
+              "at": 1790262557770,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            }
+          ],
+          "physicalRequests": 6,
+          "hiddenRequests": 5,
+          "served": {
+            "input": 0,
+            "output": 0,
+            "requestsThatServed": 0
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "6 physical requests stood behind one admitted port call (5 the port call did not show)"
+        },
+        {
+          "attempt": 2,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-2",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 2,
+            "runId": "probe-persistent-500"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-2",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 7,
+              "modelIndex": 7,
+              "at": 1790262557871,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 8,
+              "modelIndex": 8,
+              "at": 1790262560387,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 9,
+              "modelIndex": 9,
+              "at": 1790262564731,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 10,
+              "modelIndex": 10,
+              "at": 1790262573235,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 11,
+              "modelIndex": 11,
+              "at": 1790262592115,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 12,
+              "modelIndex": 12,
+              "at": 1790262628603,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "500",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            }
+          ],
+          "physicalRequests": 6,
+          "hiddenRequests": 5,
+          "served": {
+            "input": 0,
+            "output": 0,
+            "requestsThatServed": 0
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "6 physical requests stood behind one admitted port call (5 the port call did not show)"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "FAILS",
+      "complete": true,
+      "why": "attempt 1: 6 physical requests stood behind one admitted port call (5 the port call did not show); attempt 2: 6 physical requests stood behind one admitted port call (5 the port call did not show)",
+      "totals": {
+        "admittedAttempts": 2,
+        "madRetries": 1,
+        "refusedAdmissions": 0,
+        "physicalRequests": 12,
+        "hiddenHostRequests": 10,
+        "unattributedRequests": 0,
+        "servedInput": 0,
+        "servedOutput": 0,
+        "recordedInput": 0,
+        "recordedOutput": 0
+      },
+      "hostStop": "process 95272 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262484318,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        },
+        {
+          "at": 1790262485937,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "429 then success",
+      "what": "the first request gets HTTP 429, every later one a success",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [
+          "429"
+        ],
+        "otherwise": "ok"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-429-then-success"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 1002,
+                "output": 12,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262633449,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "429",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            },
+            {
+              "index": 2,
+              "modelIndex": 2,
+              "at": 1790262635554,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "ok",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1002,
+                "completion_tokens": 12,
+                "total_tokens": 1014
+              }
+            }
+          ],
+          "physicalRequests": 2,
+          "hiddenRequests": 1,
+          "served": {
+            "input": 1002,
+            "output": 12,
+            "requestsThatServed": 1
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 1002,
+              "output": 12,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "2 physical requests stood behind one admitted port call (1 the port call did not show)"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "FAILS",
+      "complete": true,
+      "why": "attempt 1: 2 physical requests stood behind one admitted port call (1 the port call did not show)",
+      "totals": {
+        "admittedAttempts": 1,
+        "madRetries": 0,
+        "refusedAdmissions": 0,
+        "physicalRequests": 2,
+        "hiddenHostRequests": 1,
+        "unattributedRequests": 0,
+        "servedInput": 1002,
+        "servedOutput": 12,
+        "recordedInput": 1002,
+        "recordedOutput": 12
+      },
+      "hostStop": "process 571 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262632377,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        },
+        {
+          "at": 1790262633947,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "400",
+      "what": "the first request gets HTTP 400, every later one a success",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [
+          "400"
+        ],
+        "otherwise": "ok"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-400"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262640244,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "400",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required"
+            }
+          ],
+          "physicalRequests": 1,
+          "hiddenRequests": 0,
+          "served": {
+            "input": 0,
+            "output": 0,
+            "requestsThatServed": 0
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "HOLDS",
+          "why": "one physical request, and the usage MAD recorded is the usage served"
+        },
+        {
+          "attempt": 2,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-2",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 2,
+            "runId": "probe-400"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-2",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 1002,
+                "output": 12,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 2,
+              "modelIndex": 2,
+              "at": 1790262640791,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "ok",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1002,
+                "completion_tokens": 12,
+                "total_tokens": 1014
+              }
+            }
+          ],
+          "physicalRequests": 1,
+          "hiddenRequests": 0,
+          "served": {
+            "input": 1002,
+            "output": 12,
+            "requestsThatServed": 1
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 1002,
+              "output": 12,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "HOLDS",
+          "why": "one physical request, and the usage MAD recorded is the usage served"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "HOLDS",
+      "complete": true,
+      "why": "every admitted attempt (2) made one physical request, and what MAD settled matches what the stub served",
+      "totals": {
+        "admittedAttempts": 2,
+        "madRetries": 1,
+        "refusedAdmissions": 0,
+        "physicalRequests": 2,
+        "hiddenHostRequests": 0,
+        "unattributedRequests": 0,
+        "servedInput": 1002,
+        "servedOutput": 12,
+        "recordedInput": 1002,
+        "recordedOutput": 12
+      },
+      "hostStop": "process 824 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262638790,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "hang past the adapter timeout",
+      "what": "every request hangs; the adapter gives up at 5000 ms and the stub is watched for 15000 ms more",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "hang"
+      },
+      "turnTimeoutMs": 5000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-hang-past-the-adapter-timeout"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "unknown",
+              "why": "the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+              "executionId": "exec-1"
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262645467,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "hang",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "closed": {
+                "at": 1790262664478,
+                "afterMs": 19011,
+                "by": "host-stopping"
+              }
+            }
+          ],
+          "physicalRequests": 1,
+          "hiddenRequests": 0,
+          "served": {
+            "input": 0,
+            "output": 0,
+            "requestsThatServed": 0
+          },
+          "recorded": {
+            "kind": "unknown",
+            "why": "the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported"
+          },
+          "upstream": {
+            "heldOpenAfterSettleMs": 15046,
+            "closedBy": "host-stopping"
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "the host held the provider request open for 15046 ms after the adapter gave up and MAD settled the attempt as unknown, until the probe stopped the host; whether the host would have reported that request's usage later was not observed"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [
+        {
+          "cause": "halted",
+          "reason": "the experiment is HALTED: request `request-1` (block 1 prefix, discover/discovery-1 attempt 1) billed an UNKNOWN amount: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported. Token exposure is unquantified and admission does not resume automatically (`evaluation-protocol.md:332-339`)."
+        }
+      ],
+      "verdict": "FAILS",
+      "complete": true,
+      "why": "attempt 1: the host held the provider request open for 15046 ms after the adapter gave up and MAD settled the attempt as unknown, until the probe stopped the host; whether the host would have reported that request's usage later was not observed",
+      "totals": {
+        "admittedAttempts": 1,
+        "madRetries": 0,
+        "refusedAdmissions": 1,
+        "physicalRequests": 1,
+        "hiddenHostRequests": 0,
+        "unattributedRequests": 0,
+        "servedInput": 0,
+        "servedOutput": 0,
+        "recordedInput": 0,
+        "recordedOutput": 0
+      },
+      "hostStop": "process 952 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262644009,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        },
+        {
+          "at": 1790262645915,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "host-tool step",
+      "what": "the first answer calls the host tool `glob`; every later one is a StructuredOutput call (host tools offered by default)",
+      "tools": "the adapter's default (no `tools` option: host tools offered)",
+      "stubScript": {
+        "queue": [
+          "tool:glob"
+        ],
+        "otherwise": "ok"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-host-tool-step"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 1002,
+                "output": 12,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262669196,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "tool:glob",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1001,
+                "completion_tokens": 11,
+                "total_tokens": 1012
+              }
+            },
+            {
+              "index": 2,
+              "modelIndex": 2,
+              "at": 1790262669539,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "ok",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "question",
+                "read",
+                "skill",
+                "StructuredOutput",
+                "task",
+                "todowrite",
+                "webfetch",
+                "write"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1002,
+                "completion_tokens": 12,
+                "total_tokens": 1014
+              }
+            }
+          ],
+          "physicalRequests": 2,
+          "hiddenRequests": 1,
+          "served": {
+            "input": 2003,
+            "output": 23,
+            "requestsThatServed": 2
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 1002,
+              "output": 12,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "2 physical requests stood behind one admitted port call (1 the port call did not show); MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out over 2 request(s)"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "FAILS",
+      "complete": true,
+      "why": "attempt 1: 2 physical requests stood behind one admitted port call (1 the port call did not show); MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out over 2 request(s)",
+      "totals": {
+        "admittedAttempts": 1,
+        "madRetries": 0,
+        "refusedAdmissions": 0,
+        "physicalRequests": 2,
+        "hiddenHostRequests": 1,
+        "unattributedRequests": 0,
+        "servedInput": 2003,
+        "servedOutput": 23,
+        "recordedInput": 1002,
+        "recordedOutput": 12
+      },
+      "hostStop": "process 1511 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262668060,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        },
+        {
+          "at": 1790262669497,
+          "line": "CONNECT github.com:443 HTTP/1.1"
+        }
+      ]
+    },
+    {
+      "name": "unoffered tool",
+      "what": "the first answer calls `glob`, which is not offered under `tools: {\"*\":false,\"StructuredOutput\":true}`; every later one is a StructuredOutput call",
+      "tools": {
+        "*": false,
+        "StructuredOutput": true
+      },
+      "stubScript": {
+        "queue": [
+          "tool:glob"
+        ],
+        "otherwise": "ok"
+      },
+      "turnTimeoutMs": 150000,
+      "attempts": [
+        {
+          "attempt": 1,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "probe-unoffered-tool"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 1002,
+                "output": 12,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "modelIndex": 1,
+              "at": 1790262674394,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "tool:glob",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "StructuredOutput"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1001,
+                "completion_tokens": 11,
+                "total_tokens": 1012
+              }
+            },
+            {
+              "index": 2,
+              "modelIndex": 2,
+              "at": 1790262674718,
+              "method": "POST",
+              "path": "/v1/chat/completions",
+              "model": true,
+              "behaviour": "ok",
+              "requestedModel": "m1",
+              "stream": true,
+              "toolsOffered": [
+                "StructuredOutput"
+              ],
+              "toolChoice": "required",
+              "servedUsage": {
+                "prompt_tokens": 1002,
+                "completion_tokens": 12,
+                "total_tokens": 1014
+              }
+            }
+          ],
+          "physicalRequests": 2,
+          "hiddenRequests": 1,
+          "served": {
+            "input": 2003,
+            "output": 23,
+            "requestsThatServed": 2
+          },
+          "recorded": {
+            "kind": "usage",
+            "tokens": {
+              "input": 1002,
+              "output": 12,
+              "reasoning": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          "incomplete": null,
+          "verdict": "FAILS",
+          "why": "2 physical requests stood behind one admitted port call (1 the port call did not show); MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out over 2 request(s)"
+        }
+      ],
+      "unattributedRequests": [],
+      "refusedAdmissions": [],
+      "verdict": "FAILS",
+      "complete": true,
+      "why": "attempt 1: 2 physical requests stood behind one admitted port call (1 the port call did not show); MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out over 2 request(s)",
+      "totals": {
+        "admittedAttempts": 1,
+        "madRetries": 0,
+        "refusedAdmissions": 0,
+        "physicalRequests": 2,
+        "hiddenHostRequests": 1,
+        "unattributedRequests": 0,
+        "servedInput": 2003,
+        "servedOutput": 23,
+        "recordedInput": 1002,
+        "recordedOutput": 12
+      },
+      "hostStop": "process 1651 exited (status 143) after SIGTERM",
+      "proxyAttempts": [
+        {
+          "at": 1790262673291,
+          "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+        }
+      ]
+    }
+  ],
+  "gateTwo": [
+    {
+      "gate": "global",
+      "seeded": "one settled Pilot request of 2000000 tokens: the global cap is reached, the Blocks allowance is untouched",
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "the experiment's global cap is exhausted: 2000000 of 2000000 tokens"
+        }
+      ],
+      "backendCalls": 0,
+      "stubRequests": 0,
+      "issuedLinesAfter": 1,
+      "issuedLinesSeeded": 1,
+      "hostStop": "process 1745 exited (status 143) after SIGTERM",
+      "holds": true,
+      "why": "refused inside the journal's admission, before any backend call; 0 requests reached the stub; no `issued` line added"
+    },
+    {
+      "gate": "Blocks",
+      "seeded": "one settled block-3 ON request of 1400000 tokens: the Blocks allowance is reached, the global cap and block 1's prefix are not",
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "the Blocks allowance is exhausted: 1400000 of 1400000 tokens"
+        }
+      ],
+      "backendCalls": 0,
+      "stubRequests": 0,
+      "issuedLinesAfter": 1,
+      "issuedLinesSeeded": 1,
+      "hostStop": "process 1887 exited (status 143) after SIGTERM",
+      "holds": true,
+      "why": "refused inside the journal's admission, before any backend call; 0 requests reached the stub; no `issued` line added"
+    },
+    {
+      "gate": "phase",
+      "seeded": "one settled block-1 prefix request of 60000 tokens: block 1's prefix allowance is reached, the Blocks and global ones are not",
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "block 1's shared prefix allowance is exhausted: 60000 of 60000 newly executed tokens"
+        }
+      ],
+      "backendCalls": 0,
+      "stubRequests": 0,
+      "issuedLinesAfter": 1,
+      "issuedLinesSeeded": 1,
+      "hostStop": "process 1888 exited (status 143) after SIGTERM",
+      "holds": true,
+      "why": "refused inside the journal's admission, before any backend call; 0 requests reached the stub; no `issued` line added"
+    }
+  ],
+  "gateTwoScope": "on the measured host, each of the global, Blocks and phase gates refused inside the journal's admission, before any backend call, and 0 requests reached the stub. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested, and the Adversarial gate was not exercised",
+  "proxyAttempts": [
+    {
+      "at": 1790262478930,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262484318,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262485937,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262632377,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262633947,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262638790,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262644009,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262645915,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262668060,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262669497,
+      "line": "CONNECT github.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262673291,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    },
+    {
+      "at": 1790262685225,
+      "line": "CONNECT registry.npmjs.org:443 HTTP/1.1"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F2",
+      "text": "whether the host retries a failed provider request itself. Measured here: a persistent 500 was sent 6, 6 time(s) in its 2 admitted attempt(s); a first 429 was followed by 1 further request(s) within its admitted attempt(s). Measured in the 2026-09-23 spike, not by this probe: a header timeout (headerTimeout 3000 ms) was sent 6 times. The network-error case comes from reading the host binary, not from a measurement. A source search found no switch to turn the loop off; that search does not prove no switch exists"
+    },
+    {
+      "id": "F3",
+      "text": "host tools are offered by default; with one tool step, 2 physical request(s) stood behind the admitted attempt(s), and MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out (scenario `host-tool step`)"
+    },
+    {
+      "id": "N2",
+      "text": "with only StructuredOutput offered (`tools: {\"*\":false,\"StructuredOutput\":true}`), a stub answer that called another tool left 2 physical request(s) behind the admitted attempt(s), and MAD recorded 1002 in / 12 out; the stub served 2003 in / 23 out (scenario `unoffered tool`). Whether a real provider emits such a call under `tool_choice: \"required\"` is not established"
+    },
+    {
+      "id": "H1",
+      "text": "in the hang scenario the host held the provider request open 15046 ms after MAD settled the attempt, until the probe stopped the host; the stub was watched for 15000 ms after the adapter gave up, and this says nothing about later"
+    }
+  ],
+  "scope": [
+    "opencode 1.18.32 (binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e) on this machine, one provider package (@ai-sdk/openai-compatible), one model, one-slot discover, the scripted behaviours above; not every host, build, provider, stage or failure",
+    "requests are attributed to attempts by order: a scenario runs one slot on its own host, so attempts never overlap",
+    "the adapter's turn deadline was 150000 ms (5000 ms in the hang scenario); the production default is 600000 ms, which also outlasts the host's six-try retry series",
+    "the hang scenario watched the stub for 15000 ms after the adapter gave up, and says nothing about later",
+    "a HOLDS verdict is about request count and usage for that scenario only; it does not close paired gate 1",
+    "the stub's 429 carries no Retry-After or rate-limit header; F2's 429 figure covers that one response shape"
+  ]
+}

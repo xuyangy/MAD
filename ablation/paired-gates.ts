@@ -67,14 +67,14 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     status: "OPEN",
     requires:
       "one physical request per admitted port call, no host retry, and every host subcall accounted, on the measured " +
-      "host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-23.json) " +
+      "host. The zero-bill probe (`bun run accounting-probe`, evidence ablation/evidence/host-accounting-2026-09-24.json) " +
       "measured this false on opencode 1.18.32: F2, the host retries a failed request itself (a persistent 500 was sent " +
-      "6 times per admitted attempt and a 429 was retried once; a header timeout was sent 6 times in the 2026-09-23 " +
+      "6 times in each of 2 admitted attempts and a 429 was followed by 1 further request; a header timeout was sent 6 times in the 2026-09-23 " +
       "spike; the network-error case is read from the host binary, not measured); F3, host tools are offered by " +
       "default, a tool step costs an extra request and only the last step's usage is returned; N2, with only " +
       "StructuredOutput offered, a stub that returned a call to an unoffered tool caused a second request (whether a real " +
-      "provider emits one under tool_choice required is not established). In the hang scenario the host held the " +
-      "provider request open after the adapter gave up, until the probe stopped the host. Closing it needs the " +
+      "provider emits one under tool_choice required is not established); H1, in the hang scenario the host held the " +
+      "provider request open 15046 ms after MAD settled the attempt as unknown, until the probe stopped the host. Closing it needs the " +
       "request-accounting story filed in deferred-work.md, re-measured by the probe",
   },
   {
@@ -90,8 +90,8 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real " +
       "OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the " +
       "journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix " +
-      "phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence: " +
-      "ablation/evidence/host-accounting-2026-09-23.json. Tests: scripts/accounting-probe.test.ts",
+      "phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Evidence file: " +
+      "ablation/evidence/host-accounting-2026-09-24.json. Tests: scripts/accounting-probe.test.ts",
   },
   {
     number: 3,

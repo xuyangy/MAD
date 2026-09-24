@@ -133,12 +133,13 @@ const GATES_BLOB = "0123456789abcdef0123456789abcdef01234567"
 
 /** A managed host that starts no process: it records what it was asked to start and how often it was stopped. */
 function scriptedHost(
-  options: { stop?: StopOutcome; refuse?: string; refusedStop?: StopOutcome; whileStarting?: () => void; stopRejects?: boolean } = {},
+  options: { stop?: StopOutcome; refuse?: string; refusedStop?: StopOutcome; whileStarting?: () => void; whileStopping?: () => void; stopRejects?: boolean } = {},
 ) {
   const started: ManagedHostOptions[] = []
   let stops = 0
   const stop = async (): Promise<StopOutcome> => {
     stops += 1
+    options.whileStopping?.()
     if (options.stopRejects) throw new Error("the stop exploded")
     return options.stop ?? { confirmed: true, pid: 777, how: "exited (status 143) after SIGTERM" }
   }
@@ -1464,6 +1465,48 @@ describe("the managed host (story 2-8c)", () => {
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.code).toBe(1)
     expect(result.text).toContain("the refused host's exit is UNCONFIRMED: check process 4321 by hand")
+  })
+
+  test("an error after the host has started is printed with the credential redacted", async () => {
+    const env = await setup()
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      enumerate: async () => {
+        throw new Error(`the host echoed its config: {"apiKey":"${KEY}"}`)
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("the roster could not be resolved from the managed host")
+    expect(result.text).toContain('{"apiKey":"[REDACTED]"}')
+    expect(result.text).not.toContain(KEY)
+  })
+
+  test("a signal while main stops the host is held until the stop is confirmed", async () => {
+    const env = await setup()
+    const signals = fakeSignals()
+    const exits: number[] = []
+    let heldDuringStop = 0
+    const host = scriptedHost({
+      whileStopping: () => {
+        heldDuringStop = signals.count()
+        signals.fire("SIGTERM")
+      },
+    })
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      signals: signals.source,
+      startHost: host.startHost,
+      exit: (code) => {
+        exits.push(code)
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(heldDuringStop).toBe(2)
+    expect(exits).toEqual([])
+    expect(result.text).toContain("the managed host is already being stopped; waiting for its exit to be confirmed")
+    expect(result.text).toContain("Managed host stopped: process 777")
+    expect(signals.count()).toBe(0)
   })
 
   test("a startHost that rejects is the stage-2 refusal, with the credential redacted", async () => {
