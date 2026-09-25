@@ -139,7 +139,7 @@ export function unknownValue(why: string): UnknownValue {
  * anything here, which is the same rule `perStage` follows through
  * `budgetReport`: the accountant's arithmetic, never a second copy.
  *
- * THREE VALUES, AND THE THIRD IS NOT A LEFTOVER:
+ * FOUR VALUES. THE THIRD IS NOT A LEFTOVER, AND THE FOURTH BELONGS TO ONE MODE:
  *
  * - `complete` — the ledger holds no unknown. Every turn this run billed is in
  *   `spend.total`.
@@ -152,6 +152,11 @@ export function unknownValue(why: string): UnknownValue {
  *   required field one layer down. A manifest built from a pre-2.3 dump, or by a
  *   JavaScript caller that omitted the collection, would otherwise read
  *   `complete` on the strength of a field nobody wrote.
+ * - `unverified` (story 2-8c4) — an attempt-mode arm (`experiment.accounting:
+ *   "attempts"`). Its token figures are the host's own reports on the OAuth route,
+ *   where nothing measures them and a failed turn's missing usage reads as zero, so
+ *   no audit can call them complete. It is written only beside
+ *   `spend.source: "host-reported-unverified"` and `exposure: "unquantified"`.
  *
  * `MANIFEST_SCHEMA_VERSION` does NOT bump for this widening; see its own comment.
  *
@@ -161,7 +166,7 @@ export function unknownValue(why: string): UnknownValue {
  * erases — and a hand-written second list beside the type is a list that can
  * fall one value behind it. Derived, they cannot disagree.
  */
-export const USAGE_COMPLETENESS_VALUES = ["complete", "incomplete", "unaudited"] as const
+export const USAGE_COMPLETENESS_VALUES = ["complete", "incomplete", "unaudited", "unverified"] as const
 export type UsageCompleteness = (typeof USAGE_COMPLETENESS_VALUES)[number]
 
 /**
@@ -174,9 +179,10 @@ export type UsageCompleteness = (typeof USAGE_COMPLETENESS_VALUES)[number]
  * bound impossible, it is named **unquantified**".
  *
  * So this is not a synonym for `usageCompleteness`, and it collapses the union
- * on purpose: `incomplete` and `unaudited` both yield `unquantified`, because a
- * run that could not count a turn and a run nobody audited are equally unable to
- * support a finite bound. Only `complete` yields `quantified`, and then the
+ * on purpose: `incomplete`, `unaudited` and `unverified` all yield `unquantified`,
+ * because a run that could not count a turn, a run nobody audited and a run whose
+ * figures are the host's unchecked reports are equally unable to support a finite
+ * bound. Only `complete` yields `quantified`, and then the
  * number is `spend.total` — already written beside it, never restated here.
  *
  * The alternative was to leave the reader to infer it from the verdict. It was
@@ -354,6 +360,14 @@ export interface RunManifest {
     routingPolicy: RoutingPolicy
   }
   spend: {
+    /**
+     * Story 2-8c4 — present only on an attempt-mode arm, and always there: every
+     * figure in `spend` is the host's own report, unverified, never a cost or a
+     * complete bill. `usageCompleteness` is then `unverified` and `exposure`
+     * `unquantified`. Absent on every token-mode manifest, whose figures are
+     * MAD's own ledger.
+     */
+    source?: "host-reported-unverified"
     /** From `budgetReport` — the accountant's own arithmetic, never a second copy. */
     perStage: StageSpend[]
     /**
@@ -449,6 +463,7 @@ export interface BuildManifestInput {
 export function buildManifest(input: BuildManifestInput): RunManifest {
   const { record, change, identity } = input
   const warnings = record.warnings.map(toManifestWarning)
+  const attempts = input.experiment?.accounting === "attempts"
   return {
     schemaVersion: MANIFEST_SCHEMA_VERSION,
     identity: { ...identity, changeId: changeIdFor(change) },
@@ -499,9 +514,11 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
       routingPolicy: record.routingPolicy ?? "shipped",
     },
     spend: {
+      // Key order matters: a token-mode manifest is byte-identical to one written before the marker existed.
+      ...(attempts ? { source: "host-reported-unverified" as const } : {}),
       perStage: budgetReport(record.ledger),
       total: record.ledger.total,
-      ...auditUsage(record.ledger),
+      ...auditUsage(record.ledger, attempts),
       // A record without an unknown-usage collection has no audited list, and
       // `auditUsage` writes an empty one; `usageByOrigin` reads the same absence
       // the same way, so the manifest cannot disagree with itself.
@@ -537,8 +554,11 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
  * `unknownUsageCount` in `core/budget/ledger.ts` are the accountant's answer,
  * and the same two functions gate `mayISpend` and phrase what
  * `core/stages/output.ts` prints — so the manifest's verdict, the refusal to
- * spend and the rendered caveat cannot drift apart. This function's whole content
- * is the `unaudited` case below.
+ * spend and the rendered caveat cannot drift apart. This function's own content is
+ * the `unaudited` case and the attempt-mode case below: an attempt-mode arm's
+ * figures are the host's unchecked reports, so it is `unverified` and
+ * `unquantified` whatever the ledger says, with the unknown-usage identities still
+ * carried.
  *
  * THE `Array.isArray` GUARD IS NOT DEAD CODE, though the type says it is.
  * `TokenLedger.unknownUsage` is required, so every ledger MAD builds has one; a
@@ -550,12 +570,21 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
  * PURE (`:21-23`): no clock, no filesystem, no environment. It reads the ledger
  * and nothing else.
  */
-function auditUsage(ledger: TokenLedger): {
+function auditUsage(ledger: TokenLedger, attempts: boolean): {
   usageCompleteness: UsageCompleteness
   unknownUsage: UnknownUsageEntry[]
   unknownUsageCount: number
   exposure: TokenExposure
 } {
+  if (attempts) {
+    const audited = Array.isArray(ledger.unknownUsage)
+    return {
+      usageCompleteness: "unverified",
+      unknownUsage: audited ? [...ledger.unknownUsage] : [],
+      unknownUsageCount: audited ? unknownUsageCount(ledger) : 0,
+      exposure: "unquantified",
+    }
+  }
   if (!Array.isArray(ledger.unknownUsage)) {
     return {
       usageCompleteness: "unaudited",

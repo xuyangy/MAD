@@ -1089,6 +1089,16 @@ v2's draft sections A6 onward, which are not frozen.
   `tokenCap: null` and `stopOnUnknownUsage: false`, and `route` when it is `oauth`; a token-mode,
   api-key config carries none of these, so its digest does not depend on them. The OAuth route runs only in attempt mode. Every
   arm manifest's `experiment` carries `accounting: "attempts"` (`MANIFEST_SCHEMA_VERSION` stays 1).
+- **What an attempt-mode manifest's `spend` says (story 2-8c4).** Its token figures are the host's own
+  reports, which nothing on the OAuth route measures, and a failed turn's missing usage reads as zero.
+  So its `spend` carries `source: "host-reported-unverified"`, `usageCompleteness: "unverified"` and
+  `exposure: "unquantified"`; `total`, `perStage` and `origin` stay as figures under that marker, and
+  nothing in it claims `complete` or `quantified`. A token-mode manifest has no `source` key and is
+  byte for byte what it was. `bun run eval-read` accepts `source` and `unverified` only together, and
+  only on an arm whose `experiment.accounting` is `attempts`: a marker on a token-mode arm, half a
+  marker, or an attempt-mode arm whose `spend` claims an audited verdict is refused. The report gives an
+  `unverified` arm no token cost figure. A reader built at or before commit e7164e2 does not know
+  `unverified` and refuses such a manifest, although `MANIFEST_SCHEMA_VERSION` stays 1.
 - **The report.** For an attempt-mode bundle `bun run eval-read` reads `paired-journal.jsonl` through
   `ablation/journal-read.ts`, which replays the whole file with the journal's own validation and
   refuses a journal that is incomplete (an attempt never settled), conflicted or mixed-mode rather
@@ -1117,7 +1127,8 @@ bun run paired --live --provider-mode oauth \
 `--provider-mode oauth` runs the managed host on opencode's own sign-ins. MAD holds, copies and
 handles no provider credential, and there is no relay and no meter. **With the shipped tree it always
 refuses at stage 1**, before any host exists, with one aggregated diagnostic that lists gate 4 OPEN,
-gate 7 OPEN and protocol v2 not frozen.
+gate 7 OPEN and protocol v2 not frozen, and the store guard's refusal while the data directory's
+database holds anything (below).
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
 Then create the dedicated data directory and its one link to your sign-ins:
@@ -1164,8 +1175,40 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
   `~/.local/share/opencode`, the prepared directory, `--out`, `--directory` and the host's private root:
   neither may equal or contain the other. It becomes the host's `XDG_DATA_HOME`, and `stop()` removes
   only the private root. **opencode writes into the data directory**: its database, sessions, storage
-  and logs, which persist across blocks and runs. What that carried-over state does to the measured
-  pathway is unmeasured.
+  and logs, which persist across blocks and runs.
+- **The store guard (story 2-8c4).** Stage 1, every host start (before the spawn) and every stop (once
+  the host's exit is confirmed) run only `SELECT COUNT(*)` on `session`, `message`, `part`, `permission`,
+  `credential`, `account`, `account_state` and `control_account` in `<data-dir>/opencode/opencode.db`, on
+  a read-only connection (`ablation/oauth-store.ts`). Every count must be 0. The store is counted only
+  once the data directory check has proven the directory disjoint from your own `~/.local/share/opencode`
+  and every other directory above; when that check fails, stage 1 lists `OAuth store` as not evaluated,
+  so no database there is opened. `<data-dir>/opencode` must be a real directory, and `opencode.db`, its
+  `-wal` and its `-shm`, where present, regular files: a symlink refuses. opencode keeps the database in
+  WAL mode, where a reader writes the `-shm` index even on a read-only connection, so a WAL-mode
+  database and its `-wal` are copied into a private temporary directory and counted there; a change to
+  any of the three files during the copy refuses, and no byte of them changes. The copy is removed after
+  the count; a copy that cannot be removed, or a connection that cannot be closed, refuses whatever the
+  counts were, and the refusal names the leftover directory so you can remove it. A missing named table
+  (the schema changed), a database that cannot be read (locked, corrupt) or any other count refuses; a
+  data directory with no `opencode.db` yet reads as empty and says so. The guard reports table names and
+  counts, never a row, and never opens `auth.json`. The host API's session list, which sees one
+  directory's sessions and no other table, does not stand in for it. A stored permission, a leftover
+  session or a sign-in moved into the database would otherwise reach later blocks and both arms unseen.
+  **The tables are an allowlist tied to the pinned opencode 1.18.32 schema.** Every other table of that
+  schema is unguarded, and a table a newer schema adds goes unseen; the binary pin (`MEASURED_HOST`),
+  which refuses any other build before the spawn, is what makes a version change visible. **What it
+  does not cover:** the effect of persistent logs, `project` and `event` rows on later runs is
+  unmeasured, the unguarded tables are unguarded, and every attempt-mode report lists both among its
+  limitations. Six unguarded tables of the pinned schema may hold session data: `session_message`,
+  `session_entry`, `session_input`, `todo`, `session_share` and `workspace`. The guard never counts
+  them, so nothing establishes that they are empty.
+- **The spike's sessions.** The 2-8c3 spike left three sessions (and their six messages) in the data
+  directory. They were removed on established provenance: each matched the spike's recorded title,
+  working directory and creation window before it was deleted by id, and the ordinary zero-count guard
+  passed after the host stopped (`ablation/evidence/oauth-store-cleanup-2026-09-25.json`). The ids in
+  that file are cut to 8 characters and read alike, so the three distinct creation times, not the ids,
+  establish that three sessions were removed. No command for that cleanup ships, and nothing bypasses
+  the zero-count guard for a real data directory.
 - **The host.** The managed host in OAuth mode (`ablation/managed-host.ts`) copies the Anthropic sign-in
   plugin into its private root, verifies the copy's tree digest, and loads that copy by `file://`, so
   opencode's plugin installer never runs and a change to the prepared directory after it was verified
@@ -1182,11 +1225,26 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
   (`evaluation-protocol-v2.md`), which must be frozen: until the human freezes it, stage 1 refuses. The
   api-key route keeps its lens-free roster.
 - **After the stop.** Once the host's exit is confirmed, the data directory's shape and auth symlink,
-  the seeded config lock's sha256 and the whole seeded tree's digest are checked again. A failure, or an
+  the seeded config lock's sha256, the whole seeded tree's digest and the store guard are checked again. A failure, or an
   exit that could not be confirmed, prints `POST-STOP CHECK FAILED` and exits 1 whatever the run's own
   result was; the data directory is kept as it is. **To recover:** inspect the link with `readlink`
   only, never by opening it; recreate it with the `ln -s` above; sign in again with ordinary opencode.
   Never copy a token into the data directory.
+- **When the store guard refuses.** The refusal names each table and its count, or why the database
+  could not be read; nothing in MAD removes a row, and no cleanup command ships. Check, in this order:
+  1. that no opencode process is running on the data directory (a running host writes to it, and a
+     WAL copy that changed under the guard refuses for that reason);
+  2. by `ls -l` alone, that `<data-dir>/opencode`, `opencode.db`, `-wal` and `-shm` are not symlinks;
+  3. whether the counts match a run you know of, such as a run whose post-stop check already failed.
+     A nonzero `credential`, `account`, `account_state` or `control_account` means a sign-in is in the
+     database: stop using that data directory and sign in again with ordinary opencode;
+  4. a missing named table means opencode's schema is not the pinned one, which the binary pin should
+     have refused first: re-measure as in "Re-measuring" below before anything else.
+
+  To continue, create a fresh dedicated data directory with its one `ln -s` link, as in "Setting up the
+  data directory, once", and pass it as `--oauth-data-dir`; the guard reads it as empty. Keep the
+  refused directory as it is for inspection. Removing rows from it is a human decision, taken only on
+  established provenance and recorded as evidence.
 - **What is not controlled.** The config seed removes the one runtime fetch the spike observed: opencode's
   background `npm` install into its config directory. Nothing at the OS level prevents another runtime
   fetch on a production launch, where the host is not sandboxed, so the launch is not fail-closed for
@@ -1200,6 +1258,40 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
 - **Re-measuring.** Another npm, another payload version or another platform changes the digests: run
   `bun run oauth-prepare` twice into fresh directories, compare the printed digests, and set
   `OAUTH_PAYLOAD` in a reviewed change with both runs recorded as evidence.
+
+### Residual risks on the OAuth route (story 2-8c4)
+
+**Story 2-8d's run proposal must quote this section before the human is asked to freeze protocol v2 or
+authorize gate 4.** Each risk below is open on the shipped tree; none is closed by a check.
+
+1. **Runtime code fetch.** The config seed and the pinned plugin remove the one runtime fetch observed
+   (opencode's background `npm install @opencode-ai/plugin`, refused as `CONNECT registry.npmjs.org:443`
+   in `ablation/evidence/host-accounting-2026-09-24-relay.json` and in the 2-8c3 spike's `run-stub`).
+   Nothing at the OS level prevents another fetch beyond the pinned plugin and seed: the production
+   launch has no OS egress control, unlike the sandboxed probe.
+2. **The startup connection with the real sign-in.** With no prompt sent, the host connects to
+   `api.githubcopilot.com:443` at startup, before MAD admits any attempt (finding E1,
+   `ablation/evidence/oauth-attempts-2026-09-25.json`). On a production launch that connection leaves
+   the machine carrying the real Copilot sign-in.
+3. **Hidden host retries.** Against a stub answering HTTP 500, one admitted attempt became 6 requests
+   over 75 s (R1: 1 attempt → 6 requests, same evidence file). On the OAuth route a host retry is
+   neither gated nor counted, so an attempt bounds neither physical requests nor subscription quota.
+4. **`small_model` is the first pin.** The config's `model` and `small_model` are the first `--pin`
+   (`openai/gpt-6-luna`, whose OAuth transport is UNPROBED, finding O1). opencode's side requests, such
+   as session titles and summaries, go to that model outside every attempt count.
+5. **Unverified refresh write-through.** A stored token that has expired may be refreshed by the host
+   through the auth symlink. The probe used placeholder sign-ins only, so no refresh was exercised; where
+   a refresh writes is not established. The readlink checks before the spawn and after the exit detect a
+   replaced or retargeted link, not a write through it.
+6. **Persistent host state.** The data directory keeps opencode's database, storage and logs across
+   blocks and runs. The launcher holds the guarded tables (`STORE_TABLES`: session, message, part,
+   permission and the sign-in tables) at 0 before and after every host run; the effect of persistent
+   logs, `project` and `event` rows on later runs is unmeasured; every table outside the store guard's
+   allowlist of opencode 1.18.32 tables is unguarded, and a table a newer schema adds goes unseen.
+   Among the unguarded tables, six may hold session data: `session_message`, `session_entry`,
+   `session_input`, `todo`, `session_share` and `workspace`. Nothing counts them or establishes that
+   they are empty. **2-8d's run proposal must name these six tables too before the human is asked to
+   authorize a bounded pilot.**
 
 ### When it runs
 
@@ -1380,6 +1472,18 @@ Measured on opencode 1.18.32 on 2026-09-25:
 - **Settlements are host diagnostics.** The persistent-500 and openai attempts settled `usage` with zero
   host-reported tokens. That is the host's own unverified report, not a known zero cost; the adapter's
   mapping of a failed attempt's missing usage to zero is unchanged here.
+
+**The store guard on the probe (story 2-8c4).** Every probe host passes the ordinary store guard
+before the spawn. Both listing scenarios are held to the ordinary guard after the exit too, so the
+listing-only scenario on the real data directory refuses while that store is not empty. Each attempt
+scenario's host starts through `startProbePlaceholderHost`, which accepts only a fresh placeholder data
+directory the probe made under its own scratch directory (`<scratch>/placeholders/<name>/data`, with no
+database before the spawn). After the exit, the session its turn left there is recorded in the
+record's `postStop.held` as expected probe state (`placeholder store after the run: session=1, …,
+expected probe state`), never as an empty store; the symlink, data-directory and seeded-config checks
+still apply. `bun run paired` cannot reach that expectation: `ManagedHostOptions`, which it starts
+with, has no field for it. The committed evidence file was measured before the store guard existed, so
+its records carry no store line; it is not re-run.
 
 **Gate 7 stays OPEN.** This evidence covers the anthropic and copilot attempt paths only; closing gate 7
 needs OpenAI's transport covered by a separately human-authorized bounded pilot, reviewed before story

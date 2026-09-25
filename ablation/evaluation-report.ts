@@ -927,6 +927,14 @@ export function armCost(arm: PairedArm): ArmCost {
   if (!isRecord(spend)) {
     return { kind: "unavailable", arm: arm.arm, runId, reason: "its manifest carries no readable `spend`; its cost is unavailable, never zero" }
   }
+  if (spend.usageCompleteness === "unverified") {
+    return {
+      kind: "unavailable",
+      arm: arm.arm,
+      runId,
+      reason: "its usage is `unverified`: an attempt-mode arm's token figures are the host's own reports, never a cost; its cost is unavailable, never zero",
+    }
+  }
   const origin = spend.origin
   if (!isRecord(origin)) {
     return {
@@ -1433,6 +1441,15 @@ const ATTEMPT_COST_ESTIMAND = [
   "  count. Host-reported tokens are unverified diagnostics and enter no figure.",
 ]
 
+/**
+ * Story 2-8c4 — a limitation of every attempt-mode (OAuth-route) report: the host's
+ * data directory persists, and the store guard covers only its allowlist of tables
+ * (`STORE_TABLES` in `ablation/oauth-store.ts`).
+ */
+export const PERSISTENT_HOST_STATE_LIMITATION =
+  "the effect of persistent logs, `project` and `event` rows in the OAuth data directory on later runs is unmeasured; " +
+  "every table outside the store guard's allowlist of opencode 1.18.32 tables is unguarded, and a table a newer schema adds goes unseen"
+
 /** Story 2-8c3a — the COST estimand when no cost endpoint applies. */
 const NO_COST_ESTIMAND = [
   "  COST: NO COST ENDPOINT APPLIES. The bundle's accounting mode is mixed or cannot be established, so neither",
@@ -1501,6 +1518,10 @@ export function renderEvaluationReport(outcome: EvaluationReportOutcome): string
     lines.push(
       "  Host-reported tokens on this route are unverified diagnostics and are in no figure above. Token spend and",
       "  subscription quota are not measured; the host's own retries, tool steps and held-open requests are not counted.",
+      `  LIMITATION: ${PERSISTENT_HOST_STATE_LIMITATION}.`,
+      "  The launcher starts no host unless the store guard counts every guarded table at 0 before the spawn, and fails",
+      "  the run's exit code unless it does again after the exit: a precondition the launcher enforces, not an observation",
+      "  this report read. Nothing else the host keeps there is checked.",
       "",
     )
   }

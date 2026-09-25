@@ -883,6 +883,18 @@ describe("AC5 — the usage verdict is per arm, and the union is checked", () =>
     expect(text).not.toContain("on repeat 0 — complete")
   })
 
+  test("story 2-8c4 — an `unverified` arm is stated as host-reported, never as complete or incomplete", async () => {
+    const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    const row = result.comparable[0]!
+    row.manifest.spend = { source: "host-reported-unverified", ...row.manifest.spend, usageCompleteness: "unverified", exposure: "unquantified" }
+    const text = renderBundle(result)
+    expect(text).toContain("on repeat 0 — UNVERIFIED: an attempt-mode arm")
+    expect(text).not.toContain("on repeat 0 — complete")
+    expect(text).not.toContain("on repeat 0 — INCOMPLETE")
+  })
+
   test("the tokens column is labelled OBSERVED spend, whatever the verdict", async () => {
     const root = await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0 }])
     const result = await readBundle(root)

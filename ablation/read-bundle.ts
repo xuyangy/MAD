@@ -538,6 +538,34 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
         `(it knows quantified, unquantified)`,
     )
   }
+  // Story 2-8c4 — THE ATTEMPT-MODE MARKER. `spend.source` and `usageCompleteness:
+  // "unverified"` are one claim, that every figure is the host's unchecked report,
+  // and it belongs to an attempt-mode arm and to nothing else. So the three go
+  // together or not at all: a marker on a token-mode arm, an attempt-mode arm whose
+  // spend claims an audited verdict, or half a marker, is refused.
+  const marked = "source" in spend
+  if (marked && spend.source !== "host-reported-unverified") {
+    return fail(`has a \`spend.source\` this reader does not know: ${JSON.stringify(spend.source)} (it knows host-reported-unverified)`)
+  }
+  const unverified = spend.usageCompleteness === "unverified"
+  const attempts = isRecord(value.experiment) && value.experiment.accounting === "attempts"
+  if (marked !== unverified) {
+    return fail(
+      marked
+        ? `has \`spend.source\` but a \`spend.usageCompleteness\` of ${JSON.stringify(spend.usageCompleteness)}; host-reported figures are \`unverified\``
+        : "has a `spend.usageCompleteness` of `unverified` but no `spend.source`",
+    )
+  }
+  if (marked !== attempts) {
+    return fail(
+      marked
+        ? "has host-reported, unverified `spend`, but it is not an attempt-mode arm (`experiment.accounting` is not `attempts`)"
+        : `is an attempt-mode arm whose \`spend\` claims ${JSON.stringify(spend.usageCompleteness)}; an attempt-mode arm's figures are host-reported and \`unverified\``,
+    )
+  }
+  if (marked && spend.exposure !== "unquantified") {
+    return fail("has host-reported, unverified `spend` with a `quantified` exposure")
+  }
   const provenance = provenanceProblem(run, spend, total)
   if (provenance !== undefined) return fail(provenance)
 
@@ -1388,6 +1416,13 @@ function usageCompleteness(result: BundleReadResult): string[] {
     }
     if (spend.usageCompleteness === "complete") {
       lines.push(`${at}complete: every turn this run billed is in its token figure.`)
+      continue
+    }
+    if (spend.usageCompleteness === "unverified") {
+      lines.push(
+        `${at}UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing ` +
+          `measured, never a cost or a complete bill. Exposure is ${spend.exposure}.`,
+      )
       continue
     }
     if (spend.usageCompleteness === "unaudited") {

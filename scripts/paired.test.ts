@@ -46,6 +46,7 @@ import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { main as evalReadMain } from "./eval-read.ts"
 import { main as materializeMain } from "./materialize-labelled-change.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
+import { fakeStore, ROW_CONTENT_MARKER } from "../ablation/oauth-store.fixture.ts"
 import {
   GATE_TABLE_FILE,
   gatesIdentity,
@@ -1810,10 +1811,61 @@ describe("the OAuth route: stage 1", () => {
     expect(diagnostic).not.toContain("gate 1 ")
     expect(result.text).toContain("PASS  OAuth prepared payloads")
     expect(result.text).toContain("PASS  OAuth data directory")
+    expect(result.text).toContain("PASS  OAuth store")
+    expect(result.text).toContain("no database yet, so the store is empty")
     expect(host.started).toEqual([])
     expect(clientCalls).toEqual([])
     expect(result.text).not.toContain(AUTH_CONTENT_MARKER)
     await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("story 2-8c4 — the spike's leftover sessions refuse at stage 1 beside the gates and v2, by names and counts only, and no host starts", async () => {
+    const env = await oauthSetup()
+    await fakeStore(env.dataDir, { session: 3, message: 6 })
+    const host = oauthHost()
+    const { overrides, clientCalls } = oauthOverrides(env, host)
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
+    expect(diagnostic).toContain("session=3, message=6")
+    expect(diagnostic).toContain("every named table must be empty")
+    expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
+    expect(diagnostic).toContain("gate 7 (OAuth attempt accounting) is OPEN")
+    expect(diagnostic).toContain("protocol v2 is not frozen")
+    expect(result.text).toContain("OAuth store failed")
+    expect(result.text).not.toContain(ROW_CONTENT_MARKER)
+    expect(host.started).toEqual([])
+    expect(clientCalls).toEqual([])
+  })
+
+  test("story 2-8c4 — a stored permission refuses at stage 1 even with every gate closed and v2 frozen", async () => {
+    const env = await oauthSetup()
+    await fakeStore(env.dataDir, { permission: 1 })
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("OAuth store failed")
+    expect(result.text).toContain("holds permission=1")
+    expect(host.started).toEqual([])
+  })
+
+  test("story 2-8c4 — a data directory inside the user's own opencode store fails its check, and the store guard is not evaluated, so no database there is opened", async () => {
+    const env = await oauthSetup()
+    const userStore = join(env.home, ".local", "share", "opencode")
+    const dataDir = join(userStore, "nested")
+    await mkdir(join(dataDir, "opencode"), { recursive: true })
+    await symlink(join(userStore, "auth.json"), join(dataDir, "opencode", "auth.json"))
+    await fakeStore(dataDir, { session: 3 })
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("OAuth data directory failed")
+    expect(result.text).toContain("inside the user's own opencode data directory")
+    expect(result.text).toContain("OAuth store — not evaluated: the OAuth data directory check did not pass, so no database was opened")
+    expect(result.text).not.toContain("session=3")
+    expect(host.started).toEqual([])
   })
 
   test("auth.json replaced by a regular file refuses at stage 1 by path, never by contents, and starts no host", async () => {
@@ -1911,5 +1963,15 @@ describe("the OAuth route: a run past stage 1 (injected CLOSED gates, a frozen v
     expect(result.code).toBe(1)
     expect(result.text).toContain("POST-STOP CHECK FAILED — after the host exited, the auth symlink points elsewhere.")
     expect(result.text).toContain(`The data directory ${env.dataDir} was kept as it is.`)
+  })
+
+  test("story 2-8c4 — a session left in the store after the stop fails the exit code", async () => {
+    const env = await oauthSetup()
+    const problem = "after the host exited, the OAuth store `/d/opencode/opencode.db` holds session=1, message=2; every named table must be empty"
+    const host = oauthHost({ held: [], problems: [problem] })
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`POST-STOP CHECK FAILED — ${problem}.`)
   })
 })

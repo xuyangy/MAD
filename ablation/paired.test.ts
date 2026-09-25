@@ -921,6 +921,8 @@ describe("runPairedBlocks in attempt mode (story 2-8c3a)", () => {
       const manifest = await manifestOf(slot.manifest.directory)
       expect(manifest.experiment?.accounting).toBe("attempts")
       expect(manifest.dials.cap).toBeNull()
+      // Story 2-8c4: read alone, the arm manifest claims no complete or quantified spend.
+      expect(manifest.spend).toMatchObject({ source: "host-reported-unverified", usageCompleteness: "unverified", exposure: "unquantified" })
     }
     for (const entry of outcome.runs) {
       expect(entry.run.record.ledger.cap).toBeNull()

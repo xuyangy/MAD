@@ -617,6 +617,101 @@ describe("the optional `experiment` block (story 2-5c)", () => {
     if (parsed.ok) expect(parsed.value.experiment?.accounting).toBe("attempts")
   })
 
+  test("story 2-8c4 — an attempt-mode manifest marks its host zeros unverified, and nothing in `spend` claims complete or quantified", () => {
+    // Failed turns on the OAuth route: the host settled them with zero tokens, which the ledger holds as known usage.
+    const hostZeros = record({
+      runId: "run-branch",
+      forkedFrom: "run-prefix",
+      routingPolicy: "debate-off",
+      ledger: {
+        ...record().ledger,
+        entries: [
+          { slot: "discovery-1", stage: "discover", attempt: 1, tokens: emptyTokenUsage() },
+          { slot: "discovery-1", stage: "discover", attempt: 2, tokens: emptyTokenUsage() },
+        ],
+        total: emptyTokenUsage(),
+      },
+    })
+    const manifest = buildManifest({ record: hostZeros, change, identity, turnFiles: known(0), experiment: { ...experiment, accounting: "attempts" } })
+    expect(manifest.spend.source).toBe("host-reported-unverified")
+    expect(manifest.spend.usageCompleteness).toBe("unverified")
+    expect(manifest.spend.exposure).toBe("unquantified")
+    // The figures stay, under the marker.
+    expect(manifest.spend.total).toEqual(emptyTokenUsage())
+    expect(manifest.spend.perStage.length).toBeGreaterThan(0)
+    expect(manifest.spend.origin.attributed.tokens).toEqual(emptyTokenUsage())
+    const spendText = JSON.stringify(manifest.spend)
+    expect(spendText).not.toContain('"complete"')
+    expect(spendText).not.toContain('"quantified"')
+    expect(Object.keys(manifest.spend)[0]).toBe("source")
+    const parsed = roundTrip(manifest)
+    expect(parsed.ok, parsed.ok ? "" : parsed.reason).toBe(true)
+  })
+
+  test("story 2-8c4 — a token-mode manifest has no `source` and is byte-identical to what the baseline writer produced", () => {
+    // sha256 of `JSON.stringify(manifest)`, measured on the writer at commit e7164e2, before the attempt-mode marker existed.
+    const sha = (value: unknown) => new Bun.CryptoHasher("sha256").update(JSON.stringify(value)).digest("hex")
+    const ordinary = buildManifest({ record: record(), change, identity, turnFiles: known(3) })
+    const paired = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment })
+    expect("source" in ordinary.spend).toBe(false)
+    expect("source" in paired.spend).toBe(false)
+    expect(ordinary.spend.usageCompleteness).toBe("complete")
+    for (const [name, manifest] of [["ordinary", ordinary], ["paired", paired]] as const) {
+      const golden = TOKEN_MODE_GOLDEN[name]
+      // The committed golden is the writer's output at e7164e2: its sha256 is the one measured there.
+      expect(sha(golden), `ablation/manifest.token-mode.golden.json \`${name}\` is not the output measured at e7164e2`).toBe(TOKEN_MODE_BASELINE[name])
+      expect(
+        JSON.stringify(manifest, null, 2),
+        `the token-mode manifest built from this file's \`${name === "ordinary" ? "record()" : "forked()"}\` fixture differs from the writer's output at ` +
+          `commit e7164e2 (ablation/manifest.token-mode.golden.json \`${name}\`); token-mode manifests must stay byte-identical`,
+      ).toBe(JSON.stringify(golden, null, 2))
+      expect(sha(manifest)).toBe(TOKEN_MODE_BASELINE[name])
+    }
+  })
+
+  test.each([
+    ["a marker on a token-mode arm", (m: Record<string, any>) => ({ ...m, spend: { source: "host-reported-unverified", ...m.spend, usageCompleteness: "unverified", exposure: "unquantified" } }), false, "not an attempt-mode arm"],
+    ["`unverified` without the source", (m: Record<string, any>) => ({ ...m, spend: { ...m.spend, usageCompleteness: "unverified", exposure: "unquantified" } }), false, "but no `spend.source`"],
+    ["the source with an audited verdict", (m: Record<string, any>) => ({ ...m, spend: { source: "host-reported-unverified", ...m.spend } }), false, "host-reported figures are `unverified`"],
+    ["an unknown source", (m: Record<string, any>) => ({ ...m, spend: { source: "relay", ...m.spend } }), false, "a `spend.source` this reader does not know"],
+    ["an attempt-mode arm claiming complete", (m: Record<string, any>) => m, true, "an attempt-mode arm's figures are host-reported"],
+    ["the marker with a quantified exposure", (m: Record<string, any>) => ({ ...m, spend: { source: "host-reported-unverified", ...m.spend, usageCompleteness: "unverified", exposure: "quantified" } }), true, "a `quantified` exposure"],
+  ] as const)("story 2-8c4 — the reader refuses %s", (_name, edit, attemptArm, reason) => {
+    const written = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment })
+    const onDisk = JSON.parse(JSON.stringify(written)) as Record<string, any>
+    if (attemptArm) onDisk.experiment.accounting = "attempts"
+    const parsed = parseManifest(edit(onDisk))
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain(reason)
+  })
+
+  test.each([
+    ["an `unknownUsageCount` that disagrees with `unknownUsage`", (spend: Record<string, any>) => ({ ...spend, unknownUsageCount: spend.unknownUsageCount + 1 }), "differs from `spend.unknownUsage` or `spend.unknownUsageCount`"],
+    [
+      "an `unknownUsage` identity the count and the origin do not carry",
+      (spend: Record<string, any>) => ({ ...spend, unknownUsage: [...spend.unknownUsage, { slot: "discovery-1", stage: "discover", attempt: 3, executionId: "e-3", why: "failed" }] }),
+      "differs from `spend.unknownUsage` or `spend.unknownUsageCount`",
+    ],
+    ["a `total` its origin does not add up to", (spend: Record<string, any>) => ({ ...spend, total: { ...spend.total, input: spend.total.input + 1 } }), "differs from `spend.total`"],
+  ] as const)("story 2-8c4 — an unverified attempt-mode spend is held to the same internal consistency: %s is refused", (_name, edit, reason) => {
+    const written = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment: { ...experiment, accounting: "attempts" } })
+    const onDisk = JSON.parse(JSON.stringify(written)) as Record<string, any>
+    expect(parseManifest(onDisk).ok).toBe(true)
+    const parsed = parseManifest({ ...onDisk, spend: edit(onDisk.spend) })
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain(reason)
+  })
+
+  test("story 2-8c4 — a legacy v1 manifest with no `source` reads as before", () => {
+    const legacy = JSON.parse(JSON.stringify(buildManifest({ record: record(), change, identity, turnFiles: known(3) })))
+    const parsed = parseManifest(legacy)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) {
+      expect(parsed.value.spend.usageCompleteness).toBe("complete")
+      expect(parsed.value.spend.source).toBeUndefined()
+    }
+  })
+
   test("a prefix that is not the run's forkedFrom is refused", () => {
     const manifest = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment: { ...experiment, prefixRunId: "run-other" } })
     const parsed = roundTrip(manifest)
@@ -752,3 +847,12 @@ describe("the optional adversarial binding (story 2-7b)", () => {
   })
 })
 
+
+/** Story 2-8c4 — the token-mode writer's output on this file's `record()` and `forked()` fixtures at commit e7164e2. */
+const TOKEN_MODE_GOLDEN = (await Bun.file(new URL("./manifest.token-mode.golden.json", import.meta.url)).json()) as Record<"ordinary" | "paired", unknown>
+
+/** Story 2-8c4 — the sha256 of `JSON.stringify` of that output, measured at commit e7164e2. */
+const TOKEN_MODE_BASELINE = {
+  ordinary: "7bc24f5e37113196a0751bc04b06b885ba9dc2332033a6587417bd780a15ace1",
+  paired: "98fcf90bae7dcc005567e92bb7fa745c27a05d1cab5d211c6eb3b1beb21da09d",
+}

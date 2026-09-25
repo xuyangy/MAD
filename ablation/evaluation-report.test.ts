@@ -26,6 +26,7 @@ import {
 import { pageFor, sheetFor, writeSheet } from "./adjudication-read.fixture.ts"
 import { PREFIX_DIRECTORY } from "./bundle.ts"
 import {
+  PERSISTENT_HOST_STATE_LIMITATION,
   armCost,
   blockAttempts,
   blockCost,
@@ -926,6 +927,20 @@ describe("cost", () => {
     expect(blockCost(paired.blocks[0]!).kind).toBe("unavailable")
   })
 
+  test("story 2-8c4 — an `unverified` arm gets no cost figure: `armCost` is unavailable, never a lower bound", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const arm = paired.blocks[0]!.arms[0]!
+    Object.assign(arm.row.manifest.spend, { source: "host-reported-unverified", usageCompleteness: "unverified", exposure: "unquantified" })
+    const cost = armCost(arm)
+    expect(cost.kind).toBe("unavailable")
+    if (cost.kind === "unavailable") {
+      expect(cost.reason).toContain("its usage is `unverified`")
+      expect(cost.reason).toContain("never zero")
+    }
+    expect(blockCost(paired.blocks[0]!).kind).toBe("unavailable")
+  })
+
   test("`costContrast` never subtracts an unknown", () => {
     const base = {
       kind: "read" as const,
@@ -1215,6 +1230,7 @@ describe("attempt mode (story 2-8c3a)", () => {
     if (without.kind !== "read") throw new Error("expected a report")
     expect(without.accounting).toBeUndefined()
     expect(without.blocks.every((block) => block.attempts === undefined)).toBe(true)
+    expect(renderEvaluationReport(without)).not.toContain("LIMITATION:")
   })
 
   test("a bundle whose schedule and arms disagree about the mode gets no cost figure, and says why", async () => {
@@ -1252,6 +1268,11 @@ describe("attempt mode (story 2-8c3a)", () => {
     expect(text).toContain("COST is NEWLY ISSUED MAD ATTEMPTS")
     expect(text).toContain("attempts UNAVAILABLE — the journal reader refused the journal: the journal is incomplete")
     for (const banned of ["token cost:", "exposure quantified"]) expect(text).not.toContain(banned)
+    // Story 2-8c4: the persistent-host-state limitation is stated on every attempt-mode report.
+    expect(text).toContain(`LIMITATION: ${PERSISTENT_HOST_STATE_LIMITATION}.`)
+    // The store guard's zeros are a precondition the launcher enforces; this report reads no record of them.
+    expect(text.replace(/\s+/g, " ")).toContain("a precondition the launcher enforces, not an observation this report read")
+    expect(text).not.toContain("store guard found")
   })
 
   test("with no journal handed in, an attempt-mode bundle's cost is unavailable rather than read from tokens", async () => {

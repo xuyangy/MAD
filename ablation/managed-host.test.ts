@@ -24,17 +24,23 @@ import {
   providerBlockProblems,
   REDACTED,
   redactConfig,
+  PROBE_PLACEHOLDER_DIR,
+  PROBE_SCRATCH_PREFIX,
   startManagedHost,
+  startProbePlaceholderHost,
   type HostChild,
   type ApiKeyHostOptions,
   type ManagedHostOptions,
   type OAuthHostOptions,
   type OAuthRoute,
+  type ProbePlaceholderStore,
   type ProviderBlock,
   type SignalSource,
   type SpawnHost,
 } from "./managed-host.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "./oauth-payload.fixture.ts"
+import { storeDatabasePath } from "./oauth-store.ts"
+import { fakeStore, ROW_CONTENT_MARKER } from "./oauth-store.fixture.ts"
 
 const SECRET = "sk-test-marker-0123456789"
 const BLOCK: ProviderBlock = { id: "stub", npm: OPENAI_COMPATIBLE_NPM, baseURL: "http://127.0.0.1:9/v1", apiKeyEnv: "MAD_TEST_KEY", models: ["m1", "m2"] }
@@ -620,13 +626,24 @@ async function startOAuth(
   patch: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
   registry: unknown = oauthRegistry(route),
 ) {
+  return startManagedHost(await oauthOptions(host, route, overrides, patch, registry))
+}
+
+/** The options `startOAuth` starts with. */
+async function oauthOptions(
+  host: FakeHost,
+  route: OAuthRoute,
+  overrides: Partial<OAuthHostOptions> = {},
+  patch: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
+  registry: unknown = oauthRegistry(route),
+): Promise<OAuthHostOptions> {
   let configFile: string | undefined
   const spawn: SpawnHost = (request) => {
     configFile = request.env.OPENCODE_CONFIG
     return (overrides.spawn ?? host.spawn)(request)
   }
   const reported = () => patch({ ...(JSON.parse(readFileSync(configFile!, "utf8")) as Record<string, unknown>), ...DEFAULTS })
-  return startManagedHost({
+  return {
     mode: "oauth",
     oauth: route,
     binary: "/opt/opencode",
@@ -638,7 +655,20 @@ async function startOAuth(
     stopMs: 50,
     ...overrides,
     spawn,
-  })
+  }
+}
+
+/** A probe scratch directory in the system temp directory, and a fresh placeholder route under it, as the probe's `writePlaceholders` lays it out. */
+async function probeFixture(): Promise<{ route: OAuthRoute; placeholder: ProbePlaceholderStore; link: string; target: string }> {
+  const scratchDir = await mkdtemp(join(tmpdir(), PROBE_SCRATCH_PREFIX))
+  scratch.push(scratchDir)
+  const { prepared, pins } = await fakePrepared(await parent())
+  const { dataDir, home, link, target } = await fakeAuthLink(join(scratchDir, PROBE_PLACEHOLDER_DIR, "anthropic-attempt"))
+  return { route: { providers: PROVIDERS, models: ROSTER, dataDir, prepared, home, pins }, placeholder: { kind: "probe-placeholder", scratch: scratchDir }, link, target }
+}
+
+async function startProbe(host: FakeHost, route: OAuthRoute, placeholder: ProbePlaceholderStore) {
+  return startProbePlaceholderHost(await oauthOptions(host, route), placeholder)
 }
 
 describe("OAuth mode: the config and the route", () => {
@@ -760,6 +790,7 @@ describe("OAuth mode: starting and stopping", () => {
         `\`${link}\` is still a symlink to \`${target}\``,
         `the seeded config lock is unchanged (sha256 ${route.pins!.configSeed.lockSha256})`,
         `the seeded config tree is unchanged but for the host's own \`.gitignore\` (digest ${route.pins!.configSeed.treeDigest})`,
+        `the OAuth store is empty: \`${storeDatabasePath(route.dataDir)}\`: no database yet, so the store is empty`,
       ],
       problems: [],
     })
@@ -903,6 +934,149 @@ describe("OAuth mode: starting and stopping", () => {
     registry.providers.pop()
     const unlisted = await startOAuth(fakeHost(), route, {}, undefined, registry)
     expect(unlisted.ok ? "" : unlisted.reason).toContain("is not the OAuth route's")
+  })
+
+  test("story 2-8c4 — a leftover session, a stored permission or a missing table in the store refuses before the spawn, by names and counts only", async () => {
+    for (const [rows, omit, expected] of [
+      [{ session: 3, message: 6 }, [], "holds session=3, message=6"],
+      [{ permission: 1 }, [], "holds permission=1"],
+      [{}, ["credential"], "has no table `credential`"],
+    ] as const) {
+      const { route } = await oauthFixture()
+      await fakeStore(route.dataDir, rows, omit)
+      const host = fakeHost()
+      const result = await startOAuth(host, route)
+      expect(result.ok).toBe(false)
+      const reason = result.ok ? "" : result.reason
+      expect(reason).toContain(`the OAuth data directory is refused: the OAuth store`)
+      expect(reason).toContain(expected)
+      expect(reason).not.toContain(ROW_CONTENT_MARKER)
+      expect(host.requests).toEqual([])
+    }
+  })
+
+  test("story 2-8c4 — a session left in the store after the run fails the post-stop check, and the store is kept", async () => {
+    const { route } = await oauthFixture()
+    await fakeStore(route.dataDir)
+    const result = await startOAuth(fakeHost(), route)
+    expect(result.ok, result.ok ? "" : result.reason).toBe(true)
+    if (!result.ok) return
+    await fakeStore(route.dataDir, { session: 1, message: 2 })
+    const stopped = await result.host.stop()
+    expect(stopped.postStop?.problems.join("\n")).toContain("after the host exited, the OAuth store")
+    expect(stopped.postStop?.problems.join("\n")).toContain("holds session=1, message=2; every named table must be empty")
+    expect(await lstat(storeDatabasePath(route.dataDir)).then((info) => info.isFile())).toBe(true)
+  })
+
+  test("story 2-8c4 — the store is counted only once the data directory is proven disjoint from the user's own store and the prepared directory", async () => {
+    const { route, root } = await oauthFixture()
+    const userStore = join(route.home!, ".local", "share", "opencode")
+    const inPrepared = join(route.prepared, "data")
+    for (const [dataDir, expected] of [
+      [join(userStore, "nested"), "inside the user's own opencode data directory"],
+      [inPrepared, "inside the prepared directory"],
+    ] as const) {
+      await mkdir(join(dataDir, "opencode"), { recursive: true })
+      await symlink(join(userStore, "auth.json"), join(dataDir, "opencode", "auth.json"))
+      await fakeStore(dataDir, { session: 3 })
+      const host = fakeHost()
+      const result = await startOAuth(host, { ...route, dataDir }, { scratchParent: root })
+      const reason = result.ok ? "" : result.reason
+      expect(reason).toContain(expected)
+      expect(reason).not.toContain("OAuth store")
+      expect(host.requests).toEqual([])
+    }
+  })
+
+  test("story 2-8c4 — a probe placeholder route: an attempt's nonempty store is recorded as expected probe state, never as an empty store", async () => {
+    const { route, placeholder, link, target } = await probeFixture()
+    const result = await startProbe(fakeHost(), route, placeholder)
+    expect(result.ok, result.ok ? "" : result.reason).toBe(true)
+    if (!result.ok) return
+    await fakeStore(route.dataDir, { session: 1, message: 2, part: 4 })
+    const stopped = await result.host.stop()
+    expect(stopped.postStop?.problems).toEqual([])
+    const held = stopped.postStop?.held ?? []
+    expect(held[0]).toBe(`\`${link}\` is still a symlink to \`${target}\``)
+    expect(held.at(-1)).toBe(
+      "placeholder store after the run: session=1, message=2, part=4, permission=0, credential=0, account=0, account_state=0, control_account=0, " +
+        `expected probe state (\`${storeDatabasePath(route.dataDir)}\`, a fresh probe-owned placeholder data directory; not an empty-store check)`,
+    )
+    expect(held.join("\n")).not.toContain("the OAuth store is empty")
+    expect(held.join("\n")).not.toContain(ROW_CONTENT_MARKER)
+  })
+
+  test("story 2-8c4 — the probe expectation on a route that is not a fresh probe placeholder is refused before the spawn", async () => {
+    const cases: [string, () => Promise<{ route: OAuthRoute; placeholder: ProbePlaceholderStore }>, string][] = [
+      ["an ordinary data directory", async () => ({ route: (await oauthFixture()).route, placeholder: (await probeFixture()).placeholder }), "is not a probe placeholder"],
+      [
+        "a scratch that is not the probe's",
+        async () => {
+          const { route } = await probeFixture()
+          return { route, placeholder: { kind: "probe-placeholder", scratch: await parent() } }
+        },
+        "directly in the system temp directory",
+      ],
+      [
+        "a placeholder store that already has a database, even an empty one",
+        async () => {
+          const fixture = await probeFixture()
+          await fakeStore(fixture.route.dataDir)
+          return fixture
+        },
+        "is not fresh (it already has a database)",
+      ],
+      [
+        "a home that is not the placeholder's own",
+        async () => {
+          const fixture = await probeFixture()
+          const other = await oauthFixture()
+          await unlink(fixture.link)
+          await symlink(other.target, fixture.link)
+          return { ...fixture, route: { ...fixture.route, home: other.route.home! } }
+        },
+        "is not the placeholder's own",
+      ],
+    ]
+    for (const [name, make, expected] of cases) {
+      const { route, placeholder } = await make()
+      const host = fakeHost()
+      const result = await startProbe(host, route, placeholder)
+      expect(result.ok, name).toBe(false)
+      expect(result.ok ? "" : result.reason, name).toContain(expected)
+      expect(host.requests, name).toEqual([])
+    }
+  })
+
+  test("story 2-8c4 — with the probe expectation, a retargeted symlink or a rewritten seeded config still fails the post-stop check", async () => {
+    const retargeted = await probeFixture()
+    const first = await startProbe(fakeHost(), retargeted.route, retargeted.placeholder)
+    if (!first.ok) throw new Error(first.reason)
+    await fakeStore(retargeted.route.dataDir, { session: 1 })
+    await unlink(retargeted.link)
+    await symlink(`${retargeted.target}.elsewhere`, retargeted.link)
+    const linkProblems = (await first.host.stop()).postStop?.problems ?? []
+    expect(linkProblems).toEqual([`after the host exited, \`${retargeted.link}\` points to \`${retargeted.target}.elsewhere\`; it must point to \`${retargeted.target}\` exactly`])
+
+    const seeded = await probeFixture()
+    const host = fakeHost()
+    const second = await startProbe(host, seeded.route, seeded.placeholder)
+    if (!second.ok) throw new Error(second.reason)
+    await writeFile(join(host.requests[0]!.env.XDG_CONFIG_HOME!, "opencode", "package-lock.json"), "{}\n")
+    const seedProblems = (await second.host.stop()).postStop?.problems.join("\n") ?? ""
+    expect(seedProblems).toContain("after the host exited, the seeded config lock's sha256 is")
+    expect(seedProblems).toContain("after the host exited, the seeded config tree's digest")
+  })
+
+  test("story 2-8c4 — `ManagedHostOptions`, which the launcher starts with, has no field for the probe expectation", async () => {
+    const { route, placeholder } = await probeFixture()
+    // @ts-expect-error the probe expectation reaches the host only through `startProbePlaceholderHost`.
+    const options: ManagedHostOptions = { mode: "oauth", oauth: route, placeholder }
+    // Passed anyway, it is ignored: the post-stop guard is the ordinary one, and a session left behind fails it.
+    const result = await startManagedHost({ ...(await oauthOptions(fakeHost(), route)), ...options })
+    if (!result.ok) throw new Error(result.reason)
+    await fakeStore(route.dataDir, { session: 1 })
+    expect((await result.host.stop()).postStop?.problems.join("\n")).toContain("holds session=1; every named table must be empty")
   })
 
   test("an unmeasured binary is refused before the payloads are even read", async () => {

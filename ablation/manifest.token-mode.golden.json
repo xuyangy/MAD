@@ -1,0 +1,453 @@
+{
+  "ordinary": {
+    "schemaVersion": 1,
+    "identity": {
+      "protocolVersion": {
+        "kind": "known",
+        "value": 1
+      },
+      "protocolHash": {
+        "kind": "known",
+        "value": "sha256:aaa"
+      },
+      "fixtureVersion": {
+        "kind": "unknown",
+        "why": "--fixture-version was not given"
+      },
+      "fixtureHash": {
+        "kind": "unknown",
+        "why": "--fixture-hash was not given"
+      },
+      "codeRevision": {
+        "kind": "known",
+        "value": {
+          "commit": "13eadc6",
+          "dirty": false
+        }
+      },
+      "armId": "on",
+      "repeatId": 0,
+      "changeId": {
+        "description": "HEAD~1..HEAD",
+        "files": [
+          "src/a.ts"
+        ],
+        "diffHash": "sha256:af76bbcf50e727f301b85c89d2dd9e5bbd26b21dac0f575c7615491cf10fdd5a"
+      }
+    },
+    "run": {
+      "runId": "run-0001",
+      "forkedFrom": {
+        "kind": "unknown",
+        "why": "the run was not forked"
+      },
+      "startedAt": "2026-09-10T00:00:00.000Z",
+      "finishedAt": {
+        "kind": "known",
+        "value": "2026-09-10T00:01:00.000Z"
+      }
+    },
+    "roster": {
+      "requested": 3,
+      "filled": 1,
+      "answered": 1,
+      "distinctLineages": 1,
+      "providers": [
+        "anthropic"
+      ],
+      "slots": [
+        {
+          "slot": "discovery-1",
+          "providerId": "anthropic",
+          "modelId": "claude-sonnet-4-5",
+          "identity": "claude-sonnet-4",
+          "lineage": {
+            "family": "claude",
+            "verified": true
+          },
+          "toolcall": true,
+          "alsoAvailableVia": []
+        }
+      ],
+      "lensSlots": [],
+      "skippedForBudget": []
+    },
+    "dials": {
+      "threshold": 0.5,
+      "maxRounds": 2,
+      "maxConcurrency": 4,
+      "cap": 1000,
+      "shares": {
+        "discover": 0.3,
+        "debate": 0.65,
+        "judge": 1
+      },
+      "preset": {
+        "kind": "unknown",
+        "why": "the caller named no preset"
+      },
+      "routingPolicy": "shipped"
+    },
+    "spend": {
+      "perStage": [
+        {
+          "stage": "discover",
+          "spent": 30,
+          "total": 30,
+          "ceiling": 300
+        },
+        {
+          "stage": "debate",
+          "spent": 0,
+          "total": 30,
+          "ceiling": 650
+        },
+        {
+          "stage": "judge",
+          "spent": 0,
+          "total": 30,
+          "ceiling": 1000
+        }
+      ],
+      "total": {
+        "input": 10,
+        "output": 20,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "usageCompleteness": "complete",
+      "unknownUsage": [],
+      "unknownUsageCount": 0,
+      "exposure": "quantified",
+      "origin": {
+        "attributed": {
+          "tokens": {
+            "input": 10,
+            "output": 20,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 1,
+          "unknown": 0
+        },
+        "executedHere": {
+          "tokens": {
+            "input": 10,
+            "output": 20,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 1,
+          "unknown": 0
+        },
+        "inherited": {
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 0,
+          "unknown": 0
+        }
+      }
+    },
+    "status": {
+      "completion": "completed",
+      "cancelledAt": {
+        "kind": "unknown",
+        "why": "the run was never cancelled"
+      },
+      "warnings": [],
+      "routeCounts": {
+        "kind": "did-not-run"
+      },
+      "debateCounts": {
+        "kind": "did-not-run"
+      },
+      "judgeCounts": {
+        "kind": "did-not-run"
+      }
+    },
+    "findings": {
+      "pool": [
+        {
+          "id": "f1",
+          "claim": "claim f1",
+          "reasoning": "reasoning f1",
+          "locus": {
+            "file": "src/a.ts",
+            "startLine": 1,
+            "endLine": 2
+          },
+          "severity": "medium",
+          "author": "discovery-1",
+          "source": "pool",
+          "history": [],
+          "clusterId": "c1",
+          "mergedIds": [
+            "f2"
+          ]
+        },
+        {
+          "id": "f2",
+          "claim": "claim f2",
+          "reasoning": "reasoning f2",
+          "locus": {
+            "file": "src/a.ts",
+            "startLine": 1,
+            "endLine": 2
+          },
+          "severity": "medium",
+          "author": "discovery-1",
+          "source": "pool",
+          "history": []
+        }
+      ],
+      "canonicalIds": [
+        "f1"
+      ],
+      "lensInstructions": []
+    },
+    "stageOutputs": {
+      "recordFile": "record.json",
+      "turnFiles": {
+        "kind": "known",
+        "value": 3
+      }
+    }
+  },
+  "paired": {
+    "schemaVersion": 1,
+    "identity": {
+      "protocolVersion": {
+        "kind": "known",
+        "value": 1
+      },
+      "protocolHash": {
+        "kind": "known",
+        "value": "sha256:aaa"
+      },
+      "fixtureVersion": {
+        "kind": "unknown",
+        "why": "--fixture-version was not given"
+      },
+      "fixtureHash": {
+        "kind": "unknown",
+        "why": "--fixture-hash was not given"
+      },
+      "codeRevision": {
+        "kind": "known",
+        "value": {
+          "commit": "13eadc6",
+          "dirty": false
+        }
+      },
+      "armId": "on",
+      "repeatId": 0,
+      "changeId": {
+        "description": "HEAD~1..HEAD",
+        "files": [
+          "src/a.ts"
+        ],
+        "diffHash": "sha256:af76bbcf50e727f301b85c89d2dd9e5bbd26b21dac0f575c7615491cf10fdd5a"
+      }
+    },
+    "run": {
+      "runId": "run-branch",
+      "forkedFrom": {
+        "kind": "known",
+        "value": "run-prefix"
+      },
+      "startedAt": "2026-09-10T00:00:00.000Z",
+      "finishedAt": {
+        "kind": "known",
+        "value": "2026-09-10T00:01:00.000Z"
+      }
+    },
+    "roster": {
+      "requested": 3,
+      "filled": 1,
+      "answered": 1,
+      "distinctLineages": 1,
+      "providers": [
+        "anthropic"
+      ],
+      "slots": [
+        {
+          "slot": "discovery-1",
+          "providerId": "anthropic",
+          "modelId": "claude-sonnet-4-5",
+          "identity": "claude-sonnet-4",
+          "lineage": {
+            "family": "claude",
+            "verified": true
+          },
+          "toolcall": true,
+          "alsoAvailableVia": []
+        }
+      ],
+      "lensSlots": [],
+      "skippedForBudget": []
+    },
+    "dials": {
+      "threshold": 0.5,
+      "maxRounds": 2,
+      "maxConcurrency": 4,
+      "cap": 1000,
+      "shares": {
+        "discover": 0.3,
+        "debate": 0.65,
+        "judge": 1
+      },
+      "preset": {
+        "kind": "unknown",
+        "why": "the caller named no preset"
+      },
+      "routingPolicy": "debate-off"
+    },
+    "spend": {
+      "perStage": [
+        {
+          "stage": "discover",
+          "spent": 30,
+          "total": 30,
+          "ceiling": 300
+        },
+        {
+          "stage": "debate",
+          "spent": 0,
+          "total": 30,
+          "ceiling": 650
+        },
+        {
+          "stage": "judge",
+          "spent": 0,
+          "total": 30,
+          "ceiling": 1000
+        }
+      ],
+      "total": {
+        "input": 10,
+        "output": 20,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "usageCompleteness": "complete",
+      "unknownUsage": [],
+      "unknownUsageCount": 0,
+      "exposure": "quantified",
+      "origin": {
+        "attributed": {
+          "tokens": {
+            "input": 10,
+            "output": 20,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 1,
+          "unknown": 0
+        },
+        "executedHere": {
+          "tokens": {
+            "input": 10,
+            "output": 20,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 1,
+          "unknown": 0
+        },
+        "inherited": {
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "turns": 0,
+          "unknown": 0
+        }
+      }
+    },
+    "status": {
+      "completion": "completed",
+      "cancelledAt": {
+        "kind": "unknown",
+        "why": "the run was never cancelled"
+      },
+      "warnings": [],
+      "routeCounts": {
+        "kind": "did-not-run"
+      },
+      "debateCounts": {
+        "kind": "did-not-run"
+      },
+      "judgeCounts": {
+        "kind": "did-not-run"
+      }
+    },
+    "findings": {
+      "pool": [
+        {
+          "id": "f1",
+          "claim": "claim f1",
+          "reasoning": "reasoning f1",
+          "locus": {
+            "file": "src/a.ts",
+            "startLine": 1,
+            "endLine": 2
+          },
+          "severity": "medium",
+          "author": "discovery-1",
+          "source": "pool",
+          "history": [],
+          "clusterId": "c1",
+          "mergedIds": [
+            "f2"
+          ]
+        },
+        {
+          "id": "f2",
+          "claim": "claim f2",
+          "reasoning": "reasoning f2",
+          "locus": {
+            "file": "src/a.ts",
+            "startLine": 1,
+            "endLine": 2
+          },
+          "severity": "medium",
+          "author": "discovery-1",
+          "source": "pool",
+          "history": []
+        }
+      ],
+      "canonicalIds": [
+        "f1"
+      ],
+      "lensInstructions": []
+    },
+    "stageOutputs": {
+      "recordFile": "record.json",
+      "turnFiles": {
+        "kind": "known",
+        "value": 0
+      }
+    },
+    "experiment": {
+      "scheduleHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "block": 2,
+      "arm": "off",
+      "position": "first",
+      "prefixRunId": "run-prefix"
+    }
+  }
+}

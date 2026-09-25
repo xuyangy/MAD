@@ -140,6 +140,7 @@ import {
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
+import { storeGuard } from "../ablation/oauth-store.ts"
 import { gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
@@ -1643,8 +1644,10 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
  * guarded, so a thrown check is a FAIL line: the route, the prepared payloads
  * against the pins, and the data directory (its shape and auth symlink, by
  * `lstat`, `readdir` and `readlink` only, and its real path disjoint from the
- * user's own opencode store, the prepared directory and `others`). The route, when
- * every check passed.
+ * user's own opencode store, the prepared directory and `others`), and, only once
+ * that data directory check passed, the store guard (story 2-8c4: the named tables
+ * of its opencode database counted on a read-only connection, every count 0). The
+ * route, when every check passed.
  */
 async function oauthChecks(
   flags: ParsedFlags,
@@ -1654,7 +1657,7 @@ async function oauthChecks(
   others: { name: string; path: string | undefined }[],
 ): Promise<OAuthRoute | undefined> {
   if (flags.oauth === undefined) {
-    for (const name of ["OAuth route", "OAuth prepared payloads", "OAuth data directory"]) checks.push(notEvaluated(name, "--pin and the --oauth-* flags"))
+    for (const name of ["OAuth route", "OAuth prepared payloads", "OAuth data directory", "OAuth store"]) checks.push(notEvaluated(name, "--pin and the --oauth-* flags"))
     return undefined
   }
   const route: OAuthRoute = {
@@ -1698,7 +1701,16 @@ async function oauthChecks(
       : fail("OAuth data directory", found)
   })
   checks.push(dataDir)
-  return problems.length === 0 && payloads.state === "pass" && dataDir.state === "pass" ? route : undefined
+  // The store is opened only in a data directory proven disjoint from the user's own opencode store.
+  const store =
+    dataDir.state === "pass"
+      ? await guarded("OAuth store", async () => {
+          const guard = await storeGuard(route.dataDir)
+          return guard.ok ? pass("OAuth store", [guard.line]) : fail("OAuth store", guard.problems)
+        })
+      : notEvaluated("OAuth store", "the OAuth data directory check did not pass, so no database was opened")
+  checks.push(store)
+  return problems.length === 0 && payloads.state === "pass" && dataDir.state === "pass" && store.state === "pass" ? route : undefined
 }
 
 /**

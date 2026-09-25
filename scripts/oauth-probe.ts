@@ -60,8 +60,12 @@ import { acquireLock, JOURNAL_FILE, openJournal, type IssuedLine, type JournalLi
 import {
   MEASURED_HOST,
   OAUTH_PAYLOAD,
+  PROBE_PLACEHOLDER_DIR,
+  PROBE_SCRATCH_PREFIX,
   spawnHost,
   startManagedHost,
+  startProbePlaceholderHost,
+  type OAuthHostOptions,
   type OAuthRoute,
   type PostStopChecks,
   type SpawnHost,
@@ -598,7 +602,8 @@ export interface ProbeContext {
   live: Set<Stoppable>
   signal: AbortSignal
   identity?: HostIdentity
-  startHost?: (context: ProbeContext, route: OAuthRoute) => Promise<ProbeHost>
+  /** Starts a scenario's host; `placeholderRun` marks an attempt scenario on its fresh placeholder data directory. */
+  startHost?: (context: ProbeContext, route: OAuthRoute, placeholderRun?: boolean) => Promise<ProbeHost>
   backendFor?: (host: ProbeHost, options: { directory: string; slots: RosterSlot[]; timeoutMs: number; lateUsage: LateUsageReporter }) => ModelBackend
   /** Reads `GET /config/providers` for `directory`. */
   listProviders?: (host: ProbeHost, directory: string) => Promise<unknown>
@@ -630,10 +635,16 @@ export async function writePlaceholders(root: string): Promise<{ dataDir: string
   return { dataDir, home }
 }
 
-/** The real managed host in OAuth mode, sandboxed, registered in `live` the moment it is spawned. */
-export async function managedProbeHost(context: ProbeContext, route: OAuthRoute): Promise<ProbeHost> {
+/**
+ * The real managed host in OAuth mode, sandboxed, registered in `live` the moment it
+ * is spawned. An attempt scenario's host (`placeholderRun`) starts through
+ * `startProbePlaceholderHost` on its fresh placeholder data directory under the
+ * probe's scratch, so the session it leaves there is recorded as expected probe
+ * state after the exit; every other host is held to the ordinary store guard.
+ */
+export async function managedProbeHost(context: ProbeContext, route: OAuthRoute, placeholderRun = false): Promise<ProbeHost> {
   let spawned: Stoppable | undefined
-  const started = await startManagedHost({
+  const options: OAuthHostOptions = {
     mode: "oauth",
     oauth: route,
     proxy: context.proxy.url,
@@ -645,7 +656,10 @@ export async function managedProbeHost(context: ProbeContext, route: OAuthRoute)
       spawned = host
       context.live.add(host)
     },
-  })
+  }
+  const started = placeholderRun
+    ? await startProbePlaceholderHost(options, { kind: "probe-placeholder", scratch: context.scratchParent })
+    : await startManagedHost(options)
   if (!started.ok) {
     if (spawned !== undefined && (started.stopped === null || started.stopped.confirmed)) context.live.delete(spawned)
     throw new Error(
@@ -827,7 +841,7 @@ export async function runAttempt(context: ProbeContext, scenario: Extract<Scenar
   let stopped: { how: string; postStop: PostStopChecks | null } = { how: "", postStop: null }
   let journalLatched: string | null = null
   try {
-    host = await (context.startHost ?? managedProbeHost)(context, await probeRoute(context, "placeholders", slug(scenario.name)))
+    host = await (context.startHost ?? managedProbeHost)(context, await probeRoute(context, "placeholders", slug(scenario.name)), true)
     const roster = selectRoster([{ providerId: scenario.providerId, modelId: scenario.modelId, toolcall: true }], { slots: 1, providerConfigKey: "provider" }).roster
     const options = { directory: context.workDir, slots: roster.slots, timeoutMs: scenario.turnTimeoutMs, lateUsage: journal.reporter() }
     const backend = (context.backendFor ?? ((probeHost, given) => new OpencodeModelBackend({ serverUrl: probeHost.url, ...given })))(host, options)
@@ -1018,6 +1032,10 @@ export function buildEvidence(input: {
         "the probe persisted no raw HTTP request or response",
       "a fresh host, and for every prompt scenario a fresh placeholder data directory, was used for every scenario, and " +
         "each host's exit was confirmed: see each record's `hostStop`",
+      "the store guard (story 2-8c4) counted each data directory's named opencode tables on a read-only connection before " +
+        "every spawn and found them empty. After the exit, the listing scenarios' stores were held to the same empty check; " +
+        "each attempt scenario's fresh placeholder store holds the session its turn made, and its counts are recorded in " +
+        "`postStop.held` as expected probe state, not as an empty store",
     ],
     host: input.host,
     summary: Object.fromEntries(input.scenarios.map((scenario) => [scenario.name, scenario.verdict])),
@@ -1063,7 +1081,7 @@ export type ProbeBody = (args: ProbeArgs, scratch: string[], live: Set<Stoppable
 
 const probeWith = (hooks: ProbeHooks): ProbeBody => async (args, scratch, live, servers, signal) => {
   const { out } = args
-  const scratchParent = await realpath(await mkdtemp(join(tmpdir(), "mad-oauth-probe-")))
+  const scratchParent = await realpath(await mkdtemp(join(tmpdir(), PROBE_SCRATCH_PREFIX)))
   scratch.push(scratchParent)
   const selfTest = await (hooks.selfTest ?? sandboxSelfTest)()
   if (!selfTest.ok) {
@@ -1095,7 +1113,7 @@ const probeWith = (hooks: ProbeHooks): ProbeBody => async (args, scratch, live, 
     workDir,
     scratchParent,
     prepared,
-    placeholders: (scenario) => writePlaceholders(join(scratchParent, "placeholders", scenario)),
+    placeholders: (scenario) => writePlaceholders(join(scratchParent, PROBE_PLACEHOLDER_DIR, scenario)),
     realDataDir: args.dataDir,
     realHome: args.home,
     stubs,

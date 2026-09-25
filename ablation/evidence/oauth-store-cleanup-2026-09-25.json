@@ -1,0 +1,118 @@
+{
+  "kind": "MAINTENANCE — the 2-8c3 spike's sessions removed from the OAuth data directory on established provenance (story 2-8c4)",
+  "measuredAt": "2026-09-25T17:26:06.734Z",
+  "provenance": {
+    "title": "spike",
+    "directory": "<spike-scratch>/spike-oauth/run-stub/work",
+    "createdFrom": "2026-09-25T10:53:24.822Z",
+    "createdTo": "2026-09-25T10:53:30.843Z",
+    "count": 3,
+    "record": "_bmad-output/specs/spec-mad-orchestrator/stories/2-8c3-spike/step2.sh, run-stub/host.redacted.log"
+  },
+  "expectation": {
+    "session": 3,
+    "message": 6,
+    "permission": 0,
+    "credential": 0,
+    "account": 0,
+    "account_state": 0,
+    "control_account": 0
+  },
+  "storeBefore": {
+    "session": 3,
+    "message": 6,
+    "permission": 0,
+    "credential": 0,
+    "account": 0,
+    "account_state": 0,
+    "control_account": 0
+  },
+  "sandbox": {
+    "ok": true,
+    "control": "connected",
+    "loopback": "connected",
+    "external": [
+      {
+        "target": "1.1.1.1:443",
+        "outcome": "refused: ECONNREFUSED"
+      },
+      {
+        "target": "https://example.com/",
+        "outcome": "refused: ConnectionRefused"
+      }
+    ],
+    "why": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused"
+  },
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    }
+  },
+  "sessions": [
+    {
+      "id": "ses_f27c",
+      "title": "spike",
+      "directory": "<spike-scratch>/spike-oauth/run-stub/work",
+      "created": "2026-09-25T10:53:30.515Z"
+    },
+    {
+      "id": "ses_f27c",
+      "title": "spike",
+      "directory": "<spike-scratch>/spike-oauth/run-stub/work",
+      "created": "2026-09-25T10:53:29.906Z"
+    },
+    {
+      "id": "ses_f27c",
+      "title": "spike",
+      "directory": "<spike-scratch>/spike-oauth/run-stub/work",
+      "created": "2026-09-25T10:53:28.195Z"
+    }
+  ],
+  "sessionIdNote": "The listed session and deletion ids were truncated to their first 8 characters, and all three read identically (`ses_f27c`), so the ids do not establish that three distinct sessions were deleted. Distinctness rests on the three distinct `created` timestamps. The spike scratch path is redacted to `<spike-scratch>` throughout; `provenance.directory` and each session's `directory` are the same path.",
+  "provenanceProblems": [],
+  "deletions": [
+    {
+      "id": "ses_f27c",
+      "ok": true,
+      "why": "HTTP 200 true"
+    },
+    {
+      "id": "ses_f27c",
+      "ok": true,
+      "why": "HTTP 200 true"
+    },
+    {
+      "id": "ses_f27c",
+      "ok": true,
+      "why": "HTTP 200 true"
+    }
+  ],
+  "outcome": "cleaned",
+  "why": "the spike's 3 sessions were deleted by id",
+  "hostStop": "process 73215 exited (status 143) after SIGTERM",
+  "postStop": {
+    "held": [
+      "`<data-dir>/opencode/auth.json` is still a symlink to `<home>/.local/share/opencode/auth.json`",
+      "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+      "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)",
+      "the OAuth store is empty: `<data-dir>/opencode/opencode.db`: session=0, message=0, permission=0, credential=0, account=0, account_state=0, control_account=0 (every named table empty; counted by SELECT COUNT(*) on a read-only connection)"
+    ],
+    "problems": []
+  },
+  "storeAfter": {
+    "session": 0,
+    "message": 0,
+    "permission": 0,
+    "credential": 0,
+    "account": 0,
+    "account_state": 0,
+    "control_account": 0
+  },
+  "proxyTargets": [
+    "api.githubcopilot.com:443"
+  ]
+}

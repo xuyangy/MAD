@@ -55,6 +55,8 @@ import {
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
 import { PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
+import { STORE_TABLES } from "./oauth-store.ts"
+import { PERSISTENT_HOST_STATE_LIMITATION } from "./evaluation-report.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
@@ -813,5 +815,150 @@ describe("LIVE-RUN.md documents the OAuth attempt probe that was actually run", 
       expect(text, phrase).toContain(phrase)
     }
     expect(text).not.toContain("evaluation complete")
+  })
+})
+
+/**
+ * Story 2-8c4 — the OAuth pre-run guards: the residual-risk section the human's v2
+ * and gate-4 review reads, the store guard, its limitation and recovery, the spike
+ * sessions' removal, the probe's placeholder stores and the attempt-mode manifest marker.
+ */
+describe("LIVE-RUN.md documents the OAuth pre-run guards", () => {
+  const flat = async () => (await liveRunDoc()).replace(/\s+/g, " ")
+
+  test("the residual-risk section sits inside the OAuth route section, names each risk with its evidence, and binds 2-8d's proposal", async () => {
+    const doc = await liveRunDoc()
+    const route = doc.indexOf("### The OAuth route (story 2-8c3b)")
+    const risks = doc.indexOf("### Residual risks on the OAuth route (story 2-8c4)")
+    const next = doc.indexOf("### When it runs")
+    expect(route).toBeGreaterThan(-1)
+    expect(risks).toBeGreaterThan(route)
+    expect(next).toBeGreaterThan(risks)
+    const text = between(doc, "### Residual risks on the OAuth route (story 2-8c4)", "### When it runs", "the residual-risk section").replace(/\s+/g, " ")
+    expect(text).toContain("**Story 2-8d's run proposal must quote this section before the human is asked to freeze protocol v2 or authorize gate 4.**")
+    for (const [risk, evidence] of [
+      ["**Runtime code fetch.**", "the production launch has no OS egress control"],
+      ["**Runtime code fetch.**", "`CONNECT registry.npmjs.org:443`"],
+      ["**The startup connection with the real sign-in.**", "`api.githubcopilot.com:443`"],
+      ["**The startup connection with the real sign-in.**", "(finding E1,"],
+      ["**Hidden host retries.**", "(R1: 1 attempt → 6 requests"],
+      ["**Hidden host retries.**", "over 75 s"],
+      ["**`small_model` is the first pin.**", "outside every attempt count"],
+      ["**`small_model` is the first pin.**", "finding O1"],
+      ["**Unverified refresh write-through.**", "where a refresh writes is not established"],
+      ["**Persistent host state.**", PERSISTENT_HOST_STATE_LIMITATION.replace(" in the OAuth data directory", "")],
+    ] as const) {
+      expect(text, risk).toContain(risk)
+      expect(text, evidence).toContain(evidence)
+    }
+    for (const file of ["ablation/evidence/host-accounting-2026-09-24-relay.json", "ablation/evidence/oauth-attempts-2026-09-25.json"]) {
+      expect(text).toContain(`\`${file}\``)
+      expect(await Bun.file(new URL(`../${file}`, import.meta.url)).exists()).toBe(true)
+    }
+  })
+
+  test("the six unguarded pinned-schema tables that may hold session data are named, never as guarded or empty, and bind 2-8d's pilot proposal", async () => {
+    const doc = await liveRunDoc()
+    const six = ["session_message", "session_entry", "session_input", "todo", "session_share", "workspace"]
+    const guard = between(doc, "**The store guard (story 2-8c4).**", "- **The spike's sessions.**", "the store guard bullet").replace(/\s+/g, " ")
+    const risks = between(doc, "### Residual risks on the OAuth route (story 2-8c4)", "### When it runs", "the residual-risk section").replace(/\s+/g, " ")
+    const named = six.map((table) => `\`${table}\``).join(", ").replace(/, (`workspace`)$/, " and $1")
+    for (const text of [guard, risks]) {
+      expect(text).toContain(`may hold session data: ${named}`)
+      for (const table of six) expect(STORE_TABLES as readonly string[]).not.toContain(table)
+    }
+    expect(guard).toContain("The guard never counts them, so nothing establishes that they are empty")
+    expect(risks).toContain("Nothing counts them or establishes that they are empty")
+    expect(risks).toContain("**2-8d's run proposal must name these six tables too before the human is asked to authorize a bounded pilot.**")
+  })
+
+  test("the store guard: what it reads, how, when, and what it does not cover", async () => {
+    const text = await flat()
+    expect(text).toContain("**The store guard (story 2-8c4).**")
+    expect(text).toContain("run only `SELECT COUNT(*)` on")
+    expect(text).toContain("on a read-only connection (`ablation/oauth-store.ts`)")
+    const guard = between(await liveRunDoc(), "**The store guard (story 2-8c4).**", "- **The spike's sessions.**", "the store guard bullet")
+    for (const table of STORE_TABLES) expect(guard).toContain(`\`${table}\``)
+    for (const phrase of [
+      "Every count must be 0",
+      "The store is counted only once the data directory check has proven the directory disjoint from your own `~/.local/share/opencode`",
+      "stage 1 lists `OAuth store` as not evaluated, so no database there is opened",
+      "`opencode.db`, its `-wal` and its `-shm`, where present, regular files: a symlink refuses",
+      "a WAL-mode database and its `-wal` are copied into a private temporary directory and counted there",
+      "no byte of them changes",
+      "**The tables are an allowlist tied to the pinned opencode 1.18.32 schema.**",
+      "a table a newer schema adds goes unseen",
+      "the binary pin (`MEASURED_HOST`)",
+      "the unguarded tables are unguarded",
+      "a data directory with no `opencode.db` yet reads as empty and says so",
+      "never a row, and never opens `auth.json`",
+      "does not stand in for it",
+      "the effect of persistent logs, `project` and `event` rows on later runs is unmeasured",
+      "every attempt-mode report lists both among its limitations",
+      "the whole seeded tree's digest and the store guard are checked again",
+      "and the store guard's refusal while the data directory's database holds anything",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+  })
+
+  test("the spike's sessions were removed on established provenance, and no cleanup command ships", async () => {
+    const text = await flat()
+    for (const phrase of [
+      "**The spike's sessions.**",
+      "They were removed on established provenance",
+      "(`ablation/evidence/oauth-store-cleanup-2026-09-25.json`)",
+      "the three distinct creation times, not the ids, establish that three sessions were removed",
+      "No command for that cleanup ships, and nothing bypasses the zero-count guard for a real data directory",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    expect(text).not.toContain("oauth-clean-spike-sessions")
+    expect(await Bun.file(new URL("../ablation/evidence/oauth-store-cleanup-2026-09-25.json", import.meta.url)).exists()).toBe(true)
+  })
+
+  test("a store-guard refusal has a general recovery path", async () => {
+    const text = between(await liveRunDoc(), "- **When the store guard refuses.**", "- **What is not controlled.**", "the store-guard recovery").replace(/\s+/g, " ")
+    for (const phrase of [
+      "nothing in MAD removes a row, and no cleanup command ships",
+      "that no opencode process is running on the data directory",
+      "by `ls -l` alone",
+      "stop using that data directory and sign in again with ordinary opencode",
+      "re-measure as in \"Re-measuring\" below",
+      "create a fresh dedicated data directory with its one `ln -s` link",
+      "Keep the refused directory as it is for inspection",
+      "Removing rows from it is a human decision, taken only on established provenance and recorded as evidence",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+  })
+
+  test("an attempt-mode manifest's spend is documented as host-reported and unverified", async () => {
+    const text = await flat()
+    for (const phrase of [
+      '`source: "host-reported-unverified"`, `usageCompleteness: "unverified"` and `exposure: "unquantified"`',
+      "nothing in it claims `complete` or `quantified`",
+      "A token-mode manifest has no `source` key and is byte for byte what it was",
+      "accepts `source` and `unverified` only together, and only on an arm whose `experiment.accounting` is `attempts`",
+      "The report gives an `unverified` arm no token cost figure",
+      "A reader built at or before commit e7164e2 does not know `unverified` and refuses such a manifest, although `MANIFEST_SCHEMA_VERSION` stays 1",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+  })
+
+  test("the probe section states how the store guard treats each probe host", async () => {
+    const text = between(await liveRunDoc(), "## OAuth attempt probe (story 2-8c3b)", "\n## ", "the OAuth probe section").replace(/\s+/g, " ")
+    for (const phrase of [
+      "**The store guard on the probe (story 2-8c4).** Every probe host passes the ordinary store guard before the spawn",
+      "Both listing scenarios are held to the ordinary guard after the exit too",
+      "starts through `startProbePlaceholderHost`",
+      "(`<scratch>/placeholders/<name>/data`, with no database before the spawn)",
+      "recorded in the record's `postStop.held` as expected probe state",
+      "never as an empty store; the symlink, data-directory and seeded-config checks still apply",
+      "`bun run paired` cannot reach that expectation: `ManagedHostOptions`, which it starts with, has no field for it",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
   })
 })

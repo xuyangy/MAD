@@ -88,13 +88,27 @@
  *   sha256 and the seeded tree's digest (allowing only the host's own `.gitignore`,
  *   `HOST_CONFIG_GITIGNORE`), and reports them on the outcome's `postStop`; an
  *   unconfirmed exit establishes none of them.
+ * - **The store guard (story 2-8c4).** Before the spawn, once the data directory's
+ *   shape and its disjointness from every other directory are proven, and after the
+ *   confirmed exit, `storeGuard` (`ablation/oauth-store.ts`) counts the named tables
+ *   of `<data-dir>/opencode/opencode.db` on a read-only connection; any count other
+ *   than 0, a missing table or an unreadable database refuses the start, or joins
+ *   the outcome's `postStop` problems.
+ * - **The probe's placeholder stores (story 2-8c4).** `startProbePlaceholderHost`,
+ *   which only the zero-bill probe calls, is `startManagedHost` for a route whose data
+ *   directory is a fresh probe placeholder: `<scratch>/placeholders/<name>/data`
+ *   beside its `home`, under a probe scratch directory directly in the system temp
+ *   directory, with no database yet. Every check above holds, the pre-spawn store
+ *   guard included; after the exit, the store's counts are recorded as expected probe
+ *   state (`probeStoreAfterRun`) instead of being held to 0. `ManagedHostOptions`
+ *   has no field that reaches it.
  *
  * AD-1: this tree may import from `core/`; nothing under `core/` imports it.
  */
 
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, rmdir, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { basename, dirname, isAbsolute, join } from "node:path"
 
 import {
   authLinkPaths,
@@ -109,6 +123,7 @@ import {
   type PayloadPins,
   type PreparedMeasure,
 } from "./oauth-payload.ts"
+import { probeStoreAfterRun, readStoreCounts, storeGuard } from "./oauth-store.ts"
 
 /**
  * The opencode build the accounting probe measured. The managed host refuses any
@@ -782,7 +797,64 @@ export async function startManagedHost(options: ManagedHostOptions): Promise<Man
   }
 }
 
-async function start(options: ManagedHostOptions, secrets: string[], redact: (text: string) => string): Promise<ManagedHostStart> {
+/** The prefix of the zero-bill probe's scratch directory, made directly in the system temp directory. */
+export const PROBE_SCRATCH_PREFIX = "mad-oauth-probe-"
+/** Where the probe makes each scenario's placeholder data directory and home: `<scratch>/placeholders/<name>/{data,home}`. */
+export const PROBE_PLACEHOLDER_DIR = "placeholders"
+
+/** Story 2-8c4 — the zero-bill probe's scratch directory, whose placeholder data directories a probe host may run on. */
+export interface ProbePlaceholderStore {
+  kind: "probe-placeholder"
+  /** The probe's scratch directory: `<system temp>/mad-oauth-probe-…`. */
+  scratch: string
+}
+
+/**
+ * Story 2-8c4 — `startManagedHost` for the zero-bill probe's fresh placeholder data
+ * directories only. The route is refused before anything is created unless its data
+ * directory is `<scratch>/placeholders/<name>/data`, its home that directory's
+ * sibling `home`, and `scratch` a `mad-oauth-probe-…` directory directly in the
+ * system temp directory; the pre-spawn store guard must then find no database. After
+ * the exit the store's counts are recorded as expected probe state, never as an
+ * empty store; every other post-stop check is unchanged. It never rejects.
+ */
+export async function startProbePlaceholderHost(options: OAuthHostOptions, placeholder: ProbePlaceholderStore): Promise<ManagedHostStart> {
+  try {
+    return await start(options, [], (text) => text, placeholder)
+  } catch (error) {
+    return { ok: false, reason: `the managed host could not be started: ${messageOf(error)}`, stopped: null }
+  }
+}
+
+/** Why `route` is not a fresh probe placeholder under `placeholder.scratch`: empty when it is. Never rejects. */
+async function probePlaceholderProblems(route: OAuthRoute, placeholder: ProbePlaceholderStore): Promise<string[]> {
+  if (placeholder.kind !== "probe-placeholder") return [`the probe placeholder expectation has the kind ${JSON.stringify(placeholder.kind)}`]
+  const real = (path: string) => realpath(path).catch(() => undefined)
+  const [temp, scratch, dataDir, home] = await Promise.all([real(tmpdir()), real(placeholder.scratch), real(route.dataDir), real(route.home ?? homedir())])
+  if (scratch === undefined || temp === undefined || dirname(scratch) !== temp || !basename(scratch).startsWith(PROBE_SCRATCH_PREFIX)) {
+    return [`the probe scratch \`${placeholder.scratch}\` is not a \`${PROBE_SCRATCH_PREFIX}…\` directory directly in the system temp directory`]
+  }
+  const problems: string[] = []
+  const root = dataDir === undefined ? undefined : dirname(dataDir)
+  if (dataDir === undefined || root === undefined || basename(dataDir) !== "data" || dirname(root) !== join(scratch, PROBE_PLACEHOLDER_DIR)) {
+    problems.push(`the data directory \`${route.dataDir}\` is not a probe placeholder \`${join(placeholder.scratch, PROBE_PLACEHOLDER_DIR)}/<name>/data\``)
+  } else if (home !== join(root, "home")) {
+    problems.push(`the home \`${route.home ?? "(the user's)"}\` is not the placeholder's own \`${join(root, "home")}\``)
+  }
+  if (problems.length > 0) return problems
+  const reading = await readStoreCounts(route.dataDir)
+  if (reading.kind !== "no-database") {
+    problems.push(`the placeholder store \`${reading.path}\` is not fresh (${reading.kind === "counted" ? "it already has a database" : reading.reason})`)
+  }
+  return problems
+}
+
+async function start(
+  options: ManagedHostOptions,
+  secrets: string[],
+  redact: (text: string) => string,
+  placeholder?: ProbePlaceholderStore,
+): Promise<ManagedHostStart> {
   const variant =
     options.mode === "oauth"
       ? ({ kind: "oauth", route: options.oauth } as const)
@@ -847,6 +919,17 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
       await rmdir(root).catch(() => undefined)
       return { ok: false, reason: `the OAuth data directory is refused: ${overlap}`, stopped: null }
     }
+    // Only once the data directory is proven disjoint from the user's own store and every other directory.
+    const store = await storeGuard(route.dataDir)
+    if (!store.ok) {
+      await rmdir(root).catch(() => undefined)
+      return { ok: false, reason: `the OAuth data directory is refused: ${store.problems.join("; ")}`, stopped: null }
+    }
+    const notPlaceholder = placeholder === undefined ? [] : await probePlaceholderProblems(route, placeholder)
+    if (notPlaceholder.length > 0) {
+      await rmdir(root).catch(() => undefined)
+      return { ok: false, reason: `the OAuth data directory is refused as a probe placeholder: ${notPlaceholder.join("; ")}`, stopped: null }
+    }
   }
   const dirs = {
     home: join(root, "home"),
@@ -879,7 +962,7 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
         outcome = {
           ...outcome,
           postStop: outcome.confirmed
-            ? await postStopChecks(route, home, pins, dirs.config)
+            ? await postStopChecks(route, home, pins, dirs.config, placeholder !== undefined)
             : { held: [], problems: ["the host's exit was not confirmed; post-stop checks not established"] },
         }
       }
@@ -1051,10 +1134,12 @@ async function seedPayloads(prepared: string, pins: PayloadPins, into: { plugin:
 /**
  * After an OAuth-mode host's exit was confirmed: the data directory still has its
  * shape and the auth symlink is still the expected link, the seeded config lock is
- * byte-identical to the pinned one, and the whole seeded tree still has its pinned
- * digest. Neither the link nor its target is opened. Never rejects.
+ * byte-identical to the pinned one, the whole seeded tree still has its pinned
+ * digest, and the store guard finds every named table empty; on a probe placeholder
+ * route (`probePlaceholder`), the store's counts are recorded as expected probe state
+ * instead. Neither the link nor its target is opened. Never rejects.
  */
-async function postStopChecks(route: OAuthRoute, home: string, pins: PayloadPins, configHome: string): Promise<PostStopChecks> {
+async function postStopChecks(route: OAuthRoute, home: string, pins: PayloadPins, configHome: string, probePlaceholder: boolean): Promise<PostStopChecks> {
   const held: string[] = []
   const problems: string[] = []
   const { link, target } = authLinkPaths(route.dataDir, home)
@@ -1079,6 +1164,9 @@ async function postStopChecks(route: OAuthRoute, home: string, pins: PayloadPins
       )
     } else held.push(`the seeded config tree is unchanged but for the host's own \`${HOST_CONFIG_GITIGNORE.path}\` (digest ${digest})`)
   }
+  const store = probePlaceholder ? await probeStoreAfterRun(route.dataDir) : await storeGuard(route.dataDir)
+  if (store.ok) held.push(probePlaceholder ? store.line : `the OAuth store is empty: ${store.line}`)
+  else problems.push(...store.problems.map((problem) => `after the host exited, ${problem}`))
   return { held, problems }
 }
 

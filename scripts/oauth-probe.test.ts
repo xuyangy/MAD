@@ -270,12 +270,14 @@ const passingSelfTest = async (): Promise<SelfTest> => ({ ok: true, control: "co
 function standIn(options: { postStopProblems?: string[] } = {}) {
   let route: OAuthRoute | undefined
   const started: OAuthRoute[] = []
+  const placeholderRuns: boolean[] = []
   let stops = 0
   const hooks: ProbeHooks = {
     prepare: async () => ({ ok: true }),
     selfTest: passingSelfTest,
-    startHost: async (context, given) => {
+    startHost: async (context, given, placeholderRun) => {
       route = given
+      placeholderRuns.push(placeholderRun === true)
       context.identity ??= {
         binary: "/opt/opencode",
         sha256: "stand-in",
@@ -326,7 +328,7 @@ function standIn(options: { postStopProblems?: string[] } = {}) {
     }),
     scenarios: SCENARIOS.map((scenario): Scenario => (scenario.kind === "attempt" && scenario.expect === "abandoned" ? { ...scenario, turnTimeoutMs: 200 } : scenario)),
   }
-  return { hooks, started, stops: () => stops }
+  return { hooks, started, placeholderRuns, stops: () => stops }
 }
 
 async function runProbe(hooks: ProbeHooks, extra: { platform?: string } = {}) {
@@ -368,6 +370,8 @@ describe("a run against a stand-in host", () => {
     expect(stand.started.filter((route) => route.dataDir === result.dataDir)[0]!.baseURLs).toBeUndefined()
     expect(stand.started.filter((route) => route.dataDir !== result.dataDir).every((route) => route.baseURLs?.anthropic !== undefined)).toBe(true)
     expect(stand.stops()).toBe(stand.started.length)
+    // Story 2-8c4: only the attempt scenarios' hosts, each on its fresh placeholder store, take the probe expectation.
+    expect(stand.placeholderRuns).toEqual(SCENARIOS.map((scenario) => scenario.kind === "attempt"))
     const text = await readFile(join(result.out, EVIDENCE_FILE), "utf8")
     expect(text).not.toContain(result.out)
     expect(text).not.toContain(result.home)
