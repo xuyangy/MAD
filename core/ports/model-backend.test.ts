@@ -60,6 +60,7 @@ describe("abandonedTurn — the IN-FLIGHT case, where tokens ARE billed", () => 
     expect(envelope.usageUnknown).toEqual({
       executionId: "exec-7",
       why: "the run was cancelled in flight",
+      abandoned: true,
     })
     expect("tokens" in envelope).toBe(false)
   })

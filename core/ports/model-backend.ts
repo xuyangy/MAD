@@ -92,6 +92,14 @@ export type TurnFailure =
 export interface UsageUnknown {
   executionId: string
   why: string
+  /**
+   * Story 2-8c3a — present when the turn did not end within its bound: MAD
+   * stopped waiting on a request that was issued (a timeout, or a cancellation
+   * in flight), so the request may still be held open. Absent when the turn
+   * ended and the host reported nothing. The two differ in what may still be
+   * running, and a free-text `why` is not a reliable place to read that from.
+   */
+  abandoned?: true
 }
 
 /**
@@ -282,7 +290,7 @@ export function abandonedTurn<T>(slot: string, executionId: string, why: string)
     slot,
     failure: "cancelled",
     message: "the run stopped waiting on this turn while it was in flight, so its usage is unknown",
-    usageUnknown: { executionId, why: stated },
+    usageUnknown: { executionId, why: stated, abandoned: true },
   }
 }
 

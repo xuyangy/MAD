@@ -35,7 +35,8 @@ import type { Roster } from "../core/domain/roster.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 import type { LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
 import type { Provenance } from "./arms.ts"
-import { PAIRED_ALLOWANCES } from "./governor.ts"
+import { ATTEMPT_ALLOWANCES, PAIRED_ALLOWANCES, type AccountingMode } from "./governor.ts"
+import type { GateRoute } from "./paired-gates.ts"
 import { resolveInstructions } from "../core/instructions/registry.ts"
 import { acquireLock, syncDirectory } from "./journal.ts"
 import { changeIdFor, type CodeRevision, type Maybe } from "./manifest.ts"
@@ -81,10 +82,19 @@ export interface PairedConfig {
    */
   tools?: string
   /**
-   * The identity of the gate table that let the run start (its committed blob and
-   * every gate's status), or absent when no launcher checked one.
+   * The identity of the gate table that let the run start (its committed blob,
+   * the route it was checked for and every gate's status), or absent when no
+   * launcher checked one.
    */
   gates?: string
+  /**
+   * Story 2-8c3a — what the journal counts: `tokens` (protocol v1, the default)
+   * or `attempts` (protocol v2's draft unit for the OAuth route). Absent means
+   * tokens.
+   */
+  accounting?: AccountingMode
+  /** Story 2-8c3a — how the host reaches its providers. Absent means `api-key`. */
+  route?: GateRoute
 }
 
 export interface PairedSchedule {
@@ -166,14 +176,21 @@ export function scheduleHashOf(schedule: Omit<PairedSchedule, "scheduleHash"> & 
  *
  * The change is bound by its diff hash. `tokenCap`, the shares and the stop dial
  * are fixed rather than read from `config`, so no arm can be given its own.
+ *
+ * Story 2-8c3a — `accounting`, `attemptAllowances` and `route` are written only
+ * when they are not the token and api-key defaults, so a token-mode, api-key
+ * config carries none of them and its digest does not depend on them. In
+ * attempt mode the run dials say what the runs receive: no `tokenCap` (`null`)
+ * and no stop on unknown usage.
  */
 export function pairedRunConfig(config: PairedConfig, change: ChangeSet, roster: Roster): Record<string, unknown> {
+  const attempts = config.accounting === "attempts"
   return {
     provenance: config.provenance,
     changeDiffHash: changeIdFor(change).diffHash,
-    tokenCap: PAIRED_ALLOWANCES.runCap,
+    tokenCap: attempts ? null : PAIRED_ALLOWANCES.runCap,
     spendShares: { ...CUMULATIVE_SHARE },
-    stopOnUnknownUsage: true,
+    stopOnUnknownUsage: !attempts,
     threshold: config.threshold,
     maxRounds: config.maxRounds,
     maxConcurrency: config.maxConcurrency,
@@ -182,6 +199,8 @@ export function pairedRunConfig(config: PairedConfig, change: ChangeSet, roster:
     instructionsDigest: instructionsDigestOf(roster),
     tools: config.tools ?? "no tools port",
     ...(config.gates === undefined ? {} : { gates: config.gates }),
+    ...(attempts ? { accounting: "attempts", attemptAllowances: { ...ATTEMPT_ALLOWANCES } } : {}),
+    ...(config.route === undefined || config.route === "api-key" ? {} : { route: config.route }),
   }
 }
 
@@ -204,6 +223,68 @@ export function instructionsDigestOf(roster: Roster): string {
 
 export function configDigestOf(config: Record<string, unknown>): string {
   return sha256(canonicalJson(config))
+}
+
+// ---------------------------------------------------------------------------
+// Story 2-8c3a — what an attempt-mode schedule must be bound to
+// ---------------------------------------------------------------------------
+
+/** The lens slots `ATTEMPT_ALLOWANCES.prefix` = 2×(3+L) is sized for, with L = 2. */
+export const ATTEMPT_MODE_LENSES = ["reliability", "security"] as const
+/** The pool discovery slots it is sized for. */
+export const ATTEMPT_MODE_POOL_SLOTS = 3
+
+/**
+ * Why the config's accounting mode and route cannot run together, or `null`.
+ *
+ * They are one choice: the OAuth route has no relay, so MAD cannot count its
+ * tokens and it runs only in attempt mode; the api-key route is measured in
+ * tokens and never runs in attempt mode. An unknown value of either refuses.
+ */
+export function accountingConfigProblem(config: PairedConfig): string | null {
+  const { accounting, route } = config
+  if (accounting !== undefined && accounting !== "tokens" && accounting !== "attempts") {
+    return `the config's accounting ${JSON.stringify(accounting)} is neither tokens nor attempts`
+  }
+  if (route !== undefined && route !== "api-key" && route !== "oauth") {
+    return `the config's route ${JSON.stringify(route)} is neither api-key nor oauth`
+  }
+  if (route === "oauth" && accounting !== "attempts") {
+    return "the oauth route measures no tokens, so it runs only with accounting `attempts`"
+  }
+  if (accounting === "attempts" && route !== "oauth") {
+    return "accounting `attempts` belongs to the oauth route; the api-key route is measured in tokens"
+  }
+  return null
+}
+
+/**
+ * Why an attempt-mode schedule may not bind this protocol, or `null`: attempt
+ * accounting is defined only by a frozen version-2 protocol (its sections A6
+ * onward). `readFrozenProtocol` has already verified status and hash.
+ */
+export function attemptProtocolProblem(config: PairedConfig, protocol: { id: string; version: number }): string | null {
+  if (config.accounting !== "attempts" || protocol.version === 2) return null
+  return (
+    `accounting \`attempts\` needs a frozen version-2 protocol, and the protocol handed in is ` +
+    `${protocol.id} version ${protocol.version}`
+  )
+}
+
+/**
+ * Why an attempt-mode schedule may not seal this roster, or `null`. The prefix
+ * allowance of 10 attempts is 2×(3+L) for exactly three pool discovery slots and
+ * the two lens slots `security` and `reliability`.
+ */
+export function attemptRosterProblem(config: PairedConfig, roster: Roster): string | null {
+  if (config.accounting !== "attempts") return null
+  const lenses = roster.lensSlots.map((slot) => slot.lens).sort()
+  if (roster.slots.length === ATTEMPT_MODE_POOL_SLOTS && canonicalJson(lenses) === canonicalJson(ATTEMPT_MODE_LENSES)) return null
+  return (
+    `accounting \`attempts\` is sized for ${ATTEMPT_MODE_POOL_SLOTS} pool discovery slots and the lens slots ` +
+    `${ATTEMPT_MODE_LENSES.join(" and ")}, and the roster has ${roster.slots.length} pool slot(s) and lens slots ` +
+    `${JSON.stringify(lenses)}`
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -302,8 +383,12 @@ async function publishSchedule(input: CreateScheduleInput, root: string): Promis
             : present,
       }
     }
+    const configProblem = accountingConfigProblem(input.config) ?? attemptRosterProblem(input.config, input.roster)
+    if (configProblem !== null) return { ok: false, reason: `${configProblem}; nothing was tossed` }
     const protocol = await readFrozenProtocol(input.protocolFile)
     if (!protocol.ok) return { ok: false, reason: protocol.reason }
+    const protocolProblem = attemptProtocolProblem(input.config, protocol)
+    if (protocolProblem !== null) return { ok: false, reason: `${protocolProblem}; nothing was tossed` }
 
     const face = (input.coin ?? cryptoCoin)()
     if (face !== "heads" && face !== "tails") {
@@ -429,8 +514,12 @@ export async function verifySchedule(bundleRoot: string, binding: ScheduleBindin
   if (canonicalJson(schedule.slots) !== canonicalJson(plannedSlots(expectedFirst))) {
     return refuse("plans slots its coin does not give")
   }
+  const configProblem = accountingConfigProblem(binding.config) ?? attemptRosterProblem(binding.config, binding.roster)
+  if (configProblem !== null) return { ok: false, reason: configProblem }
   const protocol = await readFrozenProtocol(binding.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
+  const protocolProblem = attemptProtocolProblem(binding.config, protocol)
+  if (protocolProblem !== null) return { ok: false, reason: protocolProblem }
   if (canonicalJson(schedule.protocol) !== canonicalJson({ id: protocol.id, version: protocol.version, hash: protocol.hash })) {
     return refuse(`is bound to protocol ${canonicalJson(schedule.protocol)}, not to the frozen protocol this runner read`)
   }

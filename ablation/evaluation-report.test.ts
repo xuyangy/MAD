@@ -27,7 +27,9 @@ import { pageFor, sheetFor, writeSheet } from "./adjudication-read.fixture.ts"
 import { PREFIX_DIRECTORY } from "./bundle.ts"
 import {
   armCost,
+  blockAttempts,
   blockCost,
+  bundleAccounting,
   costContrast,
   DIRECTION_UNRESOLVED,
   NO_TREATMENT_OPPORTUNITY,
@@ -37,12 +39,14 @@ import {
   renderEvaluationReport,
   REPORTING_MILESTONE,
   settle,
+  spliceCostEstimand,
   type EvaluationReport,
   type PairDifference,
 } from "./evaluation-report.ts"
 import { fraction, fractionText, meanText } from "./fraction.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import { JOURNAL_FILE } from "./journal.ts"
+import { readPersistedJournal } from "./journal-read.ts"
 import { readLabelledBundle } from "./labelled-read.ts"
 import { known, unknownValue } from "./manifest.ts"
 import { readPairedBundle, type PairedReadResult } from "./paired-read.ts"
@@ -1166,5 +1170,221 @@ describe("prefix identity", () => {
       expect(cost.prefix.reasons.join("; ")).toContain("inherited 1 unknown execution(s) but names only 0")
     }
     expect(cost.contrast.kind).toBe("unavailable")
+  })
+})
+
+describe("attempt mode (story 2-8c3a)", () => {
+  const readers = async (paired: PairedReadResult) =>
+    [await settle(() => readLabelledBundle(paired)), await settle(() => readAdjudicationBundle(paired))] as const
+
+  /** Seal a fixture bundle as attempt mode: schedule and every arm, under a version-2 protocol. */
+  function markAttempts(paired: PairedReadResult): void {
+    if (!paired.schedule.ok) throw new Error("expected a schedule")
+    paired.schedule.schedule.config.accounting = "attempts"
+    paired.schedule.schedule.protocol.version = 2
+    for (const block of paired.blocks) for (const arm of block.arms) arm.experiment = { ...arm.experiment, accounting: "attempts" }
+  }
+
+  /** A persisted attempt-mode journal holding `lines`, read back through the reader. */
+  async function journalOf(lines: readonly object[]) {
+    const dir = await tempDir()
+    await writeFile(join(dir, JOURNAL_FILE), lines.map((line) => `${JSON.stringify(line)}\n`).join(""))
+    const read = await readPersistedJournal(dir, "attempts")
+    if (!read.ok) throw new Error(read.reason)
+    return read
+  }
+  let serial = 0
+  const attempt = (block: number, phase: "prefix" | "on" | "off", over: { attempt?: number; slot?: string; stage?: string; state?: "usage" | "not-issued" } = {}) => {
+    const id = `r-${(serial += 1)}`
+    return [
+      { type: "issued", physicalId: id, category: "blocks", block, phase, stage: over.stage ?? "discover", slot: over.slot ?? "discovery-1", attempt: over.attempt ?? 1, runId: "run", mode: "attempts" },
+      { type: "settled", physicalId: id, settlement: over.state === "not-issued" ? { kind: "not-issued" } : { kind: "usage", tokens: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } } },
+    ]
+  }
+  const completedSlots = [1, 2, 3].flatMap((block) => (["on", "off"] as const).map((arm) => ({ block, arm, status: "completed", reason: "finished" })))
+
+  test("a token-mode bundle reads no journal and prints the token cost exactly as before", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const [labelled, adjudication] = await readers(paired)
+    const without = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+    // A journal handed to a token-mode report changes nothing.
+    const refused = { kind: "read" as const, value: { ok: false as const, file: "x", reason: "never read" } }
+    const withJournal = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, refused)
+    expect(renderEvaluationReport(withJournal)).toBe(renderEvaluationReport(without))
+    if (without.kind !== "read") throw new Error("expected a report")
+    expect(without.accounting).toBeUndefined()
+    expect(without.blocks.every((block) => block.attempts === undefined)).toBe(true)
+  })
+
+  test("a bundle whose schedule and arms disagree about the mode gets no cost figure, and says why", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    if (!paired.schedule.ok) throw new Error("expected a schedule")
+    paired.schedule.schedule.config.accounting = "attempts"
+    const [labelled, adjudication] = await readers(paired)
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.accounting).toBe("mixed")
+    for (const block of report.blocks) {
+      expect(block.attempts).toMatchObject({ kind: "unavailable" })
+      expect(block.cost.kind).toBe("unavailable")
+    }
+    expect(report.upstream.join("\n")).toContain("the bundle mixes accounting modes")
+    const text = renderEvaluationReport(report)
+    expect(text).toContain("attempts UNAVAILABLE — the bundle mixes accounting modes")
+    expect(text).not.toMatch(/ON − OFF newly executed: .* tokens/)
+  })
+
+  test("an attempt-mode bundle whose journal was refused prints no count, and names the refusal", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    if (!paired.schedule.ok) throw new Error("expected a schedule")
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const refused = { kind: "read" as const, value: { ok: false as const, file: "x", reason: "the journal is incomplete" } }
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, refused)
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.accounting).toBe("attempts")
+    expect(report.upstream.join("\n")).toContain("the journal reader refused the journal: the journal is incomplete")
+    expect(report.availability.find((entry) => entry.quantity === "cost contrast")!.available).toBe(0)
+    const text = renderEvaluationReport(report)
+    expect(text).toContain("COST is NEWLY ISSUED MAD ATTEMPTS")
+    expect(text).toContain("attempts UNAVAILABLE — the journal reader refused the journal: the journal is incomplete")
+    for (const banned of ["token cost:", "exposure quantified"]) expect(text).not.toContain(banned)
+  })
+
+  test("with no journal handed in, an attempt-mode bundle's cost is unavailable rather than read from tokens", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    if (!paired.schedule.ok) throw new Error("expected a schedule")
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.blocks[0]!.attempts).toEqual({ kind: "unavailable", reason: "the persisted journal was not read (`ablation/journal-read.ts`)" })
+  })
+
+  test("an attempt-sealed bundle handed a finished token-mode journal gets no attempt count", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const tokenJournal = { kind: "read" as const, value: { ok: true as const, file: "x", mode: "tokens" as const, bill: (await journalOf([])).bill } }
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, tokenJournal)
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.blocks[0]!.attempts).toEqual({ kind: "unavailable", reason: "the journal records tokens, not attempts" })
+  })
+
+  test("an attempt-mode bundle under a protocol that is not version 2 has no established mode and no cost endpoint", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    if (paired.schedule.ok) paired.schedule.schedule.protocol.version = 1
+    const accounting = bundleAccounting(paired)
+    expect(accounting.kind).toBe("unestablished")
+    if (accounting.kind === "unestablished") expect(accounting.reason).toContain("the sealed schedule names protocol version 1")
+    const [labelled, adjudication] = await readers(paired)
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.accounting).toBe("unestablished")
+    const text = renderEvaluationReport(report)
+    expect(text).toContain("COST — no cost endpoint applies: the accounting mode is mixed or cannot be established")
+    expect(text).toContain("COST: NO COST ENDPOINT APPLIES.")
+    expect(text).not.toContain("COST is NEWLY ISSUED MAD ATTEMPTS")
+    expect(text).not.toContain("COST — newly issued MAD attempts")
+  })
+
+  test("a refused sealed schedule with no arm bound establishes no accounting mode", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const refused = { ...paired, schedule: { ok: false as const, reason: "it was edited after it was sealed" }, blocks: paired.blocks.map((block) => ({ ...block, arms: [] })) }
+    expect(bundleAccounting(refused)).toEqual({
+      kind: "unestablished",
+      reason: "the sealed schedule is refused (it was edited after it was sealed) and no arm manifest is bound, so the accounting mode cannot be established",
+    })
+  })
+
+  test("the mixed heading and estimand are neutral", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    if (paired.schedule.ok) paired.schedule.schedule.config.accounting = "attempts"
+    const [labelled, adjudication] = await readers(paired)
+    const text = renderEvaluationReport(readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication))
+    expect(text).toContain("COST — no cost endpoint applies")
+    expect(text).not.toContain("COST — newly issued MAD attempts")
+    expect(text).not.toContain("COST is NEWLY ISSUED MAD ATTEMPTS")
+  })
+
+  test("spliceCostEstimand replaces exactly the token COST estimand, and throws when there is none", () => {
+    const base = ["  RECALL here is x,", "  not y.", "  COST is OBSERVED z,", "  (`j`) owns w,", "  and more.", "  Three blocks are v.", ""]
+    expect(spliceCostEstimand(base, ["  NEW COST"])).toEqual(["  RECALL here is x,", "  not y.", "  NEW COST", "  Three blocks are v.", ""])
+    expect(() => spliceCostEstimand(["  RECALL here is x."], ["  NEW"])).toThrow("carry no `  COST is` line")
+  })
+
+  test("retries are counted apart, per phase and per row", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const read = await journalOf([...attempt(1, "on", { stage: "debate" }), ...attempt(1, "on", { stage: "debate", attempt: 2 }), ...attempt(1, "off", { stage: "judge" })])
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    if (result.kind !== "read") throw new Error("expected counts")
+    expect(result.on).toEqual({ first: 1, retries: 1, total: 2 })
+    expect(result.rows.find((row) => row.phase === "on")).toMatchObject({ stage: "debate", slot: "discovery-1", first: 1, retries: 1 })
+    expect(result.contrast).toEqual({ kind: "exact", attempts: 1 })
+  })
+
+  test("the contrast needs both continuations recorded completed: a missing status row is not completed", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const read = await journalOf([...attempt(1, "on"), ...attempt(1, "off")])
+    for (const slots of [[], completedSlots.filter((slot) => !(slot.block === 1 && slot.arm === "off"))]) {
+      const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], slots)
+      if (result.kind !== "read") throw new Error("expected counts")
+      expect(result.contrast.kind).toBe("unavailable")
+      if (result.contrast.kind === "unavailable") expect(result.contrast.reason).toContain("slot has no recorded status")
+    }
+  })
+
+  test("realised counts are shown against their thresholds, and an overshot continuation flags the contrast", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const lines = [...Array.from({ length: 46 }, () => attempt(1, "on")).flat(), ...attempt(1, "off")]
+    const read = await journalOf(lines)
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    if (result.kind !== "read") throw new Error("expected counts")
+    expect(result.thresholds.on).toEqual({ limit: 45, spent: 46, overshoot: 1 })
+    expect(result.thresholds.prefix).toEqual({ limit: 10, spent: 0, overshoot: 0 })
+    expect(result.thresholds.block).toEqual({ limit: 100, spent: 47, overshoot: 0 })
+    expect(result.contrast).toEqual({ kind: "exact", attempts: 45, differentCaps: "the arms ran under different realised caps: ON realised 46 of 45" })
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const text = renderEvaluationReport(readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: read }))
+    expect(text).toContain("ON continuation: 46 attempt(s) (46 first, 0 retries); realised 46 of the 45-attempt threshold, OVERSHOT by 1")
+    expect(text).toContain("block (prefix once + both continuations): 47 newly issued attempt(s); realised 47 of the 100-attempt threshold")
+  })
+
+  test("the prefix rows name their model source honestly: a continuation manifest, same roster", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    const read = await journalOf(attempt(1, "prefix"))
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    if (result.kind !== "read") throw new Error("expected counts")
+    expect(result.rows[0]!.modelSource).toMatch(/^continuation manifest `.+`, same roster$/)
+  })
+
+  test("a block that repeats an earlier block's prefix gets its contrast unavailable with the duplicate reason", async () => {
+    const { root } = await bundleAt({ prefixRunIds: { 2: "run-prefix-1" } })
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const read = await journalOf([...attempt(2, "on"), ...attempt(2, "off")])
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: read })
+    if (report.kind !== "read") throw new Error("expected a report")
+    const block2 = report.blocks[1]!.attempts!
+    if (block2.kind !== "read") throw new Error(JSON.stringify(block2))
+    expect(block2.contrast).toEqual({
+      kind: "unavailable",
+      reason: "it continues prefix `run-prefix-1`, which block 1 already supplied; one shared prefix is one pair",
+    })
   })
 })

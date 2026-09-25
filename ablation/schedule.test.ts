@@ -7,16 +7,20 @@ import { selectRoster } from "../core/roster/select.ts"
 import { candidate, fakeChange } from "../core/test-support/fakes.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { known } from "./manifest.ts"
+import { ATTEMPT_ALLOWANCES } from "./governor.ts"
 import {
   canonicalJson,
+  configDigestOf,
   createSchedule,
   cryptoCoin,
   firstArmsFor,
   instructionsDigestOf,
+  pairedRunConfig,
   plannedSlots,
   readFrozenProtocol,
   SCHEDULE_FILE,
   scheduleHashOf,
+  sha256,
   verifySchedule,
   writeStartMarker,
   type CreateScheduleInput,
@@ -215,5 +219,85 @@ describe("the config digest binds instructions and tools (story 2-5c review)", (
     expect((await createSchedule(input)).ok).toBe(true)
     const verified = await verifySchedule(root, { ...input, config: { ...input.config, tools: "opencode tools @ worktree B" } })
     expect(verified.ok).toBe(false)
+  })
+})
+
+describe("the accounting mode and route in the sealed config (story 2-8c3a)", () => {
+  const roster = () =>
+    selectRoster([candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")], { slots: 2, providerConfigKey: "provider" }).roster
+
+  test("a token-mode config digests exactly as before this story, with the defaults absent or explicit", () => {
+    // Digests computed with the code at 8632d9b, before the accounting mode existed.
+    const before = "sha256:b943d2025551aad8d78680ced7e4f47aa8fba5f745ec2526c17dc1ddcde92091"
+    expect(configDigestOf(pairedRunConfig({ provenance: "scripted" }, fakeChange(), roster()))).toBe(before)
+    expect(configDigestOf(pairedRunConfig({ provenance: "scripted", accounting: "tokens", route: "api-key" }, fakeChange(), roster()))).toBe(before)
+    expect(
+      configDigestOf(pairedRunConfig({ provenance: "live", tools: "t", gates: "g", maxConcurrency: 2 }, fakeChange(), roster())),
+    ).toBe("sha256:3fc842fea8dcd55d0a98b01e9285b1c61e6f579f6d5335b7a27b2182451988e7")
+  })
+
+  test("attempt mode seals its unit, its allowances and the dials the runs receive; the oauth route is sealed too", () => {
+    const config = pairedRunConfig({ provenance: "scripted", accounting: "attempts", route: "oauth" }, fakeChange(), roster())
+    expect(config).toMatchObject({
+      accounting: "attempts",
+      attemptAllowances: { ...ATTEMPT_ALLOWANCES },
+      tokenCap: null,
+      stopOnUnknownUsage: false,
+      route: "oauth",
+    })
+    expect(configDigestOf(config)).not.toBe(configDigestOf(pairedRunConfig({ provenance: "scripted" }, fakeChange(), roster())))
+  })
+
+  const attemptRoster = () =>
+    selectRoster([candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5"), candidate("google", "gemini-2.5-pro")], {
+      slots: 3,
+      providerConfigKey: "provider",
+      lenses: ["security", "reliability"],
+    }).roster
+  const attemptConfig = { provenance: "scripted" as const, accounting: "attempts" as const, route: "oauth" as const }
+
+  async function frozenProtocol(version: number): Promise<string> {
+    const dir = await tempDir()
+    const pending = `---\nid: PROTOCOL-test-v${version}\nstatus: frozen\nversion: ${version}\nfrozen_hash: PENDING\n---\n\n# test\n`
+    const file = join(dir, `protocol-v${version}.md`)
+    await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${sha256(pending)}`))
+    return file
+  }
+
+  test("an attempt-mode schedule seals under a frozen v2 protocol with three pool slots and the two lenses", async () => {
+    const root = await tempDir()
+    const created = await createSchedule(inputFor(root, { config: attemptConfig, roster: attemptRoster(), protocolFile: await frozenProtocol(2) }))
+    if (!created.ok) throw new Error(created.reason)
+    expect(created.schedule.protocol.version).toBe(2)
+    expect(created.schedule.config).toMatchObject({ accounting: "attempts", route: "oauth" })
+  })
+
+  test("createSchedule refuses, before any toss, every attempt-mode binding the allowances do not fit", async () => {
+    const v2 = await frozenProtocol(2)
+    const cases: [Partial<CreateScheduleInput>, string][] = [
+      [{ config: { provenance: "scripted", accounting: "attempts" }, roster: attemptRoster(), protocolFile: v2 }, "belongs to the oauth route"],
+      [{ config: { provenance: "scripted", route: "oauth" }, roster: attemptRoster(), protocolFile: v2 }, "runs only with accounting `attempts`"],
+      [{ config: attemptConfig, roster: attemptRoster() }, "needs a frozen version-2 protocol"],
+      [{ config: attemptConfig, protocolFile: v2 }, "is sized for 3 pool discovery slots"],
+    ]
+    for (const [over, reason] of cases) {
+      const root = await tempDir()
+      let tossed = 0
+      const created = await createSchedule(inputFor(root, { ...over, coin: () => ((tossed += 1), "heads") }))
+      expect(created.ok, reason).toBe(false)
+      if (!created.ok) expect(created.reason).toContain(reason)
+      expect(tossed).toBe(0)
+    }
+  })
+
+  test("the runner binding refuses the same: an attempt-mode schedule under a protocol that is not v2 does not verify", async () => {
+    const root = await tempDir()
+    const input = inputFor(root, { config: attemptConfig, roster: attemptRoster(), protocolFile: await frozenProtocol(2) })
+    expect((await createSchedule(input)).ok).toBe(true)
+    const verified = await verifySchedule(root, { ...input, protocolFile: PROTOCOL_FILE })
+    expect(verified.ok).toBe(false)
+    if (!verified.ok) expect(verified.reason).toContain("needs a frozen version-2 protocol")
+    const tokens = await verifySchedule(root, { ...input, config: { provenance: "scripted" } })
+    expect(tokens.ok).toBe(false)
   })
 })

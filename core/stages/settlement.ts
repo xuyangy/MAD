@@ -7,6 +7,11 @@
  * threw, may have billed, so it is never settled as free. The figure is passed
  * through as the backend gave it; the admission implementation decides whether
  * it can count it.
+ *
+ * A `runTurn` that threw is settled `abandoned` (story 2-8c3a): the stage never
+ * saw the request end, so it may still be held open, and an attempt-mode journal
+ * stops on it. An envelope the backend returned, a transport error included,
+ * ended, so it is not abandoned unless the backend said so.
  */
 
 import type { AdmissionSettlement, AdmissionStage, AdmittedTurn, StepDecision } from "../ports/admission.ts"
@@ -14,13 +19,16 @@ import type { Envelope } from "../ports/model-backend.ts"
 
 export function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
   if (envelope.usageUnknown) {
-    return { kind: "unknown", why: envelope.usageUnknown.why, executionId: envelope.usageUnknown.executionId }
+    return {
+      kind: "unknown",
+      why: envelope.usageUnknown.why,
+      executionId: envelope.usageUnknown.executionId,
+      ...(envelope.usageUnknown.abandoned === true ? { abandoned: true as const } : {}),
+    }
   }
   if (envelope.tokens) return { kind: "usage", tokens: envelope.tokens }
-  return {
-    kind: "unknown",
-    why: threw ? "the backend threw after the request was issued" : "the backend reported no usage for an issued request",
-  }
+  if (threw) return { kind: "unknown", why: "the backend threw after the request was issued", abandoned: true }
+  return { kind: "unknown", why: "the backend reported no usage for an issued request" }
 }
 
 /**

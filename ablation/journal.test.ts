@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
 import { createLateUsageSink } from "../core/ports/late-usage.ts"
-import { acquireLock, JOURNAL_FILE, LOCK_FILE, openJournal, type JournalIo, type JournalLine, type PairedJournal } from "./journal.ts"
+import { acquireLock, ATTEMPT_MODE_STOP_PREFIX, JOURNAL_FILE, LOCK_FILE, openJournal, type JournalIo, type JournalLine, type PairedJournal } from "./journal.ts"
 import { existsSync } from "node:fs"
 import { createExperimentGovernor, HALT_MARKER_FILE } from "./governor.ts"
 
@@ -1238,5 +1238,335 @@ describe("physical requests inside an admitted attempt (story 2-8c2)", () => {
     expect(reopened.bill().known).toEqual(usage(300, 3))
     expect(reopened.bill().requests.map((request) => request.step)).toEqual([undefined, 2])
     await reopened.close()
+  })
+})
+
+describe("attempt mode (story 2-8c3a)", () => {
+  async function attemptJournal(root: string): Promise<PairedJournal> {
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const journal = await openJournal(root, lock.lock, now, undefined, "attempts")
+    if (!journal.ok) throw new Error(journal.reason)
+    return journal.journal
+  }
+
+  /** `count` settled prefix attempts of block 1, written as an earlier invocation would have. */
+  async function seeded(root: string, count: number, phase: "prefix" | "on" | "off" = "prefix", from = 1): Promise<void> {
+    const rows: JournalLine[] = []
+    for (let index = from; index < from + count; index += 1) {
+      rows.push({ type: "issued", physicalId: `seed-${phase}-${index}`, category: "blocks", block: 1, phase, stage: "discover", slot: "discovery-1", attempt: 1, runId: "seed", mode: "attempts" })
+      rows.push({ type: "settled", physicalId: `seed-${phase}-${index}`, settlement: { kind: "usage", tokens: usage(1) } })
+    }
+    await appendFile(join(root, JOURNAL_FILE), rows.map((row) => `${JSON.stringify(row)}\n`).join(""))
+  }
+
+  test("an attempt admitted at 9 of 10 is journaled with `mode`, and the 11th is refused in attempts with no line", async () => {
+    const root = await tempDir()
+    await seeded(root, 9)
+    const journal = await attemptJournal(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    const tenth = await admission.admit(discover())
+    expect(tenth.ok).toBe(true)
+    if (tenth.ok) await tenth.settle({ kind: "usage", tokens: usage(5) })
+    const written = await lines(root)
+    expect(written.at(-2)).toEqual({
+      type: "issued",
+      physicalId: "request-1",
+      category: "blocks",
+      block: 1,
+      phase: "prefix",
+      stage: "discover",
+      slot: "discovery-1",
+      attempt: 1,
+      runId: "run-a",
+      mode: "attempts",
+    })
+    expect(journal.bill().byPhase.find((phase) => phase.phase === "prefix")!.requests).toBe(10)
+
+    const eleventh = await admission.admit(discover("discovery-2"))
+    expect(eleventh).toEqual({
+      ok: false,
+      cause: "budget",
+      reason: "block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts",
+    })
+    expect(await lines(root)).toHaveLength(written.length)
+    expect(journal.bill().refused).toHaveLength(1)
+    await journal.close()
+  })
+
+  test("an attempt in flight counts at once, so the threshold refuses before it settles", async () => {
+    const root = await tempDir()
+    await seeded(root, 9)
+    const journal = await attemptJournal(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    expect((await admission.admit(discover())).ok).toBe(true)
+    expect((await admission.admit(discover("discovery-2"))).ok).toBe(false)
+    expect(journal.bill().halt).toBeNull()
+    await journal.close()
+  })
+
+  test("admitted then not issued: an `issued` + `not-issued` pair, counted 0, no stop, and not an abandoned attempt", async () => {
+    const root = await tempDir()
+    await seeded(root, 9)
+    const journal = await attemptJournal(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    const cancelled = await admission.admit(discover())
+    if (!cancelled.ok) throw new Error("refused")
+    await cancelled.settle({ kind: "not-issued" })
+    expect((await lines(root)).slice(-2)).toEqual([
+      expect.objectContaining({ type: "issued", physicalId: "request-1", mode: "attempts" }),
+      { type: "settled", physicalId: "request-1", settlement: { kind: "not-issued" } },
+    ])
+    const bill = journal.bill()
+    expect(bill.byPhase.find((phase) => phase.phase === "prefix")!.requests).toBe(9)
+    expect(bill.halt).toBeNull()
+    expect(bill.stop).toBeNull()
+    expect(bill.requests.find((request) => request.physicalId === "request-1")).toMatchObject({ state: "not-issued" })
+    expect(bill.requests.find((request) => request.physicalId === "request-1")!.abandoned).toBeUndefined()
+    // It counted 0, so the tenth attempt is still admitted.
+    expect((await admission.admit(discover("discovery-2"))).ok).toBe(true)
+    await journal.close()
+  })
+
+  test("an unknown settlement is a diagnostic: no halt, and the next attempt is admitted", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    const first = await admission.admit(discover())
+    if (!first.ok) throw new Error("refused")
+    await first.settle({ kind: "unknown", why: "the host reported nothing", executionId: "exec-1" })
+    const bill = journal.bill()
+    expect(bill.halt).toBeNull()
+    expect(bill.unknown).toHaveLength(1)
+    expect(bill.mode).toBe("attempts")
+    expect(existsSync(join(root, HALT_MARKER_FILE))).toBe(false)
+    expect((await admission.admit(discover("discovery-2"))).ok).toBe(true)
+    await journal.close()
+  })
+
+  test("an abandoned attempt latches an operational stop, worded apart from spend, and nothing more is admitted", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const admission = journal.admission({ block: 1, phase: "on", runId: () => "run-a" })
+    const held = await admission.admit({ stage: "debate", slot: "discovery-1", attempt: 1 })
+    if (!held.ok) throw new Error("refused")
+    await held.settle({ kind: "unknown", why: "timed out", executionId: "exec-1", abandoned: true })
+    expect((await lines(root)).at(-1)).toEqual({
+      type: "settled",
+      physicalId: "request-1",
+      settlement: { kind: "unknown", why: "timed out", executionId: "exec-1", abandoned: true },
+    })
+    const bill = journal.bill()
+    expect(bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+    expect(bill.halt).toContain("did not end within its bound")
+    expect(bill.halt).not.toContain("UNKNOWN amount")
+    const next = await admission.admit({ stage: "debate", slot: "discovery-2", attempt: 1 })
+    expect(next).toMatchObject({ ok: false, cause: "halted" })
+    if (!next.ok) {
+      expect(next.reason).not.toContain("Token exposure")
+      expect(next.reason).toContain("does not resume automatically")
+    }
+    await journal.settled()
+    expect(JSON.parse(await readFile(join(root, HALT_MARKER_FILE), "utf8"))).toMatchObject({ accounting: "attempts", haltReason: bill.halt })
+    await journal.close()
+  })
+
+  test("the abandoned stop survives reopening", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const held = await journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" }).admit(discover())
+    if (!held.ok) throw new Error("refused")
+    await held.settle({ kind: "unknown", why: "timed out", abandoned: true })
+    await journal.close()
+    await unlink(join(root, HALT_MARKER_FILE))
+    const reopened = await attemptJournal(root)
+    expect(reopened.bill().halt).toContain("did not end within its bound")
+    await reopened.close()
+  })
+
+  test("an attempt in flight at reopen is uncertain, worded operationally, and stops the run", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    expect((await journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" }).admit(discover())).ok).toBe(true)
+    await journal.close()
+    const reopened = await attemptJournal(root)
+    const bill = reopened.bill()
+    expect(bill.uncertain).toHaveLength(1)
+    expect(bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+    expect(bill.halt).toContain("whether it ended is not established")
+    expect(bill.halt).not.toContain("unquantified")
+    expect((await reopened.admission({ block: 1, phase: "prefix", runId: () => "run-b" }).admit(discover())).ok).toBe(false)
+    await reopened.close()
+  })
+
+  test("a mixed journal refuses to open, and so does a journal opened in the other mode", async () => {
+    const mixed = await tempDir()
+    await seeded(mixed, 1)
+    await appendFile(
+      join(mixed, JOURNAL_FILE),
+      `${JSON.stringify({ type: "issued", physicalId: "t-1", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "s", attempt: 1, runId: "r" })}\n`,
+    )
+    for (const mode of ["attempts", "tokens"] as const) {
+      const lock = await acquireLock(mixed, now())
+      if (!lock.ok) throw new Error(lock.reason)
+      const outcome = await openJournal(mixed, lock.lock, now, undefined, mode)
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.reason).toContain("integrity failure")
+      if (!outcome.ok) expect(outcome.reason).toContain("mixes accounting modes")
+      await lock.lock.release()
+    }
+
+    const attempts = await tempDir()
+    await seeded(attempts, 1)
+    const lock = await acquireLock(attempts, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const asTokens = await openJournal(attempts, lock.lock, now)
+    expect(asTokens.ok).toBe(false)
+    if (!asTokens.ok) expect(asTokens.reason).toContain("records attempts, and it was opened in tokens mode")
+    await lock.lock.release()
+
+    const tokens = await tempDir()
+    const journal = await opened(tokens)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run" }).admit(discover())
+    if (decision.ok) await decision.settle({ kind: "usage", tokens: usage(1) })
+    await journal.close()
+    const again = await acquireLock(tokens, now())
+    if (!again.ok) throw new Error(again.reason)
+    const asAttempts = await openJournal(tokens, again.lock, now, undefined, "attempts")
+    expect(asAttempts.ok).toBe(false)
+    if (!asAttempts.ok) expect(asAttempts.reason).toContain("records tokens, and it was opened in attempts mode")
+    await again.lock.release()
+  })
+
+  test("token mode ignores `abandoned`: the line is written as before, and the unknown still halts", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    await decision.settle({ kind: "unknown", why: "timed out", executionId: "exec-1", abandoned: true })
+    const written = await lines(root)
+    expect(written[0]).not.toHaveProperty("mode")
+    expect(written[1]).toEqual({ type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "timed out", executionId: "exec-1" } })
+    expect(journal.bill().halt).toContain("billed an UNKNOWN amount")
+    expect(journal.bill().mode).toBeUndefined()
+    await journal.close()
+  })
+
+  test("a step is refused in attempt mode, and it stops the runner", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run" }).admit(discover())
+    if (!decision.ok || decision.turn === undefined) throw new Error("expected a turn handle")
+    const step = await decision.turn.admitStep()
+    expect(step).toMatchObject({ ok: false, cause: "runner-stop" })
+    expect(journal.bill().stop).toContain("admits no steps")
+    expect((await lines(root)).filter((line) => line.type === "issued")).toHaveLength(1)
+    await decision.settle({ kind: "usage", tokens: usage(1) })
+    expect(journal.bill().requests[0]!.state).toBe("usage")
+    await journal.close()
+  })
+
+  test("a step line in an attempt-mode file refuses to open", async () => {
+    const root = await tempDir()
+    await appendFile(
+      join(root, JOURNAL_FILE),
+      `${JSON.stringify({ type: "issued", physicalId: "a", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "s", attempt: 1, step: 2, runId: "r", mode: "attempts" })}\n`,
+    )
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const outcome = await openJournal(root, lock.lock, now, undefined, "attempts")
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) expect(outcome.reason).toContain("step line")
+    await lock.lock.release()
+  })
+
+  test("the overshoot is reported in attempts, per phase and per block, against the v2 thresholds", async () => {
+    const root = await tempDir()
+    await seeded(root, 11)
+    await seeded(root, 46, "on")
+    await seeded(root, 45, "off")
+    const journal = await attemptJournal(root)
+    const overshoot = journal.bill().overshoot
+    expect(overshoot.unit).toBe("attempts")
+    expect(overshoot.global).toEqual({ limit: 300, spent: 102, overshoot: 0 })
+    expect(overshoot.phases).toEqual([
+      { block: 1, phase: "prefix", limit: 10, spent: 11, overshoot: 1 },
+      { block: 1, phase: "on", limit: 45, spent: 46, overshoot: 1 },
+      { block: 1, phase: "off", limit: 45, spent: 45, overshoot: 0 },
+    ])
+    expect(overshoot.blockTotals).toEqual([{ block: 1, limit: 100, spent: 102, overshoot: 2 }])
+    await journal.close()
+  })
+
+  test("the Adversarial admission refuses in attempt mode, latches the stop it names, and writes nothing", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const decision = await journal.adversarialAdmission({ label: "case-1 clean", runId: () => "run" }).admit(discover())
+    expect(decision).toMatchObject({ ok: false, cause: "runner-stop" })
+    if (!decision.ok) expect(decision.reason).toContain("has no Adversarial allowance")
+    expect(journal.bill().stop).toContain("has no Adversarial allowance")
+    expect(existsSync(join(root, JOURNAL_FILE))).toBe(false)
+    expect(journal.bill().refusedAdversarial).toHaveLength(1)
+    await journal.close()
+  })
+
+  test("100 settled attempts in block 1 refuse its next continuation on the block total; block 2 is still admitted", async () => {
+    const root = await tempDir()
+    await seeded(root, 10)
+    await seeded(root, 45, "on")
+    await seeded(root, 45, "off")
+    const journal = await attemptJournal(root)
+    const refused = await journal.admission({ block: 1, phase: "on", runId: () => "run" }).admit({ stage: "debate", slot: "discovery-1", attempt: 1 })
+    expect(refused).toEqual({ ok: false, cause: "budget", reason: "block 1's allowance is exhausted: 100 of 100 admitted attempts" })
+    expect((await journal.admission({ block: 2, phase: "prefix", runId: () => "run-2" }).admit(discover())).ok).toBe(true)
+    await journal.close()
+  })
+
+  test("at the global 300 the 301st attempt is refused in attempts", async () => {
+    const root = await tempDir()
+    const rows: JournalLine[] = []
+    for (let index = 0; index < 300; index += 1) {
+      rows.push({ type: "issued", physicalId: `cal-${index}`, category: "calibration", block: null, phase: null, stage: "discover", slot: "s", attempt: 1, runId: "cal", mode: "attempts" })
+      rows.push({ type: "settled", physicalId: `cal-${index}`, settlement: { kind: "usage", tokens: usage(1) } })
+    }
+    await appendFile(join(root, JOURNAL_FILE), rows.map((row) => `${JSON.stringify(row)}\n`).join(""))
+    const journal = await attemptJournal(root)
+    expect(await journal.admission({ block: 1, phase: "prefix", runId: () => "run" }).admit(discover())).toEqual({
+      ok: false,
+      cause: "budget",
+      reason: "the experiment's global cap is exhausted: 300 of 300 admitted attempts",
+    })
+    await journal.close()
+  })
+
+  test("a token-mode file carrying an `abandoned` settlement refuses to open", async () => {
+    const root = await tempDir()
+    await appendFile(
+      join(root, JOURNAL_FILE),
+      [
+        { type: "issued", physicalId: "a", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "s", attempt: 1, runId: "r" },
+        { type: "settled", physicalId: "a", settlement: { kind: "unknown", why: "timed out", abandoned: true } },
+      ]
+        .map((row) => `${JSON.stringify(row)}\n`)
+        .join(""),
+    )
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const outcome = await openJournal(root, lock.lock, now)
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) expect(outcome.reason).toContain("carries `abandoned`, which a token-mode journal never holds")
+    await lock.lock.release()
+  })
+
+  test("a settlement after close is persisted by flush, which replays the file in attempt mode", async () => {
+    const root = await tempDir()
+    const journal = await attemptJournal(root)
+    const decision = await journal.admission({ block: 1, phase: "prefix", runId: () => "run" }).admit(discover())
+    if (!decision.ok) throw new Error("refused")
+    const { handle } = await journal.close()
+    await decision.settle({ kind: "unknown", why: "the host reported nothing" })
+    const flushed = await handle.flush()
+    expect(flushed).toMatchObject({ ok: true, persisted: 1 })
+    expect((await lines(root)).at(-1)).toEqual({ type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "the host reported nothing" } })
   })
 })

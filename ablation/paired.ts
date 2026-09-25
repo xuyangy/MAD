@@ -20,6 +20,15 @@
  * the phase allowance (60,000 prefix, 195,000 per continuation, new consumption
  * only), the Blocks allowance, the global cap and the halt.
  *
+ * ## Attempt mode (story 2-8c3a)
+ *
+ * With `config.accounting: "attempts"` the journal counts admitted attempts
+ * against `ATTEMPT_ALLOWANCES` (10 prefix, 45 per continuation, 100 per block,
+ * 300 in all), every manifest's `experiment` says `accounting: "attempts"`, and
+ * the runs get no `tokenCap` and no stop on unknown usage, so no host-reported
+ * token figure gates anything. An unknown settlement does not make the
+ * evaluation incomplete there; everything else below holds as written.
+ *
  * ## Evidence
  *
  * Every record a run produced is written, including a partial one:
@@ -87,7 +96,13 @@ import type { ArtifactOutcome } from "../adapters/opencode/artifacts.ts"
 import type { LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
 import type { ArmRun, ArmSpec } from "./arms.ts"
 import { writeArmDump, writeBundleIndex, writePrefixEvidence } from "./bundle.ts"
-import { governorStateFromBill, PAIRED_ALLOWANCES, type ExperimentGovernorState, type PairedPhase } from "./governor.ts"
+import {
+  governorStateFromBill,
+  PAIRED_ALLOWANCES,
+  type AccountingMode,
+  type ExperimentGovernorState,
+  type PairedPhase,
+} from "./governor.ts"
 import {
   acquireLock,
   openJournal,
@@ -99,6 +114,7 @@ import {
 } from "./journal.ts"
 import { known, type CodeRevision, type ExperimentBinding, type Maybe } from "./manifest.ts"
 import {
+  accountingConfigProblem,
   appendSlotStatus,
   START_MARKER_FILE,
   verifySchedule,
@@ -187,7 +203,8 @@ export type PairedBlocksOutcome =
       /**
        * True only when all six slots completed, no halt or runner stop latched and
        * no request is unknown, uncertain or in flight. Otherwise the evaluation is
-       * incomplete and no bill equation holds.
+       * incomplete and no bill equation holds. In attempt mode an unknown
+       * settlement is a diagnostic and does not count against this.
        */
       complete: boolean
       /** The caller owns late usage from here on; see `ReconciliationHandle`. */
@@ -237,6 +254,8 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
     if (input.config.tools !== undefined && input.config.tools.trim().length === 0) {
       return await refuse("the config's Tools identity is blank, so the schedule would bind no identifiable Tools configuration")
     }
+    const accountingProblem = accountingConfigProblem(input.config)
+    if (accountingProblem !== null) return await refuse(accountingProblem)
     const verified = await verifySchedule(root, input)
     if (!verified.ok) return await refuse(verified.reason)
     const schedule = verified.schedule
@@ -251,7 +270,7 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
     })
     if (!index.ok) return await refuse(`the bundle index could not be written: ${index.reason}`)
 
-    const opened = await openJournal(root, lock, () => input.clock.now())
+    const opened = await openJournal(root, lock, () => input.clock.now(), undefined, accountingOf(input.config))
     if (!opened.ok) return await refuse(opened.reason)
     journal = opened.journal
 
@@ -370,6 +389,7 @@ async function execute(
       position: slot.position,
       prefixRunId: prefixId,
       ...(failure === undefined ? {} : { failure }),
+      ...(accountingOf(config) === "attempts" ? { accounting: "attempts" as const } : {}),
     }
     const problem = bindingProblem(schedule, experiment, record)
     const manifest: ArtifactOutcome =
@@ -599,7 +619,7 @@ async function execute(
   const complete =
     slots.every((slot) => slot.status === "completed") &&
     bill.halt === null &&
-    bill.unknown.length === 0 &&
+    (accountingOf(config) === "attempts" || bill.unknown.length === 0) &&
     bill.uncertain.length === 0 &&
     bill.inFlight.length === 0 &&
     bill.stop === null
@@ -659,23 +679,36 @@ export function deniedWork(
   return parts.length === 0 ? null : parts.join("; ")
 }
 
-/** The dials every prefix receives; continuations inherit them from the prefix record. */
+/**
+ * The dials every prefix receives; continuations inherit them from the prefix record.
+ *
+ * In attempt mode there is no `tokenCap` (the ledger's cap is `null`) and no stop
+ * on unknown usage: the ledger's own stop rule stays where it is
+ * (`core/budget/ledger.ts`), and this run simply does not turn it on, so no
+ * host-reported token figure gates a turn.
+ */
 function runDials(config: PairedConfig): {
-  tokenCap: number
-  stopOnUnknownUsage: true
+  tokenCap?: number
+  stopOnUnknownUsage: boolean
   threshold?: number
   maxRounds?: number
   maxConcurrency?: number
   preset?: Preset
 } {
+  const attempts = accountingOf(config) === "attempts"
   return {
-    tokenCap: PAIRED_ALLOWANCES.runCap,
-    stopOnUnknownUsage: true,
+    ...(attempts ? {} : { tokenCap: PAIRED_ALLOWANCES.runCap }),
+    stopOnUnknownUsage: !attempts,
     ...(config.threshold === undefined ? {} : { threshold: config.threshold }),
     ...(config.maxRounds === undefined ? {} : { maxRounds: config.maxRounds }),
     ...(config.maxConcurrency === undefined ? {} : { maxConcurrency: config.maxConcurrency }),
     ...(config.preset === undefined ? {} : { preset: config.preset }),
   }
+}
+
+/** Story 2-8c3a — the config's accounting mode; absent is tokens. */
+export function accountingOf(config: PairedConfig): AccountingMode {
+  return config.accounting ?? "tokens"
 }
 
 /**

@@ -299,6 +299,11 @@ describe("the shipped gate table", () => {
     expect(result.text).toContain(`REFUSED: gate 4 (${four.name}) is OPEN; owner: ${four.owner}`)
     expect(result.text).not.toContain("REFUSED: gate 1 ")
     expect(result.text).not.toContain("REFUSED: gate 2 ")
+    // Gate 7 covers only the oauth route, so the api-key launcher prints it and never consults it.
+    expect(result.text).not.toContain("REFUSED: gate 7 ")
+    expect(result.text).toContain(
+      "gate 7 — OAuth attempt accounting — engineering, required for evaluation on route oauth (not consulted for route api-key)",
+    )
     expect(result.text).toContain(
       "gate 3 — accounting-probe spend authorization — authorization, required for accounting-probe (not consulted for evaluation), owner the human budget owner — OPEN",
     )
@@ -411,8 +416,12 @@ describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
     expect(schedule.config.provenance).toBe("live")
     expect(schedule.fixture).toEqual(LABELLED_CHANGE_SEAL)
     expect(schedule.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`)[0]).toBe("anthropic/claude-sonnet-4-5")
-    expect(schedule.config.gates).toBe(gatesIdentity(GATES_BLOB, closedGates))
+    expect(schedule.config.gates).toBe(gatesIdentity(GATES_BLOB, closedGates, "api-key"))
     expect(String(schedule.config.gates)).toContain("gate 4 CLOSED")
+    // The route is sealed: named in the gates identity, and the api-key default adds no config key.
+    expect(String(schedule.config.gates)).toContain("; route api-key; ")
+    expect("route" in schedule.config).toBe(false)
+    expect("accounting" in schedule.config).toBe(false)
     const identity = String(schedule.config.tools)
     expect(identity).toBe(toolsIdentity(productionTools({ worktree: env.directory })!))
     expect(identity).toContain("opencodeTools")

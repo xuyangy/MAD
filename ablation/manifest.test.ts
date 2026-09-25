@@ -609,6 +609,14 @@ describe("the optional `experiment` block (story 2-5c)", () => {
     if (parsed.ok) expect(parsed.value.experiment).toEqual(experiment)
   })
 
+  test("story 2-8c3a — `accounting: attempts` is written as given and reads back; the schema version stays 1", () => {
+    const manifest = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment: { ...experiment, accounting: "attempts" } })
+    expect(manifest.schemaVersion).toBe(1)
+    const parsed = roundTrip(manifest)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect(parsed.value.experiment?.accounting).toBe("attempts")
+  })
+
   test("a prefix that is not the run's forkedFrom is refused", () => {
     const manifest = buildManifest({ record: forked(), change, identity, turnFiles: known(0), experiment: { ...experiment, prefixRunId: "run-other" } })
     const parsed = roundTrip(manifest)
@@ -633,6 +641,7 @@ describe("the optional `experiment` block (story 2-5c)", () => {
     ["a schedule hash not in sha256:<64 hex> form", { ...experiment, scheduleHash: "sha256:schedule" }],
     ["an uppercase schedule hash", { ...experiment, scheduleHash: `sha256:${"A".repeat(64)}` }],
     ["a failure that is not a string", { ...experiment, failure: 42 }],
+    ["an accounting mode that is not attempts", { ...experiment, accounting: "tokens" }],
   ])("a malformed experiment (%s) is refused", (_name, malformed) => {
     const manifest = { ...buildManifest({ record: forked(), change, identity, turnFiles: known(0) }), experiment: malformed }
     const parsed = roundTrip(manifest)

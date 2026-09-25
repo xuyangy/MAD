@@ -486,6 +486,35 @@ export const PAIRED_ALLOWANCES = {
   runCap: 255_000,
 } as const
 
+/**
+ * Story 2-8c3a — what the paired journal counts. `tokens` is protocol v1's unit
+ * and the default. `attempts` is protocol v2's draft unit for the OAuth route:
+ * one admitted attempt is one `runTurn` that passed admission and was issued,
+ * retries included. A refused attempt and a `not-issued` settlement count 0.
+ */
+export type AccountingMode = "tokens" | "attempts"
+
+/**
+ * Story 2-8c3a — protocol v2's draft admission thresholds in admitted attempts.
+ *
+ * - `prefix` is 2×(3+L) with L = 2 lens slots: 10.
+ * - `continuation` is each of the ON and OFF continuations: 45, so one block is
+ *   `block` = 10 + 45 + 45 = 100.
+ * - `blocks` and `global` are 300, the three blocks.
+ *
+ * Thresholds, not bills, exactly as `PAIRED_ALLOWANCES` are: every test is
+ * `spent < limit`, and attempts already in flight when a threshold is reached
+ * may overshoot it. The overshoot is reported, never borrowed, and the bill
+ * states the realised count.
+ */
+export const ATTEMPT_ALLOWANCES = {
+  global: 300,
+  blocks: 300,
+  block: 100,
+  prefix: 10,
+  continuation: 45,
+} as const
+
 /** The four allowance categories the protocol names. `blocks` and `adversarial` are wired. */
 export type AllowanceCategory = "blocks" | "adversarial" | "calibration" | "pilot"
 
@@ -505,6 +534,14 @@ export interface RequestGateView {
   globalSpent: number
   categorySpent(category: AllowanceCategory): number
   phaseSpent(block: number, phase: PairedPhase): number
+  /**
+   * Story 2-8c3a — present only for an attempt-mode journal. Every figure above
+   * is then a count of admitted attempts, never tokens, and `requestGate`
+   * applies `ATTEMPT_ALLOWANCES`.
+   */
+  mode?: "attempts"
+  /** Story 2-8c3a — one block's attempts over all three phases. Present with `mode`. */
+  blockSpent?(block: number): number
 }
 
 export type RequestGateResult =
@@ -523,6 +560,7 @@ export function requestGate(
   view: RequestGateView,
   target: { block: number; phase: PairedPhase },
 ): RequestGateResult {
+  if (view.mode === "attempts") return attemptGate(view, target)
   if (view.stop !== null) {
     return {
       ok: false,
@@ -563,6 +601,77 @@ export function requestGate(
       reason:
         `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
         `allowance is exhausted: ${phase} of ${limit} newly executed tokens`,
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * Story 2-8c3a — the Blocks gate in admitted attempts: stop, halt, global, the
+ * Blocks allowance, the block's own total, then the phase. Every figure is a
+ * count of attempts in any issued state (settled, unknown, in flight or
+ * uncertain), so an attempt counts from the moment it is admitted, and every
+ * message says attempts. A halt here never comes from missing token figures;
+ * its reason says what it does come from.
+ */
+function attemptGate(view: RequestGateView, target: { block: number; phase: PairedPhase }): RequestGateResult {
+  // An attempt-mode view with no per-block count cannot answer the block's
+  // threshold. That is a broken caller, not an exhausted allowance.
+  if (typeof view.blockSpent !== "function") {
+    return {
+      ok: false,
+      cause: "runner-stop",
+      reason:
+        "the paired runner stopped admitting: the attempt-mode gate view carries no per-block attempt count, so " +
+        "the block's allowance cannot be checked. No model failed.",
+    }
+  }
+  if (view.stop !== null) {
+    return {
+      ok: false,
+      cause: "runner-stop",
+      reason: `the paired runner stopped admitting: ${view.stop}. No model failed.`,
+    }
+  }
+  if (view.halt !== null) {
+    return {
+      ok: false,
+      cause: "halted",
+      reason: `the experiment is HALTED: ${view.halt}. Admission does not resume automatically.`,
+    }
+  }
+  if (!(view.globalSpent < ATTEMPT_ALLOWANCES.global)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${ATTEMPT_ALLOWANCES.global} admitted attempts`,
+    }
+  }
+  const blocks = view.categorySpent("blocks")
+  if (!(blocks < ATTEMPT_ALLOWANCES.blocks)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the Blocks allowance is exhausted: ${blocks} of ${ATTEMPT_ALLOWANCES.blocks} admitted attempts`,
+    }
+  }
+  const block = view.blockSpent(target.block)
+  if (!(block < ATTEMPT_ALLOWANCES.block)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `block ${target.block}'s allowance is exhausted: ${block} of ${ATTEMPT_ALLOWANCES.block} admitted attempts`,
+    }
+  }
+  const limit = target.phase === "prefix" ? ATTEMPT_ALLOWANCES.prefix : ATTEMPT_ALLOWANCES.continuation
+  const phase = view.phaseSpent(target.block, target.phase)
+  if (!(phase < limit)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason:
+        `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
+        `allowance is exhausted: ${phase} of ${limit} admitted attempts`,
     }
   }
   return { ok: true }
@@ -658,38 +767,61 @@ export function adversarialRequestGate(view: RequestGateView): RequestGateResult
  *
  * Exposure is `unquantified` while anything is halted, unknown, uncertain or
  * still in flight, because none of those carries a number.
+ *
+ * Story 2-8c3a — an attempt-mode bill is read by its own unit. `accounting` and
+ * `admittedAttempts` are added, and token exposure is always `unquantified`:
+ * that route measures no tokens, so the host-reported figures in `knownSpend`
+ * are unverified diagnostics and never a bill. Unknown settlements are listed
+ * apart, in `unknownDiagnostics`, because an attempt with no host figure is
+ * still counted exactly; `unknownUsage` then holds only the uncertain requests,
+ * issued by an interrupted invocation and never settled.
  */
-export function governorStateFromBill(bill: UniqueExecutionBill): ExperimentGovernorState & { runnerStop: string | null } {
-  const unknownRequests = [...bill.unknown, ...bill.uncertain]
+export function governorStateFromBill(bill: UniqueExecutionBill): ExperimentGovernorState & {
+  runnerStop: string | null
+  accounting?: "attempts"
+  admittedAttempts?: number
+  unknownDiagnostics?: ExperimentUnknownUsage[]
+} {
+  const attempts = bill.mode === "attempts"
+  const unknownRequests = attempts ? [...bill.uncertain] : [...bill.unknown, ...bill.uncertain]
+  const identityOf = (request: UniqueExecutionBill["requests"][number]): ExperimentUnknownUsage => ({
+    armId:
+      request.category !== "blocks" || request.phase === null
+        ? request.category
+        : request.phase === "prefix"
+          ? `prefix of block ${request.block}`
+          : request.phase,
+    repeatId: request.category === "blocks" && request.block !== null ? request.block - 1 : -1,
+    runId: request.runId,
+    entry: {
+      slot: request.slot,
+      stage: request.stage,
+      attempt: request.attempt,
+      executionId: request.executionId ?? request.physicalId,
+      why: request.why ?? "issued by an interrupted invocation and never settled",
+    },
+  })
   return {
     halted: bill.halt !== null,
     haltReason: bill.halt,
     knownSpend: { ...bill.known },
     knownSpendTokens: spentTokens(bill.known),
-    unknownUsage: unknownRequests.map((request) => ({
-      armId:
-        request.category !== "blocks" || request.phase === null
-          ? request.category
-          : request.phase === "prefix"
-            ? `prefix of block ${request.block}`
-            : request.phase,
-      repeatId: request.category === "blocks" && request.block !== null ? request.block - 1 : -1,
-      runId: request.runId,
-      entry: {
-        slot: request.slot,
-        stage: request.stage,
-        attempt: request.attempt,
-        executionId: request.executionId ?? request.physicalId,
-        why: request.why ?? "issued by an interrupted invocation and never settled",
-      },
-    })),
+    unknownUsage: unknownRequests.map(identityOf),
     unknownUsageCount: unknownRequests.length,
     unresolvedCleanups: [],
     inFlight: bill.inFlight.length,
     observedRuns: new Set(bill.requests.map((request) => request.runId)).size,
-    exposure: bill.halt !== null || unknownRequests.length > 0 || bill.inFlight.length > 0 ? "unquantified" : "quantified",
+    exposure:
+      attempts || bill.halt !== null || unknownRequests.length > 0 || bill.inFlight.length > 0 ? "unquantified" : "quantified",
     markerFile: bill.haltMarker.file,
     markerError: bill.haltMarker.error,
     runnerStop: bill.stop,
+    ...(attempts
+      ? {
+          accounting: "attempts" as const,
+          admittedAttempts: bill.requests.filter((request) => request.state !== "not-issued").length,
+          unknownDiagnostics: bill.unknown.map(identityOf),
+        }
+      : {}),
   }
 }

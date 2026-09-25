@@ -34,6 +34,20 @@
  * - **A persistence failure stops the runner.** No admission follows it. It is
  *   never reported as a model's failure.
  *
+ * ## Attempt mode (story 2-8c3a)
+ *
+ * `openJournal` takes the accounting mode, `tokens` by default. In `attempts`
+ * mode a line is an admitted attempt, never a physical request, and every
+ * `issued` line says so with `mode: "attempts"`. The gates count attempts in
+ * every issued state against `ATTEMPT_ALLOWANCES`; host-reported tokens are
+ * kept on the bill as unverified diagnostics and reach no gate. An `unknown`
+ * settlement latches nothing. The halt still latches, worded with
+ * `ATTEMPT_MODE_STOP_PREFIX`, on an integrity failure, on an attempt in flight at
+ * reopen, and on an attempt settled `abandoned` (it did not end within its
+ * bound). There are no step lines. A file whose lines declare one mode does not
+ * open in the other, and a file mixing the two does not open at all. A
+ * token-mode line carries no `mode` field and no `abandoned` flag.
+ *
  * AD-1: this tree may import from `core/`. Nothing under `core/` imports it.
  */
 
@@ -55,9 +69,11 @@ import type { LateUsageReport, LateUsageReporter } from "../core/ports/late-usag
 import {
   adversarialRequestGate,
   ADVERSARIAL_ALLOWANCES,
+  ATTEMPT_ALLOWANCES,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
   requestGate,
+  type AccountingMode,
   type AllowanceCategory,
   type PairedPhase,
   type RequestGateResult,
@@ -169,6 +185,8 @@ export interface IssuedLine {
   /** Story 2-8c2 — the physical request's place in its attempt, from 2; absent for the first. */
   step?: number
   runId: string
+  /** Story 2-8c3a — present exactly in an attempt-mode journal: this line is an admitted attempt. */
+  mode?: "attempts"
 }
 
 export interface SettledLine {
@@ -199,11 +217,15 @@ export interface BilledRequest {
   attempt: number
   step?: number
   runId: string
+  /** Story 2-8c3a — carried from the `issued` line of an attempt-mode journal. */
+  mode?: "attempts"
   state: RequestState
-  /** The settled figure (`usage`). */
+  /** The settled figure (`usage`). In an attempt-mode journal, a host-reported diagnostic. */
   tokens?: TokenUsage
   /** An `unknown` settlement's reason. */
   why?: string
+  /** Story 2-8c3a — an attempt-mode `unknown` settlement for an attempt that did not end within its bound. */
+  abandoned?: true
   executionId?: string
   /** The late figure that recovered an `unknown`. */
   late?: TokenUsage
@@ -279,6 +301,12 @@ export interface UniqueExecutionBill {
    * names the cleanup. Empty on every ordinary run.
    */
   operational: string[]
+  /**
+   * Story 2-8c3a — present only for an attempt-mode journal. `requests` and every
+   * `PhaseBill.requests` are then admitted attempts; `known` and `byCategory` are
+   * host-reported diagnostics, never a bill.
+   */
+  mode?: "attempts"
 }
 
 /** One refused admission: where it would have been spent, and why it was not. */
@@ -314,6 +342,10 @@ export interface OvershootReport {
   adversarial: { limit: number; spent: number; overshoot: number }
   /** One row per Blocks phase that holds any request. */
   phases: { block: number; phase: PairedPhase; limit: number; spent: number; overshoot: number }[]
+  /** Story 2-8c3a — present only in attempt mode, where every figure above counts admitted attempts. */
+  unit?: "attempts"
+  /** Story 2-8c3a — attempt mode only: one row per block that holds any attempt, against its 100. */
+  blockTotals?: { block: number; limit: number; spent: number; overshoot: number }[]
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -363,7 +395,7 @@ const UNCOUNTABLE_USAGE = "the settled usage figure was not five finite, non-neg
  * and an identical repeat of the same malformed figure compares equal to it.
  * Reading a field may throw (a getter); the caller records that as a runner stop.
  */
-function normalizedSettlement(settlement: AdmissionSettlement): AdmissionSettlement {
+function normalizedSettlement(settlement: AdmissionSettlement, mode: AccountingMode): AdmissionSettlement {
   if (settlement === null || typeof settlement !== "object") {
     return { kind: "unknown", why: "the settlement was not an object" }
   }
@@ -374,11 +406,13 @@ function normalizedSettlement(settlement: AdmissionSettlement): AdmissionSettlem
   }
   if (settlement.kind === "not-issued") return { kind: "not-issued" }
   if (settlement.kind === "unknown") {
-    const { why, executionId } = settlement
+    const { why, executionId, abandoned } = settlement
     return {
       kind: "unknown",
       why: typeof why === "string" ? why : "the unknown settlement carried no reason",
       ...(typeof executionId === "string" ? { executionId } : {}),
+      // Token mode ignores the flag, so its lines stay as they were.
+      ...(mode === "attempts" && abandoned === true ? { abandoned: true as const } : {}),
     }
   }
   return { kind: "unknown", why: "the settlement named no recognised outcome" }
@@ -402,6 +436,8 @@ function requestProblem(request: AdmissionRequest): string | null {
  * what the invocation held in memory.
  */
 class JournalState {
+  constructor(readonly mode: AccountingMode = "tokens") {}
+
   readonly requests = new Map<string, BilledRequest>()
   readonly byExecution = new Map<string, string>()
   readonly integrity: IntegrityFailure[] = []
@@ -425,7 +461,8 @@ class JournalState {
 
   fail(failure: IntegrityFailure): void {
     this.integrity.push(failure)
-    this.latch(`integrity failure: ${failure.reason}`)
+    const reason = `integrity failure: ${failure.reason}`
+    this.latch(this.mode === "attempts" ? attemptModeStopReason(reason) : reason)
   }
 
   apply(line: JournalLine): void {
@@ -470,10 +507,26 @@ class JournalState {
     }
     request.state = "unknown"
     request.why = settlement.kind === "unknown" ? settlement.why : UNCOUNTABLE_USAGE
-    this.latch(
-      `request \`${request.physicalId}\` (block ${request.block ?? "-"} ${request.phase ?? request.category}, ` +
-        `${request.stage}/${request.slot} attempt ${request.attempt}) billed an UNKNOWN amount: ${request.why}`,
-    )
+    if (this.mode === "attempts") {
+      // The attempt is counted either way, so a missing figure is a diagnostic.
+      // An attempt that did not end within its bound may still be held open, and
+      // that stops the run.
+      if (settlement.kind === "unknown" && settlement.abandoned === true) {
+        request.abandoned = true
+        this.latch(
+          attemptModeStopReason(
+            `attempt \`${request.physicalId}\` (block ${request.block ?? "-"} ${request.phase ?? request.category}, ` +
+              `${request.stage}/${request.slot} attempt ${request.attempt}) did not end within its bound, so its request ` +
+              `may still be held open: ${request.why}`,
+          ),
+        )
+      }
+    } else {
+      this.latch(
+        `request \`${request.physicalId}\` (block ${request.block ?? "-"} ${request.phase ?? request.category}, ` +
+          `${request.stage}/${request.slot} attempt ${request.attempt}) billed an UNKNOWN amount: ${request.why}`,
+      )
+    }
     if (settlement.kind === "unknown" && settlement.executionId !== undefined) {
       const bound = this.byExecution.get(settlement.executionId)
       if (bound !== undefined && bound !== request.physicalId) {
@@ -523,6 +576,7 @@ class JournalState {
           kind: "unknown",
           why: request.why!,
           ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+          ...(request.abandoned === true ? { abandoned: true as const } : {}),
         }
       default:
         return undefined
@@ -533,12 +587,20 @@ class JournalState {
   interrupt(): void {
     const uncertain = [...this.requests.values()].filter((request) => request.state === "in-flight")
     for (const request of uncertain) request.state = "uncertain"
-    if (uncertain.length > 0) {
+    if (uncertain.length === 0) return
+    if (this.mode === "attempts") {
       this.latch(
-        `${uncertain.length} request(s) were issued by an earlier invocation and never settled, beginning with ` +
-          `\`${uncertain[0]!.physicalId}\`; their cost is uncertain and unquantified`,
+        attemptModeStopReason(
+          `${uncertain.length} attempt(s) were issued by an earlier invocation and never settled, beginning with ` +
+            `\`${uncertain[0]!.physicalId}\`; each is counted, and whether it ended is not established`,
+        ),
       )
+      return
     }
+    this.latch(
+      `${uncertain.length} request(s) were issued by an earlier invocation and never settled, beginning with ` +
+        `\`${uncertain[0]!.physicalId}\`; their cost is uncertain and unquantified`,
+    )
   }
 
   knownOf(request: BilledRequest): TokenUsage | undefined {
@@ -548,7 +610,7 @@ class JournalState {
   }
 
   view(): RequestGateView {
-    return {
+    const view: RequestGateView = {
       stop: this.stop,
       halt: this.halt,
       globalSpent: this.spentWhere(() => true),
@@ -556,13 +618,29 @@ class JournalState {
       phaseSpent: (block, phase) =>
         this.spentWhere((request) => request.category === "blocks" && request.block === block && request.phase === phase),
     }
+    if (this.mode !== "attempts") return view
+    return {
+      ...view,
+      mode: "attempts",
+      blockSpent: (block) => this.spentWhere((request) => request.category === "blocks" && request.block === block),
+    }
   }
 
+  /**
+   * Known token spend, or in attempt mode the count of attempts in every issued
+   * state (settled, unknown, in flight, uncertain). A `not-issued` attempt counts
+   * 0 in both.
+   */
   private spentWhere(match: (request: BilledRequest) => boolean): number {
     let total = 0
     for (const request of this.requests.values()) {
+      if (!match(request)) continue
+      if (this.mode === "attempts") {
+        if (request.state !== "not-issued") total += 1
+        continue
+      }
       const known = this.knownOf(request)
-      if (known !== undefined && match(request)) total += spentTokens(known)
+      if (known !== undefined) total += spentTokens(known)
     }
     return total
   }
@@ -614,9 +692,13 @@ class JournalState {
       unappliedLate: unappliedLate.map((report) => structuredClone(report)),
       refused: refused.map((refusal) => ({ ...refusal })),
       refusedAdversarial: refusedAdversarial.map((refusal) => ({ ...refusal })),
-      overshoot: overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()]),
+      overshoot:
+        this.mode === "attempts"
+          ? attemptOvershootOf([...phases.values()])
+          : overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()]),
       haltMarker: { ...this.haltMarker },
       operational: [...this.operational],
+      ...(this.mode === "attempts" ? { mode: "attempts" as const } : {}),
     }
   }
 }
@@ -642,6 +724,33 @@ function overshootOf(
         phase: phase.phase!,
         ...row(phase.phase === "prefix" ? PAIRED_ALLOWANCES.prefix : PAIRED_ALLOWANCES.continuation, spentTokens(phase.tokens)),
       })),
+  }
+}
+
+/**
+ * Story 2-8c3a — the same report in admitted attempts, from each phase's count.
+ * The Adversarial row is 0 of 0: an attempt-mode journal admits nothing there.
+ */
+function attemptOvershootOf(phases: readonly PhaseBill[]): OvershootReport {
+  const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
+  const count = (match: (phase: PhaseBill) => boolean) =>
+    phases.filter(match).reduce((total, phase) => total + phase.requests, 0)
+  const blockPhases = phases.filter((phase) => phase.category === "blocks" && phase.block !== null && phase.phase !== null)
+  const blocks = [...new Set(blockPhases.map((phase) => phase.block!))].sort((a, b) => a - b)
+  return {
+    global: row(ATTEMPT_ALLOWANCES.global, count(() => true)),
+    blocks: row(ATTEMPT_ALLOWANCES.blocks, count((phase) => phase.category === "blocks")),
+    adversarial: row(0, count((phase) => phase.category === "adversarial")),
+    phases: blockPhases.map((phase) => ({
+      block: phase.block!,
+      phase: phase.phase!,
+      ...row(phase.phase === "prefix" ? ATTEMPT_ALLOWANCES.prefix : ATTEMPT_ALLOWANCES.continuation, phase.requests),
+    })),
+    unit: "attempts",
+    blockTotals: blocks.map((block) => ({
+      block,
+      ...row(ATTEMPT_ALLOWANCES.block, count((phase) => phase.category === "blocks" && phase.block === block)),
+    })),
   }
 }
 
@@ -674,7 +783,8 @@ function isLine(value: unknown): value is JournalLine {
       isWhole(line.attempt, 1) &&
       (line.step === undefined || isWhole(line.step, 2)) &&
       typeof line.runId === "string" &&
-      line.runId.length > 0
+      line.runId.length > 0 &&
+      (line.mode === undefined || line.mode === "attempts")
     )
   }
   if (line.type === "settled") {
@@ -682,7 +792,11 @@ function isLine(value: unknown): value is JournalLine {
     if (settlement === null || typeof settlement !== "object") return false
     if (settlement.kind === "usage") return countable(settlement.tokens)
     if (settlement.kind === "unknown") {
-      return typeof settlement.why === "string" && (settlement.executionId === undefined || typeof settlement.executionId === "string")
+      return (
+        typeof settlement.why === "string" &&
+        (settlement.executionId === undefined || typeof settlement.executionId === "string") &&
+        (settlement.abandoned === undefined || settlement.abandoned === true)
+      )
     }
     return settlement.kind === "not-issued"
   }
@@ -692,17 +806,27 @@ function isLine(value: unknown): value is JournalLine {
 
 type Replayed = { ok: true; state: JournalState; existed: boolean } | { ok: false; reason: string }
 
-/** Read and replay a journal file. An absent file is an empty journal. */
-async function replayFile(file: string): Promise<Replayed> {
+/**
+ * Read and replay a journal file. An absent file is an empty journal.
+ *
+ * Story 2-8c3a — every line is validated before any is replayed, and the file's
+ * mode is read from its `issued` lines: all declaring `mode: "attempts"` is an
+ * attempt-mode file, none declaring it a token-mode one. A file mixing the two is
+ * refused, and so is a file whose lines declare a mode other than `mode` when
+ * `mode` is given. With `mode` absent the file's own mode is used (tokens for a
+ * file with no `issued` line). An attempt-mode file holds no step line, and a
+ * token-mode file no `abandoned` settlement.
+ */
+async function replayFile(file: string, mode?: AccountingMode): Promise<Replayed> {
   let text: string
   try {
     text = await readFile(file, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, state: new JournalState(), existed: false }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, state: new JournalState(mode), existed: false }
     return { ok: false, reason: `the journal \`${file}\` could not be read: ${messageOf(error)}` }
   }
-  const state = new JournalState()
   const rows = text.split("\n").filter((row) => row.length > 0)
+  const lines: JournalLine[] = []
   for (const [position, row] of rows.entries()) {
     let parsed: unknown
     try {
@@ -711,9 +835,54 @@ async function replayFile(file: string): Promise<Replayed> {
       return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` is not JSON` }
     }
     if (!isLine(parsed)) return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` is not a valid journal line` }
-    state.apply(parsed)
+    lines.push(parsed)
   }
+  const issued = lines.filter((line): line is IssuedLine => line.type === "issued")
+  const declared = issued.filter((line) => line.mode === "attempts").length
+  if (declared > 0 && declared < issued.length) {
+    return {
+      ok: false,
+      reason:
+        `integrity failure: the journal \`${file}\` mixes accounting modes (${declared} issued line(s) declare ` +
+        `attempts and ${issued.length - declared} declare none), so it is read in neither`,
+    }
+  }
+  const fileMode: AccountingMode | null = issued.length === 0 ? null : declared > 0 ? "attempts" : "tokens"
+  if (mode !== undefined && fileMode !== null && fileMode !== mode) {
+    return {
+      ok: false,
+      reason: `integrity failure: the journal \`${file}\` records ${fileMode}, and it was opened in ${mode} mode`,
+    }
+  }
+  const replayMode = mode ?? fileMode ?? "tokens"
+  for (const [position, line] of lines.entries()) {
+    if (replayMode === "attempts" && line.type === "issued" && line.step !== undefined) {
+      return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` is a step line, which an attempt-mode journal never holds` }
+    }
+    if (replayMode === "tokens" && line.type === "settled" && line.settlement.kind === "unknown" && line.settlement.abandoned !== undefined) {
+      return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` carries \`abandoned\`, which a token-mode journal never holds` }
+    }
+  }
+  const state = new JournalState(replayMode)
+  for (const line of lines) state.apply(line)
   return { ok: true, state, existed: true }
+}
+
+export type PersistedReplay =
+  | { ok: true; mode: AccountingMode; existed: boolean; bill: UniqueExecutionBill }
+  | { ok: false; reason: string }
+
+/**
+ * Story 2-8c3a — a persisted journal, replayed by the rules `openJournal` uses,
+ * for a reader. Nothing is appended and no lock is taken. An `issued` line with
+ * no settlement reads UNCERTAIN, exactly as on reopen. `mode`, when given, must
+ * be the file's own.
+ */
+export async function replayPersistedJournal(file: string, mode?: AccountingMode): Promise<PersistedReplay> {
+  const replayed = await replayFile(file, mode)
+  if (!replayed.ok) return replayed
+  replayed.state.interrupt()
+  return { ok: true, mode: replayed.state.mode, existed: replayed.existed, bill: replayed.state.bill([]) }
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +1054,23 @@ export function operationalHaltReason(reason: string): string {
   return reason.startsWith(OPERATIONAL_HALT_PREFIX) ? reason : `${OPERATIONAL_HALT_PREFIX}${reason}`
 }
 
+/**
+ * Story 2-8c3a — the words on every halt an attempt-mode journal latches.
+ *
+ * In that mode the attempt count is exact and no token figure is measured, so
+ * no attempt-mode stop is about unknown spend. The halt marker is still
+ * `unknown-usage-halt.json`, and a reason written under that name without this
+ * prefix would be read as unaccounted money.
+ */
+export const ATTEMPT_MODE_STOP_PREFIX =
+  "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this " +
+  "reason makes no claim about it): "
+
+/** An attempt-mode stop reason, worded once. Idempotent, like `operationalHaltReason`. */
+export function attemptModeStopReason(reason: string): string {
+  return reason.startsWith(ATTEMPT_MODE_STOP_PREFIX) ? reason : `${ATTEMPT_MODE_STOP_PREFIX}${reason}`
+}
+
 export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; reason: string }
 
 /**
@@ -906,17 +1092,23 @@ export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; 
  * kept in memory, in order, for `flush()`. `flush()` replays the file first,
  * skips a line already there with the same payload, and refuses a journal it
  * cannot replay rather than appending to it or truncating it.
+ *
+ * ## The mode
+ *
+ * `mode` is the accounting mode (story 2-8c3a), `tokens` when absent. A file
+ * whose lines declare another mode, or mix the two, refuses to open.
  */
 export async function openJournal(
   bundleRoot: string,
   lock: HeldLock,
   now: () => string,
   io: JournalIo = FILE_IO,
+  mode: AccountingMode = "tokens",
 ): Promise<JournalOpened> {
   const root = resolve(bundleRoot)
   const file = join(root, JOURNAL_FILE)
   const markerPath = join(root, HALT_MARKER_FILE)
-  const replayed = await replayFile(file)
+  const replayed = await replayFile(file, mode)
   if (!replayed.ok) return { ok: false, reason: replayed.reason }
   const state = replayed.state
   state.interrupt()
@@ -1143,6 +1335,7 @@ export async function openJournal(
           attempt: request.attempt,
           ...(request.step === undefined ? {} : { step: request.step }),
           runId,
+          ...(mode === "attempts" ? { mode: "attempts" as const } : {}),
         }
         try {
           await writeLine(line)
@@ -1203,6 +1396,22 @@ export async function openJournal(
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
           if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
+          if (mode === "attempts") {
+            // Protocol v2's attempt unit has no Adversarial allowance. Asking for
+            // one is a caller on the wrong journal, so it stops the runner, as a
+            // step asked for in attempt mode does.
+            state.stop ??= "an Adversarial admission was asked of an attempt-mode journal, which has no Adversarial allowance"
+            const refusal = refuseAsStop("adversarial runner") as AdmissionDecision & { ok: false }
+            const runId = runIdOf(binding.runId)
+            refusedAdversarial.push({
+              label: binding.label,
+              ...(runId === undefined ? {} : { runId }),
+              ...whereOf(request),
+              cause: refusal.cause,
+              reason: refusal.reason,
+            })
+            return Promise.resolve(refusal)
+          }
           return admitWith(request, {
             // A halt marker written at the root after this journal opened (by
             // the arm governor, or by hand) latches the halt before the gate reads
@@ -1315,6 +1524,22 @@ export async function openJournal(
    * still in flight when the stage settles, is an integrity failure.
    */
   function meteredAttempt(firstId: string, request: AdmissionRequest, spec: AdmitSpec): AdmissionDecision {
+    if (mode === "attempts") {
+      // An attempt-mode line is the attempt, so it has no physical steps. A
+      // backend that asks for one is metering against the wrong journal.
+      const settleOnly = settleFor(firstId)
+      return {
+        ok: true,
+        settle: settleOnly,
+        turn: {
+          async admitStep(): Promise<StepDecision> {
+            state.stop ??= "a step was asked for inside an attempt, and an attempt-mode journal admits no steps"
+            return refuseAsStop(spec.runner) as StepDecision
+          },
+          settleFirst: settleOnly,
+        },
+      }
+    }
     const steps: string[] = []
     let metered = false
     let settledByStage = false
@@ -1345,7 +1570,7 @@ export async function openJournal(
       // With no step admitted and nothing settled by a meter, the stage's figure is the first request's, as it always was.
       if (!metered && steps.length === 0) return settleFirst(given)
       try {
-        crossCheck(firstId, [firstId, ...steps], normalizedSettlement(given))
+        crossCheck(firstId, [firstId, ...steps], normalizedSettlement(given, mode))
       } catch (error) {
         state.stop ??= `a settlement could not be cross-checked: ${messageOf(error)}`
       }
@@ -1388,7 +1613,7 @@ export async function openJournal(
   function settleFor(physicalId: string): (settlement: AdmissionSettlement) => Promise<void> {
     return async (given) => {
       try {
-        const settlement = normalizedSettlement(given)
+        const settlement = normalizedSettlement(given, mode)
         const request = state.requests.get(physicalId)!
         const previous = state.settlementOf(request)
         if (previous !== undefined && sameJson(previous, settlement)) return
@@ -1424,7 +1649,7 @@ export async function openJournal(
           return outcome
         }
         try {
-          const disk = await replayFile(file)
+          const disk = await replayFile(file, mode)
           if (!disk.ok) return fail(disk.reason)
           const persist = async (line: JournalLine): Promise<boolean> => {
             try {
@@ -1520,6 +1745,7 @@ async function writeHaltMarker(markerPath: string, state: JournalState): Promise
     // tells the next reader that a process or a file operation is unaccounted
     // for. The two need different recovery steps.
     operational: [...state.operational],
+    ...(state.mode === "attempts" ? { accounting: "attempts" } : {}),
   }
   try {
     const handle = await open(markerPath, "wx", 0o600)

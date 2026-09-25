@@ -14,9 +14,17 @@
  *
  * Each gate names the phase it is required for: `accounting-probe` (story 2-8c's
  * bounded, authorized probe) or `evaluation` (the three blocks). The launcher
- * asks `gatePreflight(PAIRED_GATES, "evaluation")`. A gate required only for the
- * probe is printed and never consulted for the evaluation, so closing it can
- * never stand in for an evaluation gate.
+ * asks `gatePreflight(PAIRED_GATES, "evaluation", "api-key")`. A gate required
+ * only for the probe is printed and never consulted for the evaluation, so
+ * closing it can never stand in for an evaluation gate.
+ *
+ * ## Routes (story 2-8c3a)
+ *
+ * A gate may name the routes it covers: `api-key` (the relay between the host
+ * and one provider) or `oauth` (opencode's own sign-ins, counted in admitted
+ * attempts). A gate naming no route covers every route. A gate outside the
+ * checked route is printed "(not consulted for route …)" and never consulted,
+ * so a gate for one route can neither block nor stand in for the other.
  *
  * ## Authorization is a decision, not an engineering task
  *
@@ -31,6 +39,9 @@
 export type GateKind = "engineering" | "authorization"
 export type GatePhase = "accounting-probe" | "evaluation"
 export type GateStatus = "OPEN" | "CLOSED"
+/** Story 2-8c3a — how the managed host reaches its providers. */
+export type GateRoute = "api-key" | "oauth"
+export const GATE_ROUTES: readonly GateRoute[] = ["api-key", "oauth"]
 
 export interface PairedGate {
   number: number
@@ -38,6 +49,8 @@ export interface PairedGate {
   kind: GateKind
   /** The phase this gate is required for. */
   phase: GatePhase
+  /** Story 2-8c3a — the routes this gate covers. Absent means every route. */
+  routes?: readonly GateRoute[]
   owner: string
   status: GateStatus
   /** What closing it requires. */
@@ -63,6 +76,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "host request accounting",
     kind: "engineering",
     phase: "evaluation",
+    routes: ["api-key"],
     owner: "story 2-8c2",
     status: "CLOSED",
     requires:
@@ -118,7 +132,10 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
-    requires: "the budget owner authorizes the three paired blocks' spend",
+    requires:
+      "the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three " +
+      "blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block " +
+      "and 300 in total, each an admission threshold",
   },
   {
     number: 5,
@@ -149,6 +166,21 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "built with no deadline override, and `config.tools` records the same three facts. Checked before the coin " +
       "toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts",
   },
+  {
+    number: 7,
+    name: "OAuth attempt accounting",
+    kind: "engineering",
+    phase: "evaluation",
+    routes: ["oauth"],
+    owner: "story 2-8c3b",
+    status: "OPEN",
+    requires:
+      "story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, " +
+      "every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an " +
+      "attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the " +
+      "gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d " +
+      "starts. Never closed from the paid paired evaluation",
+  },
 ]
 
 export const PAIRED_NON_GATES: readonly CheckedNonGate[] = [
@@ -175,31 +207,54 @@ export interface GatePreflight {
 }
 
 /**
- * Check the gates required for `phase`. A gate for another phase is printed and
- * never consulted. A table that is not well formed refuses: an unknown kind, phase
- * or status, a CLOSED gate with no evidence, an OPEN gate carrying evidence, a
- * duplicate or non-positive number, a note that is not one non-empty line, an
- * authorization gate that the human budget owner does not own, or no
- * authorization gate for the phase (a table that cannot say who authorized the
- * spend authorizes nothing).
+ * Check the gates required for `phase` on `route`. A gate for another phase, or
+ * naming only other routes, is printed and never consulted. A table that is not
+ * well formed refuses: an unknown kind, phase, route or status, a CLOSED gate with
+ * no evidence, an OPEN gate carrying evidence, a duplicate or non-positive number,
+ * a note that is not one non-empty line, an authorization gate that the human
+ * budget owner does not own, or no authorization gate for the phase and route (a
+ * table that cannot say who authorized the spend authorizes nothing).
+ *
+ * FAIL CLOSED ON ROUTES. A `route` that is neither api-key nor oauth is a
+ * problem, and then every route-scoped gate is consulted rather than skipped. A
+ * gate's `routes` that is not a non-empty list of known routes is a problem too,
+ * and that gate is consulted: a malformed value never decides coverage.
  */
-export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): GatePreflight {
+export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase, route: GateRoute): GatePreflight {
   const lines: string[] = []
   const problems: string[] = []
   const seen = new Set<number>()
+  const knownRoute = GATE_ROUTES.includes(route)
+  if (!knownRoute) {
+    problems.push(`the route ${JSON.stringify(route)} is neither api-key nor oauth, so every route-scoped gate is consulted`)
+  }
+  const wellFormedRoutes = (gate: PairedGate): boolean =>
+    gate.routes === undefined ||
+    (Array.isArray(gate.routes) &&
+      gate.routes.length > 0 &&
+      gate.routes.every((entry: unknown) => typeof entry === "string" && GATE_ROUTES.includes(entry as GateRoute)))
+  const covers = (gate: PairedGate): boolean =>
+    gate.routes === undefined || !knownRoute || !wellFormedRoutes(gate) || gate.routes.includes(route)
   for (const gate of gates) {
-    const required = gate.phase === phase
+    const onRoute = covers(gate)
+    const required = gate.phase === phase && onRoute
     const evidence = gate.status === "CLOSED" ? ` — evidence: ${gate.evidence ?? "NONE RECORDED"}` : ""
     const note = gate.note === undefined ? "" : ` — note: ${gate.note}`
+    const routes =
+      gate.routes === undefined ? "" : wellFormedRoutes(gate) ? ` on route ${gate.routes.join(", ")}` : ` on routes ${JSON.stringify(gate.routes)}`
+    const skipped = gate.phase !== phase ? ` (not consulted for ${phase})` : onRoute ? "" : ` (not consulted for route ${route})`
     lines.push(
-      `gate ${gate.number} — ${gate.name} — ${gate.kind}, required for ${gate.phase}` +
-        `${required ? "" : ` (not consulted for ${phase})`}, owner ${gate.owner} — ${gate.status}${evidence}${note}`,
+      `gate ${gate.number} — ${gate.name} — ${gate.kind}, required for ${gate.phase}${routes}` +
+        `${skipped}, owner ${gate.owner} — ${gate.status}${evidence}${note}`,
     )
     if (gate.kind !== "engineering" && gate.kind !== "authorization") {
       problems.push(`gate ${gate.number} (${gate.name}) has kind ${JSON.stringify(gate.kind)}, which is neither engineering nor authorization`)
     }
     if (gate.phase !== "accounting-probe" && gate.phase !== "evaluation") {
       problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is neither accounting-probe nor evaluation`)
+    }
+    if (!wellFormedRoutes(gate)) {
+      problems.push(`gate ${gate.number} (${gate.name}) has routes ${JSON.stringify(gate.routes)}, which are not a non-empty list of api-key and oauth`)
     }
     if (gate.status !== "OPEN" && gate.status !== "CLOSED") {
       problems.push(`gate ${gate.number} (${gate.name}) has status ${JSON.stringify(gate.status)}, which is neither OPEN nor CLOSED`)
@@ -224,8 +279,8 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase): G
       problems.push(`gate ${gate.number} (${gate.name}) is ${gate.status}; owner: ${gate.owner}; closing it requires: ${gate.requires}`)
     }
   }
-  if (!gates.some((gate) => gate.phase === phase && gate.kind === "authorization")) {
-    problems.push(`the table holds no authorization gate for ${phase}, so nothing authorizes its spend`)
+  if (!gates.some((gate) => gate.phase === phase && gate.kind === "authorization" && covers(gate))) {
+    problems.push(`the table holds no authorization gate for ${phase} on route ${route}, so nothing authorizes its spend`)
   }
   return { ok: problems.length === 0, lines, problems }
 }

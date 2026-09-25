@@ -10,6 +10,7 @@ import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-supp
 import { runAblation, type ArmRun } from "./arms.ts"
 import { EvaluationBundleError } from "./bundle.ts"
 import {
+  ATTEMPT_ALLOWANCES,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
   createExperimentGovernor,
@@ -671,5 +672,112 @@ describe("two branches of one prefix bill it once (story 2-5c)", () => {
       { armId: "off", repeatId: 1, runId: "run-off", entry: { slot: "discovery-1", stage: "judge", attempt: 2, executionId: "exec-4", why: "timed out" } },
     ])
     await opened.journal.close()
+  })
+})
+
+describe("requestGate in admitted attempts (story 2-8c3a)", () => {
+  function view(over: { phases?: Record<string, number>; perBlock?: Record<number, number>; blocks?: number; globalSpent?: number; halt?: string; stop?: string } = {}): RequestGateView {
+    return {
+      stop: over.stop ?? null,
+      halt: over.halt ?? null,
+      globalSpent: over.globalSpent ?? 0,
+      categorySpent: (category) => (category === "blocks" ? (over.blocks ?? 0) : 0),
+      phaseSpent: (block, phase) => over.phases?.[`${block}:${phase}`] ?? 0,
+      mode: "attempts",
+      blockSpent: (block) => over.perBlock?.[block] ?? 0,
+    }
+  }
+
+  test("ATTEMPT_ALLOWANCES: prefix 2×(3+L) with L = 2, 45 per continuation, 100 per block, 300 in all", () => {
+    expect(ATTEMPT_ALLOWANCES).toEqual({ global: 300, blocks: 300, block: 100, prefix: 10, continuation: 45 })
+    expect(ATTEMPT_ALLOWANCES.prefix as number).toBe(2 * (3 + 2))
+    expect(ATTEMPT_ALLOWANCES.prefix + 2 * ATTEMPT_ALLOWANCES.continuation).toBe(ATTEMPT_ALLOWANCES.block as number)
+    expect(3 * ATTEMPT_ALLOWANCES.block).toBe(ATTEMPT_ALLOWANCES.blocks as number)
+  })
+
+  test("each threshold refuses AT its value, and every message counts attempts", () => {
+    expect(requestGate(view({ phases: { "1:prefix": 9 } }), { block: 1, phase: "prefix" }).ok).toBe(true)
+    const cases: [ReturnType<typeof view>, { block: number; phase: "prefix" | "on" | "off" }, string][] = [
+      [view({ phases: { "1:prefix": 10 } }), { block: 1, phase: "prefix" }, "block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts"],
+      [view({ phases: { "2:off": 45 } }), { block: 2, phase: "off" }, "block 2's OFF continuation allowance is exhausted: 45 of 45 admitted attempts"],
+      [view({ perBlock: { 3: 100 }, phases: { "3:on": 44 } }), { block: 3, phase: "on" }, "block 3's allowance is exhausted: 100 of 100 admitted attempts"],
+      [view({ blocks: 300 }), { block: 3, phase: "on" }, "the Blocks allowance is exhausted: 300 of 300 admitted attempts"],
+      [view({ globalSpent: 300 }), { block: 3, phase: "on" }, "the experiment's global cap is exhausted: 300 of 300 admitted attempts"],
+    ]
+    for (const [gateView, target, reason] of cases) {
+      expect(requestGate(gateView, target)).toEqual({ ok: false, cause: "budget", reason })
+    }
+  })
+
+  test("the per-block total refuses one continuation even while its own phase has room", () => {
+    const full = view({ perBlock: { 1: 100 }, phases: { "1:on": 40 } })
+    expect(requestGate(full, { block: 1, phase: "on" }).ok).toBe(false)
+    expect(requestGate(full, { block: 2, phase: "on" }).ok).toBe(true)
+  })
+
+  test("a halt never claims token exposure; the stop and the halt still refuse", () => {
+    const halted = requestGate(view({ halt: "ATTEMPT-MODE STOP (…): an attempt did not end within its bound" }), { block: 1, phase: "on" })
+    expect(halted).toMatchObject({ ok: false, cause: "halted" })
+    if (!halted.ok) {
+      expect(halted.reason).not.toContain("Token exposure")
+      expect(halted.reason).toContain("does not resume automatically")
+    }
+    expect(requestGate(view({ stop: "disk full" }), { block: 1, phase: "on" })).toMatchObject({ ok: false, cause: "runner-stop" })
+  })
+
+  test("a token-mode view is gated in tokens exactly as before", () => {
+    const tokens: RequestGateView = { ...view({ phases: { "1:prefix": 10 } }), mode: undefined, blockSpent: undefined }
+    expect(requestGate(tokens, { block: 1, phase: "prefix" }).ok).toBe(true)
+    const atLimit: RequestGateView = { ...view({ phases: { "1:prefix": 60_000 } }), mode: undefined, blockSpent: undefined }
+    expect(requestGate(atLimit, { block: 1, phase: "prefix" })).toEqual({
+      ok: false,
+      cause: "budget",
+      reason: "block 1's shared prefix allowance is exhausted: 60000 of 60000 newly executed tokens",
+    })
+  })
+
+  test("an attempt-mode view with no per-block count is a malformed view, never a budget refusal", () => {
+    const broken: RequestGateView = { ...view(), blockSpent: undefined }
+    const result = requestGate(broken, { block: 1, phase: "prefix" })
+    expect(result).toMatchObject({ ok: false, cause: "runner-stop" })
+    if (!result.ok) {
+      expect(result.reason).toContain("carries no per-block attempt count")
+      expect(result.reason).not.toContain("Infinity")
+    }
+  })
+
+  test("governorStateFromBill reads an attempt-mode bill by its unit: the count, and token exposure unmeasured", async () => {
+    const root = await tempDir("mad-bill-")
+    const lock = await acquireLock(root, "t")
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, () => "t", undefined, "attempts")
+    if (!opened.ok) throw new Error(opened.reason)
+    const admission = opened.journal.admission({ block: 1, phase: "prefix", runId: () => "run-p" })
+    const first = await admission.admit({ stage: "discover", slot: "discovery-1", attempt: 1 })
+    if (!first.ok) throw new Error(first.reason)
+    await first.settle({ kind: "unknown", why: "the host reported nothing" })
+    const second = await admission.admit({ stage: "discover", slot: "discovery-2", attempt: 1 })
+    if (!second.ok) throw new Error(second.reason)
+    await second.settle({ kind: "not-issued" })
+    const state = governorStateFromBill(opened.journal.bill())
+    expect(state.accounting).toBe("attempts")
+    expect(state.admittedAttempts).toBe(1)
+    expect(state.halted).toBe(false)
+    expect(state.exposure).toBe("unquantified")
+    // The unknown is a diagnostic, listed apart from the interrupted requests.
+    expect(state.unknownUsage).toEqual([])
+    expect(state.unknownUsageCount).toBe(0)
+    expect(state.unknownDiagnostics!.map((entry) => entry.entry.why)).toEqual(["the host reported nothing"])
+    // An attempt left in flight is what `unknownUsage` lists, once the journal is reopened.
+    expect((await admission.admit({ stage: "discover", slot: "discovery-3", attempt: 1 })).ok).toBe(true)
+    await opened.journal.close()
+    const again = await acquireLock(root, "t")
+    if (!again.ok) throw new Error(again.reason)
+    const reopened = await openJournal(root, again.lock, () => "t", undefined, "attempts")
+    if (!reopened.ok) throw new Error(reopened.reason)
+    const after = governorStateFromBill(reopened.journal.bill())
+    expect(after.unknownUsage.map((entry) => entry.entry.why)).toEqual(["issued by an interrupted invocation and never settled"])
+    expect(after.unknownDiagnostics).toHaveLength(1)
+    await reopened.journal.close()
   })
 })

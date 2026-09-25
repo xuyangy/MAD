@@ -47,9 +47,13 @@
  *
  * Readiness is `PAIRED_GATES` and nothing else: no flag, environment variable or
  * file read at run time can close a gate. While any gate the evaluation phase
- * requires is OPEN, or `ablation/paired-gates.ts` differs from HEAD, this command
- * refuses at stage 1. The schedule's `config.gates` records the committed blob and
- * every gate's status.
+ * requires on the api-key route is OPEN, or `ablation/paired-gates.ts` differs
+ * from HEAD, this command refuses at stage 1. A gate that covers only the oauth
+ * route is printed and never consulted. The schedule's `config.gates` records the
+ * committed blob, the route (`route api-key`) and every gate's status. The
+ * launcher hands the runner `route: "api-key"`, which the sealed config does not
+ * repeat: it writes `route` only for the oauth route, so the api-key route is
+ * sealed only through `config.gates`.
  *
  * ## The change is the sealed one, and the worktree is proved
  *
@@ -110,7 +114,7 @@ import {
   type ProviderBlock,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
-import { gatePreflight, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -197,9 +201,12 @@ export async function gateTableState(git: RunGit, root: string): Promise<GateTab
   return { ok: true, blob: blob.stdout.trim() }
 }
 
-/** The `config.gates` identity: the committed table's blob and every gate's status. */
-export function gatesIdentity(blob: string, gates: readonly PairedGate[]): string {
-  return `${GATE_TABLE_FILE} blob ${blob}; ${gates.map((gate) => `gate ${gate.number} ${gate.status}`).join(", ")}`
+/** The route this launcher runs: the relay to one api-key provider. It never selects the oauth route. */
+export const LAUNCH_ROUTE: GateRoute = "api-key"
+
+/** The `config.gates` identity: the committed table's blob, the route it was checked for and every gate's status. */
+export function gatesIdentity(blob: string, gates: readonly PairedGate[], route: GateRoute): string {
+  return `${GATE_TABLE_FILE} blob ${blob}; route ${route}; ${gates.map((gate) => `gate ${gate.number} ${gate.status}`).join(", ")}`
 }
 
 /** The `config.tools` identity: the adapter and both blame deadlines, as the factory reported them. */
@@ -1053,7 +1060,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       }),
     )
 
-    const gateCheck = gatePreflight(gates, "evaluation")
+    const gateCheck = gatePreflight(gates, "evaluation", LAUNCH_ROUTE)
     let table: GateTableState
     try {
       table = await (overrides.gateTable ?? (() => gateTableState(git, REPO_ROOT)))()
@@ -1323,7 +1330,12 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     } catch (error) {
       codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
     }
-    const config: PairedConfig = { provenance: "live", tools: toolsIdentity(wiring), gates: gatesIdentity(gatesBlob, gates) }
+    const config: PairedConfig = {
+      provenance: "live",
+      tools: toolsIdentity(wiring),
+      gates: gatesIdentity(gatesBlob, gates, LAUNCH_ROUTE),
+      route: LAUNCH_ROUTE,
+    }
     const base = {
       bundleRoot: out,
       protocolFile: PROTOCOL_FILE,

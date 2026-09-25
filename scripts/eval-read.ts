@@ -67,7 +67,8 @@ import { readAdjudicationBundle, renderAdjudicationBundle } from "../ablation/ad
 import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adversarial-read.ts"
 import { ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE, hasAdversarialSchedule } from "../ablation/adversarial-schedule.ts"
 import { BUNDLE_FILE } from "../ablation/bundle.ts"
-import { readEvaluationReport, renderEvaluationReport, settle } from "../ablation/evaluation-report.ts"
+import { bundleAccounting, readEvaluationReport, renderEvaluationReport, settle } from "../ablation/evaluation-report.ts"
+import { readPersistedJournal } from "../ablation/journal-read.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
@@ -171,9 +172,12 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
         console.log(`MAD adjudication report could not be rendered — ${error instanceof Error ? error.message : String(error)}`)
       }
       // The evaluation report reads no file. It composes the three results
-      // above, a reader's error included, in its own `try`.
+      // above, a reader's error included, in its own `try`. An attempt-mode
+      // bundle's cost comes from its persisted journal, read and validated here.
       try {
-        const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication)
+        const journal =
+          bundleAccounting(paired).kind === "attempts" ? await settle(() => readPersistedJournal(target, "attempts")) : undefined
+        const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, journal)
         if (report.kind !== "not-applicable") console.log(renderEvaluationReport(report))
       } catch (error) {
         console.log(`MAD evaluation report — ${error instanceof Error ? error.message : String(error)}`)

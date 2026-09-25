@@ -97,6 +97,9 @@ export const EVALUATION_REPORT_MODULE = "ablation/evaluation-report.ts"
 /** The module that reads the sealed adversarial suite's two diagnostics, for the same reason. */
 export const ADVERSARIAL_READER_MODULE = "ablation/adversarial-read.ts"
 
+/** Story 2-8c3a — the module that replays and validates a persisted paired journal, for the same reason. */
+export const JOURNAL_READER_MODULE = "ablation/journal-read.ts"
+
 export const INHERITED_SUM_RULE = [
   "  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then",
   "  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.",

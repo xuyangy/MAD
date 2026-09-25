@@ -820,28 +820,33 @@ credential itself). The host is given only the relay's host key.
 preflight. **With the shipped gate table it always refuses:** gate 4 below is OPEN and is
 required for the evaluation, so the command prints every check and exits 1 before any host, client,
 schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
-evaluation. Nothing in this section authorizes billing, and the command's existence is not
-authorization.
+evaluation. Gate 7 is OPEN as well; it covers only the oauth route, which this launcher never selects,
+so it is printed and not consulted for the api-key route. Nothing in this section authorizes billing,
+and the command's existence is not authorization.
 
 ### The paired gates
 
 `ablation/paired-gates.ts` holds `PAIRED_GATES`: each gate's number, name, kind (`engineering` or
-`authorization`), the phase it is required for (`accounting-probe` or `evaluation`), its owner, its
-status and, when CLOSED, its evidence. **Authority lives only in the repository.** No flag,
+`authorization`), the phase it is required for (`accounting-probe` or `evaluation`), the routes it
+covers (`api-key`, `oauth`, or every route when it names none), its owner, its status and, when
+CLOSED, its evidence. **Authority lives only in the repository.** No flag,
 environment variable or file read at run time can close a gate; a gate closes by a reviewed change to
 that file, committed: the launcher refuses while `ablation/paired-gates.ts` differs from MAD's HEAD
-(staged, unstaged or untracked), and the sealed schedule's `config.gates` records the committed blob
-and every gate's status. The launcher checks the `evaluation` phase only, so a gate required for story 2-8c's probe
-alone never lets the three blocks run. A table with an unknown kind, phase or status, a CLOSED gate
-with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate the human
-budget owner does not own, or no authorization gate for the evaluation is refused.
+(staged, unstaged or untracked), and the sealed schedule's `config.gates` records the committed blob,
+the route and every gate's status. The launcher checks the `evaluation` phase on the `api-key` route
+only, so a gate required for story 2-8c's probe alone, or one covering only the oauth route, never lets
+the three blocks run and never blocks them. A table with an unknown kind, phase, route or status, a
+CLOSED gate with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate
+the human budget owner does not own, or no authorization gate for the evaluation on the checked route
+is refused.
 
-1. **host request accounting — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c2. Requires: every physical provider request individually admitted and accounted, with host retries refused, on the measured host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is refused, never forwarded. Evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts.
+1. **host request accounting — CLOSED.** Engineering, required for evaluation on the api-key route only. Owner: story 2-8c2. Requires: every physical provider request individually admitted and accounted, with host retries refused, on the measured host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is refused, never forwarded. Evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts.
 2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts.
 3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it. Note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub.
-4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend. No story closes it.
+4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation on every route. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block and 300 in total, each an admission threshold. No story closes it.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
 6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
+7. **OAuth attempt accounting — OPEN.** Engineering, required for evaluation on the oauth route only. Owner: story 2-8c3b. Requires: story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d starts. Never closed from the paid paired evaluation. Printed, and not consulted by this launcher, which runs the api-key route.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
 `PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
@@ -1035,6 +1040,66 @@ what paired gate 1 is closed on:
 
 The shipped plugin runs no relay: a review outside the paired launcher still reads a turn's usage from
 the host's settled message.
+
+### Attempt-mode accounting (story 2-8c3a)
+
+The OAuth providers sign in through opencode, with no relay, so MAD cannot measure their tokens. For
+that route `runPairedBlocks` has a second accounting mode, `config.accounting: "attempts"`, beside the
+unchanged token mode. **No launcher path selects it yet:** this launcher passes `route: "api-key"`,
+counts tokens, and refuses exactly as before; the OAuth host route and its zero-bill probe are story
+2-8c3b's, and gate 7 stays OPEN until that evidence is reviewed. The mode follows protocol v2's draft
+sections A6 onward, which are not frozen.
+
+- **The unit.** One admitted attempt is one `runTurn` that passed its stage's ledger gate and the
+  experiment's admission and was issued, retries included. It is not a debate round and not a
+  physical request. In attempt mode the ledger gate still runs, but with `tokenCap` null and
+  `stopOnUnknownUsage: false` it gates nothing on tokens. A refused attempt writes no journal
+  line and counts 0; an attempt admitted and then settled `not-issued` (cancelled before `runTurn`)
+  counts 0.
+- **The allowances.** `ATTEMPT_ALLOWANCES`: prefix 10 (2×(3+L), L = 2), ON 45, OFF 45, 100 per block,
+  300 for the Blocks allowance and 300 globally. They are admission thresholds (`spent < limit`):
+  attempts already in flight when one is reached can overshoot it, and the bill's `overshoot` reports
+  the realised count against each limit, per phase and per block.
+- **The journal.** Every `issued` line carries `mode: "attempts"`, and there are no step lines. A
+  journal whose lines declare one mode refuses to open in the other, and a journal mixing lines with
+  and without `mode` refuses to open at all. A token-mode journal carries no `mode` field and no
+  `abandoned` flag.
+- **What stops the run.** An `unknown` settlement is recorded as a diagnostic and stops nothing: the
+  attempt count is exact either way. The halt still latches on an integrity failure, on an attempt
+  left in flight by an earlier invocation (uncertain), and on an attempt that did not end within its
+  bound (a timeout or a cancellation after the request went out, marked `abandoned` by the backend,
+  or a `runTurn` that threw, because it may still be held open). Each of those halt reasons starts
+  with `ATTEMPT-MODE STOP` and makes no claim about token spend, even though the marker file is still
+  `unknown-usage-halt.json`; the marker records `accounting: "attempts"`, and `bun run eval-read`
+  presents it as an attempt-mode operational stop. A persistence failure is a runner stop, not a
+  halt: it writes no marker and carries no attempt-mode wording.
+- **The run dials.** Each run gets no `tokenCap` and `stopOnUnknownUsage: false`, so no host-reported
+  token figure gates a turn. Those figures stay on the bill as unverified diagnostics and enter no
+  gate, completeness check or cost contrast. The evaluation is complete when every slot completed and
+  nothing halted, stopped, or is uncertain or in flight; an unknown settlement does not make it
+  incomplete.
+- **What it binds to.** Attempt mode and the oauth route go together: `createSchedule` and the runner
+  refuse `accounting: "attempts"` without `route: "oauth"`, the oauth route without attempts, and an
+  unknown value of either. An attempt-mode schedule seals only under a frozen version-2 protocol and
+  only over a roster of exactly three pool discovery slots plus the `security` and `reliability` lens
+  slots, the roster the 10-attempt prefix is sized for.
+- **What is sealed.** The schedule's config carries `accounting: "attempts"`, `attemptAllowances`,
+  `tokenCap: null` and `stopOnUnknownUsage: false`, and `route` when it is `oauth`; a token-mode,
+  api-key config carries none of these, so its digest does not depend on them. The OAuth route runs only in attempt mode. Every
+  arm manifest's `experiment` carries `accounting: "attempts"` (`MANIFEST_SCHEMA_VERSION` stays 1).
+- **The report.** For an attempt-mode bundle `bun run eval-read` reads `paired-journal.jsonl` through
+  `ablation/journal-read.ts`, which replays the whole file with the journal's own validation and
+  refuses a journal that is incomplete (an attempt never settled), conflicted or mixed-mode rather
+  than counting its lines. The cost endpoint is *newly issued MAD attempts*: shared prefix + ON + OFF,
+  with ON − OFF over the continuations, by stage and slot, the model named from the manifest roster,
+  retries apart, and each figure's source named. Each phase's realised count is shown against its
+  threshold, and the block's against 100, with any overshoot; ON − OFF is unavailable unless both
+  continuations are recorded completed, and it is flagged when the arms ran under different realised
+  caps. A bundle whose accounting mode is mixed or cannot be established, including an attempt-mode
+  bundle not sealed under a version-2 protocol, gets no cost endpoint at all. It is a workflow-use contrast, never token cost,
+  money, subscription quota or physical requests. The host's own retries, tool steps and held-open
+  requests on the OAuth route are neither gated nor counted, and the report says so. A token-mode
+  bundle's report keeps the token endpoint.
 
 ### When it runs
 

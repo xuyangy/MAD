@@ -11,6 +11,11 @@ decided_by:
   - "2026-09-15 — review channel (window 2, deciding in the human's place): no new billing.
     A draft protocol v2 proposes CAP-1 and CAP-11 as secondary descriptive endpoints read
     from each paired block's shared discovery prefix."
+  - "2026-09-25 — review channel (window 2, deciding in the human's place), story 2-8c3a: no
+    new billing. The draft adds A6–A11: on the OAuth route only, the budget unit becomes the
+    admitted attempt, the cost endpoint becomes newly issued MAD attempts, the
+    physical-request invariant is amended, and the unknown-usage halt is replaced. Freezing
+    stays the human's."
 ---
 
 # Evaluation protocol — Epic 2, version 2 (DRAFT)
@@ -21,8 +26,9 @@ decided_by:
 > pre-registration only when it is frozen: `status`, `frozen_on` and `frozen_hash` filled, and
 > a data-exposure statement current at that date. Freezing is a human decision.
 >
-> This draft numbers its own sections A1–A5 so they never collide with v1's. A citation of
-> the frozen protocol reads "v1 §n".
+> This draft numbers its own sections A1–A11 so they never collide with v1's. A citation of
+> the frozen protocol reads "v1 §n". A1–A5 add the prefix endpoints; A6–A11 add attempt-mode
+> accounting for the OAuth route.
 
 ## A1. What this amendment changes, and what it does not
 
@@ -34,7 +40,9 @@ delegated scope.
 
 This draft adds **two secondary descriptive endpoints**, both read from data the planned
 paired blocks already produce. It adds no billing, no allowance, no block and no arm.
-v1 §1–§8 carry over unchanged except where A2–A5 say otherwise.
+v1 §1–§8 carry over unchanged except where A2–A11 say otherwise. A6–A11 bind only a
+schedule sealed for the OAuth route; the api-key route keeps v1's token unit and every v1 rule
+A6–A11 amend.
 
 ## A2. The endpoints
 
@@ -126,3 +134,101 @@ contrasts are story 2.8's.
   2026-09-15 found no paired bundle file, and `MAD_ARTIFACTS` was unset. Beyond that search,
   exposure is **not established**. The scripted fixture outputs had been seen: CAP-1 7 of 13
   pooled against 3 of 13 per member, and a nonzero lens-only count on the seeded change.
+
+## A6. Attempt-mode accounting: what it changes, and where
+
+The planned roster signs in through opencode's own OAuth sessions. On that route MAD holds no
+provider credential and has no relay between the host and the provider, so it cannot measure a
+request's tokens, and v1's token-denominated gates, halt and cost endpoint cannot be applied.
+A6–A11 define a second accounting mode, **attempts**, for a schedule sealed for the OAuth route
+(`route: oauth`, `accounting: attempts` in its config). A schedule on the api-key route keeps
+v1 §4 exactly: the ledger-token unit, `PAIRED_ALLOWANCES`, the unknown-usage stop rule and the
+token cost endpoint. Precision (v1 §3), final recall and every other endpoint are unchanged in
+both modes.
+
+**The unit.** One *admitted attempt* is one `runTurn` that passed both its stage's ledger gate
+and the experiment's admission and was issued, retries included. An attempt refused at
+admission writes no journal line and counts 0. An attempt admitted and then not issued (the
+run was cancelled before `runTurn`) is settled `not-issued` and counts 0. An attempt is not a
+debate round: a round fans out to several seats and the OFF arm has no rounds, so a round can
+neither compare the arms nor cap them.
+
+## A7. The budget unit, on the OAuth route
+
+Replaces v1 §4's token allowances for an attempt-mode schedule.
+
+- **Per block:** the shared prefix gets 2×(3+L) attempts with L lens slots; the remainder of
+  100 is split equally between the ON and OFF continuations. With L = 2 (the shipped
+  `security` and `reliability` lenses) that is **10, 45 and 45**.
+- **Blocks:** 300 for the three blocks. **Global:** 300.
+- **Admission thresholds, not bills.** Each test is `spent < limit`, counted over attempts in
+  every issued state (settled, unknown, in flight, uncertain). Attempts already in flight when a
+  threshold is reached may overshoot it, so 300 is not a hard realised maximum unless admission
+  is serialized. The overshoot is reported and never borrowed from another allowance, and the
+  report states the realised count.
+- 300 is a chosen cap, not an evidence-based adequate budget. A block that reaches it is
+  truncated and reads as incomplete, never as measured.
+- Each run carries no token cap and does not stop on unknown usage; the ledger's own stop rule
+  is unchanged and simply not turned on. Host-reported tokens are unverified diagnostics: they
+  are kept per attempt with their source, and excluded from admission, caps, completeness and
+  every cost contrast.
+
+## A8. The cost endpoint, on the OAuth route
+
+Replaces v1 §4's *Actual cost* for an attempt-mode schedule.
+
+- **Newly issued MAD attempts:** per block, shared prefix + ON continuation + OFF
+  continuation, each admitted attempt counted once and the prefix once. `not-issued` attempts
+  are excluded.
+- **The contrast** is ON − OFF over the continuation attempts only. It is unavailable while
+  either continuation did not complete, because a truncated continuation would read as a
+  difference.
+- Attempts are reported by stage, slot and model (read from the manifest roster), with retries
+  (`attempt > 1`) apart, and every figure names where it was read from. They are read from the
+  persisted journal, replayed and validated as a whole; a journal that is incomplete, conflicted
+  or mixed-mode yields no figure.
+- **What it is.** A workflow-use contrast. It is never token cost, money, subscription quota or
+  a physical request count, and no attempt is equated with any number of tokens. The report
+  states that token spend and subscription quota are unmeasured on this route. Subscription
+  exhaustion and failed attempts stay visible outcomes.
+
+## A9. The physical-request invariant, amended
+
+v1 §4 requires every billable request to pass its stage gate and every experiment gate, with no
+additional host or provider retry unaccounted for. On the OAuth route every **MAD attempt**
+passes the stage's gate and the experiment's gates before it is issued. The host's own work
+inside an attempt — its retries, tool steps and requests held open — is **not gated and not
+counted**, and the report discloses it as unmeasured. MAD adds no retry of its own beyond v1's
+one per request. The claim that every physical request is gated is not made on this route.
+
+## A10. The unknown-usage halt, replaced
+
+v1 §4's *Stop rule on unknown usage* does not apply on the OAuth route: a missing token figure
+does not stop admission, because the attempt count is exact either way. It is recorded as a
+diagnostic. Admission still **halts**, latched and recorded in the halt marker, and does not
+resume automatically, on:
+
+- an integrity failure in the journal;
+- an attempt issued by an earlier invocation and never settled, whose ending is not
+  established;
+- an attempt that did not end within its bound (a timeout, a cancellation after the request
+  went out, or a `runTurn` that threw), since a held-open request may still consume quota.
+
+Each halt is worded operationally and never implies unknown spend. Separately, a failed
+persistence of an admission or a settlement is a **runner stop**, as in v1: the runner admits
+nothing further in that invocation and names the failure, but it is not a halt, writes no halt
+marker, and carries no attempt-mode wording. *Complete* on this route means
+every slot completed, with no halt, no stop, and nothing uncertain or in flight; an unknown token
+figure does not make a block incomplete.
+
+## A11. Freezing A6–A11, and data exposure
+
+- **Before any OAuth-route schedule is sealed,** v2 is frozen with a data-exposure statement
+  current at that date. A schedule sealed under v1 is never read under A6–A11.
+- **The gates.** The OAuth route is required to pass its own attempt-accounting gate, closed only
+  on zero-bill probe evidence or, for a transport that cannot be probed without billing, on a
+  separately authorized bounded pilot reviewed before the evaluation; never on the paid
+  evaluation itself. The evaluation spend authorization is restated in attempts for this route.
+- **Data exposure at drafting (2026-09-25).** No paired bundle on the OAuth route exists: no host
+  route selects it, and no outcome data was seen for A6–A11. The v1 exposure statement in A5
+  stands for everything else.

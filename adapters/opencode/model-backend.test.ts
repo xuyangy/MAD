@@ -805,6 +805,37 @@ describe("runTurn — abandonment marks usage unknown without moving a failure (
  * "a session we cannot delete is untidy, not a failure of the review"), which is
  * why every test here also asserts the turn's own outcome survived.
  */
+/**
+ * Story 2-8c3a — `abandoned` is data, not wording: it marks a turn that did not
+ * end within its bound (a timeout, or a cancellation after the prompt went out),
+ * and only that. A turn that ended with no usage, or whose transport threw, is
+ * unknown without it.
+ */
+describe("runTurn — `abandoned` marks only a turn that did not end within its bound (story 2-8c3a)", () => {
+  test("the timeout path sets it", async () => {
+    const result = await backendWith({ hang: true }, { timeoutMs: 25 }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(result.usageUnknown?.abandoned).toBe(true)
+  })
+
+  test("the cancel-after-issue path sets it", async () => {
+    const { backend } = backendWith({ hang: true }, { timeoutMs: 10_000 })
+    const controller = new AbortController()
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    controller.abort()
+    const result = await pending
+    expect(result.usageUnknown?.abandoned).toBe(true)
+  })
+
+  test("ordinary missing host usage does not, and neither does a transport throw", async () => {
+    const missing = await backendWith({ reply: { data: { info: { structured: PAYLOAD } } } }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(missing.usageUnknown).toBeDefined()
+    expect("abandoned" in missing.usageUnknown!).toBe(false)
+    const thrown = await backendWith({ throws: new Error("socket hang up") }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(thrown.usageUnknown).toBeDefined()
+    expect("abandoned" in thrown.usageUnknown!).toBe(false)
+  })
+})
+
 describe("runTurn — bounded, exposed session cleanup (AC3)", () => {
   test("a HANGING `session.delete` does not hold the turn open, and is reported", async () => {
     const { backend, calls } = backendWith({ deleteHangs: true }, { cleanupTimeoutMs: 10 })

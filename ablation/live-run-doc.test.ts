@@ -21,7 +21,7 @@ import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
 import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_FILE } from "./bundle.ts"
-import { ADVERSARIAL_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
+import { ADVERSARIAL_ALLOWANCES, ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import {
   ADJUDICATION_QUANTITIES,
   ADJUDICATION_SHEET_FILE,
@@ -36,7 +36,7 @@ import {
   ADVERSARIAL_SLOT_STATUS_FILE,
   ADVERSARIAL_START_MARKER_FILE,
 } from "./adversarial-schedule.ts"
-import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
+import { ATTEMPT_MODE_STOP_PREFIX, JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
 import {
   ADJUDICATION_READER_MODULE,
   ADVERSARIAL_READER_MODULE,
@@ -511,6 +511,8 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       const gate = PAIRED_GATES[index]!
       const body = item[4]!.replace(/\s+/g, " ")
       expect(body.toLowerCase(), gate.name).toContain(`${gate.kind}, required for ${gate.phase}`)
+      if (gate.routes === undefined) expect(body, `${gate.name} routes`).not.toContain("route only")
+      else expect(body, `${gate.name} routes`).toContain(`on the ${gate.routes.join(" and ")} route only.`)
       expect(body, gate.name).toContain(`Owner: ${gate.owner}.`)
       expect(body, `${gate.name} requires`).toContain(`Requires: ${gate.requires.replace(/\s+/g, " ")}.`)
       if (gate.status === "CLOSED") expect(body, `${gate.name} evidence`).toContain(`Evidence: ${gate.evidence!.replace(/\s+/g, " ")}.`)
@@ -544,12 +546,46 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     }
   })
 
-  test("the opening summary names gate 4 as the refusal, and gate 3 as not consulted", async () => {
+  test("the opening summary names gate 4 as the refusal, and gates 3 and 7 as not consulted", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("gate 4 below is OPEN and is required for the evaluation")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
-    const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN").map((gate) => gate.number)
+    expect(text).toContain(
+      "Gate 7 is OPEN as well; it covers only the oauth route, which this launcher never selects, so it is printed and not consulted for the api-key route.",
+    )
+    const onRoute = (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes("api-key")
+    const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(gate)).map((gate) => gate.number)
     expect(required).toEqual([4])
+    const oauthOnly = PAIRED_GATES.filter((gate) => gate.status === "OPEN" && !onRoute(gate)).map((gate) => gate.number)
+    expect(oauthOnly).toEqual([7])
+  })
+
+  test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {
+    const text = between((await section()).replace(/\s+/g, " "), "### Attempt-mode accounting (story 2-8c3a)", " ### ", "the attempt-mode section")
+    expect(text).toContain("**No launcher path selects it yet:**")
+    expect(text).toContain("gate 7 stays OPEN")
+    for (const figure of [ATTEMPT_ALLOWANCES.prefix, ATTEMPT_ALLOWANCES.continuation, ATTEMPT_ALLOWANCES.block, ATTEMPT_ALLOWANCES.blocks]) {
+      expect(text).toContain(String(figure))
+    }
+    for (const phrase of [
+      "retries included",
+      "A refused attempt writes no journal line and counts 0",
+      "`mode: \"attempts\"`",
+      "mixing lines with and without `mode` refuses to open",
+      "An `unknown` settlement is recorded as a diagnostic and stops nothing",
+      "`abandoned`",
+      "`ATTEMPT-MODE STOP`",
+      "`stopOnUnknownUsage: false`",
+      "its digest",
+      "`MANIFEST_SCHEMA_VERSION` stays 1",
+      "`ablation/journal-read.ts`",
+      "workflow-use contrast, never token cost, money, subscription quota or physical requests",
+      "neither gated nor counted",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    expect(text).toContain(ATTEMPT_MODE_STOP_PREFIX.slice(0, "ATTEMPT-MODE STOP".length))
+    expect(text).not.toContain("evaluation complete")
   })
 
   test("the relay is documented: attribution, admission before forwarding, refused retries, unknown on error, the credential", async () => {

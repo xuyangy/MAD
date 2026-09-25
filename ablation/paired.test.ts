@@ -16,6 +16,7 @@ import type { ZodType } from "zod"
 import { spentTokens, usageByOrigin } from "../core/budget/ledger.ts"
 import { emptyTokenUsage, type RunRecord, type TokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
+import { CODING_LENS_INSTRUCTIONS } from "../core/instructions/coding/lenses.ts"
 import type { Clock } from "../core/ports/clock.ts"
 import type { LateUsageReporter } from "../core/ports/late-usage.ts"
 import { cancelledTurn, type BackendCapabilities, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
@@ -29,12 +30,20 @@ import { known, MANIFEST_FILE, type RunManifest } from "./manifest.ts"
 import { bindingProblem, deniedWork, runPairedBlocks, type PairedPhaseContext, type RunPairedBlocksInput } from "./paired.ts"
 import type { RefusedAdmission } from "./journal.ts"
 import { parseManifest } from "./read-bundle.ts"
+import { readAdjudicationBundle } from "./adjudication-read.ts"
+import { readEvaluationReport, renderEvaluationReport, settle } from "./evaluation-report.ts"
+import { readPersistedJournal } from "./journal-read.ts"
+import { readLabelledBundle } from "./labelled-read.ts"
+import { readPairedBundle, renderPairedBundle } from "./paired-read.ts"
+import { main as evalReadMain } from "../scripts/eval-read.ts"
 import {
   createSchedule,
   readSlotStatuses,
   SCHEDULE_FILE,
   START_MARKER_FILE,
+  sha256,
   type CoinFace,
+  type PairedConfig,
   type PairedSchedule,
 } from "./schedule.ts"
 
@@ -74,7 +83,7 @@ interface Call extends PairedPhaseContext {
 }
 
 /** What one call answers with, beyond its payload. */
-type Usage = TokenUsage | { unknown: string } | "throw"
+type Usage = TokenUsage | { unknown: string; abandoned?: true } | "throw"
 
 interface Script {
   usage?: (call: Call, index: number) => Usage
@@ -97,7 +106,8 @@ function scripted(script: Script = {}) {
     async runTurn<T>(slot: string, instructions: string, _input: string, schema: ZodType<T>, signal?: AbortSignal): Promise<Envelope<T>> {
       if (signal?.aborted) return cancelledTurn<T>(slot)
       const role = judgeRoleOf(instructions)
-      const stage: Stage = role !== undefined ? "judge" : instructions === CODING_DISCOVERY_GENERALIST.text ? "discover" : "debate"
+      const discovery = instructions === CODING_DISCOVERY_GENERALIST.text || LENS_TEXTS.has(instructions)
+      const stage: Stage = role !== undefined ? "judge" : discovery ? "discover" : "debate"
       const call: Call = { ...context, stage, slot }
       const index = calls.length
       calls.push(call)
@@ -108,7 +118,15 @@ function scripted(script: Script = {}) {
       const parsed = schema.safeParse(payload)
       if (!parsed.success) throw new Error(`fake payload for ${stage} did not parse`)
       const billing =
-        "unknown" in usage ? { usageUnknown: { executionId: `exec-${(executions += 1)}`, why: usage.unknown } } : { tokens: usage }
+        "unknown" in usage
+          ? {
+              usageUnknown: {
+                executionId: `exec-${(executions += 1)}`,
+                why: usage.unknown,
+                ...(usage.abandoned === true ? { abandoned: true as const } : {}),
+              },
+            }
+          : { tokens: usage }
       script.after?.(call, index)
       return { ok: true, slot, value: parsed.data, ...billing }
     },
@@ -116,21 +134,42 @@ function scripted(script: Script = {}) {
   return { calls, backendFor }
 }
 
-function rosterOf(count: number) {
+const LENS_TEXTS = new Set([...CODING_LENS_INSTRUCTIONS.values()].map((set) => set.text))
+
+function rosterOf(count: number, lenses: readonly string[] = []) {
   return selectRoster(
     [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5"), candidate("google", "gemini-2.5-pro")].slice(0, count),
-    { slots: count, providerConfigKey: "provider" },
+    { slots: count, providerConfigKey: "provider", ...(lenses.length === 0 ? {} : { lenses }) },
   )
 }
 
+/** A frozen version-2 protocol, hashed by `readFrozenProtocol`'s own rule, in a temp dir of its own. */
+async function frozenV2Protocol(): Promise<string> {
+  const dir = await tempDir()
+  const pending = "---\nid: PROTOCOL-test-v2\nstatus: frozen\nversion: 2\nfrozen_hash: PENDING\n---\n\n# A test protocol, version 2\n"
+  const file = join(dir, "protocol-v2.md")
+  await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${sha256(pending)}`))
+  return file
+}
+
 async function sealed(
-  options: { coin?: CoinFace; slots?: number; maxConcurrency?: number; clock?: Clock; signal?: AbortSignal; script?: Script } = {},
+  options: {
+    coin?: CoinFace
+    slots?: number
+    maxConcurrency?: number
+    clock?: Clock
+    signal?: AbortSignal
+    script?: Script
+    config?: Pick<PairedConfig, "accounting" | "route">
+  } = {},
 ) {
   const root = await tempDir()
-  const resolved = rosterOf(options.slots ?? 2)
+  // Attempt mode is sized for three pool slots and the security and reliability lenses, under a frozen v2 protocol.
+  const attemptMode = options.config?.accounting === "attempts"
+  const resolved = attemptMode ? rosterOf(3, ["security", "reliability"]) : rosterOf(options.slots ?? 2)
   const base = {
     bundleRoot: root,
-    protocolFile: PROTOCOL_FILE,
+    protocolFile: attemptMode ? await frozenV2Protocol() : PROTOCOL_FILE,
     fixture: LABELLED_CHANGE_SEAL,
     codeRevision: known({ commit: "abc123", dirty: false }),
     roster: resolved.roster,
@@ -138,6 +177,7 @@ async function sealed(
     config: {
       provenance: "scripted" as const,
       ...(options.maxConcurrency === undefined ? {} : { maxConcurrency: options.maxConcurrency }),
+      ...options.config,
     },
   }
   const created = await createSchedule({ ...base, createdAt: "2026-09-14T00:00:00.000Z", coin: () => options.coin ?? "heads" })
@@ -854,5 +894,218 @@ describe("runPairedBlocks — a denial fails only the slot it denied (story 2-5c
       "3:off:completed",
     ])
     expect(outcome.complete).toBe(false)
+  })
+})
+
+describe("runPairedBlocks in attempt mode (story 2-8c3a)", () => {
+  const attempts = { accounting: "attempts" as const, route: "oauth" as const }
+
+  async function journalLines(root: string): Promise<Record<string, unknown>[]> {
+    return (await readFile(join(root, JOURNAL_FILE), "utf8"))
+      .split("\n")
+      .filter((row) => row.length > 0)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
+  }
+
+  test("every issued line says `attempts`, every manifest says so, and the runs get no token cap or unknown-usage stop", async () => {
+    const { root, input } = await sealed({ config: attempts })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.complete).toBe(true)
+    expect(outcome.bill.mode).toBe("attempts")
+    const issued = (await journalLines(root)).filter((line) => line.type === "issued")
+    expect(issued.length).toBeGreaterThan(0)
+    expect(issued.every((line) => line.mode === "attempts")).toBe(true)
+    for (const slot of outcome.slots) {
+      if (slot.manifest?.kind !== "written") throw new Error("expected a manifest")
+      const manifest = await manifestOf(slot.manifest.directory)
+      expect(manifest.experiment?.accounting).toBe("attempts")
+      expect(manifest.dials.cap).toBeNull()
+    }
+    for (const entry of outcome.runs) {
+      expect(entry.run.record.ledger.cap).toBeNull()
+      expect(entry.run.record.ledger.stopOnUnknownUsage).toBe(false)
+    }
+    expect(outcome.governor).toMatchObject({ accounting: "attempts", admittedAttempts: issued.length })
+    expect(outcome.schedule.config).toMatchObject({ accounting: "attempts", tokenCap: null, stopOnUnknownUsage: false })
+  })
+
+  test("an unknown settlement halts nothing: every slot still runs, and the evaluation is complete", async () => {
+    let unknownGiven = false
+    const { input, calls } = await sealed({
+      config: attempts,
+      script: {
+        usage: (call) => {
+          if (!unknownGiven && call.block === 1 && call.phase === "on" && call.stage === "debate") {
+            unknownGiven = true
+            return { unknown: "host reported nothing" }
+          }
+          return { ...emptyTokenUsage(), input: 10, output: 20 }
+        },
+      },
+    })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(unknownGiven).toBe(true)
+    expect(outcome.bill.halt).toBeNull()
+    expect(outcome.bill.unknown).toHaveLength(1)
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array(6).fill("completed"))
+    expect(outcome.complete).toBe(true)
+    expect(calls.some((call) => call.block === 3)).toBe(true)
+  })
+
+  test("an abandoned attempt stops the run operationally; later slots are not attempted", async () => {
+    let given = false
+    const { input } = await sealed({
+      config: attempts,
+      script: {
+        usage: (call) => {
+          if (!given && call.block === 1 && call.phase === "on" && call.stage === "debate") {
+            given = true
+            return { unknown: "timed out", abandoned: true }
+          }
+          return { ...emptyTokenUsage(), input: 10, output: 20 }
+        },
+      },
+    })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.bill.halt).toContain("did not end within its bound")
+    expect(outcome.bill.halt).not.toContain("UNKNOWN amount")
+    expect(outcome.complete).toBe(false)
+    expect(outcome.slots.slice(2).map((slot) => slot.status)).toEqual(Array(4).fill("not-attempted"))
+
+    // The paired reader presents the marker as an attempt-mode operational stop, never as unknown spend.
+    const paired = await readPairedBundle(input.bundleRoot)
+    if ("error" in paired) throw new Error(paired.error)
+    expect(paired.halt).toMatchObject({ kind: "halted", accounting: "attempts" })
+    const text = renderPairedBundle(paired)
+    expect(text).toContain("THIS EXPERIMENT STOPPED IN ATTEMPT MODE — an operational stop, not unknown spend.")
+    expect(text).not.toContain("THIS EXPERIMENT IS HALTED.")
+  })
+
+  test("a thrown runTurn is settled abandoned, so attempt mode stops", async () => {
+    let thrown = false
+    const { input } = await sealed({
+      config: attempts,
+      script: {
+        usage: (call) => {
+          if (!thrown && call.block === 1 && call.phase === "on" && call.stage === "debate") {
+            thrown = true
+            return "throw"
+          }
+          return { ...emptyTokenUsage(), input: 10, output: 20 }
+        },
+      },
+    })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(thrown).toBe(true)
+    expect(outcome.bill.halt).toContain("did not end within its bound")
+    expect(outcome.bill.halt).toContain("the backend threw after the request was issued")
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("`eval-read` reads an attempt-mode bundle's journal and prints the attempt endpoint", async () => {
+    const { root, input } = await sealed({ config: attempts })
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const lines: string[] = []
+    const log = console.log
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "))
+    let code: number
+    try {
+      code = await evalReadMain(["bun", "eval-read", "--bundle", root])
+    } finally {
+      console.log = log
+    }
+    expect(code).toBe(0)
+    const text = lines.join("\n")
+    expect(text).toContain("COST — newly issued MAD attempts")
+    expect(text).toContain("replayed and validated by `ablation/journal-read.ts`")
+    expect(text).not.toContain("attempts UNAVAILABLE")
+  })
+
+  test("attempts and the oauth route go together, and an unknown value of either refuses", async () => {
+    const { input } = await sealed({ config: attempts })
+    const cases: [Partial<PairedConfig>, string][] = [
+      [{ accounting: undefined, route: "oauth" }, "runs only with accounting `attempts`"],
+      [{ accounting: "attempts", route: undefined }, "belongs to the oauth route"],
+      [{ accounting: "attempts", route: "api-key" }, "belongs to the oauth route"],
+      [{ accounting: "tally" as never }, "neither tokens nor attempts"],
+      [{ route: "wifi" as never }, "neither api-key nor oauth"],
+    ]
+    for (const [over, reason] of cases) {
+      const refused = await runPairedBlocks({ ...input, config: { ...input.config, ...over } })
+      expect(refused.ok, reason).toBe(false)
+      if (!refused.ok) expect(refused.reason).toContain(reason)
+    }
+  })
+
+  test("the prefix threshold: the realised count and overshoot are in the bill, and the report's attempts equal the journal's, by arm", async () => {
+    // One request at a time, so each admission sees the attempts before it.
+    const { root, input, calls } = await sealed({ maxConcurrency: 1, config: attempts })
+    // Eight settled prefix attempts of block 1 and one admitted-then-not-issued one, as an earlier caller left them.
+    const seed = [
+      ...Array.from({ length: 8 }, (_, index) => [
+        { type: "issued", physicalId: `seed-${index}`, category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, runId: "seed", mode: "attempts" },
+        { type: "settled", physicalId: `seed-${index}`, settlement: { kind: "usage", tokens: { ...emptyTokenUsage(), input: 1 } } },
+      ]).flat(),
+      { type: "issued", physicalId: "seed-cancelled", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, runId: "seed", mode: "attempts" },
+      { type: "settled", physicalId: "seed-cancelled", settlement: { kind: "not-issued" } },
+    ]
+    await writeFile(join(root, JOURNAL_FILE), seed.map((line) => `${JSON.stringify(line)}\n`).join(""))
+    const outcome = await runPairedBlocks(input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+
+    // 8 counted + 2 admitted reach 10; the third discovery attempt is refused in attempts.
+    expect(calls.filter((call) => call.block === 1 && call.phase === "prefix")).toHaveLength(2)
+    const prefixRow = outcome.bill.overshoot.phases.find((row) => row.block === 1 && row.phase === "prefix")!
+    expect(prefixRow).toEqual({ block: 1, phase: "prefix", limit: 10, spent: 10, overshoot: 0 })
+    expect(outcome.bill.overshoot.unit).toBe("attempts")
+    expect(outcome.bill.overshoot.blockTotals!.find((row) => row.block === 1)!.limit).toBe(100)
+    expect(outcome.bill.refused[0]!.reason).toBe("block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts")
+    expect(outcome.slots.slice(0, 2).map((slot) => slot.status)).toEqual(["failed", "failed"])
+
+    const paired = await readPairedBundle(root)
+    if ("error" in paired) throw new Error(paired.error)
+    const journal = await readPersistedJournal(root)
+    expect(journal.ok).toBe(true)
+    const report = readEvaluationReport(
+      { kind: "read", value: paired },
+      await settle(() => readLabelledBundle(paired)),
+      await settle(() => readAdjudicationBundle(paired)),
+      { kind: "read", value: journal },
+    )
+    if (report.kind !== "read") throw new Error(JSON.stringify(report))
+    expect(report.accounting).toBe("attempts")
+    const issuedOf = (block: number, phase: string) =>
+      outcome.bill.requests.filter((request) => request.block === block && request.phase === phase && request.state !== "not-issued").length
+    for (const entry of report.blocks) {
+      const attemptsOf = entry.attempts
+      if (attemptsOf?.kind !== "read") throw new Error(`block ${entry.block}: ${JSON.stringify(attemptsOf)}`)
+      expect(attemptsOf.prefix.total).toBe(issuedOf(entry.block, "prefix"))
+      expect(attemptsOf.on.total).toBe(issuedOf(entry.block, "on"))
+      expect(attemptsOf.off.total).toBe(issuedOf(entry.block, "off"))
+      expect(attemptsOf.total).toBe(attemptsOf.prefix.total + attemptsOf.on.total + attemptsOf.off.total)
+      expect(entry.cost.kind).toBe("unavailable")
+    }
+    const block1 = report.blocks[0]!.attempts!
+    if (block1.kind !== "read") throw new Error("unreachable")
+    expect(block1.prefix.total).toBe(10)
+    expect(block1.notIssued).toBe(1)
+    // Block 1's slots failed on the refusal, so its contrast is unavailable; block 2's is exact.
+    expect(block1.contrast.kind).toBe("unavailable")
+    const block2 = report.blocks[1]!.attempts!
+    if (block2.kind !== "read") throw new Error("unreachable")
+    expect(block2.contrast).toEqual({ kind: "exact", attempts: block2.on.total - block2.off.total })
+    expect(block2.rows.find((row) => row.phase === "prefix")!.model).toBe("anthropic/claude-sonnet-4-5")
+
+    const text = renderEvaluationReport(report)
+    expect(text).toContain("COST — newly issued MAD attempts: a workflow-use contrast, never token cost, money, subscription quota or physical requests")
+    expect(text).toContain("shared prefix, counted once: 10 attempt(s) (10 first, 0 retries)")
+    expect(text).toContain("1 admitted attempt(s) settled `not-issued` never reached a backend and are excluded")
+    expect(text).not.toContain("COST is OBSERVED per-block execution cost")
+    expect(text).not.toMatch(/ON − OFF newly executed: .* tokens/)
   })
 })

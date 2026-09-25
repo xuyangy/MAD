@@ -50,6 +50,21 @@
  * journal's (`paired-journal.jsonl`), and no block figure here is summed into an
  * experiment total.
  *
+ * ## ATTEMPT MODE (story 2-8c3a)
+ *
+ * A bundle whose sealed schedule and arm manifests say `accounting: "attempts"`
+ * reports protocol v2's draft cost endpoint instead: *newly issued MAD attempts*,
+ * shared prefix + ON continuation + OFF continuation, with ON − OFF over the
+ * continuations, split by stage and slot, the model named from the manifest
+ * roster and retries (`attempt > 1`) shown apart. The counts come from the
+ * persisted journal, handed in already replayed and validated by
+ * `ablation/journal-read.ts`; this module still opens no file. It is a
+ * workflow-use contrast: never token cost, money, subscription quota or a
+ * physical request count, and host-reported tokens enter no figure. A bundle
+ * whose schedule and arms disagree about the mode, whose mode cannot be
+ * established (no evidence, or an attempt-mode seal under a protocol that is not
+ * version 2), or whose journal was refused, gets no cost figure. A token-mode bundle keeps the token endpoint above.
+ *
  * ## WHAT IT DOES NOT DO
  *
  * No significance claim, no pooled precision across blocks, and no product-value
@@ -71,10 +86,12 @@ import {
   ZERO,
   type Fraction,
 } from "./fraction.ts"
-import { JOURNAL_FILE } from "./journal.ts"
+import { ATTEMPT_ALLOWANCES, type PairedPhase } from "./governor.ts"
+import { JOURNAL_FILE, type UniqueExecutionBill } from "./journal.ts"
+import type { JournalReadOutcome } from "./journal-read.ts"
 import type { LabelledReadOutcome } from "./labelled-read.ts"
 import { allExcluded, type HaltReport, type PairedArm, type PairedBlock, type PairedReadOutcome, type TreatmentOpportunity } from "./paired-read.ts"
-import { ADJUDICATION_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
+import { ADJUDICATION_READER_MODULE, JOURNAL_READER_MODULE, LABELLED_READER_MODULE, PAIRED_READER_MODULE } from "./report.ts"
 import { PAIRED_BLOCKS, SLOT_STATUS_FILE, type Arm } from "./schedule.ts"
 
 // ---------------------------------------------------------------------------
@@ -244,6 +261,73 @@ export type BlockCost =
   | { kind: "unavailable"; reasons: string[]; arms: ArmCost[] }
   | { kind: "read"; on: ArmCost & { kind: "read" }; off: ArmCost & { kind: "read" }; prefix: PrefixCost; contrast: CostContrast; total: BlockTotal }
 
+/** Story 2-8c3a — one phase's newly issued attempts: first attempts and retries apart. */
+export interface AttemptCount {
+  first: number
+  retries: number
+  total: number
+}
+
+/** Story 2-8c3a — one realised count against its admission threshold. */
+export interface AttemptThreshold {
+  limit: number
+  spent: number
+  overshoot: number
+}
+
+/** Story 2-8c3a — one stage and slot of one phase, with the model its manifest roster names. */
+export interface AttemptRow {
+  phase: PairedPhase
+  stage: string
+  slot: string
+  model: string
+  /** Where `model` was read from. */
+  modelSource: string
+  first: number
+  retries: number
+}
+
+/**
+ * Story 2-8c3a — one block's newly issued MAD attempts, from the persisted
+ * journal. `not-issued` settlements are excluded, and counted apart.
+ */
+export type BlockAttempts =
+  | {
+      kind: "read"
+      /** Where the counts were read from. */
+      source: string
+      prefix: AttemptCount
+      on: AttemptCount
+      off: AttemptCount
+      /**
+       * ON − OFF over the two continuations. `differentCaps` is set when either
+       * continuation overshot its threshold, so the two arms ran under different
+       * realised caps.
+       */
+      contrast: { kind: "exact"; attempts: number; differentCaps?: string } | { kind: "unavailable"; reason: string }
+      /** Each phase's realised count against its threshold, and the block's against 100, from the bill's overshoot. */
+      thresholds: { prefix: AttemptThreshold; on: AttemptThreshold; off: AttemptThreshold; block: AttemptThreshold }
+      /** Prefix once + ON + OFF. */
+      total: number
+      rows: AttemptRow[]
+      notIssued: number
+      /** Attempts that settled with no host-reported usage: a diagnostic, counted in full above. */
+      noHostUsage: number
+    }
+  | { kind: "unavailable"; reason: string }
+
+/** Story 2-8c3a — what a bundle's cost is counted in, read from its sealed schedule and every bound arm. */
+export type BundleAccounting =
+  | { kind: "tokens" }
+  | { kind: "attempts" }
+  | { kind: "mixed"; reason: string }
+  | { kind: "unestablished"; reason: string }
+
+/** Story 2-8c3a — why an attempt-mode block prints no token cost. */
+export const ATTEMPT_MODE_COST =
+  "an attempt-mode bundle: its cost endpoint is newly issued MAD attempts (below); host-reported tokens are unverified " +
+  "diagnostics and never a cost contrast"
+
 export type DebateRan = { kind: "ran"; debated: number } | { kind: "did-not-run" } | { kind: "unknown"; why: string }
 
 export interface BlockTreatment {
@@ -278,6 +362,8 @@ export interface EvaluationBlock {
   precision: BlockPrecision
   recall: BlockRecall
   cost: BlockCost
+  /** Story 2-8c3a — present only for an attempt-mode bundle. */
+  attempts?: BlockAttempts
   treatment: BlockTreatment
 }
 
@@ -299,6 +385,8 @@ export interface EvaluationReport {
   availability: Availability[]
   /** Upstream readers that threw or refused, named once at the top. */
   upstream: string[]
+  /** Story 2-8c3a — present only when the bundle is not a plain token-mode bundle. */
+  accounting?: "attempts" | "mixed" | "unestablished"
 }
 
 export type EvaluationReportOutcome =
@@ -310,13 +398,19 @@ export type EvaluationReportOutcome =
 // The read
 // ---------------------------------------------------------------------------
 
+/**
+ * `journal` is the persisted-journal reader's result (story 2-8c3a). It is read
+ * only for an attempt-mode bundle, where it is the source of the cost endpoint;
+ * absent there, the endpoint is unavailable.
+ */
 export function readEvaluationReport(
   paired: Upstream<PairedReadOutcome>,
   labelled: Upstream<LabelledReadOutcome>,
   adjudication: Upstream<AdjudicationReadOutcome>,
+  journal?: Upstream<JournalReadOutcome>,
 ): EvaluationReportOutcome {
   try {
-    return compose(paired, labelled, adjudication)
+    return compose(paired, labelled, adjudication, journal)
   } catch (error) {
     // Nothing below is expected to throw. If something does, the report still
     // says so rather than taking `eval-read` down with it.
@@ -328,6 +422,7 @@ function compose(
   pairedUp: Upstream<PairedReadOutcome>,
   labelledUp: Upstream<LabelledReadOutcome>,
   adjudicationUp: Upstream<AdjudicationReadOutcome>,
+  journalUp: Upstream<JournalReadOutcome> | undefined,
 ): EvaluationReportOutcome {
   if (pairedUp.kind === "threw") return { kind: "unavailable", reason: `the paired reader threw: ${pairedUp.message}` }
   if ("error" in pairedUp.value) return { kind: "unavailable", reason: `the paired reader refused the bundle: ${pairedUp.value.error}` }
@@ -343,6 +438,34 @@ function compose(
   const labelled = labelledUp.kind === "read" && labelledUp.value.kind === "read" ? labelledUp.value : null
   const adjudication = adjudicationUp.kind === "read" && adjudicationUp.value.kind === "read" ? adjudicationUp.value : null
   const scheduleWhy = paired.schedule.ok ? null : `the sealed schedule is refused: ${paired.schedule.reason}`
+
+  const accounting = bundleAccounting(paired)
+  let attemptSource: { bill: UniqueExecutionBill; source: string } | { why: string } | null = null
+  if (accounting.kind !== "tokens") {
+    const journalWhy =
+      accounting.kind === "mixed" || accounting.kind === "unestablished"
+        ? accounting.reason
+        : journalUp === undefined
+          ? `the persisted journal was not read (\`${JOURNAL_READER_MODULE}\`)`
+          : journalUp.kind === "threw"
+            ? `the journal reader threw: ${journalUp.message}`
+            : !journalUp.value.ok
+              ? `the journal reader refused the journal: ${journalUp.value.reason}`
+              : journalUp.value.mode !== "attempts"
+                ? `the journal records ${journalUp.value.mode}, not attempts`
+                : null
+    if (journalWhy !== null) {
+      upstream.push(`attempt counts (\`${JOURNAL_READER_MODULE}\`): ${journalWhy}`)
+      attemptSource = { why: journalWhy }
+    } else if (journalUp?.kind === "read" && journalUp.value.ok) {
+      attemptSource = {
+        bill: journalUp.value.bill,
+        source:
+          `\`${JOURNAL_FILE}\`, replayed and validated by \`${JOURNAL_READER_MODULE}\`: each admitted attempt once, under ` +
+          "the block and phase its admission was bound to, with `not-issued` settlements excluded",
+      }
+    }
+  }
 
   const labels = labelled?.seal.labels ?? SEEDED_DEFECTS.length
   const blocks: EvaluationBlock[] = []
@@ -387,6 +510,14 @@ function compose(
           labels,
           adjudicationBlock,
           truthWhy,
+          ...(attemptSource === null
+            ? {}
+            : {
+                attempts:
+                  "why" in attemptSource
+                    ? { kind: "unavailable" as const, reason: attemptSource.why }
+                    : blockAttempts(attemptSource.bill, attemptSource.source, number, block, paired.slots),
+              }),
         }),
       )
     } catch (error) {
@@ -415,6 +546,7 @@ function compose(
     spread: spreadOf(blocks),
     availability: availabilityOf(blocks),
     upstream,
+    ...(accounting.kind === "tokens" ? {} : { accounting: accounting.kind }),
   }
 }
 
@@ -430,6 +562,8 @@ interface BlockInput {
   labels: number
   adjudicationBlock: BlockRead | undefined
   truthWhy: string | null
+  /** Story 2-8c3a — present only for an attempt-mode bundle, and then it replaces the token cost. */
+  attempts?: BlockAttempts
 }
 
 type LabelledArm = {
@@ -447,16 +581,23 @@ function composeBlock(input: BlockInput): EvaluationBlock {
   const { number, block, absent, prefixRunId, duplicate } = input
   let precision = precisionOf(input.adjudicationBlock, input.truthWhy)
   let recall = recallOf(input.labelledArms, input.labelledWhy, input.labels, input.adjudicationBlock, input.truthWhy)
-  let cost: BlockCost = block === undefined ? { kind: "unavailable", reasons: [absent], arms: [] } : blockCost(block)
+  let cost: BlockCost =
+    input.attempts !== undefined
+      ? { kind: "unavailable", reasons: [ATTEMPT_MODE_COST], arms: [] }
+      : block === undefined
+        ? { kind: "unavailable", reasons: [absent], arms: [] }
+        : blockCost(block)
+  let attempts = input.attempts
   let treatment = treatmentOf(block, absent)
   if (duplicate !== null) {
     if (precision.kind === "read") precision = { ...precision, difference: { kind: "unavailable", reason: duplicate } }
     recall = { ...recall, change: { kind: "unavailable", reason: duplicate }, lost: { kind: "unavailable", reasons: [duplicate] } }
     const arms = cost.kind === "read" ? [cost.on, cost.off] : cost.arms
     cost = { kind: "unavailable", reasons: [duplicate, ...(cost.kind === "unavailable" ? cost.reasons : [])], arms }
+    if (attempts?.kind === "read") attempts = { ...attempts, contrast: { kind: "unavailable", reason: duplicate } }
     treatment = { ...treatment, opportunity: { kind: "unknown", why: duplicate } }
   }
-  return { block: number, prefixRunId, precision, recall, cost, treatment }
+  return { block: number, prefixRunId, precision, recall, cost, ...(attempts === undefined ? {} : { attempts }), treatment }
 }
 
 /** A block whose composition threw: every quantity unavailable with the message. */
@@ -1020,6 +1161,182 @@ export function blockCost(block: PairedBlock): BlockCost {
 }
 
 // ---------------------------------------------------------------------------
+// Attempt mode (story 2-8c3a)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the bundle counts cost in. The sealed schedule's `config.accounting` and
+ * every bound arm's `experiment.accounting` must agree: all absent is tokens,
+ * all `attempts` is attempts, and anything else is mixed, so no cost is read.
+ *
+ * With the schedule refused and no arm bound there is no evidence either way, so
+ * the mode cannot be established and no cost endpoint applies. An attempt-mode
+ * bundle must be sealed under a version-2 protocol (the schedule's, or else each
+ * arm's recorded protocol version); otherwise its mode is not established either.
+ */
+export function bundleAccounting(paired: Extract<PairedReadOutcome, { root: string }>): BundleAccounting {
+  const sources: { name: string; attempts: boolean }[] = []
+  if (paired.schedule.ok) {
+    const value = paired.schedule.schedule.config.accounting
+    if (value !== undefined && value !== "attempts") {
+      return { kind: "mixed", reason: `the sealed schedule's \`config.accounting\` is ${JSON.stringify(value)}, which is not attempts` }
+    }
+    sources.push({ name: "the sealed schedule", attempts: value === "attempts" })
+  }
+  const arms = paired.blocks.flatMap((block) => block.arms.map((arm) => ({ block: block.block, arm })))
+  for (const { block, arm } of arms) {
+    sources.push({ name: `block ${block} ${arm.arm}'s manifest`, attempts: arm.experiment.accounting === "attempts" })
+  }
+  if (sources.length === 0) {
+    return {
+      kind: "unestablished",
+      reason:
+        `the sealed schedule is refused (${paired.schedule.ok ? "" : paired.schedule.reason}) and no arm manifest is bound, ` +
+        "so the accounting mode cannot be established",
+    }
+  }
+  const attempts = sources.filter((source) => source.attempts)
+  if (attempts.length === 0) return { kind: "tokens" }
+  if (attempts.length < sources.length) {
+    const tokens = sources.filter((source) => !source.attempts).map((source) => source.name)
+    return {
+      kind: "mixed",
+      reason:
+        `the bundle mixes accounting modes: ${attempts.map((source) => source.name).join(", ")} count attempts, and ` +
+        `${tokens.join(", ")} count tokens`,
+    }
+  }
+  const versions = paired.schedule.ok
+    ? [{ name: "the sealed schedule", version: paired.schedule.schedule.protocol.version as unknown }]
+    : arms.map(({ block, arm }) => {
+        const recorded = arm.row.manifest.identity.protocolVersion as { kind?: unknown; value?: unknown }
+        return { name: `block ${block} ${arm.arm}'s manifest`, version: recorded?.kind === "known" ? recorded.value : undefined }
+      })
+  const wrong = versions.filter((entry) => entry.version !== 2)
+  if (wrong.length > 0) {
+    return {
+      kind: "unestablished",
+      reason:
+        "attempt accounting is defined only by a frozen version-2 protocol, and " +
+        wrong.map((entry) => `${entry.name} names protocol version ${JSON.stringify(entry.version) ?? "unknown"}`).join(", "),
+    }
+  }
+  return { kind: "attempts" }
+}
+
+/**
+ * One block's newly issued MAD attempts, from the replayed journal's Blocks
+ * requests for that block. A `not-issued` attempt was never handed to a backend,
+ * so it counts 0 here and is shown apart. The contrast is ON − OFF over the two
+ * continuations; it is unavailable while either continuation's slot did not
+ * complete, because a truncated continuation would read as a workflow-use
+ * difference.
+ */
+export function blockAttempts(
+  bill: UniqueExecutionBill,
+  source: string,
+  number: number,
+  block: PairedBlock | undefined,
+  slots: readonly { block: number; arm: Arm; status: string; reason: string }[],
+): BlockAttempts {
+  const thresholdOf = (row: { limit: number; spent: number; overshoot: number } | undefined, limit: number): AttemptThreshold =>
+    row === undefined ? { limit, spent: 0, overshoot: 0 } : { limit: row.limit, spent: row.spent, overshoot: row.overshoot }
+  const phaseRow = (phase: PairedPhase) => bill.overshoot.phases.find((row) => row.block === number && row.phase === phase)
+  const thresholds = {
+    prefix: thresholdOf(phaseRow("prefix"), ATTEMPT_ALLOWANCES.prefix),
+    on: thresholdOf(phaseRow("on"), ATTEMPT_ALLOWANCES.continuation),
+    off: thresholdOf(phaseRow("off"), ATTEMPT_ALLOWANCES.continuation),
+    block: thresholdOf(bill.overshoot.blockTotals?.find((row) => row.block === number), ATTEMPT_ALLOWANCES.block),
+  }
+  const mine = bill.requests.filter((request) => request.category === "blocks" && request.block === number)
+  const issued = mine.filter((request) => request.state !== "not-issued")
+  const countOf = (phase: PairedPhase): AttemptCount => {
+    const inPhase = issued.filter((request) => request.phase === phase)
+    const first = inPhase.filter((request) => request.attempt === 1).length
+    return { first, retries: inPhase.length - first, total: inPhase.length }
+  }
+  const prefix = countOf("prefix")
+  const on = countOf("on")
+  const off = countOf("off")
+
+  const armOf = (name: Arm) => block?.arms.find((arm) => arm.arm === name)
+  // The shared prefix writes no manifest of its own, so its models are read from
+  // a continuation's, which inherited the prefix's roster, and named as such.
+  const rosterFor = (phase: PairedPhase) => (phase === "prefix" ? (armOf("on") ?? armOf("off")) : armOf(phase))
+  const modelOf = (phase: PairedPhase, slot: string): { model: string; modelSource: string } => {
+    const arm = rosterFor(phase)
+    if (arm === undefined) return { model: "unattributed", modelSource: `no arm manifest was bound to block ${number}` }
+    const manifest = arm.row.manifest
+    const roster = manifest.roster as { slots?: unknown; lensSlots?: unknown }
+    const entries = [...(Array.isArray(roster.slots) ? roster.slots : []), ...(Array.isArray(roster.lensSlots) ? roster.lensSlots : [])]
+    const found = entries.find((entry) => isRecord(entry) && entry.slot === slot) as Record<string, unknown> | undefined
+    const modelSource =
+      phase === "prefix"
+        ? `continuation manifest \`${manifest.run.runId}\`, same roster`
+        : `run \`${manifest.run.runId}\`'s manifest roster`
+    if (found === undefined || typeof found.providerId !== "string" || typeof found.modelId !== "string") {
+      return { model: "not in the manifest roster", modelSource }
+    }
+    return { model: `${found.providerId}/${found.modelId}`, modelSource }
+  }
+  const rows = new Map<string, AttemptRow>()
+  for (const request of issued) {
+    const phase = request.phase!
+    const key = `${phase}\0${request.stage}\0${request.slot}`
+    let row = rows.get(key)
+    if (row === undefined) {
+      row = { phase, stage: request.stage, slot: request.slot, ...modelOf(phase, request.slot), first: 0, retries: 0 }
+      rows.set(key, row)
+    }
+    if (request.attempt === 1) row.first += 1
+    else row.retries += 1
+  }
+  const order: PairedPhase[] = ["prefix", "on", "off"]
+  const sorted = [...rows.values()].sort(
+    (a, b) => order.indexOf(a.phase) - order.indexOf(b.phase) || a.stage.localeCompare(b.stage) || a.slot.localeCompare(b.slot),
+  )
+
+  // Both continuations must be recorded completed: a missing status row is not a completed continuation.
+  const unfinished = (["on", "off"] as const).flatMap((arm) => {
+    const row = slots.find((slot) => slot.block === number && slot.arm === arm)
+    if (row === undefined) return [`the ${arm.toUpperCase()} slot has no recorded status`]
+    return row.status === "completed" ? [] : [`the ${arm.toUpperCase()} slot is ${row.status}: ${row.reason}`]
+  })
+  const overshot = (["on", "off"] as const).filter((arm) => thresholds[arm].overshoot > 0)
+  const contrast: Extract<BlockAttempts, { kind: "read" }>["contrast"] =
+    unfinished.length > 0
+      ? {
+          kind: "unavailable",
+          reason: `${unfinished.join("; ")}; a contrast against a truncated continuation would report the truncation as a workflow-use difference`,
+        }
+      : {
+          kind: "exact",
+          attempts: on.total - off.total,
+          ...(overshot.length === 0
+            ? {}
+            : {
+                differentCaps:
+                  `the arms ran under different realised caps: ${overshot
+                    .map((arm) => `${arm.toUpperCase()} realised ${thresholds[arm].spent} of ${thresholds[arm].limit}`)
+                    .join(", ")}`,
+              }),
+        }
+  return {
+    kind: "read",
+    source,
+    prefix,
+    on,
+    off,
+    contrast,
+    thresholds,
+    total: prefix.total + on.total + off.total,
+    rows: sorted,
+    notIssued: mine.length - issued.length,
+    noHostUsage: issued.filter((request) => request.state === "unknown").length,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Treatment opportunity
 // ---------------------------------------------------------------------------
 
@@ -1077,6 +1394,10 @@ function unavailableWhy(block: EvaluationBlock, quantity: EvaluationQuantity): s
     case "lost true candidates":
       return block.recall.lost.kind === "read" ? null : block.recall.lost.reasons.join("; ")
     case "cost contrast":
+      if (block.attempts !== undefined) {
+        if (block.attempts.kind === "unavailable") return block.attempts.reason
+        return block.attempts.contrast.kind === "unavailable" ? block.attempts.contrast.reason : null
+      }
       if (block.cost.kind === "unavailable") return block.cost.reasons.join("; ")
       return block.cost.contrast.kind === "unavailable" ? block.cost.contrast.reason : null
     case "treatment opportunity":
@@ -1104,6 +1425,38 @@ const ESTIMANDS = [
   "",
 ]
 
+/** Story 2-8c3a — the COST estimand for an attempt-mode bundle, in place of the token one. */
+const ATTEMPT_COST_ESTIMAND = [
+  "  COST is NEWLY ISSUED MAD ATTEMPTS (protocol v2 draft): shared prefix + ON continuation + OFF continuation, each",
+  `  admitted attempt once, retries included and shown apart, read from \`${JOURNAL_FILE}\`. ON − OFF compares the`,
+  "  continuations only. It is a WORKFLOW-USE CONTRAST: never token cost, money, subscription quota or a physical request",
+  "  count. Host-reported tokens are unverified diagnostics and enter no figure.",
+]
+
+/** Story 2-8c3a — the COST estimand when no cost endpoint applies. */
+const NO_COST_ESTIMAND = [
+  "  COST: NO COST ENDPOINT APPLIES. The bundle's accounting mode is mixed or cannot be established, so neither",
+  "  the token endpoint nor the attempt endpoint is read, and no cost figure is printed.",
+]
+
+/**
+ * `base` with its COST estimand replaced: from the line starting `  COST is` to
+ * the last continuation line after it (a line whose third character is not an
+ * upper-case letter). Throws when there is no COST estimand to replace.
+ */
+export function spliceCostEstimand(base: readonly string[], replacement: readonly string[]): string[] {
+  const at = base.findIndex((line) => line.startsWith("  COST is "))
+  if (at < 0) throw new Error("the estimands carry no `  COST is` line to replace")
+  let end = at + 1
+  while (end < base.length && /^  [^A-Z\s]/.test(base[end]!)) end += 1
+  return [...base.slice(0, at), ...replacement, ...base.slice(end)]
+}
+
+function estimandLines(accounting: EvaluationReport["accounting"]): string[] {
+  if (accounting === undefined) return ESTIMANDS
+  return spliceCostEstimand(ESTIMANDS, accounting === "attempts" ? ATTEMPT_COST_ESTIMAND : NO_COST_ESTIMAND)
+}
+
 export function renderEvaluationReport(outcome: EvaluationReportOutcome): string {
   if (outcome.kind === "not-applicable") return ""
   if (outcome.kind === "unavailable") return `${NOT_COMPOSED}\n  ${outcome.reason}\n`
@@ -1116,7 +1469,7 @@ export function renderEvaluationReport(outcome: EvaluationReportOutcome): string
     for (const entry of outcome.upstream) lines.push(`  ${entry}`)
     lines.push("")
   }
-  lines.push(...ESTIMANDS)
+  lines.push(...estimandLines(outcome.accounting))
   lines.push(...coverageLines(outcome.coverage))
   lines.push(...availabilityLines(outcome.availability))
 
@@ -1128,13 +1481,29 @@ export function renderEvaluationReport(outcome: EvaluationReportOutcome): string
   for (const block of outcome.blocks) lines.push(...recallLines(block))
   lines.push("")
 
-  lines.push("COST — observed per-block execution cost, never the experiment's bill")
-  for (const block of outcome.blocks) lines.push(...costLines(block))
-  lines.push(
-    `  No experiment total is printed. The unique-execution bill is \`${JOURNAL_FILE}\`'s, and summing the blocks`,
-    "  visible here would leave out every failed prefix and every missing manifest.",
-    "",
-  )
+  if (outcome.accounting === undefined) {
+    lines.push("COST — observed per-block execution cost, never the experiment's bill")
+    for (const block of outcome.blocks) lines.push(...costLines(block))
+    lines.push(
+      `  No experiment total is printed. The unique-execution bill is \`${JOURNAL_FILE}\`'s, and summing the blocks`,
+      "  visible here would leave out every failed prefix and every missing manifest.",
+      "",
+    )
+  } else if (outcome.accounting !== "attempts") {
+    lines.push("COST — no cost endpoint applies: the accounting mode is mixed or cannot be established")
+    for (const block of outcome.blocks) lines.push(...attemptLines(block))
+    lines.push("")
+  } else {
+    lines.push(
+      "COST — newly issued MAD attempts: a workflow-use contrast, never token cost, money, subscription quota or physical requests",
+    )
+    for (const block of outcome.blocks) lines.push(...attemptLines(block))
+    lines.push(
+      "  Host-reported tokens on this route are unverified diagnostics and are in no figure above. Token spend and",
+      "  subscription quota are not measured; the host's own retries, tool steps and held-open requests are not counted.",
+      "",
+    )
+  }
 
   lines.push("TREATMENT OPPORTUNITY — how many candidates normal policy would have debated, and whether debate ran")
   for (const block of outcome.blocks) lines.push(...treatmentLines(block))
@@ -1168,7 +1537,11 @@ function provenanceLines(provenance: ProvenanceRead): string[] {
 function coverageLines(coverage: Coverage): string[] {
   const lines = ["EXECUTION COVERAGE — every failure retained"]
   if (coverage.halt.kind !== "none") {
-    lines.push(`  THE EXPERIMENT HALT is ${coverage.halt.kind} (\`${coverage.halt.file}\`): ${coverage.halt.reason}`)
+    lines.push(
+      coverage.halt.kind === "halted" && coverage.halt.accounting === "attempts"
+        ? `  THE EXPERIMENT STOPPED IN ATTEMPT MODE, an operational stop and not unknown spend (\`${coverage.halt.file}\`): ${coverage.halt.reason}`
+        : `  THE EXPERIMENT HALT is ${coverage.halt.kind} (\`${coverage.halt.file}\`): ${coverage.halt.reason}`,
+    )
   }
   lines.push(`  scheduled blocks: ${coverage.scheduled}; completed: ${countText(coverage.completed, coverage.scheduled)}`)
   for (const block of coverage.blocks) {
@@ -1385,6 +1758,58 @@ function costLines(block: EvaluationBlock): string[] {
     for (const reason of [...total.unquantified, ...total.stopped]) lines.push(`      ${reason}`)
   } else {
     lines.push(`    block execution: unavailable — ${total.reason}`)
+  }
+  return lines
+}
+
+function attemptCountText(count: AttemptCount, threshold: AttemptThreshold): string {
+  return (
+    `${count.total} attempt(s) (${count.first} first, ${count.retries} retr${count.retries === 1 ? "y" : "ies"}); ` +
+    thresholdText(threshold)
+  )
+}
+
+function thresholdText(threshold: AttemptThreshold): string {
+  return (
+    `realised ${threshold.spent} of the ${threshold.limit}-attempt threshold` +
+    (threshold.overshoot > 0 ? `, OVERSHOT by ${threshold.overshoot}` : "")
+  )
+}
+
+function attemptLines(block: EvaluationBlock): string[] {
+  const lines = [`  BLOCK ${block.block}`]
+  const attempts = block.attempts
+  if (attempts === undefined || attempts.kind === "unavailable") {
+    lines.push(`    attempts UNAVAILABLE — ${attempts?.reason ?? "no attempt count was composed"}`)
+    return lines
+  }
+  lines.push(
+    `    source: ${attempts.source}`,
+    `    shared prefix, counted once: ${attemptCountText(attempts.prefix, attempts.thresholds.prefix)}`,
+    `    ON continuation: ${attemptCountText(attempts.on, attempts.thresholds.on)}`,
+    `    OFF continuation: ${attemptCountText(attempts.off, attempts.thresholds.off)}`,
+  )
+  if (attempts.contrast.kind === "exact") {
+    lines.push(`    ON − OFF continuation attempts: exactly ${attempts.contrast.attempts}`)
+    if (attempts.contrast.differentCaps !== undefined) lines.push(`      ${attempts.contrast.differentCaps}`)
+  } else {
+    lines.push(`    ON − OFF continuation attempts: unavailable — ${attempts.contrast.reason}`)
+  }
+  lines.push(
+    `    block (prefix once + both continuations): ${attempts.total} newly issued attempt(s); ${thresholdText(attempts.thresholds.block)}`,
+  )
+  if (attempts.rows.length > 0) lines.push("    by stage and slot:")
+  for (const row of attempts.rows) {
+    lines.push(
+      `      ${row.phase} ${row.stage}/${row.slot} — ${row.model} (model from ${row.modelSource}): ${row.first} first, ` +
+        `${row.retries} retr${row.retries === 1 ? "y" : "ies"}`,
+    )
+  }
+  if (attempts.noHostUsage > 0) {
+    lines.push(`    ${attempts.noHostUsage} attempt(s) settled with no host-reported usage — a diagnostic; each is counted above`)
+  }
+  if (attempts.notIssued > 0) {
+    lines.push(`    ${attempts.notIssued} admitted attempt(s) settled \`not-issued\` never reached a backend and are excluded`)
   }
   return lines
 }

@@ -265,7 +265,12 @@ export interface Availability {
  */
 export type HaltReport =
   | { kind: "none" }
-  | { kind: "halted"; file: string; reason: string }
+  /**
+   * `accounting` is present when the marker was written by an attempt-mode
+   * journal (story 2-8c3a): the halt is then an operational stop, never unknown
+   * spend.
+   */
+  | { kind: "halted"; file: string; reason: string; accounting?: "attempts" }
   | { kind: "unestablished"; file: string; reason: string }
 
 export interface PairedReadResult {
@@ -454,6 +459,7 @@ async function readHalt(root: string): Promise<HaltReport> {
     kind: "halted",
     file,
     reason: extra.length === 0 ? named : `${named}; also ${extra.join("; also ")}`,
+    ...(isRecord(recorded) && recorded.accounting === "attempts" ? { accounting: "attempts" as const } : {}),
   }
 }
 
@@ -1075,7 +1081,16 @@ export function renderPairedBundle(result: PairedReadResult): string {
   }
   lines.push("")
 
-  if (result.halt.kind === "halted") {
+  if (result.halt.kind === "halted" && result.halt.accounting === "attempts") {
+    lines.push(
+      "THIS EXPERIMENT STOPPED IN ATTEMPT MODE — an operational stop, not unknown spend.",
+      `  \`${result.halt.file}\` — ${result.halt.reason}`,
+      "  The admitted-attempt count is exact and token spend is not measured in this mode; the marker's file name",
+      "  does not mean usage went unaccounted. The paired results below are still read from what was written, and",
+      "  admission does not resume until a human reads the stop and removes the marker.",
+      "",
+    )
+  } else if (result.halt.kind === "halted") {
     lines.push(
       "THIS EXPERIMENT IS HALTED.",
       `  \`${result.halt.file}\` — ${result.halt.reason}`,

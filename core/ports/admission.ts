@@ -59,13 +59,14 @@ export interface AdmissionRequest {
  * - `usage` — the envelope carried `tokens` and no unknown marker.
  * - `unknown` — the envelope carried `usageUnknown` (which wins when both are
  *   present), carried neither field, or `runTurn` threw. `executionId` is present
- *   only when the backend supplied one.
+ *   only when the backend supplied one. `abandoned` is carried from the
+ *   envelope's `usageUnknown`: the attempt did not end within its bound.
  * - `not-issued` — the signal had fired by the time admission resolved, so the
  *   stage never called `runTurn`. Nothing was billed.
  */
 export type AdmissionSettlement =
   | { kind: "usage"; tokens: TokenUsage }
-  | { kind: "unknown"; why: string; executionId?: string }
+  | { kind: "unknown"; why: string; executionId?: string; abandoned?: true }
   | { kind: "not-issued" }
 
 export type SettleRequest = (settlement: AdmissionSettlement) => Promise<void>

@@ -800,7 +800,7 @@ export class OpencodeModelBackend implements ModelBackend {
           slot,
           failure: "transport-error",
           message: describeError(error),
-          usageUnknown: { executionId, why: timedOutInFlight(error.ms) },
+          usageUnknown: { executionId, why: timedOutInFlight(error.ms), abandoned: true },
         }
       }
       // Only thrown for genuine transport failures; provider errors are returned.

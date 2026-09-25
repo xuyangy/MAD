@@ -609,7 +609,8 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
       (experiment.arm !== "on" && experiment.arm !== "off") ||
       (experiment.position !== "first" && experiment.position !== "second") ||
       !isText(experiment.prefixRunId) ||
-      ("failure" in experiment && !isText(experiment.failure))
+      ("failure" in experiment && !isText(experiment.failure)) ||
+      ("accounting" in experiment && experiment.accounting !== "attempts")
     ) {
       return fail("has a malformed `experiment`")
     }
