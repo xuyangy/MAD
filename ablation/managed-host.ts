@@ -59,12 +59,56 @@
  * into text, and every message this module returns is redacted with both the
  * credential and its JSON-escaped form.
  *
+ * ## OAuth mode (story 2-8c3b)
+ *
+ * `mode: "oauth"` runs the host on opencode's own sign-ins, with no credential and
+ * no relay. Everything above holds, with these differences:
+ *
+ * - **The payloads.** Before anything is spawned, the prepared directory
+ *   (`scripts/oauth-prepare.ts`) is verified against `OAUTH_PAYLOAD`: both tree
+ *   digests and the catalogue's sha256 (`ablation/oauth-payload.ts`). The Anthropic
+ *   sign-in plugin, the config seed and the catalogue are then copied into the
+ *   host's private root, and every copy is verified again, so what the host loads is
+ *   what was verified.
+ * - **The config.** `plugin` is exactly the `file://` spec of the private copy of the
+ *   Anthropic sign-in plugin, `enabled_providers` exactly the OAuth provider ids, and no
+ *   credential appears anywhere. A `provider` key appears only when the probe passes
+ *   `baseURL` overrides, and then holds exactly those; the launcher never passes one.
+ * - **The environment.** `XDG_DATA_HOME` is the caller's data directory, never a
+ *   private one. No credential variable is set.
+ * - **The registry.** `GET /config/providers` lists exactly the OAuth providers, and
+ *   every roster model under its provider.
+ * - **The data directory is the caller's.** Before the spawn its real path must be
+ *   disjoint from the private root's, the prepared directory's and the user's own
+ *   `<HOME>/.local/share/opencode`; `<data-dir>/opencode` must be a real directory
+ *   whose only symlink is `auth.json`, and that symlink's `readlink` must be exactly
+ *   `<HOME>/.local/share/opencode/auth.json` (`dataDirProblems`: `lstat`, `readdir`
+ *   and `readlink` only). `stop()` removes only the private root. After the host's
+ *   exit is confirmed it checks the data directory again, the seeded config lock's
+ *   sha256 and the seeded tree's digest (allowing only the host's own `.gitignore`,
+ *   `HOST_CONFIG_GITIGNORE`), and reports them on the outcome's `postStop`; an
+ *   unconfirmed exit establishes none of them.
+ *
  * AD-1: this tree may import from `core/`; nothing under `core/` imports it.
  */
 
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, rmdir, writeFile } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
+import { isAbsolute, join } from "node:path"
+
+import {
+  authLinkPaths,
+  dataDirProblems,
+  overlapProblem,
+  pluginPackageDir,
+  recordDigest,
+  sha256Of,
+  treeDigest,
+  treeRecord,
+  verifyPrepared,
+  type PayloadPins,
+  type PreparedMeasure,
+} from "./oauth-payload.ts"
 
 /**
  * The opencode build the accounting probe measured. The managed host refuses any
@@ -77,6 +121,45 @@ export const MEASURED_HOST = {
   version: "1.18.32",
   sha256: "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
   evidence: "ablation/evidence/host-accounting-2026-09-24-relay.json",
+} as const
+
+/**
+ * Story 2-8c3b — the OAuth route's prepared payloads, as `bun run oauth-prepare`
+ * builds them from `ablation/oauth/`. Every OAuth-mode start verifies the prepared
+ * directory against these before anything is spawned (`verifyPrepared`). Each tree
+ * digest was pinned after two fresh installs agreed (`evidence`).
+ */
+export const OAUTH_PAYLOAD = {
+  anthropicAuth: {
+    dir: "anthropic-auth",
+    package: "@ex-machina/opencode-anthropic-auth@1.8.1",
+    integrity: "sha512-p1kER9dYcDnDGWJCYdifVX/e42OPtDF+q/HGdMlCWYD1nYslP96I/Ywf/IP/iKuZvRs6kKJ3wrfi5Oph6HK/2Q==",
+    lockSha256: "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+    treeDigest: "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+  },
+  // 1.18.5, not the host's 1.18.32: opencode 1.18.32's config-directory installer compares dependency names only,
+  // never versions, so a seeded 1.18.5 satisfies it and it fetches nothing (2-8c3-design.md, "Config-directory dependencies").
+  configSeed: {
+    dir: "config-seed",
+    package: "@opencode-ai/plugin@1.18.5",
+    integrity: "sha512-o1loQw5lh3zK7dgTN25Zh4tK+bW7BdszyDwdSumj0ahaR1lXWjYjVbAZuOQxeEQfkr266cqNi2x8UrrlkI0n7A==",
+    lockSha256: "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+    treeDigest: "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+  },
+  catalogue: { file: "models.json", sha256: "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3" },
+  evidence: "ablation/evidence/oauth-prepare-2026-09-25.json",
+} as const
+
+/**
+ * Story 2-8c3b — the one file opencode 1.18.32 adds to a seeded config directory:
+ * a top-level `.gitignore` of five fixed lines (`node_modules`, `package.json`,
+ * `package-lock.json`, `bun.lock`, `.gitignore`), measured by story 2-8c3b's probe.
+ * The post-stop digest check allows exactly this entry, byte for byte, and nothing
+ * else.
+ */
+export const HOST_CONFIG_GITIGNORE = {
+  path: ".gitignore",
+  sha256: "663a068e76d264d0bc6740f5450b6c4193c7b41ecf5e0dc222485b8a17404d95",
 } as const
 
 /** The one provider package the managed host accepts. */
@@ -269,20 +352,7 @@ export function configDrift(reported: unknown, generated: Record<string, unknown
     const entry = (providers as Record<string, unknown>)[block.id]
     if (entry !== undefined) problems.push(...providerDrift(entry, block, describe))
   }
-  for (const key of Object.keys(generated)) {
-    if (key === "provider" || key === "plugin") continue
-    if (!(key in actual)) problems.push(`\`${key}\` is missing; the generated config sets it to ${describe(generated[key])}`)
-    else if (!sameJson(actual[key], generated[key])) {
-      problems.push(`\`${key}\` is ${describe(actual[key])}; the generated config sets ${describe(generated[key])}`)
-    }
-  }
-  for (const key of Object.keys(actual)) {
-    if (key in generated) continue
-    const allowed = HOST_DEFAULTS[key]
-    const name = redactText(key, secrets)
-    if (allowed === undefined) problems.push(`\`${name}\` is set to ${describe(actual[key])}, and the generated config does not set it`)
-    else if (!allowed(actual[key])) problems.push(`\`${name}\` is ${describe(actual[key])}, not the host's own default`)
-  }
+  problems.push(...otherKeyDrift(actual, generated, describe, secrets))
   return problems
 }
 
@@ -351,6 +421,199 @@ export function providerRegistryDrift(reported: unknown, block: ProviderBlock, s
 }
 
 // ---------------------------------------------------------------------------
+// OAuth mode (story 2-8c3b)
+// ---------------------------------------------------------------------------
+
+/** What an OAuth-mode host runs with. */
+export interface OAuthRoute {
+  /** The providers opencode signs in to, and the host's `enabled_providers`, in order. */
+  providers: readonly string[]
+  /** The roster's models; the registry must list each under its provider. The first is the config's `model`. */
+  models: readonly { providerId: string; modelId: string }[]
+  /** The caller's opencode data directory: the host's `XDG_DATA_HOME`. Never created, written or removed here. */
+  dataDir: string
+  /** The prepared directory (`bun run oauth-prepare`). */
+  prepared: string
+  /** The home whose `.local/share/opencode/auth.json` the data directory must link to. Defaults to `os.homedir()`. */
+  home?: string
+  /** Probe-only: a `baseURL` per provider, pointing it at a local stub. The launcher never passes this. */
+  baseURLs?: Readonly<Record<string, string>>
+  /** The pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
+  pins?: PayloadPins
+}
+
+const PLAIN_ID = /^[a-z0-9][a-z0-9_-]*$/i
+
+/** Why the OAuth route cannot be used, one reason each; empty when it can. */
+export function oauthRouteProblems(route: OAuthRoute): string[] {
+  const problems: string[] = []
+  if (route.providers.length === 0) problems.push("no OAuth provider is named")
+  const seen = new Set<string>()
+  for (const id of route.providers) {
+    if (!PLAIN_ID.test(id)) problems.push(`the provider id \`${id}\` is not a plain identifier (letters, digits, \`-\` and \`_\`)`)
+    else if (seen.has(id)) problems.push(`the provider \`${id}\` is named twice`)
+    seen.add(id)
+  }
+  if (route.models.length === 0) problems.push("the OAuth route names no model")
+  const models = new Set<string>()
+  for (const { providerId, modelId } of route.models) {
+    if (!seen.has(providerId)) problems.push(`the model \`${providerId}/${modelId}\` names a provider that is not an OAuth provider`)
+    if (modelId.trim().length === 0 || modelId !== modelId.trim()) problems.push(`the model id ${JSON.stringify(modelId)} is blank or padded`)
+    else if (modelId.includes("/")) problems.push(`the model id \`${modelId}\` contains \`/\`, which the host reads as a provider separator`)
+    else if (models.has(`${providerId}/${modelId}`)) problems.push(`the model \`${providerId}/${modelId}\` is named twice`)
+    models.add(`${providerId}/${modelId}`)
+  }
+  for (const [name, path] of [["data directory", route.dataDir], ["prepared directory", route.prepared]] as const) {
+    if (!isAbsolute(path)) problems.push(`the ${name} \`${path}\` is not an absolute path`)
+  }
+  if (route.home !== undefined && !isAbsolute(route.home)) problems.push(`the home \`${route.home}\` is not an absolute path`)
+  for (const [id, baseURL] of Object.entries(route.baseURLs ?? {})) {
+    if (!seen.has(id)) problems.push(`a baseURL override names \`${id}\`, which is not an OAuth provider`)
+    let url: URL | undefined
+    try {
+      url = new URL(baseURL)
+    } catch {
+      url = undefined
+    }
+    if (url === undefined || url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname) || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
+      problems.push(`the baseURL override for \`${id}\` is \`${baseURL}\`; an override may only point at a local stub (plain http to 127.0.0.1, ::1 or localhost)`)
+    }
+  }
+  return problems
+}
+
+/** The `plugin` spec that loads the Anthropic sign-in plugin under `root`: a `file://` path, so opencode's installer never runs. */
+export function oauthPluginSpec(prepared: string): string {
+  return `file://${pluginPackageDir(prepared)}`
+}
+
+/**
+ * The whole effective config of an OAuth-mode host, loading the plugin from the
+ * verified copy under `payloadRoot`. No credential appears in it.
+ */
+export function oauthHostConfig(route: OAuthRoute, payloadRoot: string): Record<string, unknown> {
+  const first = `${route.models[0]!.providerId}/${route.models[0]!.modelId}`
+  const overrides = Object.entries(route.baseURLs ?? {})
+  return {
+    ...FIXED_HOST_SETTINGS,
+    plugin: [oauthPluginSpec(payloadRoot)],
+    enabled_providers: [...route.providers],
+    model: first,
+    small_model: first,
+    ...(overrides.length === 0 ? {} : { provider: Object.fromEntries(overrides.map(([id, baseURL]) => [id, { options: { baseURL } }])) }),
+  }
+}
+
+/**
+ * Every way an OAuth-mode host's `GET /config` differs from the generated config,
+ * one sentence each: `plugin` must be exactly the private plugin copy, `provider`
+ * exactly the probe's overrides or absent, and every other key as generated,
+ * allowing only the host's own defaults (`HOST_DEFAULTS`).
+ *
+ * There is no credential to redact here, and the host's sign-ins may reach its
+ * config, so no reported value is ever described: a sentence names keys, provider
+ * ids and option names only, and describes only what MAD generated.
+ */
+export function oauthConfigDrift(reported: unknown, generated: Record<string, unknown>): string[] {
+  const describe = (value: unknown) => describeValue(value, [])
+  if (reported === null || typeof reported !== "object" || Array.isArray(reported)) {
+    return ["`GET /config` did not return an object"]
+  }
+  const actual = reported as Record<string, unknown>
+  const problems: string[] = []
+  if (!sameJson(actual.plugin, generated.plugin)) {
+    problems.push(`\`plugin\` is ${shapeOf(actual.plugin)}, not the generated list; the OAuth host loads exactly ${describe(generated.plugin)}`)
+  }
+  if (!sameJson(actual.provider, generated.provider)) {
+    problems.push(
+      `\`provider\` is ${providerKeys(actual.provider)}; ` +
+        (generated.provider === undefined ? "the OAuth host's config sets no provider block" : `the generated config sets exactly ${describe(generated.provider)}`),
+    )
+  }
+  problems.push(...otherKeyDrift(actual, generated, describe, [], shapeOf))
+  return problems
+}
+
+/** A reported value described by its shape alone: never its contents. */
+function shapeOf(value: unknown): string {
+  if (value === undefined) return "absent"
+  if (Array.isArray(value)) return `a list of ${value.length} entr${value.length === 1 ? "y" : "ies"}`
+  if (value === null) return "null"
+  if (typeof value === "object") return `an object with keys ${JSON.stringify(Object.keys(value).sort())}`
+  return `a ${typeof value} value`
+}
+
+/** A reported provider block described by provider ids and option names alone. */
+function providerKeys(value: unknown): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return shapeOf(value)
+  const entries = Object.entries(value as Record<string, unknown>).map(([id, entry]) => {
+    const options = entry !== null && typeof entry === "object" ? (entry as { options?: unknown }).options : undefined
+    const names = options !== null && typeof options === "object" ? Object.keys(options).sort() : []
+    return `\`${id}\` (option names ${JSON.stringify(names)})`
+  })
+  return entries.length === 0 ? "an empty provider block" : `a provider block naming ${entries.join(", ")}`
+}
+
+/**
+ * Every way an OAuth-mode host's `GET /config/providers` differs from the route: it
+ * must list exactly the OAuth providers, and every roster model under its provider.
+ * Nothing from a provider's options is read or described.
+ */
+export function oauthRegistryDrift(reported: unknown, route: OAuthRoute): string[] {
+  const describe = (value: unknown) => describeValue(value, [])
+  const body = reported as { providers?: unknown } | null
+  if (body === null || typeof body !== "object" || !Array.isArray(body.providers)) {
+    return ["`GET /config/providers` did not return a provider list"]
+  }
+  const providers = body.providers as { id?: unknown; models?: unknown }[]
+  const ids = providers.map((provider) => (provider !== null && typeof provider === "object" ? provider.id : undefined))
+  const problems: string[] = []
+  const expected = [...route.providers].sort()
+  if (!sameJson([...ids].sort(), expected)) {
+    problems.push(`the provider registry lists ${describe(ids)}; exactly the OAuth providers ${describe(expected)} are allowed`)
+  }
+  for (const { providerId, modelId } of route.models) {
+    const provider = providers.find((entry) => entry !== null && typeof entry === "object" && entry.id === providerId)
+    const models = provider?.models
+    if (provider === undefined) continue
+    if (models === null || typeof models !== "object" || !Object.hasOwn(models, modelId)) {
+      problems.push(`the registry's \`${providerId}\` does not list the roster model \`${modelId}\``)
+    }
+  }
+  return problems
+}
+
+/**
+ * Keys other than `provider` and `plugin`: each as generated, and nothing else but
+ * the host's own defaults. `describeActual` describes a reported value; it is
+ * `describe` unless the caller must not print reported values.
+ */
+function otherKeyDrift(
+  actual: Record<string, unknown>,
+  generated: Record<string, unknown>,
+  describe: (value: unknown) => string,
+  secrets: readonly string[],
+  describeActual: (value: unknown) => string = describe,
+): string[] {
+  const problems: string[] = []
+  for (const key of Object.keys(generated)) {
+    if (key === "provider" || key === "plugin") continue
+    if (!(key in actual)) problems.push(`\`${key}\` is missing; the generated config sets it to ${describe(generated[key])}`)
+    else if (!sameJson(actual[key], generated[key])) {
+      problems.push(`\`${key}\` is ${describeActual(actual[key])}; the generated config sets ${describe(generated[key])}`)
+    }
+  }
+  for (const key of Object.keys(actual)) {
+    if (key in generated || key === "provider" || key === "plugin") continue
+    const allowed = HOST_DEFAULTS[key]
+    const name = redactText(key, secrets)
+    if (allowed === undefined) problems.push(`\`${name}\` is set to ${describeActual(actual[key])}, and the generated config does not set it`)
+    else if (!allowed(actual[key])) problems.push(`\`${name}\` is ${describeActual(actual[key])}, not the host's own default`)
+  }
+  return problems
+}
+
+// ---------------------------------------------------------------------------
 // The process
 // ---------------------------------------------------------------------------
 
@@ -382,10 +645,24 @@ export interface SignalSource {
   off(signal: "SIGINT" | "SIGTERM", handler: () => void): unknown
 }
 
-export interface ManagedHostOptions {
+/** The api-key mode: one `@ai-sdk/openai-compatible` block and its credential. */
+export interface ApiKeyHostOptions extends HostOptionsBase {
+  mode?: "api-key"
   block: ProviderBlock
   /** The credential's value. It reaches the host only as the `block.apiKeyEnv` variable. */
   credential: string
+}
+
+/** Story 2-8c3b — the OAuth mode: opencode's own sign-ins, no credential, no relay. */
+export interface OAuthHostOptions extends HostOptionsBase {
+  mode: "oauth"
+  oauth: OAuthRoute
+}
+
+export type ManagedHostOptions = ApiKeyHostOptions | OAuthHostOptions
+
+/** What both modes take. */
+export interface HostOptionsBase {
   /** A proxy for HTTP(S)_PROXY, with `NO_PROXY=127.0.0.1`. Absent, no proxy variable is set. */
   proxy?: string
   /**
@@ -426,9 +703,21 @@ export interface ManagedHostOptions {
   exit?: (code: number) => void
 }
 
-export type StopOutcome =
+export type StopOutcome = (
   | { confirmed: true; pid: number; how: string }
   | { confirmed: false; pid: number; why: string }
+) & {
+  /** Story 2-8c3b — OAuth mode only, when a host was spawned: the checks made after it exited. */
+  postStop?: PostStopChecks
+}
+
+/** What an OAuth-mode stop checked after the host exited and before the private root was removed. */
+export interface PostStopChecks {
+  /** Each check that held, in words. */
+  held: string[]
+  /** Each check that failed, in words; non-empty fails the caller's exit code. */
+  problems: string[]
+}
 
 /** What the host's plugin install left in its config directory. */
 export type PluginInstall =
@@ -447,6 +736,8 @@ export interface ManagedHost {
   reportedConfig: unknown
   /** The names, never the values, of every variable in the host's environment. */
   environmentKeys: string[]
+  /** Story 2-8c3b — OAuth mode only: the data directory, and what the prepared directory measured as. */
+  oauth?: { dataDir: string; prepared: string; measured: PreparedMeasure }
   /** Reads whether `@opencode-ai/plugin` is installed in the host's config directory, and its version. */
   pluginInstall(): Promise<PluginInstall>
   /** Stops the host and confirms it exited. Idempotent: a second call returns the first outcome. Never rejects. */
@@ -482,7 +773,7 @@ function defaultBinary(): string {
  * they live until `stop()`. It never rejects.
  */
 export async function startManagedHost(options: ManagedHostOptions): Promise<ManagedHostStart> {
-  const secrets = secretForms(options.credential)
+  const secrets = options.mode === "oauth" ? [] : secretForms(options.credential)
   const redact = (text: string) => redactText(text, secrets)
   try {
     return await start(options, secrets, redact)
@@ -492,8 +783,18 @@ export async function startManagedHost(options: ManagedHostOptions): Promise<Man
 }
 
 async function start(options: ManagedHostOptions, secrets: string[], redact: (text: string) => string): Promise<ManagedHostStart> {
-  const problems = providerBlockProblems(options.block)
-  if (problems.length > 0) return { ok: false, reason: redact(`the provider block is refused: ${problems.join("; ")}`), stopped: null }
+  const variant =
+    options.mode === "oauth"
+      ? ({ kind: "oauth", route: options.oauth } as const)
+      : ({ kind: "api-key", block: options.block, credential: options.credential } as const)
+  const route = variant.kind === "oauth" ? variant.route : undefined
+  if (variant.kind === "api-key") {
+    const problems = providerBlockProblems(variant.block)
+    if (problems.length > 0) return { ok: false, reason: redact(`the provider block is refused: ${problems.join("; ")}`), stopped: null }
+  } else {
+    const problems = oauthRouteProblems(variant.route)
+    if (problems.length > 0) return { ok: false, reason: `the OAuth route is refused: ${problems.join("; ")}`, stopped: null }
+  }
   const measured = options.measured ?? MEASURED_HOST
   const doFetch = options.fetch ?? ((url: string, init?: { signal?: AbortSignal }) => fetch(url, init))
   const stopMs = options.stopMs ?? DEFAULT_STOP_MS
@@ -519,7 +820,34 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
     }
   }
 
+  // OAuth mode, before anything is created: the payloads as pinned, and the data directory's shape and place.
+  const pins = route?.pins ?? OAUTH_PAYLOAD
+  const home = route?.home ?? homedir()
+  let measuredPayload: PreparedMeasure | undefined
+  if (route !== undefined) {
+    const verified = await verifyPrepared(route.prepared, pins)
+    if (!verified.ok) return { ok: false, reason: `the prepared directory \`${route.prepared}\` is refused: ${verified.problems.join("; ")}`, stopped: null }
+    measuredPayload = verified.measured
+    const shape = await dataDirProblems(route.dataDir, home)
+    if (shape.length > 0) return { ok: false, reason: `the OAuth data directory is refused: ${shape.join("; ")}`, stopped: null }
+    for (const other of [
+      { name: "user's own opencode data directory", path: join(home, ".local", "share", "opencode") },
+      { name: "prepared directory", path: route.prepared },
+    ]) {
+      const overlap = await overlapProblem({ name: "OAuth data directory", path: route.dataDir }, other)
+      if (overlap !== null) return { ok: false, reason: `the OAuth data directory is refused: ${overlap}`, stopped: null }
+    }
+  }
+
   const root = await mkdtemp(join(options.scratchParent ?? tmpdir(), "mad-managed-host-"))
+  if (route !== undefined) {
+    // Checked while the root is still empty, so a refusal removes nothing but that empty directory.
+    const overlap = await overlapProblem({ name: "OAuth data directory", path: route.dataDir }, { name: "managed host's private root", path: root })
+    if (overlap !== null) {
+      await rmdir(root).catch(() => undefined)
+      return { ok: false, reason: `the OAuth data directory is refused: ${overlap}`, stopped: null }
+    }
+  }
   const dirs = {
     home: join(root, "home"),
     config: join(root, "xdg-config"),
@@ -547,6 +875,14 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
       } catch (error) {
         outcome = { confirmed: false, pid: child?.pid ?? 0, why: redact(`the stop failed: ${messageOf(error)}`) }
       }
+      if (route !== undefined && child !== undefined) {
+        outcome = {
+          ...outcome,
+          postStop: outcome.confirmed
+            ? await postStopChecks(route, home, pins, dirs.config)
+            : { held: [], problems: ["the host's exit was not confirmed; post-stop checks not established"] },
+        }
+      }
       await removeRoot().catch(() => undefined)
       return outcome
     })()
@@ -558,21 +894,29 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
   }
 
   try {
-    for (const dir of Object.values(dirs)) await mkdir(dir, { recursive: true, mode: 0o700 })
-    const config = hostConfig(options.block)
+    for (const [name, dir] of Object.entries(dirs)) {
+      // The OAuth host's data directory is the caller's; the private one is never made.
+      if (route === undefined || name !== "data") await mkdir(dir, { recursive: true, mode: 0o700 })
+    }
+    const payloadRoot = join(root, "payload")
+    if (route !== undefined) {
+      const seeded = await seedPayloads(route.prepared, pins, { plugin: payloadRoot, config: dirs.config, cache: dirs.cache })
+      if (seeded !== null) return await refuse(seeded)
+    }
+    const config = variant.kind === "api-key" ? hostConfig(variant.block) : oauthHostConfig(variant.route, payloadRoot)
     const configFile = join(root, "opencode.json")
     await writeFile(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
     const env: Record<string, string> = {
       PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
       HOME: dirs.home,
       XDG_CONFIG_HOME: dirs.config,
-      XDG_DATA_HOME: dirs.data,
+      XDG_DATA_HOME: variant.kind === "api-key" ? dirs.data : variant.route.dataDir,
       XDG_CACHE_HOME: dirs.cache,
       XDG_STATE_HOME: dirs.state,
       OPENCODE_CONFIG: configFile,
       OPENCODE_DISABLE_MODELS_FETCH: "1",
       OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-      [options.block.apiKeyEnv]: options.credential,
+      ...(variant.kind === "api-key" ? { [variant.block.apiKeyEnv]: variant.credential } : {}),
       ...(options.proxy === undefined
         ? {}
         : {
@@ -632,7 +976,7 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
     for (const directory of [dirs.cwd, ...(options.verifyDirectories ?? [])]) {
       const reported = await readJson(doFetch, `${url}/config?directory=${encodeURIComponent(directory)}`, requestMs)
       if (!reported.ok) return await refuse(`\`GET /config\` for \`${directory}\` could not be read: ${reported.why}`)
-      const drift = configDrift(reported.value, config, options.block, secrets)
+      const drift = variant.kind === "api-key" ? configDrift(reported.value, config, variant.block, secrets) : oauthConfigDrift(reported.value, config)
       if (drift.length > 0) return await refuse(`the host's effective config for \`${directory}\` is not the generated one: ${drift.join("; ")}`)
       reportedConfig ??= reported.value
     }
@@ -640,9 +984,13 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
     for (const directory of [dirs.cwd, ...(options.verifyDirectories ?? [])]) {
       const registry = await readJson(doFetch, `${url}/config/providers?directory=${encodeURIComponent(directory)}`, requestMs)
       if (!registry.ok) return await refuse(`\`GET /config/providers\` for \`${directory}\` could not be read: ${registry.why}`)
-      const registryDrift = providerRegistryDrift(registry.value, options.block, secrets)
+      const registryDrift = variant.kind === "api-key" ? providerRegistryDrift(registry.value, variant.block, secrets) : oauthRegistryDrift(registry.value, variant.route)
       if (registryDrift.length > 0) {
-        return await refuse(`the host's provider registry for \`${directory}\` is not the one block: ${registryDrift.join("; ")}`)
+        return await refuse(
+          variant.kind === "api-key"
+            ? `the host's provider registry for \`${directory}\` is not the one block: ${registryDrift.join("; ")}`
+            : `the host's provider registry for \`${directory}\` is not the OAuth route's: ${registryDrift.join("; ")}`,
+        )
       }
     }
     // A stop that arrived while the host was starting (through `onSpawn` or a signal) wins.
@@ -659,6 +1007,7 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
         config,
         reportedConfig: redactConfig(reportedConfig, secrets),
         environmentKeys: Object.keys(env).sort(),
+        ...(route === undefined ? {} : { oauth: { dataDir: route.dataDir, prepared: route.prepared, measured: measuredPayload! } }),
         pluginInstall: () => pluginInstallIn(dirs.config),
         stop,
       },
@@ -666,6 +1015,71 @@ async function start(options: ManagedHostOptions, secrets: string[], redact: (te
   } catch (error) {
     return await refuse(`the managed host could not be started: ${messageOf(error)}`)
   }
+}
+
+/**
+ * Copy the Anthropic sign-in plugin into `<plugin>/`, the config seed into
+ * `<config>/opencode/` and the catalogue into `<cache>/opencode/models.json`, then
+ * verify every copy against the pins. The host loads and reads only these copies,
+ * so a change to the prepared directory after it was verified reaches nothing. The
+ * reason they were refused, or `null`.
+ */
+async function seedPayloads(prepared: string, pins: PayloadPins, into: { plugin: string; config: string; cache: string }): Promise<string | null> {
+  const plugin = join(into.plugin, pins.anthropicAuth.dir)
+  const seed = join(into.config, "opencode")
+  const catalogue = join(into.cache, "opencode", pins.catalogue.file)
+  const copy = { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false }
+  await mkdir(into.plugin, { recursive: true, mode: 0o700 })
+  await cp(join(prepared, pins.anthropicAuth.dir), plugin, copy)
+  await cp(join(prepared, pins.configSeed.dir), seed, copy)
+  await mkdir(join(into.cache, "opencode"), { recursive: true, mode: 0o700 })
+  await cp(join(prepared, pins.catalogue.file), catalogue, { errorOnExist: true, force: false })
+  const problems: string[] = []
+  for (const [what, dir, pinned] of [
+    ["the copied Anthropic sign-in plugin", plugin, pins.anthropicAuth.treeDigest],
+    ["the copied config seed", seed, pins.configSeed.treeDigest],
+  ] as const) {
+    const digest = await treeDigest(dir)
+    if (!digest.ok) problems.push(digest.reason)
+    else if (digest.digest !== pinned) problems.push(`${what}'s tree digest is ${digest.digest}; the pinned digest is ${pinned}`)
+  }
+  const sha = await sha256Of(catalogue)
+  if (sha !== pins.catalogue.sha256) problems.push(`the copied catalogue's sha256 is ${sha}; the pinned catalogue's is ${pins.catalogue.sha256}`)
+  return problems.length === 0 ? null : `the payloads copied into the host's private directories differ from the pins: ${problems.join("; ")}`
+}
+
+/**
+ * After an OAuth-mode host's exit was confirmed: the data directory still has its
+ * shape and the auth symlink is still the expected link, the seeded config lock is
+ * byte-identical to the pinned one, and the whole seeded tree still has its pinned
+ * digest. Neither the link nor its target is opened. Never rejects.
+ */
+async function postStopChecks(route: OAuthRoute, home: string, pins: PayloadPins, configHome: string): Promise<PostStopChecks> {
+  const held: string[] = []
+  const problems: string[] = []
+  const { link, target } = authLinkPaths(route.dataDir, home)
+  const shape = await dataDirProblems(route.dataDir, home)
+  if (shape.length === 0) held.push(`\`${link}\` is still a symlink to \`${target}\``)
+  else problems.push(...shape.map((problem) => `after the host exited, ${problem}`))
+  const lockFile = join(configHome, "opencode", "package-lock.json")
+  const lock = await sha256Of(lockFile).catch((error: unknown) => ({ failed: messageOf(error) }))
+  if (typeof lock !== "string") problems.push(`after the host exited, the seeded config lock could not be hashed: ${lock.failed}`)
+  else if (lock !== pins.configSeed.lockSha256) problems.push(`after the host exited, the seeded config lock's sha256 is ${lock}; the pinned lock's is ${pins.configSeed.lockSha256}`)
+  else held.push(`the seeded config lock is unchanged (sha256 ${lock})`)
+  const record = await treeRecord(join(configHome, "opencode")).catch((error: unknown) => ({ ok: false as const, reason: messageOf(error) }))
+  if (!record.ok) problems.push(`after the host exited, ${record.reason}`)
+  else {
+    // The host's own `.gitignore`, exactly as measured, is the one entry allowed beyond the seed.
+    const gitignore = `F\t${HOST_CONFIG_GITIGNORE.path}\t${HOST_CONFIG_GITIGNORE.sha256}\t-\n`
+    const digest = recordDigest(record.lines.filter((line) => line !== gitignore))
+    if (digest !== pins.configSeed.treeDigest) {
+      problems.push(
+        `after the host exited, the seeded config tree's digest (less the host's own \`${HOST_CONFIG_GITIGNORE.path}\`) is ${digest}; ` +
+          `the pinned digest is ${pins.configSeed.treeDigest}`,
+      )
+    } else held.push(`the seeded config tree is unchanged but for the host's own \`${HOST_CONFIG_GITIGNORE.path}\` (digest ${digest})`)
+  }
+  return { held, problems }
 }
 
 /** What `npm install @opencode-ai/plugin` left under the host's config directory. */

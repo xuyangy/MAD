@@ -14,7 +14,8 @@
  *
  * Each gate names the phase it is required for: `accounting-probe` (story 2-8c's
  * bounded, authorized probe) or `evaluation` (the three blocks). The launcher
- * asks `gatePreflight(PAIRED_GATES, "evaluation", "api-key")`. A gate required
+ * asks `gatePreflight(PAIRED_GATES, "evaluation", route)` for the route its
+ * `--provider-mode` selects, `api-key` by default. A gate required
  * only for the probe is printed and never consulted for the evaluation, so
  * closing it can never stand in for an evaluation gate.
  *
@@ -135,7 +136,8 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     requires:
       "the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three " +
       "blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block " +
-      "and 300 in total, each an admission threshold",
+      "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
+      "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1)",
   },
   {
     number: 5,
@@ -180,6 +182,9 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the " +
       "gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d " +
       "starts. Never closed from the paid paired evaluation",
+    note:
+      "story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic " +
+      "and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN",
   },
 ]
 

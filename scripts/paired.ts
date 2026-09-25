@@ -47,13 +47,14 @@
  *
  * Readiness is `PAIRED_GATES` and nothing else: no flag, environment variable or
  * file read at run time can close a gate. While any gate the evaluation phase
- * requires on the api-key route is OPEN, or `ablation/paired-gates.ts` differs
- * from HEAD, this command refuses at stage 1. A gate that covers only the oauth
- * route is printed and never consulted. The schedule's `config.gates` records the
- * committed blob, the route (`route api-key`) and every gate's status. The
- * launcher hands the runner `route: "api-key"`, which the sealed config does not
- * repeat: it writes `route` only for the oauth route, so the api-key route is
- * sealed only through `config.gates`.
+ * requires on the selected route (`api-key` unless `--provider-mode oauth`) is
+ * OPEN, or `ablation/paired-gates.ts` differs from HEAD, this command refuses at
+ * stage 1. A gate that covers only the other route is printed and never
+ * consulted. The schedule's `config.gates` records the committed blob, the route
+ * and every gate's status. On the api-key route the launcher hands the runner
+ * `route: "api-key"`, which the sealed config does not repeat: it writes `route`
+ * only for the oauth route, so the api-key route is sealed only through
+ * `config.gates`.
  *
  * ## The change is the sealed one, and the worktree is proved
  *
@@ -74,6 +75,27 @@
  * facts. When the port reports unconfirmed blame cleanup, the run is aborted
  * through its signal and the process id is printed.
  *
+ * ## The OAuth route (story 2-8c3b)
+ *
+ *   bun run paired --live --provider-mode oauth \
+ *     --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot \
+ *     --pin openai/gpt-6-luna --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-5-mini \
+ *     --oauth-data-dir ~/.local/share/mad-opencode-oauth --oauth-prepared /scratch/mad-oauth-prepared \
+ *     --directory /scratch/mad-labelled-change --out /scratch/mad-paired-oauth
+ *
+ * `--provider-mode oauth` runs the managed host on opencode's own sign-ins
+ * (`ablation/managed-host.ts`, OAuth mode). It takes one `--pin` per
+ * `--oauth-provider`, all distinct, and refuses every `--provider-*` credential
+ * flag; the api-key mode refuses every `--oauth-*` flag. It starts no relay and
+ * no meter. Stage 1 checks the gates for route `oauth`, the frozen protocol v2
+ * (`PROTOCOL_V2_FILE`), the prepared payloads against `OAUTH_PAYLOAD` and the auth
+ * symlink (`lstat` and `readlink` only), and every OAuth refusal names each failed
+ * check's reason in its one aggregated diagnostic. Stage 2 resolves the roster
+ * with the lenses `security` and `reliability`. Stage 4 seals `accounting:
+ * "attempts"` and `route: "oauth"` under protocol v2. After the host is stopped
+ * the auth symlink and the seeded config lock are checked again, and a failure
+ * there exits 1 whatever the run's result was.
+ *
  * Exit codes: 0 when the three blocks ran and the runner's result reads
  * `complete: true`; 1 for every refusal and every incomplete run; 130 when
  * SIGINT or SIGTERM arrives during stages 1-3, after the scratch copy is removed
@@ -83,7 +105,7 @@
 
 import { rmSync } from "node:fs"
 import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
@@ -103,7 +125,9 @@ import { codeRevisionFrom } from "../ablation/bundle.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { runPairedBlocks, type PairedPhaseContext } from "../ablation/paired.ts"
 import {
+  OAUTH_PAYLOAD,
   OPENAI_COMPATIBLE_NPM,
+  oauthRouteProblems,
   providerBlockProblems,
   redactText,
   secretForms,
@@ -111,9 +135,11 @@ import {
   type ManagedHost,
   type ManagedHostOptions,
   type ManagedHostStart,
+  type OAuthRoute,
   type ProviderBlock,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
+import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
@@ -138,6 +164,8 @@ import { writeLabelledTree, type GitResult, type RunGit } from "./materialize-la
 /** This repository: the reviewed worktree may neither be it, sit inside it, nor contain it. */
 const REPO_ROOT = resolve(import.meta.dir, "..")
 export const PROTOCOL_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md")
+/** Story 2-8c3b — the protocol the OAuth route seals under: attempt accounting is defined only by v2. */
+export const PROTOCOL_V2_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md")
 
 /**
  * The preflight's git deadlines: fixed constants, not flags. Each git call in the
@@ -201,8 +229,17 @@ export async function gateTableState(git: RunGit, root: string): Promise<GateTab
   return { ok: true, blob: blob.stdout.trim() }
 }
 
-/** The route this launcher runs: the relay to one api-key provider. It never selects the oauth route. */
+/** The api-key route: the relay to one api-key provider, and the launcher's default. */
 export const LAUNCH_ROUTE: GateRoute = "api-key"
+
+/** Story 2-8c3b — which route `--provider-mode` selects. */
+export type ProviderMode = "api-key" | "oauth"
+export function routeFor(mode: ProviderMode): GateRoute {
+  return mode === "oauth" ? "oauth" : LAUNCH_ROUTE
+}
+
+/** Story 2-8c3b — the lens slots the OAuth route's roster carries, which protocol v2's prefix of 10 attempts is sized for. */
+export const OAUTH_LENSES = ["security", "reliability"] as const
 
 /** The `config.gates` identity: the committed table's blob, the route it was checked for and every gate's status. */
 export function gatesIdentity(blob: string, gates: readonly PairedGate[], route: GateRoute): string {
@@ -256,6 +293,12 @@ export interface PairedOverrides {
   gates?: readonly PairedGate[]
   /** Starts the managed host. Defaults to `startManagedHost`. */
   startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
+  /** Story 2-8c3b, test-only: the protocol file the OAuth route reads. Defaults to `PROTOCOL_V2_FILE`. */
+  protocolV2File?: string
+  /** Story 2-8c3b, test-only: the pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
+  payloadPins?: PayloadPins
+  /** Story 2-8c3b, test-only: the home the auth symlink must point into. Defaults to `os.homedir()`. */
+  home?: string
   /** Starts the relay between the host and the provider. Defaults to `startRequestMeter`. */
   startMeter?: (options: RequestMeterOptions) => RequestMeter
   /** Where the credential variable is read. Defaults to `process.env`. */
@@ -290,7 +333,22 @@ export interface PairedOverrides {
 // Flags
 // ---------------------------------------------------------------------------
 
-const VALUE_FLAGS = new Set(["pin", "directory", "out", "provider-url", "provider-key-env", "provider-model", "server", "target"])
+const VALUE_FLAGS = new Set([
+  "pin",
+  "directory",
+  "out",
+  "provider-url",
+  "provider-key-env",
+  "provider-model",
+  "server",
+  "target",
+  "provider-mode",
+  "oauth-provider",
+  "oauth-data-dir",
+  "oauth-prepared",
+])
+const API_KEY_FLAGS = ["provider-url", "provider-key-env", "provider-model"] as const
+const OAUTH_FLAGS = ["oauth-provider", "oauth-data-dir", "oauth-prepared"] as const
 const KNOWN_FLAGS = new Set<string>(["live", ...VALUE_FLAGS])
 
 const matchesFlag = (arg: string, name: string) => arg === `--${name}` || arg.startsWith(`--${name}=`)
@@ -327,7 +385,14 @@ function parsePin(value: string): Pin | undefined {
 
 export interface ParsedFlags {
   problems: string[]
+  /** Story 2-8c3b — `--provider-mode`, `api-key` when absent. */
+  mode: ProviderMode
+  /** The api-key mode's one `--pin`. Absent in OAuth mode, whose pins are all in `pins`. */
   pin?: Pin
+  /** Every readable `--pin`, in order: one in the api-key mode, one per OAuth provider in OAuth mode. */
+  pins: Pin[]
+  /** Story 2-8c3b — the OAuth route's flags, when every one was readable. */
+  oauth?: { providers: string[]; dataDir: string; prepared: string }
   directory?: string
   out?: string
   /** The managed host's provider block, when every `--provider-*` flag and `--pin` were readable. */
@@ -340,7 +405,7 @@ export interface ParsedFlags {
 export function parseFlags(argv: readonly string[]): ParsedFlags {
   const args = argv.slice(2)
   const problems: string[] = []
-  const parsed: ParsedFlags = { problems, unusable: {} }
+  const parsed: ParsedFlags = { problems, mode: "api-key", pins: [], unusable: {} }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!
@@ -349,7 +414,8 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
       if (!KNOWN_FLAGS.has(name)) {
         problems.push(
           `\`${arg}\` is not a flag this command knows. It takes --live, --pin, --directory, --out, --provider-url, ` +
-            "--provider-key-env and --provider-model only.",
+            "--provider-key-env and --provider-model only; with --provider-mode oauth, --oauth-provider, --oauth-data-dir " +
+            "and --oauth-prepared in place of the three --provider-* flags.",
         )
       } else if (VALUE_FLAGS.has(name) && !arg.includes("=") && args[index + 1] !== undefined && !args[index + 1]!.startsWith("-")) {
         index += 1
@@ -368,13 +434,24 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
     problems.push(`--live was given ${live.length} times. Pass it once.`)
   }
 
-  const pin = valueFlag(args, "pin")
-  if (!pin.ok) problems.push(pin.message)
-  else if (pin.value === undefined) problems.push("--pin provider/model is required. MAD names no model; you name the pinned slot.")
-  else {
-    const value = parsePin(pin.value)
-    if (value === undefined) problems.push(`--pin must be provider/model. It received \`${pin.value}\`.`)
-    else parsed.pin = value
+  const mode = valueFlag(args, "provider-mode")
+  if (!mode.ok) problems.push(mode.message)
+  else if (mode.value !== undefined && mode.value !== "api-key" && mode.value !== "oauth") {
+    problems.push(`--provider-mode is api-key or oauth. It received \`${mode.value}\`.`)
+  } else if (mode.value === "oauth") parsed.mode = "oauth"
+
+  if (parsed.mode === "api-key") {
+    const pin = valueFlag(args, "pin")
+    if (!pin.ok) problems.push(pin.message)
+    else if (pin.value === undefined) problems.push("--pin provider/model is required. MAD names no model; you name the pinned slot.")
+    else {
+      const value = parsePin(pin.value)
+      if (value === undefined) problems.push(`--pin must be provider/model. It received \`${pin.value}\`.`)
+      else {
+        parsed.pin = value
+        parsed.pins = [value]
+      }
+    }
   }
 
   for (const name of ["directory", "out"] as const) {
@@ -395,6 +472,34 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
     } else parsed[name] = resolve(flag.value)
   }
 
+  if (parsed.mode === "oauth") parseOAuthFlags(args, parsed)
+  else parseApiKeyFlags(args, parsed)
+
+  if (args.some((arg) => matchesFlag(arg, "server"))) {
+    problems.push(
+      "--server is refused: the launcher starts its own managed host (ablation/managed-host.ts), bound to the measured " +
+        "opencode build and a config it generates, and never trusts a host it did not start. Drop it and pass the " +
+        "--provider-* flags.",
+    )
+  }
+
+  if (args.some((arg) => matchesFlag(arg, "target"))) {
+    problems.push(
+      "--target is refused: the launcher reviews the sealed labelled change itself and never reads a ref range, " +
+        "so --target would be a second authority on what is reviewed. Drop it.",
+    )
+  }
+  return parsed
+}
+
+/** The api-key mode's `--provider-*` flags; every `--oauth-*` flag is refused. */
+function parseApiKeyFlags(args: readonly string[], parsed: ParsedFlags): void {
+  const problems = parsed.problems
+  for (const name of OAUTH_FLAGS) {
+    if (args.some((arg) => matchesFlag(arg, name))) {
+      problems.push(`--${name} belongs to --provider-mode oauth; the api-key mode takes the --provider-* flags. Drop it, or pass --provider-mode oauth.`)
+    }
+  }
   const url = valueFlag(args, "provider-url")
   const keyEnv = valueFlag(args, "provider-key-env")
   if (!url.ok) problems.push(url.message)
@@ -418,22 +523,84 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
   if (parsed.pin !== undefined && url.ok && url.value !== undefined && keyEnv.ok && keyEnv.value !== undefined && models.length > 0) {
     parsed.provider = { id: parsed.pin.providerId, npm: OPENAI_COMPATIBLE_NPM, baseURL: url.value, apiKeyEnv: keyEnv.value, models }
   }
+}
 
-  if (args.some((arg) => matchesFlag(arg, "server"))) {
-    problems.push(
-      "--server is refused: the launcher starts its own managed host (ablation/managed-host.ts), bound to the measured " +
-        "opencode build and a config it generates, and never trusts a host it did not start. Drop it and pass the " +
-        "--provider-* flags.",
-    )
+/**
+ * Story 2-8c3b — the OAuth mode's flags: repeated `--oauth-provider`, one `--pin`
+ * per provider (all distinct), `--oauth-data-dir` and `--oauth-prepared`. Every
+ * `--provider-*` flag is refused: the OAuth host holds no credential.
+ */
+function parseOAuthFlags(args: readonly string[], parsed: ParsedFlags): void {
+  const problems = parsed.problems
+  const mixed = API_KEY_FLAGS.filter((name) => args.some((arg) => matchesFlag(arg, name)))
+  for (const name of mixed) {
+    problems.push(`--${name} belongs to the api-key mode; --provider-mode oauth runs on opencode's own sign-ins and takes no credential. Drop it.`)
   }
+  const repeated = (name: string): string[] | undefined => {
+    const values: string[] = []
+    let unreadable = false
+    for (const [index, arg] of args.entries()) {
+      if (!matchesFlag(arg, name)) continue
+      const eq = arg.indexOf("=")
+      const raw = eq >= 0 ? arg.slice(eq + 1) : args[index + 1]
+      if (raw === undefined || raw.trim() === "" || raw.startsWith("-")) {
+        problems.push(`--${name} needs a value. Nothing readable followed it.`)
+        unreadable = true
+      } else values.push(raw.trim())
+    }
+    return unreadable ? undefined : values
+  }
+  const providers = repeated("oauth-provider")
+  if (providers !== undefined && providers.length === 0) problems.push("--oauth-provider is required, once per provider opencode signs in to.")
+  const duplicate = providers?.find((id, index) => providers.indexOf(id) !== index)
+  if (duplicate !== undefined) problems.push(`--oauth-provider \`${duplicate}\` was given twice; name each provider once.`)
 
-  if (args.some((arg) => matchesFlag(arg, "target"))) {
-    problems.push(
-      "--target is refused: the launcher reviews the sealed labelled change itself and never reads a ref range, " +
-        "so --target would be a second authority on what is reviewed. Drop it.",
-    )
+  const pinValues = repeated("pin")
+  const pins: Pin[] = []
+  if (pinValues !== undefined && pinValues.length === 0) problems.push("--pin provider/model is required, once per --oauth-provider. MAD names no model; you name each pinned slot.")
+  for (const value of pinValues ?? []) {
+    const pin = parsePin(value)
+    if (pin === undefined) problems.push(`--pin must be provider/model. It received \`${value}\`.`)
+    else pins.push(pin)
   }
-  return parsed
+  const pinLabels = pins.map((pin) => `${pin.providerId}/${pin.modelId}`)
+  const repeatedPin = pinLabels.find((label, index) => pinLabels.indexOf(label) !== index)
+  if (repeatedPin !== undefined) problems.push(`--pin ${repeatedPin} was given twice; every pin is distinct.`)
+  if (providers !== undefined && pinValues !== undefined && pins.length === pinValues.length) {
+    for (const id of providers) {
+      const count = pins.filter((pin) => pin.providerId === id).length
+      if (count !== 1) problems.push(`--oauth-provider ${id} has ${count} --pin(s); exactly one per OAuth provider is required.`)
+    }
+    for (const pin of pins) {
+      if (!providers.includes(pin.providerId)) problems.push(`--pin ${pin.providerId}/${pin.modelId} names a provider that is not an --oauth-provider.`)
+    }
+  }
+  parsed.pins = pins
+
+  const paths: Partial<Record<"oauth-data-dir" | "oauth-prepared", string>> = {}
+  for (const name of ["oauth-data-dir", "oauth-prepared"] as const) {
+    const flag = valueFlag(args, name)
+    if (!flag.ok) problems.push(flag.message)
+    else if (flag.value === undefined) {
+      problems.push(
+        name === "oauth-data-dir"
+          ? "--oauth-data-dir is required: the dedicated opencode data directory whose opencode/auth.json links to your sign-ins."
+          : "--oauth-prepared is required: the directory `bun run oauth-prepare --out <dir>` built.",
+      )
+    } else if (!isAbsolute(flag.value)) problems.push(`--${name} must be an absolute path. It received \`${flag.value}\`.`)
+    else paths[name] = resolve(flag.value)
+  }
+  if (
+    mixed.length === 0 &&
+    providers !== undefined &&
+    providers.length > 0 &&
+    pins.length === providers.length &&
+    paths["oauth-data-dir"] !== undefined &&
+    paths["oauth-prepared"] !== undefined &&
+    !problems.some((problem) => problem.startsWith("--pin") || problem.startsWith("--oauth-provider"))
+  ) {
+    parsed.oauth = { providers, dataDir: paths["oauth-data-dir"], prepared: paths["oauth-prepared"] }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +1029,8 @@ interface ManagedSlot {
   /** The relay, started before the host and stopped after it. */
   meter?: RequestMeter
   meterStopped?: Promise<void>
+  /** Story 2-8c3b — set for the OAuth route before the host is started. */
+  oauth?: { dataDir: string }
 }
 
 /** Stop the relay, once. It holds the credential, so every way out stops it. */
@@ -915,7 +1084,13 @@ function stopManaged(managed: ManagedSlot): Promise<boolean> {
         : `\nMANAGED HOST STOP UNCONFIRMED — check process ${outcome.pid} by hand before anything else runs: ${outcome.why}.`,
     )
     await stopMeter(managed)
-    return outcome.confirmed
+    // The OAuth route: the auth symlink and the seeded config lock, checked after the host exited. A failure fails the exit code.
+    const post = outcome.postStop
+    if (post !== undefined) {
+      for (const line of post.held) console.log(`  after the stop: ${line}`)
+      for (const problem of post.problems) console.log(`POST-STOP CHECK FAILED — ${problem}. The data directory ${managed.oauth?.dataDir ?? ""} was kept as it is.`)
+    }
+    return outcome.confirmed && (post === undefined || post.problems.length === 0)
   })()
   return managed.stopped
 }
@@ -1003,7 +1178,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   signals.on("SIGTERM", preflightInterrupt)
 
   let prepared: {
-    pin: Pin
+    /** Every `--pin`: one on the api-key route, one per provider on the OAuth route. */
+    pins: Pin[]
     directory: string
     out: string
     host: ManagedHost
@@ -1011,6 +1187,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     roster: Roster
     warnings: Warning[]
     gatesBlob: string
+    mode: ProviderMode
   }
   try {
     // ---- STAGE 1: offline checks ----
@@ -1051,8 +1228,17 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       checks.push(root.check)
     }
 
+    const oauthMode = flags.mode === "oauth"
+    const route = routeFor(flags.mode)
     checks.push(
       await guarded("frozen protocol", async () => {
+        if (oauthMode) {
+          const protocol = await readFrozenProtocol(overrides.protocolV2File ?? PROTOCOL_V2_FILE)
+          if (!protocol.ok) return fail("frozen protocol", [`protocol v2 is not frozen: ${protocol.reason}`])
+          return protocol.version === 2
+            ? pass("frozen protocol", [`${protocol.id} v${protocol.version} ${protocol.hash}`])
+            : fail("frozen protocol", [`the OAuth route needs protocol v2, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
+        }
         const protocol = await readFrozenProtocol(PROTOCOL_FILE)
         return protocol.ok
           ? pass("frozen protocol", [`${protocol.id} v${protocol.version} ${protocol.hash}`])
@@ -1060,7 +1246,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       }),
     )
 
-    const gateCheck = gatePreflight(gates, "evaluation", LAUNCH_ROUTE)
+    const gateCheck = gatePreflight(gates, "evaluation", route)
     let table: GateTableState
     try {
       table = await (overrides.gateTable ?? (() => gateTableState(git, REPO_ROOT)))()
@@ -1084,7 +1270,14 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
 
     let credential: string | undefined
     const provider = flags.provider
-    if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
+    let oauthRoute: OAuthRoute | undefined
+    const home = overrides.home ?? homedir()
+    if (oauthMode) {
+      oauthRoute = await oauthChecks(flags, home, overrides.payloadPins ?? OAUTH_PAYLOAD, checks, [
+        { name: "--directory", path: directory },
+        { name: "--out", path: out },
+      ])
+    } else if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
     else {
       const problems = providerBlockProblems(provider)
       const value = env[provider.apiKeyEnv]
@@ -1151,9 +1344,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       failed.length > 0 ||
       skipped.length > 0 ||
       interrupted ||
-      flags.pin === undefined ||
-      provider === undefined ||
-      credential === undefined ||
+      (oauthMode ? flags.pins.length === 0 || oauthRoute === undefined : flags.pin === undefined || provider === undefined || credential === undefined) ||
       directory === undefined ||
       out === undefined ||
       wiring === undefined ||
@@ -1163,7 +1354,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       return refusal(
         "stage 1 (offline checks)",
         [
-          ...failed.map((check) => `${check.name} failed`),
+          // The OAuth route names each failed check's reason, so its one diagnostic lists every gate and the protocol.
+          ...failed.map((check) => (oauthMode && check.state === "fail" ? `${check.name} failed: ${failureReason(check)}` : `${check.name} failed`)),
           ...skipped.map((check) => (check.state === "not-evaluated" ? `${check.name} was not evaluated (${check.prerequisite})` : check.name)),
         ],
         "fix every failure printed above and run the command again. An OPEN gate is closed only by its owner, " +
@@ -1173,29 +1365,52 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
 
     // ---- STAGE 2: managed host, client and roster ----
-    console.log("\nbun run paired — stage 2 of 4: managed host, opencode client and roster (no model session, no billable request)")
+    console.log(
+      oauthMode
+        ? "\nbun run paired — stage 2 of 4: managed host, opencode client and roster (no model session; at startup the host " +
+            "connects to api.githubcopilot.com with the real sign-in, before any admission)"
+        : "\nbun run paired — stage 2 of 4: managed host, opencode client and roster (no model session, no billable request)",
+    )
     let started: ManagedHostStart
-    managed.secrets = secretForms(credential)
-    try {
-      // The relay holds the credential and forwards to the provider; the host is
-      // pointed at the relay and given only a placeholder key.
-      const meter = (overrides.startMeter ?? startRequestMeter)({ upstream: provider.baseURL, credential })
-      managed.meter = meter
-      console.log(`  relay ${meter.baseURL} -> ${provider.baseURL} (the host holds the relay's key, not the credential)`)
-      started = await (overrides.startHost ?? startManagedHost)({
-        block: { ...provider, baseURL: meter.baseURL },
-        credential: meter.hostKey,
-        verifyDirectories: [directory],
-        signals: null,
-        onSpawn: (spawned) => {
-          managed.stop = spawned.stop
-        },
-      })
-    } catch (error) {
-      started = {
-        ok: false,
-        reason: redactText(`the managed host could not be started: ${messageOf(error)}`, secretForms(credential)),
-        stopped: null,
+    managed.secrets = oauthMode ? [] : secretForms(credential!)
+    if (oauthRoute !== undefined) {
+      managed.oauth = { dataDir: oauthRoute.dataDir }
+      // No relay and no meter: the host signs in through the data directory's auth symlink and holds no credential here.
+      try {
+        started = await (overrides.startHost ?? startManagedHost)({
+          mode: "oauth",
+          oauth: oauthRoute,
+          verifyDirectories: [directory],
+          signals: null,
+          onSpawn: (spawned) => {
+            managed.stop = spawned.stop
+          },
+        })
+      } catch (error) {
+        started = { ok: false, reason: `the managed host could not be started: ${messageOf(error)}`, stopped: null }
+      }
+    } else {
+      try {
+        // The relay holds the credential and forwards to the provider; the host is
+        // pointed at the relay and given only a placeholder key.
+        const meter = (overrides.startMeter ?? startRequestMeter)({ upstream: provider!.baseURL, credential: credential! })
+        managed.meter = meter
+        console.log(`  relay ${meter.baseURL} -> ${provider!.baseURL} (the host holds the relay's key, not the credential)`)
+        started = await (overrides.startHost ?? startManagedHost)({
+          block: { ...provider!, baseURL: meter.baseURL },
+          credential: meter.hostKey,
+          verifyDirectories: [directory],
+          signals: null,
+          onSpawn: (spawned) => {
+            managed.stop = spawned.stop
+          },
+        })
+      } catch (error) {
+        started = {
+          ok: false,
+          reason: redactText(`the managed host could not be started: ${messageOf(error)}`, secretForms(credential!)),
+          stopped: null,
+        }
       }
     }
     if (!started.ok) {
@@ -1206,9 +1421,13 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           ...(started.stopped !== null && !started.stopped.confirmed
             ? [`the refused host's exit is UNCONFIRMED: check process ${started.stopped.pid} by hand (${started.stopped.why})`]
             : []),
+          ...(started.stopped?.postStop?.problems ?? []).map((problem) => `POST-STOP CHECK FAILED — ${problem}`),
         ],
-        "run the command on the measured opencode build (`MEASURED_HOST` in ablation/managed-host.ts) with an " +
-          "OpenAI-compatible --provider-url, and run it again.",
+        oauthMode
+          ? "run the command on the measured opencode build (`MEASURED_HOST` in ablation/managed-host.ts) with a prepared " +
+              "directory from `bun run oauth-prepare` and every roster model signed in and listed, and run it again."
+          : "run the command on the measured opencode build (`MEASURED_HOST` in ablation/managed-host.ts) with an " +
+              "OpenAI-compatible --provider-url, and run it again.",
       )
     }
     const host = started.host
@@ -1223,8 +1442,10 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       const candidates = await (overrides.enumerate ?? ((value: unknown) => enumerateCandidates(value as never)))(client)
       const resolved = selectRoster(candidates, {
         slots: DEFAULT_DISCOVERY_SLOTS,
-        pins: [flags.pin],
+        pins: flags.pins,
         providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
+        // The api-key route keeps its lens-free roster; protocol v2's prefix of 10 attempts is sized for these two lenses.
+        ...(oauthMode ? { lenses: OAUTH_LENSES } : {}),
       })
       roster = resolved.roster
       warnings = resolved.warnings
@@ -1237,13 +1458,15 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     for (const slot of roster.slots) console.log(`  ${slot.slot}: ${slot.providerId}/${slot.modelId}`)
     for (const warning of warnings) console.log(`  warning ${warning.code}: ${warning.message}`)
-    const rosterProblems = rosterProblemsFor(roster, warnings, flags.pin)
+    const rosterProblems = oauthMode || flags.pin === undefined ? oauthRosterProblems(roster, warnings, flags.pins) : rosterProblemsFor(roster, warnings, flags.pin)
     if (rosterProblems.length > 0) {
       return refusal(
         "stage 2 (client and roster)",
         rosterProblems,
-        "name the pinned model and enough distinct models with --provider-model, or pin one of the --provider-model " +
-          "models, and run the command again.",
+        oauthMode
+          ? "pin one model each provider's registry lists, with enough distinct models for every slot and both lenses, and run the command again."
+          : "name the pinned model and enough distinct models with --provider-model, or pin one of the --provider-model " +
+              "models, and run the command again.",
       )
     }
 
@@ -1277,7 +1500,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     console.log(`  PASS  \`${directory}\` is still exactly the sealed labelled change`)
     if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
-    prepared = { pin: flags.pin, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob }
+    prepared = { pins: flags.pins, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob, mode: flags.mode }
   } finally {
     // The scratch copy is removed while the handlers are still on, so no interrupt lands between the two stages' handlers.
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
@@ -1290,7 +1513,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
 
   // ---- STAGE 4: schedule, then the three blocks ----
   console.log("\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks")
-  const { directory, out, wiring, roster, warnings, gatesBlob } = prepared
+  const { directory, out, wiring, roster, warnings, gatesBlob, mode } = prepared
   // SIGINT/SIGTERM during the run: abort through the runner's signal, which keeps every piece of evidence.
   const runInterrupt = (): void => {
     console.log(
@@ -1333,12 +1556,14 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     const config: PairedConfig = {
       provenance: "live",
       tools: toolsIdentity(wiring),
-      gates: gatesIdentity(gatesBlob, gates, LAUNCH_ROUTE),
-      route: LAUNCH_ROUTE,
+      gates: gatesIdentity(gatesBlob, gates, routeFor(mode)),
+      route: routeFor(mode),
+      // The OAuth route has no relay, so it counts admitted attempts, under protocol v2.
+      ...(mode === "oauth" ? { accounting: "attempts" as const } : {}),
     }
     const base = {
       bundleRoot: out,
-      protocolFile: PROTOCOL_FILE,
+      protocolFile: mode === "oauth" ? (overrides.protocolV2File ?? PROTOCOL_V2_FILE) : PROTOCOL_FILE,
       fixture: LABELLED_CHANGE_SEAL,
       codeRevision,
       roster,
@@ -1412,6 +1637,92 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   }
 }
 
+
+/**
+ * Story 2-8c3b — stage 1's OAuth checks, each pushed onto `checks` and each
+ * guarded, so a thrown check is a FAIL line: the route, the prepared payloads
+ * against the pins, and the data directory (its shape and auth symlink, by
+ * `lstat`, `readdir` and `readlink` only, and its real path disjoint from the
+ * user's own opencode store, the prepared directory and `others`). The route, when
+ * every check passed.
+ */
+async function oauthChecks(
+  flags: ParsedFlags,
+  home: string,
+  pins: PayloadPins,
+  checks: Check[],
+  others: { name: string; path: string | undefined }[],
+): Promise<OAuthRoute | undefined> {
+  if (flags.oauth === undefined) {
+    for (const name of ["OAuth route", "OAuth prepared payloads", "OAuth data directory"]) checks.push(notEvaluated(name, "--pin and the --oauth-* flags"))
+    return undefined
+  }
+  const route: OAuthRoute = {
+    providers: flags.oauth.providers,
+    models: flags.pins,
+    dataDir: flags.oauth.dataDir,
+    prepared: flags.oauth.prepared,
+    home,
+    pins,
+  }
+  const problems = oauthRouteProblems(route)
+  checks.push(
+    problems.length === 0
+      ? pass("OAuth route", [`providers ${route.providers.join(", ")}; pins ${flags.pins.map((pin) => `${pin.providerId}/${pin.modelId}`).join(", ")}; no relay, no credential`])
+      : fail("OAuth route", problems),
+  )
+  const payloads = await guarded("OAuth prepared payloads", async () => {
+    const verified = await verifyPrepared(route.prepared, pins)
+    return verified.ok
+      ? pass("OAuth prepared payloads", [
+          `\`${route.prepared}\`: anthropic-auth tree ${verified.measured.anthropicAuth.treeDigest}, config seed tree ` +
+            `${verified.measured.configSeed.treeDigest}, catalogue ${verified.measured.catalogueSha256}; each as pinned in OAUTH_PAYLOAD`,
+        ])
+      : fail("OAuth prepared payloads", verified.problems)
+  })
+  checks.push(payloads)
+  const dataDir = await guarded("OAuth data directory", async () => {
+    const found = await dataDirProblems(route.dataDir, home)
+    for (const other of [
+      { name: "user's own opencode data directory", path: join(home, ".local", "share", "opencode") },
+      { name: "prepared directory", path: route.prepared },
+      ...others,
+    ]) {
+      if (other.path === undefined) continue
+      const overlap = await overlapProblem({ name: "OAuth data directory", path: route.dataDir }, { name: other.name, path: other.path })
+      if (overlap !== null) found.push(overlap)
+    }
+    const { link, target } = authLinkPaths(route.dataDir, home)
+    return found.length === 0
+      ? pass("OAuth data directory", [`\`${link}\` is a symlink to \`${target}\` (checked by lstat and readlink; not opened); the directory overlaps nothing it must not`])
+      : fail("OAuth data directory", found)
+  })
+  checks.push(dataDir)
+  return problems.length === 0 && payloads.state === "pass" && dataDir.state === "pass" ? route : undefined
+}
+
+/**
+ * A failed check's reason in one line, for the OAuth route's aggregated diagnostic.
+ * A check that states its refusals (`REFUSED: …` lines, as the gate check does) is
+ * reduced to those, each whole; any other check keeps every detail line.
+ */
+function failureReason(check: Extract<Check, { state: "fail" }>): string {
+  const refused = check.detail.filter((line) => line.startsWith("REFUSED: ")).map((line) => line.slice("REFUSED: ".length))
+  return (refused.length > 0 ? refused : check.detail).join("; ")
+}
+
+/**
+ * Story 2-8c3b — why the OAuth roster is not the default roster with every pin
+ * holding a slot and the two lens slots `security` and `reliability`.
+ */
+export function oauthRosterProblems(roster: Roster, warnings: readonly Warning[], pins: readonly Pin[]): string[] {
+  const problems = [...new Set(pins.flatMap((pin) => rosterProblemsFor(roster, warnings, pin)))]
+  const lenses = roster.lensSlots.map((slot) => slot.lens).sort()
+  if (JSON.stringify(lenses) !== JSON.stringify([...OAUTH_LENSES].sort())) {
+    problems.push(`the roster's lens slots are ${JSON.stringify(lenses)}; the OAuth route needs exactly ${OAUTH_LENSES.join(" and ")}`)
+  }
+  return problems
+}
 
 /**
  * Why the resolved roster is not the shipped default roster with `--pin` as its

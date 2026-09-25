@@ -1,0 +1,53 @@
+{
+  "kind": "MEASURED \u2014 two fresh builds of the OAuth route's prepared directory (story 2-8c3b)",
+  "story": "2-8c3b",
+  "measuredAt": "2026-09-25",
+  "toolchain": {
+    "npm": "11.7.0",
+    "node": "v24.2.0",
+    "bun": "1.3.14",
+    "platform": "darwin"
+  },
+  "record": "tree digest = sha256 of one line per entry, `<type>\\t<relative path>\\t<payload>\\t<mode>\\n`, sorted by the path's UTF-8 bytes (ablation/oauth-payload.ts `treeRecord`)",
+  "runs": [
+    {
+      "out": "<scratch>/prep5",
+      "command": "bun run oauth-prepare --out <scratch>/prep5",
+      "npmCi": "npm ci --ignore-scripts --no-audit --no-fund",
+      "anthropicAuth": {
+        "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+        "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+        "entries": 3669
+      },
+      "configSeed": {
+        "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+        "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+        "entries": 3654
+      },
+      "catalogueSha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    },
+    {
+      "out": "<scratch>/prep6",
+      "command": "bun run oauth-prepare --out <scratch>/prep6",
+      "npmCi": "npm ci --ignore-scripts --no-audit --no-fund",
+      "anthropicAuth": {
+        "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+        "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+        "entries": 3669
+      },
+      "configSeed": {
+        "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+        "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+        "entries": 3654
+      },
+      "catalogueSha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    }
+  ],
+  "agreed": true,
+  "pinned": "ablation/managed-host.ts OAUTH_PAYLOAD: both trees' digests are the values both runs measured",
+  "scope": [
+    "two installs on one machine, one npm (11.7.0) and one node (v24.2.0), a few minutes apart: this shows the digest is stable on this machine, not that a build elsewhere, with another npm or at another time reproduces it",
+    "the digest records file bytes, execute bits and relative symlink targets; it does not record owners, timestamps or empty directories"
+  ],
+  "environment": "npm ran with a clean environment (scripts/oauth-prepare.ts `npmEnvironment`): PATH only from the caller, a private empty HOME with its own empty npm cache, empty user and global npm config files, and npm_config_registry https://registry.npmjs.org/. Each run therefore fetched every tarball from the registry into a fresh cache"
+}

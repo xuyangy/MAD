@@ -5,13 +5,20 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readdir, rm } from "node:fs/promises"
+import { readFileSync } from "node:fs"
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
   configDrift,
+  HOST_CONFIG_GITIGNORE,
   hostConfig,
+  oauthConfigDrift,
+  oauthHostConfig,
+  oauthPluginSpec,
+  oauthRegistryDrift,
+  oauthRouteProblems,
   MEASURED_HOST,
   OPENAI_COMPATIBLE_NPM,
   providerBlockProblems,
@@ -19,11 +26,15 @@ import {
   redactConfig,
   startManagedHost,
   type HostChild,
+  type ApiKeyHostOptions,
   type ManagedHostOptions,
+  type OAuthHostOptions,
+  type OAuthRoute,
   type ProviderBlock,
   type SignalSource,
   type SpawnHost,
 } from "./managed-host.ts"
+import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "./oauth-payload.fixture.ts"
 
 const SECRET = "sk-test-marker-0123456789"
 const BLOCK: ProviderBlock = { id: "stub", npm: OPENAI_COMPATIBLE_NPM, baseURL: "http://127.0.0.1:9/v1", apiKeyEnv: "MAD_TEST_KEY", models: ["m1", "m2"] }
@@ -124,7 +135,7 @@ function fetchFor(
   }
 }
 
-async function start(host: FakeHost, overrides: Partial<ManagedHostOptions> = {}) {
+async function start(host: FakeHost, overrides: Partial<ApiKeyHostOptions> = {}) {
   return startManagedHost({
     block: BLOCK,
     credential: SECRET,
@@ -562,4 +573,368 @@ describe("redaction", () => {
   test("a healthy config shows no drift", () => {
     expect(configDrift(reportedFor(BLOCK), hostConfig(BLOCK), BLOCK)).toEqual([])
   })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-8c3b — OAuth mode. Temporary prepared trees, a temporary data directory
+// and a temporary home only; nothing here reads the user's opencode directories.
+// ---------------------------------------------------------------------------
+
+const ROSTER = [
+  { providerId: "openai", modelId: "gpt-6-luna" },
+  { providerId: "anthropic", modelId: "claude-opus-5-5" },
+  { providerId: "github-copilot", modelId: "gpt-5-mini" },
+]
+const PROVIDERS = ROSTER.map((entry) => entry.providerId)
+
+async function oauthFixture(): Promise<{ root: string; route: OAuthRoute; link: string; target: string }> {
+  const root = await parent()
+  const { prepared, pins } = await fakePrepared(root)
+  const { dataDir, home, link, target } = await fakeAuthLink(root)
+  return { root, route: { providers: PROVIDERS, models: ROSTER, dataDir, prepared, home, pins }, link, target }
+}
+
+/** The host's own defaults, added to what it reports on `GET /config`. */
+const DEFAULTS = { command: {}, mode: {}, agent: {}, username: "unknown" }
+
+/** What a healthy OAuth host's registry reports: every provider, with its roster model among others, and options the checks never read. */
+function oauthRegistry(route: OAuthRoute): unknown {
+  return {
+    providers: route.providers.map((id) => ({
+      id,
+      options: { apiKey: `${AUTH_CONTENT_MARKER}-${id}` },
+      models: Object.fromEntries([...route.models.filter((model) => model.providerId === id).map((model) => model.modelId), "other"].map((model) => [model, { id: model }])),
+    })),
+    default: {},
+  }
+}
+
+/**
+ * Start an OAuth host on a fake process whose `GET /config` reports the config file
+ * it was started with, plus the host's defaults, through `patch`.
+ */
+async function startOAuth(
+  host: FakeHost,
+  route: OAuthRoute,
+  overrides: Partial<OAuthHostOptions> = {},
+  patch: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
+  registry: unknown = oauthRegistry(route),
+) {
+  let configFile: string | undefined
+  const spawn: SpawnHost = (request) => {
+    configFile = request.env.OPENCODE_CONFIG
+    return (overrides.spawn ?? host.spawn)(request)
+  }
+  const reported = () => patch({ ...(JSON.parse(readFileSync(configFile!, "utf8")) as Record<string, unknown>), ...DEFAULTS })
+  return startManagedHost({
+    mode: "oauth",
+    oauth: route,
+    binary: "/opt/opencode",
+    resolveBinary: async (path) => path,
+    hashFile: async () => MEASURED_HOST.sha256,
+    fetch: fetchFor({ healthy: true, version: MEASURED_HOST.version }, () => reported(), registry),
+    scratchParent: await parent(),
+    signals: null,
+    stopMs: 50,
+    ...overrides,
+    spawn,
+  })
+}
+
+describe("OAuth mode: the config and the route", () => {
+  test("the config loads exactly the plugin copy by file://, enables exactly the OAuth providers, and holds no credential", async () => {
+    const { route } = await oauthFixture()
+    expect(oauthHostConfig(route, "/private/payload")).toEqual({
+      $schema: "https://opencode.ai/config.json",
+      autoupdate: false,
+      share: "disabled",
+      plugin: ["file:///private/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"],
+      enabled_providers: ["openai", "anthropic", "github-copilot"],
+      model: "openai/gpt-6-luna",
+      small_model: "openai/gpt-6-luna",
+    })
+    expect(oauthPluginSpec("/p")).toBe("file:///p/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth")
+    expect(oauthHostConfig({ ...route, baseURLs: { anthropic: "http://127.0.0.1:9/v1" } }, "/p").provider).toEqual({ anthropic: { options: { baseURL: "http://127.0.0.1:9/v1" } } })
+  })
+
+  test("route problems: duplicates, a model off the providers, relative paths and a non-loopback override are each named", () => {
+    const problems = oauthRouteProblems({
+      providers: ["openai", "openai", "bad id"],
+      models: [{ providerId: "google", modelId: "g" }, { providerId: "openai", modelId: "a/b" }],
+      dataDir: "rel",
+      prepared: "/ok",
+      baseURLs: { openai: "https://api.openai.com/v1", nobody: "http://127.0.0.1:1" },
+    })
+    const text = problems.join("\n")
+    for (const expected of [
+      "`openai` is named twice",
+      "`bad id` is not a plain identifier",
+      "`google/g` names a provider that is not an OAuth provider",
+      "contains `/`",
+      "the data directory `rel` is not an absolute path",
+      "may only point at a local stub",
+      "names `nobody`, which is not an OAuth provider",
+    ]) {
+      expect(text).toContain(expected)
+    }
+  })
+
+  test("config drift: a healthy report shows none; another plugin, a provider block and an unknown key are named", async () => {
+    const { route } = await oauthFixture()
+    const generated = oauthHostConfig(route, "/p")
+    expect(oauthConfigDrift({ ...generated, ...DEFAULTS }, generated)).toEqual([])
+    const drifted = { ...generated, ...DEFAULTS, plugin: ["@ex-machina/opencode-anthropic-auth@latest"], provider: { openai: { options: {} } }, experimental: {} }
+    const text = oauthConfigDrift(drifted, generated).join("\n")
+    expect(text).toContain("`plugin` is a list of 1 entry, not the generated list; the OAuth host loads exactly")
+    expect(text).toContain('`provider` is a provider block naming `openai` (option names []); the OAuth host\'s config sets no provider block')
+    expect(text).toContain("`experimental` is set to an object with keys [], and the generated config does not set it")
+  })
+
+  test("config drift never describes a reported value: a secret-looking option or unknown key names keys only", async () => {
+    const { route } = await oauthFixture()
+    const generated = oauthHostConfig(route, "/p")
+    const secret = `sk-${AUTH_CONTENT_MARKER}`
+    const drifted = {
+      ...generated,
+      ...DEFAULTS,
+      plugin: [secret],
+      model: secret,
+      provider: { anthropic: { options: { apiKey: secret, baseURL: "http://x" } } },
+      token: secret,
+      agent: { leak: secret },
+    }
+    const problems = oauthConfigDrift(drifted, generated)
+    const text = problems.join("\n")
+    expect(text).not.toContain(AUTH_CONTENT_MARKER)
+    expect(text).toContain('`anthropic` (option names ["apiKey","baseURL"])')
+    expect(text).toContain("`model` is a string value; the generated config sets")
+    expect(text).toContain("`token` is set to a string value")
+    expect(text).toContain('`agent` is an object with keys ["leak"], not the host\'s own default')
+  })
+
+  test("registry drift: a missing provider, an extra provider and an unlisted roster model are named; options are never described", async () => {
+    const { route } = await oauthFixture()
+    expect(oauthRegistryDrift(oauthRegistry(route), route)).toEqual([])
+    const body = oauthRegistry(route) as { providers: { id: string; models: Record<string, unknown> }[] }
+    body.providers = body.providers.filter((provider) => provider.id !== "openai")
+    body.providers.push({ id: "google", models: {} })
+    delete body.providers.find((provider) => provider.id === "anthropic")!.models["claude-opus-5-5"]
+    const problems = oauthRegistryDrift(body, route)
+    expect(problems.join("\n")).toContain('exactly the OAuth providers ["anthropic","github-copilot","openai"] are allowed')
+    expect(problems.join("\n")).toContain("the registry's `anthropic` does not list the roster model `claude-opus-5-5`")
+    expect(problems.join("\n")).not.toContain(AUTH_CONTENT_MARKER)
+  })
+})
+
+describe("OAuth mode: starting and stopping", () => {
+  test("a healthy host: the data directory as XDG_DATA_HOME, no credential variable, every payload copied privately, and the data directory untouched by stop", async () => {
+    const { route, link, target } = await oauthFixture()
+    const host = fakeHost()
+    const dataBefore = (await readdir(route.dataDir, { recursive: true })).sort()
+    const result = await startOAuth(host, route, { proxy: "http://127.0.0.1:1" })
+    expect(result.ok, result.ok ? "" : result.reason).toBe(true)
+    if (!result.ok) return
+    const env = host.requests[0]!.env
+    expect(env.XDG_DATA_HOME).toBe(route.dataDir)
+    expect(Object.keys(env).sort()).toEqual([
+      "HOME", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "OPENCODE_CONFIG", "OPENCODE_DISABLE_MODELS_FETCH", "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "PATH", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "http_proxy", "https_proxy", "no_proxy",
+    ])
+    expect(env.OPENCODE_DISABLE_MODELS_FETCH).toBe("1")
+    expect(await readFile(join(env.XDG_CONFIG_HOME!, "opencode", "package-lock.json"), "utf8")).toContain("config-seed")
+    expect(await readFile(join(env.XDG_CACHE_HOME!, "opencode", "models.json"), "utf8")).toContain("github-copilot")
+    // The plugin is loaded from the private copy, never from --oauth-prepared.
+    const config = JSON.parse(await readFile(env.OPENCODE_CONFIG!, "utf8")) as { plugin: string[] }
+    const privateRoot = join(env.OPENCODE_CONFIG!, "..")
+    expect(config as Record<string, unknown>).toEqual(oauthHostConfig(route, join(privateRoot, "payload")))
+    expect(config.plugin[0]!.startsWith(`file://${privateRoot}/payload/`)).toBe(true)
+    expect(config.plugin[0]).not.toContain(route.prepared)
+    expect(await readFile(join(privateRoot, "payload", "anthropic-auth", "node_modules", "@ex-machina", "opencode-anthropic-auth", "dist", "index.js"), "utf8")).toContain("AnthropicAuthPlugin")
+    expect(result.host.oauth?.measured.configSeed.treeDigest).toBe(route.pins!.configSeed.treeDigest)
+    expect(JSON.stringify(result.host)).not.toContain(AUTH_CONTENT_MARKER)
+
+    const stopped = await result.host.stop()
+    expect(stopped.confirmed).toBe(true)
+    expect(stopped.postStop).toEqual({
+      held: [
+        `\`${link}\` is still a symlink to \`${target}\``,
+        `the seeded config lock is unchanged (sha256 ${route.pins!.configSeed.lockSha256})`,
+        `the seeded config tree is unchanged but for the host's own \`.gitignore\` (digest ${route.pins!.configSeed.treeDigest})`,
+      ],
+      problems: [],
+    })
+    // Only the private root went; the data directory, the link and its target are as they were.
+    expect((await readdir(route.dataDir, { recursive: true })).sort()).toEqual(dataBefore)
+    expect(await readlink(link)).toBe(target)
+    expect(await readFile(target, "utf8")).toContain(AUTH_CONTENT_MARKER)
+    await expect(lstat(privateRoot)).rejects.toThrow()
+  })
+
+  test("a payload byte changed under a matching lock is refused before the spawn, naming the digest", async () => {
+    const { route } = await oauthFixture()
+    await writeFile(join(route.prepared, "anthropic-auth", "node_modules", "@ex-machina", "opencode-anthropic-auth", "dist", "index.js"), "changed\n")
+    const host = fakeHost()
+    const result = await startOAuth(host, route)
+    expect(result.ok).toBe(false)
+    expect(result.ok ? "" : result.reason).toContain("the Anthropic sign-in plugin: the tree digest of")
+    expect(host.requests).toEqual([])
+  })
+
+  test("auth.json replaced by a regular file: not spawned; the refusal names the path, never the contents", async () => {
+    const { route, link } = await oauthFixture()
+    await unlink(link)
+    await writeFile(link, `{"access":"${AUTH_CONTENT_MARKER}"}`)
+    const host = fakeHost()
+    const result = await startOAuth(host, route)
+    expect(result.ok).toBe(false)
+    expect(result.ok ? "" : result.reason).toContain(`\`${link}\` is a regular file`)
+    expect(result.ok ? "" : result.reason).not.toContain(AUTH_CONTENT_MARKER)
+    expect(host.requests).toEqual([])
+  })
+
+  test("<data-dir>/opencode that is a symlink, or that holds another symlink, is refused before the spawn", async () => {
+    const { route, root } = await oauthFixture()
+    await symlink(join(root, "elsewhere"), join(route.dataDir, "opencode", "storage"))
+    const host = fakeHost()
+    const extra = await startOAuth(host, route)
+    expect(extra.ok ? "" : extra.reason).toContain("`auth.json` is the only symlink allowed")
+    const linkedDir = join(root, "linked-data")
+    await mkdir(linkedDir)
+    await symlink(join(route.dataDir, "opencode"), join(linkedDir, "opencode"))
+    const linked = await startOAuth(host, { ...route, dataDir: linkedDir })
+    expect(linked.ok ? "" : linked.reason).toContain(`\`${join(linkedDir, "opencode")}\` is a symlink`)
+    expect(host.requests).toEqual([])
+  })
+
+  test("a data directory overlapping the user's own opencode store or the prepared directory is refused before the spawn", async () => {
+    const { route } = await oauthFixture()
+    const host = fakeHost()
+    // The data directory is the home's `.local/share`, which contains the user's store.
+    const store = join(route.home!, ".local", "share")
+    await mkdir(join(store, "opencode-link"), { recursive: true })
+    const inStore = await startOAuth(host, { ...route, dataDir: store })
+    expect(inStore.ok ? "" : inStore.reason).toMatch(/OAuth data directory|auth/)
+    const inPrepared = join(route.prepared, "data")
+    await mkdir(join(inPrepared, "opencode"), { recursive: true })
+    await symlink(join(route.home!, ".local", "share", "opencode", "auth.json"), join(inPrepared, "opencode", "auth.json"))
+    const prepared = await startOAuth(host, { ...route, dataDir: inPrepared })
+    expect(prepared.ok ? "" : prepared.reason).toContain("inside the prepared directory")
+    expect(host.requests).toEqual([])
+  })
+
+  test("a data directory that resolves to the scratch parent, through `..` or a symlink, is refused before the spawn; nothing is deleted", async () => {
+    const { route, root } = await oauthFixture()
+    const scratchParent = join(root, "scratch")
+    await mkdir(join(scratchParent, "sub"), { recursive: true })
+    await writeFile(join(scratchParent, "keep.txt"), "keep")
+    await symlink(scratchParent, join(root, "alias"))
+    await mkdir(join(scratchParent, "opencode"), { recursive: true })
+    await symlink(join(route.home!, ".local", "share", "opencode", "auth.json"), join(scratchParent, "opencode", "auth.json"))
+    for (const dataDir of [join(scratchParent, "sub", ".."), join(root, "alias")]) {
+      const host = fakeHost()
+      const result = await startOAuth(host, { ...route, dataDir }, { scratchParent })
+      expect(result.ok).toBe(false)
+      expect(result.ok ? "" : result.reason).toContain("which contains the managed host's private root")
+      expect(host.requests).toEqual([])
+      expect(await readFile(join(scratchParent, "keep.txt"), "utf8")).toBe("keep")
+      expect((await readdir(scratchParent)).sort()).toEqual(["keep.txt", "opencode", "sub"])
+    }
+  })
+
+  test("a symlink retargeted while the host ran fails the post-stop check, and the data directory is kept", async () => {
+    const { route, link, target } = await oauthFixture()
+    const result = await startOAuth(fakeHost(), route)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    await unlink(link)
+    await symlink(`${target}.elsewhere`, link)
+    const stopped = await result.host.stop()
+    expect(stopped.confirmed).toBe(true)
+    expect(stopped.postStop?.problems).toEqual([`after the host exited, \`${link}\` points to \`${target}.elsewhere\`; it must point to \`${target}\` exactly`])
+    expect(await lstat(route.dataDir).then((info) => info.isDirectory())).toBe(true)
+  })
+
+  test("the seeded lock, or any other seeded file, rewritten while the host ran fails the post-stop check", async () => {
+    for (const file of [["package-lock.json"], ["node_modules", "@opencode-ai", "plugin", "package.json"]]) {
+      const { route } = await oauthFixture()
+      const host = fakeHost()
+      const result = await startOAuth(host, route)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      await writeFile(join(host.requests[0]!.env.XDG_CONFIG_HOME!, "opencode", ...file), "{}\n")
+      const stopped = await result.host.stop()
+      const problems = stopped.postStop?.problems.join("\n") ?? ""
+      expect(problems, file.join("/")).toContain("after the host exited, the seeded config tree's digest (less the host's own `.gitignore`) is")
+      if (file.length === 1) expect(problems).toContain("after the host exited, the seeded config lock's sha256 is")
+    }
+  })
+
+  test("the host's own .gitignore, byte for byte, is the one file allowed beyond the seed", async () => {
+    for (const [content, allowed] of [
+      ["node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore", true],
+      ["node_modules\n", false],
+    ] as const) {
+      const { route } = await oauthFixture()
+      const host = fakeHost()
+      const result = await startOAuth(host, route)
+      if (!result.ok) throw new Error(result.reason)
+      await writeFile(join(host.requests[0]!.env.XDG_CONFIG_HOME!, "opencode", HOST_CONFIG_GITIGNORE.path), content)
+      const stopped = await result.host.stop()
+      expect(stopped.postStop?.problems.length === 0, content).toBe(allowed)
+    }
+  })
+
+  test("an unconfirmed exit establishes no post-stop check", async () => {
+    const { route } = await oauthFixture()
+    const result = await startOAuth(fakeHost({ exitsOn: "never" }), route, { stopMs: 10 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const stopped = await result.host.stop()
+    expect(stopped.confirmed).toBe(false)
+    expect(stopped.postStop).toEqual({ held: [], problems: ["the host's exit was not confirmed; post-stop checks not established"] })
+  })
+
+  test("config and registry drift refuse the OAuth host and stop it", async () => {
+    const { route } = await oauthFixture()
+    const drifted = await startOAuth(fakeHost(), route, {}, (config) => ({ ...config, plugin: [] }))
+    expect(drifted.ok ? "" : drifted.reason).toContain("the host's effective config for")
+    expect(drifted.ok ? null : drifted.stopped?.postStop?.problems).toEqual([])
+    const registry = oauthRegistry(route) as { providers: { id: string }[] }
+    registry.providers.pop()
+    const unlisted = await startOAuth(fakeHost(), route, {}, undefined, registry)
+    expect(unlisted.ok ? "" : unlisted.reason).toContain("is not the OAuth route's")
+  })
+
+  test("an unmeasured binary is refused before the payloads are even read", async () => {
+    const { route } = await oauthFixture()
+    await rm(route.prepared, { recursive: true })
+    const host = fakeHost()
+    const result = await startOAuth(host, route, { hashFile: async () => "0".repeat(64) })
+    expect(result.ok ? "" : result.reason).toContain("the host is not the measured build")
+    expect(host.requests).toEqual([])
+  })
+})
+
+test("options without `mode` start the api-key host: the credential variable, the openai-compatible block, no OAuth fields", async () => {
+  const host = fakeHost()
+  const options: ManagedHostOptions = {
+    block: BLOCK,
+    credential: SECRET,
+    binary: "/opt/opencode",
+    resolveBinary: async (path) => path,
+    hashFile: async () => MEASURED_HOST.sha256,
+    spawn: host.spawn,
+    fetch: fetchFor({ healthy: true, version: MEASURED_HOST.version }, reportedFor(BLOCK)),
+    scratchParent: await parent(),
+    signals: null,
+    stopMs: 50,
+  }
+  const result = await startManagedHost(options)
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  expect(host.requests[0]!.env[BLOCK.apiKeyEnv]).toBe(SECRET)
+  expect(result.host.config).toEqual(hostConfig(BLOCK))
+  expect(result.host.oauth).toBeUndefined()
+  const stopped = await result.host.stop()
+  expect(stopped.postStop).toBeUndefined()
 })

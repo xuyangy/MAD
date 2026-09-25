@@ -27,8 +27,10 @@ import {
   MEASURED_HOST,
   OPENAI_COMPATIBLE_NPM,
   startManagedHost,
+  type ApiKeyHostOptions,
   type ManagedHostOptions,
   type ManagedHostStart,
+  type OAuthHostOptions,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
@@ -43,6 +45,7 @@ import { candidate, DEFAULT_JUDGE_ANSWERS, fakeClock, judgeRoleOf } from "../cor
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { main as evalReadMain } from "./eval-read.ts"
 import { main as materializeMain } from "./materialize-labelled-change.ts"
+import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import {
   GATE_TABLE_FILE,
   gatesIdentity,
@@ -50,7 +53,9 @@ import {
   guarded,
   main,
   nonReturnedReason,
+  parseFlags,
   PREFLIGHT_GIT_SETTINGS,
+  PROTOCOL_V2_FILE,
   preflightGitEnv,
   preflightSpawn,
   productionTools,
@@ -130,6 +135,12 @@ const argvFor = (directory: string, out: string, extra: string[] = []) => [
 ]
 
 const HOST_URL = "http://127.0.0.1:47001"
+
+/** The api-key options a host was started with; an OAuth start here is a test failure. */
+function apiKeyOptions(asked: ManagedHostOptions): ApiKeyHostOptions {
+  if (asked.mode === "oauth") throw new Error("the api-key launcher started an OAuth host")
+  return asked
+}
 const GATES_BLOB = "0123456789abcdef0123456789abcdef01234567"
 
 /** A managed host that starts no process: it records what it was asked to start and how often it was stopped. */
@@ -159,7 +170,7 @@ function scriptedHost(
         binary: "/opt/opencode",
         sha256: MEASURED_HOST.sha256,
         version: MEASURED_HOST.version,
-        config: hostConfig(asked.block),
+        config: hostConfig(apiKeyOptions(asked).block),
         reportedConfig: {},
         environmentKeys: [],
         pluginInstall: async () => ({ installed: true, version: "1.18.32" }),
@@ -397,7 +408,7 @@ describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
     // The relay holds the credential and the provider URL; the host is pointed at
     // the relay and holds only the placeholder.
     expect(meter.started).toEqual([{ upstream: PROVIDER_URL, credential: KEY }])
-    expect(host.started.map((asked) => ({ block: asked.block, credential: asked.credential, signals: asked.signals }))).toEqual([
+    expect(host.started.map((asked) => ({ block: apiKeyOptions(asked).block, credential: apiKeyOptions(asked).credential, signals: asked.signals }))).toEqual([
       {
         block: { id: "anthropic", npm: OPENAI_COMPATIBLE_NPM, baseURL: RELAY_URL, apiKeyEnv: KEY_ENV, models: MODELS },
         credential: RELAY_HOST_KEY,
@@ -1382,8 +1393,8 @@ describe("the managed host (story 2-8c)", () => {
       gates: closedGates,
       startHost: (options) =>
         startManagedHost({
-          ...options,
-          block: { ...options.block, npm: "@ai-sdk/anthropic" },
+          ...apiKeyOptions(options),
+          block: { ...apiKeyOptions(options).block, npm: "@ai-sdk/anthropic" },
           spawn: () => {
             spawned = true
             throw new Error("no process may start in this test")
@@ -1630,5 +1641,275 @@ describe("the managed host (story 2-8c)", () => {
     expect(result.text).toContain("PASS  managed host provider block")
     expect(host.started).toEqual([])
     expect(meter.started).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-8c3b — the OAuth route. A temporary prepared directory with pins
+// measured from it, a temporary data directory and home, and a scripted host: no
+// test here starts opencode or touches the user's opencode directories.
+// ---------------------------------------------------------------------------
+
+const OAUTH_PINS = ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"]
+
+const oauthArgv = (directory: string, out: string, dataDir: string, prepared: string, extra: string[] = []) => [
+  "bun",
+  "scripts/paired.ts",
+  "--live",
+  "--provider-mode",
+  "oauth",
+  ...["openai", "anthropic", "github-copilot"].flatMap((id) => ["--oauth-provider", id]),
+  ...OAUTH_PINS.flatMap((pin) => ["--pin", pin]),
+  "--oauth-data-dir",
+  dataDir,
+  "--oauth-prepared",
+  prepared,
+  "--directory",
+  directory,
+  "--out",
+  out,
+  ...extra,
+]
+
+/** Protocol v2's draft, frozen by its own hash rule into a temporary file, for a run that must get past stage 1. */
+async function frozenV2(dir: string): Promise<string> {
+  const draft = await readFile(PROTOCOL_V2_FILE, "utf8")
+  const pending = draft.replace(/^status: .*$/m, "status: frozen").replace(/^frozen_hash: .*$/m, "frozen_hash: PENDING")
+  const hash = `sha256:${new Bun.CryptoHasher("sha256").update(pending).digest("hex")}`
+  const file = join(dir, "evaluation-protocol-v2.frozen.md")
+  await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`), "utf8")
+  return file
+}
+
+/** An OAuth host that starts no process; its stop reports `postStop`. */
+function oauthHost(postStop: { held: string[]; problems: string[] } = { held: ["the auth symlink is intact"], problems: [] }, refuse?: string) {
+  const started: ManagedHostOptions[] = []
+  let stops = 0
+  const stop = async (): Promise<StopOutcome> => {
+    stops += 1
+    return { confirmed: true, pid: 778, how: "exited (status 143) after SIGTERM", postStop }
+  }
+  const startHost = async (asked: ManagedHostOptions): Promise<ManagedHostStart> => {
+    started.push(asked)
+    asked.onSpawn?.({ pid: 778, stop })
+    if (refuse !== undefined) return { ok: false, reason: refuse, stopped: await stop() }
+    return {
+      ok: true,
+      host: {
+        url: HOST_URL,
+        pid: 778,
+        binary: "/opt/opencode",
+        sha256: MEASURED_HOST.sha256,
+        version: MEASURED_HOST.version,
+        config: {},
+        reportedConfig: {},
+        environmentKeys: [],
+        pluginInstall: async () => ({ installed: true, version: "1.18.5" }),
+        stop,
+      },
+    }
+  }
+  return { startHost, started, stops: () => stops }
+}
+
+async function oauthSetup() {
+  const env = await setup()
+  const { prepared, pins } = await fakePrepared(env.parent)
+  const auth = await fakeAuthLink(env.parent)
+  return { ...env, prepared, pins, ...auth }
+}
+
+/** A scripted backend for the lens roster: a lens discovery turn is answered with the same finding as a pool one. */
+const lensAwareBackend = (_context: PairedPhaseContext, _lateUsage: LateUsageReporter): ModelBackend => ({
+  capabilities: (): BackendCapabilities => ({ tools: true }),
+  async runTurn<T>(slot: string, instructions: string, _input: string, schema: ZodType<T>, signal?: AbortSignal): Promise<Envelope<T>> {
+    if (signal?.aborted) return cancelledTurn<T>(slot)
+    const role = judgeRoleOf(instructions)
+    const payloads = role !== undefined ? [DEFAULT_JUDGE_ANSWERS[role]] : [CRITICAL, { turns: [] }]
+    for (const payload of payloads) {
+      const parsed = schema.safeParse(payload)
+      if (parsed.success) return { ok: true, slot, value: parsed.data, tokens: { ...emptyTokenUsage(), input: 10, output: 20 } }
+    }
+    throw new Error("no fake payload parsed")
+  },
+})
+
+function oauthOverrides(env: Awaited<ReturnType<typeof oauthSetup>>, host: ReturnType<typeof oauthHost>, extra: PairedOverrides = {}) {
+  const base = overridesFor(env)
+  return {
+    ...base,
+    overrides: {
+      ...base.overrides,
+      env: {},
+      startHost: host.startHost,
+      payloadPins: env.pins,
+      home: env.home,
+      enumerate: async () => [candidate("openai", "gpt-6-luna"), candidate("anthropic", "claude-opus-5-5"), candidate("github-copilot", "gpt-5-mini")],
+      backendFor: lensAwareBackend,
+      ...extra,
+    } satisfies PairedOverrides,
+  }
+}
+
+describe("the OAuth route: flags", () => {
+  const args = (extra: string[]) => parseFlags(oauthArgv("/w", "/o", "/d", "/p", extra))
+  test("valid OAuth flags give the route, every pin, and no provider block", () => {
+    const parsed = args([])
+    expect(parsed.problems).toEqual([])
+    expect(parsed.mode).toBe("oauth")
+    expect(parsed.oauth).toEqual({ providers: ["openai", "anthropic", "github-copilot"], dataDir: "/d", prepared: "/p" })
+    expect(parsed.pins.map((pin) => `${pin.providerId}/${pin.modelId}`)).toEqual(OAUTH_PINS)
+    expect(parsed.provider).toBeUndefined()
+  })
+
+  test("an api-key flag with --provider-mode oauth is refused at parse", () => {
+    const parsed = args(["--provider-url", "http://127.0.0.1:1/v1"])
+    expect(parsed.problems.join("\n")).toContain("--provider-url belongs to the api-key mode")
+    expect(parsed.oauth).toBeUndefined()
+  })
+
+  test("an OAuth flag in the api-key mode is refused at parse", () => {
+    const parsed = parseFlags(argvFor("/w", "/o", ["--oauth-data-dir", "/d"]))
+    expect(parsed.problems.join("\n")).toContain("--oauth-data-dir belongs to --provider-mode oauth")
+  })
+
+  test("pins must be exactly one per OAuth provider, all distinct, and each an OAuth provider's", () => {
+    const missing = parseFlags(oauthArgv("/w", "/o", "/d", "/p").filter((arg) => arg !== "github-copilot/gpt-5-mini" ).filter((arg, index, all) => !(arg === "--pin" && all[index + 1] === "--oauth-data-dir")))
+    expect(missing.problems.join("\n")).toContain("--oauth-provider github-copilot has 0 --pin(s)")
+    expect(args(["--pin", "anthropic/claude-opus-5-5"]).problems.join("\n")).toContain("--pin anthropic/claude-opus-5-5 was given twice")
+    expect(args(["--pin", "google/gemini"]).problems.join("\n")).toContain("--pin google/gemini names a provider that is not an --oauth-provider")
+    expect(args(["--oauth-provider", "openai"]).problems.join("\n")).toContain("--oauth-provider `openai` was given twice")
+  })
+
+  test("two different models pinned for one provider are refused, and no single pin stands for the run", () => {
+    const parsed = args(["--pin", "openai/gpt-5"])
+    expect(parsed.problems.join("\n")).toContain("--oauth-provider openai has 2 --pin(s); exactly one per OAuth provider is required.")
+    expect(parsed.oauth).toBeUndefined()
+    expect(args([]).pin).toBeUndefined()
+  })
+
+  test("the data and prepared directories are required and absolute, and the mode is api-key or oauth", () => {
+    expect(parseFlags(oauthArgv("/w", "/o", "rel", "/p")).problems.join("\n")).toContain("--oauth-data-dir must be an absolute path")
+    expect(parseFlags(["bun", "x", "--live", "--provider-mode", "relay"]).problems.join("\n")).toContain("--provider-mode is api-key or oauth")
+  })
+})
+
+describe("the OAuth route: stage 1", () => {
+  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN, gate 7 OPEN and protocol v2 not frozen, and starts no host", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides, clientCalls } = oauthOverrides(env, host)
+    expect("gates" in overrides).toBe(false)
+    expect("protocolV2File" in overrides).toBe(false)
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
+    expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
+    expect(diagnostic).toContain("gate 7 (OAuth attempt accounting) is OPEN")
+    expect(diagnostic).toContain("protocol v2 is not frozen")
+    expect(diagnostic).not.toContain("gate 1 ")
+    expect(result.text).toContain("PASS  OAuth prepared payloads")
+    expect(result.text).toContain("PASS  OAuth data directory")
+    expect(host.started).toEqual([])
+    expect(clientCalls).toEqual([])
+    expect(result.text).not.toContain(AUTH_CONTENT_MARKER)
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("auth.json replaced by a regular file refuses at stage 1 by path, never by contents, and starts no host", async () => {
+    const env = await oauthSetup()
+    await unlink(env.link)
+    await writeFile(env.link, `{"access":"${AUTH_CONTENT_MARKER}"}`)
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("OAuth data directory failed")
+    expect(result.text).toContain(`\`${env.link}\` is a regular file`)
+    expect(result.text).not.toContain(AUTH_CONTENT_MARKER)
+    expect(host.started).toEqual([])
+  })
+
+  test("a changed payload refuses at stage 1, naming the digest, and starts no host", async () => {
+    const env = await oauthSetup()
+    await appendFile(join(env.prepared, "config-seed", "node_modules", "@opencode-ai", "plugin", "package.json"), " ")
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("OAuth prepared payloads failed: the config-directory seed: the tree digest of")
+    expect(host.started).toEqual([])
+  })
+})
+
+describe("the OAuth route: data-directory placement", () => {
+  test("a data directory containing --out, or inside the prepared directory, refuses at stage 1", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const out = join(env.dataDir, "bundle")
+    const result = await captured(() => main(oauthArgv(env.directory, out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("OAuth data directory failed")
+    expect(result.text).toContain("which contains the --out")
+    expect(host.started).toEqual([])
+  })
+})
+
+describe("the OAuth route: a refusal after the spawn", () => {
+  test("a host refused after it spawned reports its post-stop problems in the stage-2 refusal and exits 1", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost({ held: [], problems: ["after the host exited, the auth symlink points elsewhere"] }, "the host's provider registry is not the OAuth route's")
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    const refusal = result.text.slice(result.text.indexOf("REFUSED at stage 2 (managed host)."))
+    expect(refusal).toContain("the host's provider registry is not the OAuth route's")
+    expect(refusal).toContain("POST-STOP CHECK FAILED — after the host exited, the auth symlink points elsewhere")
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+})
+
+describe("the OAuth route: a run past stage 1 (injected CLOSED gates, a frozen v2 copy, scripted backends)", () => {
+  test("the OAuth host, no meter, the lens roster, attempts on route oauth under v2, and exit 0", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides, meter } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(meter.started).toEqual([])
+    const asked = host.started[0] as OAuthHostOptions
+    expect(asked.mode).toBe("oauth")
+    expect(asked.oauth).toEqual({
+      providers: ["openai", "anthropic", "github-copilot"],
+      models: OAUTH_PINS.map((pin) => ({ providerId: pin.split("/")[0]!, modelId: pin.split("/")[1]! })),
+      dataDir: env.dataDir,
+      prepared: env.prepared,
+      home: env.home,
+      pins: env.pins,
+    })
+    expect(asked.oauth.baseURLs).toBeUndefined()
+    expect(host.stops()).toBe(1)
+    expect(result.text).toContain("after the stop: the auth symlink is intact")
+    expect(result.text).toContain("at startup the host connects to api.githubcopilot.com with the real sign-in, before any admission")
+    expect(result.text).not.toContain("no model session, no billable request")
+
+    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
+    expect(schedule.config.accounting).toBe("attempts")
+    expect(schedule.config.route).toBe("oauth")
+    expect(schedule.config.gates).toBe(gatesIdentity(GATES_BLOB, closedGates, "oauth"))
+    expect(schedule.protocol.version).toBe(2)
+    expect(schedule.roster.lensSlots.map((slot) => slot.lens).sort()).toEqual(["reliability", "security"])
+    expect(schedule.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`).sort()).toEqual([...OAUTH_PINS].sort())
+  })
+
+  test("a symlink found retargeted after the stop fails the exit code, whatever the run's result", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost({ held: [], problems: ["after the host exited, the auth symlink points elsewhere"] })
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("POST-STOP CHECK FAILED — after the host exited, the auth symlink points elsewhere.")
+    expect(result.text).toContain(`The data directory ${env.dataDir} was kept as it is.`)
   })
 })

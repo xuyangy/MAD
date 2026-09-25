@@ -57,6 +57,19 @@ describe("PAIRED_GATES", () => {
     }
   })
 
+  test("gate 7's note names the probe evidence and its summary, and the summary is what that file records", async () => {
+    const gate = PAIRED_GATES.find((entry) => entry.number === 7)!
+    const file = /ablation\/evidence\/oauth-attempts-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
+    expect(file).toBeDefined()
+    const evidence = JSON.parse(await Bun.file(new URL(`../${file}`, import.meta.url)).text()) as { summary: Record<string, string> }
+    const holds = Object.entries(evidence.summary).filter(([, verdict]) => verdict === "HOLDS").map(([name]) => name)
+    expect(holds.sort()).toEqual(
+      ["registry with placeholders", "registry with the real data directory", "anthropic attempt", "copilot attempt", "attempt refused by a seeded gate", "hang past the turn deadline", "persistent 500"].sort(),
+    )
+    expect(evidence.summary["openai attempt"]).toBe("UNPROBED")
+    expect(gate.note).toContain("openai is UNPROBED, so the gate stays OPEN")
+  })
+
   test("gate 4 states the api-key unit unchanged and the oauth unit in admitted attempts", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 4)!
     expect(gate.routes).toBeUndefined()

@@ -54,7 +54,7 @@ import {
 } from "./evaluation-report.ts"
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
 import { PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
-import { MEASURED_HOST } from "./managed-host.ts"
+import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE } from "./schedule.ts"
 
 const liveRunDoc = () => Bun.file(new URL("./LIVE-RUN.md", import.meta.url)).text()
@@ -551,7 +551,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     expect(text).toContain("gate 4 below is OPEN and is required for the evaluation")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
     expect(text).toContain(
-      "Gate 7 is OPEN as well; it covers only the oauth route, which this launcher never selects, so it is printed and not consulted for the api-key route.",
+      "Gate 7 is OPEN as well; it covers only the oauth route, so it is printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) gates 4 and 7 both refuse.",
     )
     const onRoute = (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes("api-key")
     const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(gate)).map((gate) => gate.number)
@@ -562,7 +562,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### Attempt-mode accounting (story 2-8c3a)", " ### ", "the attempt-mode section")
-    expect(text).toContain("**No launcher path selects it yet:**")
+    expect(text).toContain("**`--provider-mode oauth` selects it**")
     expect(text).toContain("gate 7 stays OPEN")
     for (const figure of [ATTEMPT_ALLOWANCES.prefix, ATTEMPT_ALLOWANCES.continuation, ATTEMPT_ALLOWANCES.block, ATTEMPT_ALLOWANCES.blocks]) {
       expect(text).toContain(String(figure))
@@ -621,6 +621,49 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     expect(text).toContain("**`MEASURED_HOST` binds the launcher to this one machine's binary.**")
     expect(text).toContain("a fixed system `PATH`")
     expect(text).toContain("`GET /config/providers`")
+  })
+
+  test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
+    const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
+    expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
+    expect(text).toContain("lists gate 4 OPEN, gate 7 OPEN and protocol v2 not frozen")
+    for (const phrase of [
+      "bun run oauth-prepare --out /scratch/mad-oauth-prepared",
+      "--provider-mode oauth",
+      "One `--pin` per `--oauth-provider`, all distinct",
+      "Mixing modes is refused at parse",
+      "`npm ci --ignore-scripts`",
+      OAUTH_PAYLOAD.anthropicAuth.package,
+      OAUTH_PAYLOAD.configSeed.package,
+      "`<type>\\t<relative path>\\t<payload>\\t<mode>\\n`",
+      "`OAUTH_PAYLOAD` beside `MEASURED_HOST`",
+      `\`${OAUTH_PAYLOAD.evidence}\``,
+      "a matching lock over changed installed files fails before anything is spawned",
+      "by `lstat` and `readlink` alone",
+      "MAD never opens, reads, copies, hashes or logs either file",
+      "**opencode writes into the data directory**",
+      "is unmeasured",
+      "ln -s ~/.local/share/opencode/auth.json ~/.local/share/mad-opencode-oauth/opencode/auth.json",
+      "custom `XDG_DATA_HOME` is not supported",
+      "**To recover:**",
+      "Never copy a token",
+      "the first `--pin` decides it",
+      "which must be frozen: until the human freezes it, stage 1 refuses",
+      "not that a build elsewhere or later reproduces it",
+      "compares dependency names only, never versions",
+      "`stop()` removes only the private root",
+      "by `file://`",
+      "The probe-only `baseURL` overrides are never passed by the launcher",
+      "the lenses `security` and `reliability`",
+      "`accounting: \"attempts\"` and `route: \"oauth\"`",
+      "The api-key route keeps its lens-free roster",
+      "`POST-STOP CHECK FAILED`",
+      "the launch is not fail-closed for runtime fetches",
+      "`api.githubcopilot.com`",
+      "where that refresh writes is not established",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
   })
 
   test("the runner section points at the command", async () => {
@@ -701,6 +744,74 @@ describe("LIVE-RUN.md documents the host request accounting probe that was actua
     expect(text).toContain("600,000 ms")
     expect(text).toContain("gate 1 is closed on this file by a reviewed change to `ablation/paired-gates.ts`")
     expect(text).toContain("ablation/evidence/host-accounting-2026-09-24.json")
+    expect(text).not.toContain("evaluation complete")
+  })
+})
+
+/**
+ * Story 2-8c3b — the OAuth probe section, tied to the committed evidence: every
+ * table row is the evidence file's scenario, with its counts and verdict.
+ */
+describe("LIVE-RUN.md documents the OAuth attempt probe that was actually run", () => {
+  const EVIDENCE = "ablation/evidence/oauth-attempts-2026-09-25.json"
+  const section = async (): Promise<string> => between(await liveRunDoc(), "## OAuth attempt probe (story 2-8c3b)", "\n## ", "the OAuth probe section")
+
+  test("the table is the committed evidence, row for row", async () => {
+    const text = await section()
+    const evidence = JSON.parse(await Bun.file(new URL(`../${EVIDENCE}`, import.meta.url)).text()) as {
+      host: { version: string }
+      scenarios: { kind: string; name: string; verdict: string; attempts?: { requests: unknown[]; hostRetries: number }[] }[]
+    }
+    expect(text).toContain(`committed as \`${EVIDENCE}\``)
+    expect(text).toContain(`Measured on opencode ${evidence.host.version}`)
+    const rows = [...text.matchAll(/^\| (?!Scenario|---)(.+?) \| (\S+) \| (\S+) \| (\S+) \| (HOLDS|FAILS|UNPROBED) \|$/gm)]
+    expect(rows.map((row) => row[1])).toEqual(evidence.scenarios.map((scenario) => scenario.name))
+    for (const [index, row] of rows.entries()) {
+      const scenario = evidence.scenarios[index]!
+      const attempts = scenario.attempts
+      expect(row.slice(2), scenario.name).toEqual(
+        attempts === undefined
+          ? ["—", "—", "—", scenario.verdict]
+          : [
+              String(attempts.length),
+              String(attempts.reduce((total, attempt) => total + attempt.requests.length, 0)),
+              String(attempts.reduce((total, attempt) => total + attempt.hostRetries, 0)),
+              scenario.verdict,
+            ],
+      )
+    }
+  })
+
+  test("it states its isolation, its findings and that gate 7 stays OPEN", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    for (const phrase of [
+      "bun run oauth-probe --out /tmp/mad-oauth-probe",
+      "**It bills nothing, and it can reach nothing.**",
+      "It runs only on macOS.",
+      "`(deny network-outbound)` except loopback",
+      "a self-test",
+      "placeholder sign-ins with a far-future expiry",
+      "listing-only scenario, which sends no prompt",
+      "never a header value or a body",
+      "The probe spent no paid tokens.",
+      "**R1 — host retries.**",
+      "**H1 — the hang.**",
+      "**E1 — startup egress.**",
+      "**O1 — OpenAI is UNPROBED.**",
+      "`chatgpt.com:443`",
+      "**Gate 7 stays OPEN.**",
+      "Nothing here covers OpenAI's transport.",
+      '(allow network-outbound (remote unix-socket))',
+      "the test is inconclusive and the probe refuses",
+      "a fresh probe-owned data directory per scenario",
+      "MAD opens, reads and copies neither your store nor any token; opencode itself reads the store",
+      "the Anthropic plugin refreshes only inside its fetch wrapper",
+      "not a known zero cost",
+      "`HOST_CONFIG_GITIGNORE`",
+      "--oauth-prepared /scratch/mad-oauth-prepared",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
     expect(text).not.toContain("evaluation complete")
   })
 })

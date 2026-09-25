@@ -20,7 +20,9 @@
     "materialize-change": "bun run scripts/materialize-labelled-change.ts",
     "eval-read": "bun run scripts/eval-read.ts",
     "paired": "bun run scripts/paired.ts",
-    "accounting-probe": "bun run scripts/accounting-probe.ts"
+    "accounting-probe": "bun run scripts/accounting-probe.ts",
+    "oauth-prepare": "bun run scripts/oauth-prepare.ts",
+    "oauth-probe": "bun run scripts/oauth-probe.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.18",

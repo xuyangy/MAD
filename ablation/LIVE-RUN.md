@@ -820,9 +820,9 @@ credential itself). The host is given only the relay's host key.
 preflight. **With the shipped gate table it always refuses:** gate 4 below is OPEN and is
 required for the evaluation, so the command prints every check and exits 1 before any host, client,
 schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
-evaluation. Gate 7 is OPEN as well; it covers only the oauth route, which this launcher never selects,
-so it is printed and not consulted for the api-key route. Nothing in this section authorizes billing,
-and the command's existence is not authorization.
+evaluation. Gate 7 is OPEN as well; it covers only the oauth route, so it is printed and not consulted
+for the api-key route. With `--provider-mode oauth` (see "The OAuth route" below) gates 4 and 7 both
+refuse. Nothing in this section authorizes billing, and the command's existence is not authorization.
 
 ### The paired gates
 
@@ -833,9 +833,10 @@ CLOSED, its evidence. **Authority lives only in the repository.** No flag,
 environment variable or file read at run time can close a gate; a gate closes by a reviewed change to
 that file, committed: the launcher refuses while `ablation/paired-gates.ts` differs from MAD's HEAD
 (staged, unstaged or untracked), and the sealed schedule's `config.gates` records the committed blob,
-the route and every gate's status. The launcher checks the `evaluation` phase on the `api-key` route
-only, so a gate required for story 2-8c's probe alone, or one covering only the oauth route, never lets
-the three blocks run and never blocks them. A table with an unknown kind, phase, route or status, a
+the route and every gate's status. The launcher checks the `evaluation` phase on the route
+`--provider-mode` selects, `api-key` unless `--provider-mode oauth` is passed, so a gate required for
+story 2-8c's probe alone, or one covering only the other route, never lets the three blocks run and
+never blocks them. A table with an unknown kind, phase, route or status, a
 CLOSED gate with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate
 the human budget owner does not own, or no authorization gate for the evaluation on the checked route
 is refused.
@@ -843,10 +844,10 @@ is refused.
 1. **host request accounting — CLOSED.** Engineering, required for evaluation on the api-key route only. Owner: story 2-8c2. Requires: every physical provider request individually admitted and accounted, with host retries refused, on the measured host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is refused, never forwarded. Evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts.
 2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts.
 3. **accounting-probe spend authorization — OPEN.** Authorization, required for accounting-probe. Owner: the human budget owner. Requires: the budget owner authorizes story 2-8c's bounded accounting probe. Printed, and not consulted by this launcher. No story closes it. Note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub.
-4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation on every route. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block and 300 in total, each an admission threshold. No story closes it.
+4. **evaluation spend authorization — OPEN.** Authorization, required for evaluation on every route. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). No story closes it.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
 6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
-7. **OAuth attempt accounting — OPEN.** Engineering, required for evaluation on the oauth route only. Owner: story 2-8c3b. Requires: story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d starts. Never closed from the paid paired evaluation. Printed, and not consulted by this launcher, which runs the api-key route.
+7. **OAuth attempt accounting — OPEN.** Engineering, required for evaluation on the oauth route only. Owner: story 2-8c3b. Requires: story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d starts. Never closed from the paid paired evaluation. Consulted only with `--provider-mode oauth`; printed and not consulted for the api-key route. Note: story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
 `PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
@@ -997,7 +998,8 @@ The managed host is not offline. The first time it runs a prompt it tries
 that install reaches the registry. Before stopping the host the launcher prints what the install left
 (`@opencode-ai/plugin` and its version, or that nothing was installed). The host no longer holds the
 credential, but the code it fetches at run time is not hashed, and it can still change what the host
-does and so the measured pathway.
+does and so the measured pathway. The OAuth mode seeds the config directory so that install finds
+nothing missing (see "The OAuth route" below).
 
 ### The relay (story 2-8c2)
 
@@ -1045,10 +1047,10 @@ the host's settled message.
 
 The OAuth providers sign in through opencode, with no relay, so MAD cannot measure their tokens. For
 that route `runPairedBlocks` has a second accounting mode, `config.accounting: "attempts"`, beside the
-unchanged token mode. **No launcher path selects it yet:** this launcher passes `route: "api-key"`,
-counts tokens, and refuses exactly as before; the OAuth host route and its zero-bill probe are story
-2-8c3b's, and gate 7 stays OPEN until that evidence is reviewed. The mode follows protocol v2's draft
-sections A6 onward, which are not frozen.
+unchanged token mode. **`--provider-mode oauth` selects it** (see "The OAuth route" below); the default
+api-key mode passes `route: "api-key"`, counts tokens, and refuses exactly as before, and gate 7 stays OPEN:
+story 2-8c3b's zero-bill probe could not observe OpenAI's OAuth transport. The mode follows protocol
+v2's draft sections A6 onward, which are not frozen.
 
 - **The unit.** One admitted attempt is one `runTurn` that passed its stage's ledger gate and the
   experiment's admission and was issued, retries included. It is not a debate round and not a
@@ -1100,6 +1102,104 @@ sections A6 onward, which are not frozen.
   money, subscription quota or physical requests. The host's own retries, tool steps and held-open
   requests on the OAuth route are neither gated nor counted, and the report says so. A token-mode
   bundle's report keeps the token endpoint.
+
+### The OAuth route (story 2-8c3b)
+
+```
+bun run oauth-prepare --out /scratch/mad-oauth-prepared
+bun run paired --live --provider-mode oauth \
+  --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot \
+  --pin openai/gpt-6-luna --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-5-mini \
+  --oauth-data-dir ~/.local/share/mad-opencode-oauth --oauth-prepared /scratch/mad-oauth-prepared \
+  --directory /scratch/mad-labelled-change --out /scratch/mad-paired-oauth
+```
+
+`--provider-mode oauth` runs the managed host on opencode's own sign-ins. MAD holds, copies and
+handles no provider credential, and there is no relay and no meter. **With the shipped tree it always
+refuses at stage 1**, before any host exists, with one aggregated diagnostic that lists gate 4 OPEN,
+gate 7 OPEN and protocol v2 not frozen.
+
+**Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
+Then create the dedicated data directory and its one link to your sign-ins:
+
+```
+mkdir -p ~/.local/share/mad-opencode-oauth/opencode
+ln -s ~/.local/share/opencode/auth.json ~/.local/share/mad-opencode-oauth/opencode/auth.json
+```
+
+The link's target must be exactly `<HOME>/.local/share/opencode/auth.json`, so an opencode of your own
+that keeps its data under a custom `XDG_DATA_HOME` is not supported.
+
+- **The flags.** One `--pin` per `--oauth-provider`, all distinct, each naming one of those providers.
+  `--oauth-data-dir` and `--oauth-prepared` are absolute paths. Mixing modes is refused at parse:
+  `--provider-url`, `--provider-key-env` and `--provider-model` with `--provider-mode oauth`, and any
+  `--oauth-*` flag without it.
+- **The prepared payloads.** `bun run oauth-prepare --out <dir>` builds the prepared directory from the
+  inputs committed under `ablation/oauth/`: `npm ci --ignore-scripts` of
+  `@ex-machina/opencode-anthropic-auth@1.8.1` (`anthropic-auth/`) and of `@opencode-ai/plugin@1.18.5`
+  (`config-seed/`), and the recorded model catalogue trimmed to the three providers (`models.json`).
+  It is the one step of the route meant to reach the npm registry, and it runs with no auth store
+  attached. npm runs with a clean environment: your PATH, a private empty HOME and npm cache, empty user
+  and global config files, and the registry fixed to `https://registry.npmjs.org/`, so neither
+  `~/.npmrc` nor an `npm_config_*` variable changes what is installed. Each tree is pinned by its
+  **tree digest**: the sha256 of one line per file or symlink
+  (`<type>\t<relative path>\t<payload>\t<mode>\n`, sorted by the path's UTF-8 bytes), where a file's
+  payload is its sha256 and its mode `x` when any execute bit is set, and a symlink's payload is its
+  target. An absolute link target, a symlink that resolves outside the tree or not at all, any other
+  file type, and a path or target holding a tab or newline refuse the tree, so a verified tree stays
+  valid when it is copied. The pins sit in `OAUTH_PAYLOAD` beside `MEASURED_HOST`, with both packages'
+  lock integrities, set after two fresh installs agreed (`ablation/evidence/oauth-prepare-2026-09-25.json`).
+  Those two runs show the digest is stable on one machine with one npm, not that a build elsewhere or
+  later reproduces it. Stage 1 and every host start verify both digests, both locks and the catalogue's
+  sha256, so a matching lock over changed installed files fails before anything is spawned. The seed is
+  `@opencode-ai/plugin` 1.18.5, not the host's 1.18.32, because opencode 1.18.32's config-directory
+  installer compares dependency names only, never versions: a seeded 1.18.5 satisfies it and it fetches
+  nothing (`2-8c3-design.md`, "Config-directory dependencies").
+- **The data directory and the auth symlink.** `--oauth-data-dir` is the dedicated, persistent opencode
+  data directory set up above. `<data-dir>/opencode` must be a real directory whose only symlink is
+  `auth.json`, and that link's target must be exactly `~/.local/share/opencode/auth.json`. Stage 1,
+  every host start (before the spawn) and every stop (once the host's exit is confirmed) check this by
+  `lstat` and `readlink` alone. MAD never opens, reads, copies, hashes or logs either file, and a refusal
+  names the path, never the contents. The data directory's real path must be disjoint from your own
+  `~/.local/share/opencode`, the prepared directory, `--out`, `--directory` and the host's private root:
+  neither may equal or contain the other. It becomes the host's `XDG_DATA_HOME`, and `stop()` removes
+  only the private root. **opencode writes into the data directory**: its database, sessions, storage
+  and logs, which persist across blocks and runs. What that carried-over state does to the measured
+  pathway is unmeasured.
+- **The host.** The managed host in OAuth mode (`ablation/managed-host.ts`) copies the Anthropic sign-in
+  plugin into its private root, verifies the copy's tree digest, and loads that copy by `file://`, so
+  opencode's plugin installer never runs and a change to the prepared directory after it was verified
+  reaches nothing. It enables exactly the OAuth providers. It copies the config seed into its private
+  config directory and the catalogue into its private cache, and verifies both copies. `GET /config`
+  must match the generated config, which holds no credential; a difference is described by keys and
+  option names only, never by a reported value. `GET /config/providers` must list exactly the OAuth
+  providers, each roster model under its provider. The probe-only `baseURL` overrides are never passed
+  by the launcher. At startup the host connects to `api.githubcopilot.com` with your real Copilot
+  sign-in, before MAD admits any attempt; stage 2's banner says so.
+- **The roster and the seal.** Stage 2 resolves the roster with the lenses `security` and
+  `reliability`, the two lens slots protocol v2's prefix of 10 attempts is sized for, and refuses unless
+  every pin holds a slot. Stage 4 seals `accounting: "attempts"` and `route: "oauth"` under protocol v2
+  (`evaluation-protocol-v2.md`), which must be frozen: until the human freezes it, stage 1 refuses. The
+  api-key route keeps its lens-free roster.
+- **After the stop.** Once the host's exit is confirmed, the data directory's shape and auth symlink,
+  the seeded config lock's sha256 and the whole seeded tree's digest are checked again. A failure, or an
+  exit that could not be confirmed, prints `POST-STOP CHECK FAILED` and exits 1 whatever the run's own
+  result was; the data directory is kept as it is. **To recover:** inspect the link with `readlink`
+  only, never by opening it; recreate it with the `ln -s` above; sign in again with ordinary opencode.
+  Never copy a token into the data directory.
+- **What is not controlled.** The config seed removes the one runtime fetch the spike observed: opencode's
+  background `npm` install into its config directory. Nothing at the OS level prevents another runtime
+  fetch on a production launch, where the host is not sandboxed, so the launch is not fail-closed for
+  runtime fetches. At startup the host connects to `api.githubcopilot.com` before MAD admits any
+  attempt. The config's `model` and `small_model` are the first `--pin` (`openai/gpt-6-luna` in the
+  example above, whose transport is unprobed): opencode's own side requests, such as session titles
+  and summaries, go to that model outside every attempt count; the first `--pin` decides it. A stored
+  token that has expired may be refreshed by the host through the symlink; where that refresh writes is
+  not established. Refreshing the sign-ins by using ordinary opencode first is operational preparation,
+  not a launcher check.
+- **Re-measuring.** Another npm, another payload version or another platform changes the digests: run
+  `bun run oauth-prepare` twice into fresh directories, compare the printed digests, and set
+  `OAUTH_PAYLOAD` in a reviewed change with both runs recorded as evidence.
 
 ### When it runs
 
@@ -1207,6 +1307,84 @@ refuses every other. After an opencode upgrade, or on another machine:
    Gate 1 stays CLOSED only if every scenario HOLDS; otherwise a reviewed change re-opens it.
    The evidence tests read the file `MEASURED_HOST.evidence` names; `ablation/live-run-doc.test.ts`
    and `scripts/accounting-probe.test.ts` fail until the table, the findings and the file agree.
+
+## OAuth attempt probe (story 2-8c3b)
+
+```
+bun run oauth-probe --out /tmp/mad-oauth-probe \
+  [--oauth-data-dir ~/.local/share/mad-opencode-oauth] [--oauth-prepared /scratch/mad-oauth-prepared]
+```
+
+`scripts/oauth-probe.ts` runs the real, measured opencode through the managed host in OAuth mode and
+shows what the OAuth route does to MAD's admitted attempts. Without `--oauth-prepared` it builds its own
+prepared directory first. Its evidence is committed as `ablation/evidence/oauth-attempts-2026-09-25.json`,
+with the scratch, out, prepared, data-directory and home paths replaced.
+
+**It bills nothing, and it can reach nothing.** It runs only on macOS. Every host runs inside
+`sandbox-exec` with `(deny network-outbound)` except loopback. The whole profile is
+`(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (remote unix-socket))`:
+local sockets are allowed as well as loopback. Before any host starts, a self-test runs. First, without
+the sandbox, a TCP connect to `1.1.1.1:443` that sends no byte must succeed; otherwise the test is
+inconclusive and the probe refuses, since on a machine that cannot reach the network a refusal inside
+the sandbox proves nothing. Then a Bun process under the same profile must reach a loopback server and
+must fail to reach `1.1.1.1:443` and `https://example.com/`. HTTP(S)_PROXY points at a local proxy that
+forwards nothing and lists each `CONNECT`; it names what the sandbox blocks and is not itself the control.
+Every prompt uses a fresh probe-owned data directory per scenario, whose `auth.json` links to placeholder
+sign-ins with a far-future expiry, so no real token reaches anything and no refresh fires. Your own
+sign-ins are used only by the listing-only scenario, which sends no prompt. MAD opens, reads and copies
+neither your store nor any token; opencode itself reads the store its data directory links to. The
+listing-only scenario cannot write a refresh: the sandbox blocks any refresh request, and the Anthropic
+plugin refreshes only inside its fetch wrapper, on a model request, which that scenario never sends.
+Whether openai or github-copilot refresh at startup is not established; the readlink checks before the
+spawn and after the exit guard it. `anthropic` is pointed at a Messages stub and `github-copilot` at a
+chat-completions stub through the probe-only `baseURL` overrides. A stub records provider, method, path
+and whether an auth header was present, never a header value or a body, and the probe persists no raw
+HTTP request or response. The probe spent no paid tokens.
+
+Each attempt scenario runs the real `discover` stage with a one-slot roster, a real
+`OpencodeModelBackend` and a real journal opened in attempt mode on the OAuth route. A stub request is
+attributed to the admitted attempt whose window (admission to settlement) it arrived in; any request after
+the first in one window is a host retry. Each attempt records how it was settled.
+Measured on opencode 1.18.32 on 2026-09-25:
+
+| Scenario | Attempts | Stub requests | Host retries | Verdict |
+|---|---|---|---|---|
+| registry with placeholders | — | — | — | HOLDS |
+| registry with the real data directory | — | — | — | HOLDS |
+| anthropic attempt | 1 | 1 | 0 | HOLDS |
+| copilot attempt | 1 | 1 | 0 | HOLDS |
+| attempt refused by a seeded gate | 0 | 0 | 0 | HOLDS |
+| hang past the turn deadline | 1 | 1 | 0 | HOLDS |
+| persistent 500 | 1 | 6 | 5 | HOLDS |
+| openai attempt | 1 | 0 | 0 | UNPROBED |
+
+- **Registries.** On the placeholders and on the real `--oauth-data-dir`, the host listed all three
+  providers with every roster model, and the data directory and its auth symlink were intact before the
+  spawn and after the exit. After every exit the seeded config tree matched its pinned digest but for one
+  file opencode adds itself: a top-level `.gitignore` of five fixed lines (`HOST_CONFIG_GITIGNORE`), the
+  only entry the post-stop check allows.
+- **The anthropic and copilot attempts.** One attempt was journaled, in attempt mode, before one stub
+  request carrying an auth header, and settled once.
+- **The seeded refusal.** With block 1's prefix at its 10 attempts, the journal's admission refused the
+  turn in attempts, before any backend call; no stub request arrived and no `issued` line was added.
+- **R1 — host retries.** Against a stub answering HTTP 500, the host retried 5 times within one admitted
+  attempt, over 75 s (block 1's prefix was seeded with 9 attempts, so MAD's own retry was refused). On
+  the OAuth route a host retry is neither gated nor counted: MAD counts the attempt once, so an admitted
+  attempt bounds neither physical requests nor subscription quota. It is disclosed, not a failure.
+- **H1 — the hang.** Against a stub that never answers, the attempt settled unknown with `abandoned: true`
+  within its bound and the journal latched its `ATTEMPT-MODE STOP`.
+- **E1 — startup egress.** With no prompt sent, the host tried `api.githubcopilot.com:443` at startup. A
+  production host is not sandboxed, so that connection leaves the machine before MAD admits any attempt.
+- **O1 — OpenAI is UNPROBED.** Its OAuth transport ignores `baseURL`; beyond the startup connection the
+  proxy refused `chatgpt.com:443`, and no stub stood in for it. Nothing here covers OpenAI's transport.
+- **Settlements are host diagnostics.** The persistent-500 and openai attempts settled `usage` with zero
+  host-reported tokens. That is the host's own unverified report, not a known zero cost; the adapter's
+  mapping of a failed attempt's missing usage to zero is unchanged here.
+
+**Gate 7 stays OPEN.** This evidence covers the anthropic and copilot attempt paths only; closing gate 7
+needs OpenAI's transport covered by a separately human-authorized bounded pilot, reviewed before story
+2-8d. The probe exercised placeholder sign-ins only, so no token refresh was exercised, and it never
+claims token cost or subscription quota on this route.
 
 ## The adversarial suite (story 2-7b): a library, not a command
 

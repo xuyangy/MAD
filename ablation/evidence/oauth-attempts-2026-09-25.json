@@ -1,0 +1,837 @@
+{
+  "kind": "MEASURED RUNTIME CASES — the zero-bill OAuth attempt probe (story 2-8c3b): a real `opencode serve` in OAuth mode, inside a loopback-only sandbox, whose redirected providers are local stubs",
+  "story": "2-8c3b",
+  "measuredAt": "2026-09-25T16:46:22.062Z",
+  "paidTokens": "none. Every host ran inside a sandbox that denied all outbound traffic but loopback; every prompt used placeholder sign-ins; anthropic and github-copilot were pointed at local stubs, and openai's connection was refused. The user's sign-ins were used only for a listing, with no prompt. Nothing bills.",
+  "sandbox": {
+    "ok": true,
+    "control": "unsandboxed TCP connect to 1.1.1.1:443, no byte sent: connected",
+    "loopback": "connected",
+    "external": [
+      {
+        "target": "1.1.1.1:443",
+        "outcome": "refused: ECONNREFUSED"
+      },
+      {
+        "target": "https://example.com/",
+        "outcome": "refused: ConnectionRefused"
+      }
+    ],
+    "why": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused",
+    "profile": "(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))(allow network-outbound (remote unix-socket))"
+  },
+  "isolation": [
+    "every host is `ablation/managed-host.ts`'s in OAuth mode: the environment built from nothing, the prepared payloads verified against OAUTH_PAYLOAD before the spawn, the config seed and catalogue copied into private directories and verified again, the config and registry verified before any client call",
+    "HTTP(S)_PROXY pointed at a local proxy that forwards nothing and lists each request line; the sandbox, not the proxy, is what denies direct egress",
+    "the auth symlink was checked by lstat and readlink before every spawn and after every confirmed exit; MAD opened, read, copied and hashed neither the link's target nor any token. opencode itself reads the store it links to: the placeholders in every prompt scenario, and the user's sign-ins in the listing-only scenario",
+    "the listing-only scenario on the user's sign-ins cannot write a refresh: the sandbox blocks any refresh request, and the Anthropic plugin refreshes only inside its fetch wrapper, on a model request, which that scenario never sends. Whether openai or github-copilot refresh at startup is not established; the before and after readlink checks guard it",
+    "the stubs recorded provider, method, path and whether an auth header was present, never a header value or a body; the probe persisted no raw HTTP request or response",
+    "a fresh host, and for every prompt scenario a fresh placeholder data directory, was used for every scenario, and each host's exit was confirmed: see each record's `hostStop`"
+  ],
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "matchesMeasuredHost": true,
+    "environmentKeys": [
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "OPENCODE_CONFIG",
+      "OPENCODE_DISABLE_MODELS_FETCH",
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "PATH",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "generatedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "autoupdate": false,
+      "share": "disabled",
+      "plugin": [
+        "file://<scratch>/mad-managed-host-1U5q2y/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"
+      ],
+      "enabled_providers": [
+        "openai",
+        "anthropic",
+        "github-copilot"
+      ],
+      "model": "openai/gpt-6-luna",
+      "small_model": "openai/gpt-6-luna",
+      "provider": {
+        "anthropic": {
+          "options": {
+            "baseURL": "http://127.0.0.1:63573/v1"
+          }
+        },
+        "github-copilot": {
+          "options": {
+            "baseURL": "http://127.0.0.1:63574"
+          }
+        }
+      }
+    },
+    "reportedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "command": {},
+      "plugin": [
+        "file://<scratch>/mad-managed-host-1U5q2y/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"
+      ],
+      "share": "disabled",
+      "autoupdate": false,
+      "enabled_providers": [
+        "openai",
+        "anthropic",
+        "github-copilot"
+      ],
+      "model": "openai/gpt-6-luna",
+      "small_model": "openai/gpt-6-luna",
+      "username": "unknown",
+      "mode": {},
+      "agent": {},
+      "provider": {
+        "anthropic": {
+          "options": {
+            "baseURL": "http://127.0.0.1:63573/v1"
+          }
+        },
+        "github-copilot": {
+          "options": {
+            "baseURL": "http://127.0.0.1:63574"
+          }
+        }
+      }
+    },
+    "payload": {
+      "anthropicAuth": {
+        "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+        "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+        "entries": 3669
+      },
+      "configSeed": {
+        "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+        "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+        "entries": 3654
+      },
+      "catalogueSha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    }
+  },
+  "summary": {
+    "registry with placeholders": "HOLDS",
+    "registry with the real data directory": "HOLDS",
+    "anthropic attempt": "HOLDS",
+    "copilot attempt": "HOLDS",
+    "attempt refused by a seeded gate": "HOLDS",
+    "hang past the turn deadline": "HOLDS",
+    "persistent 500": "HOLDS",
+    "openai attempt": "UNPROBED"
+  },
+  "scenarios": [
+    {
+      "kind": "registry",
+      "name": "registry with placeholders",
+      "what": "an OAuth host on the placeholder sign-ins lists the three providers and every roster model",
+      "store": "placeholders",
+      "dataDir": "<scratch>/placeholders/registry-with-placeholders/data",
+      "authLink": {
+        "link": "<scratch>/placeholders/registry-with-placeholders/data/opencode/auth.json",
+        "target": "<scratch>/placeholders/registry-with-placeholders/home/.local/share/opencode/auth.json"
+      },
+      "listed": [
+        {
+          "id": "openai",
+          "models": 19,
+          "rosterModelListed": true
+        },
+        {
+          "id": "github-copilot",
+          "models": 34,
+          "rosterModelListed": true
+        },
+        {
+          "id": "anthropic",
+          "models": 18,
+          "rosterModelListed": true
+        }
+      ],
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "hostStop": "process 49974 exited (status 143) after SIGTERM",
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/registry-with-placeholders/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/registry-with-placeholders/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "verdict": "HOLDS",
+      "why": "the managed host verified the registry; it lists openai, github-copilot, anthropic with every roster model; `<scratch>/placeholders/registry-with-placeholders/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/registry-with-placeholders/home/.local/share/opencode/auth.json`; the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3); the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+    },
+    {
+      "kind": "registry",
+      "name": "registry with the real data directory",
+      "what": "an OAuth host on the real --oauth-data-dir lists the providers; listing only, no prompt; the auth symlink is checked before and after",
+      "store": "real",
+      "dataDir": "<data-dir>",
+      "authLink": {
+        "link": "<data-dir>/opencode/auth.json",
+        "target": "<home>/.local/share/opencode/auth.json"
+      },
+      "listed": [
+        {
+          "id": "openai",
+          "models": 19,
+          "rosterModelListed": true
+        },
+        {
+          "id": "github-copilot",
+          "models": 34,
+          "rosterModelListed": true
+        },
+        {
+          "id": "anthropic",
+          "models": 18,
+          "rosterModelListed": true
+        }
+      ],
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "hostStop": "process 50252 exited (status 143) after SIGTERM",
+      "postStop": {
+        "held": [
+          "`<data-dir>/opencode/auth.json` is still a symlink to `<home>/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "verdict": "HOLDS",
+      "why": "the managed host verified the registry; it lists openai, github-copilot, anthropic with every roster model; `<data-dir>/opencode/auth.json` is still a symlink to `<home>/.local/share/opencode/auth.json`; the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3); the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+    },
+    {
+      "kind": "attempt",
+      "name": "anthropic attempt",
+      "what": "one discover turn on anthropic/claude-opus-5-5; the Messages stub answers with a StructuredOutput call",
+      "model": "anthropic/claude-opus-5-5",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "ok"
+      },
+      "seeded": 0,
+      "expect": "one-request",
+      "turnTimeoutMs": 150000,
+      "seededIssued": 0,
+      "issuedAfter": 1,
+      "attempts": [
+        {
+          "attempt": 1,
+          "admittedAtMs": 7145,
+          "settledAtMs": 8178,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "oauth-probe-anthropic-attempt",
+            "mode": "attempts"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 10,
+                "output": 5,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "ok",
+              "atMs": 8105
+            }
+          ],
+          "hostRetries": 0,
+          "settlement": "`usage` with host-reported 10 in / 5 out (unverified)"
+        }
+      ],
+      "unattributed": [],
+      "refusals": [],
+      "backendCalls": 1,
+      "stubRequests": 1,
+      "journalLatched": null,
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/anthropic-attempt/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/anthropic-attempt/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 50533 exited (status 143) after SIGTERM",
+      "verdict": "HOLDS",
+      "why": "1 attempt journaled (attempt mode) before 1 stub request, with an auth header; settled once, `usage` with host-reported 10 in / 5 out (unverified)"
+    },
+    {
+      "kind": "attempt",
+      "name": "copilot attempt",
+      "what": "one discover turn on github-copilot/gpt-5-mini; the chat-completions stub answers with a StructuredOutput call",
+      "model": "github-copilot/gpt-5-mini",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "ok"
+      },
+      "seeded": 0,
+      "expect": "one-request",
+      "turnTimeoutMs": 150000,
+      "seededIssued": 0,
+      "issuedAfter": 1,
+      "attempts": [
+        {
+          "attempt": 1,
+          "admittedAtMs": 6776,
+          "settledAtMs": 8060,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "oauth-probe-copilot-attempt",
+            "mode": "attempts"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 10,
+                "output": 5,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "provider": "github-copilot",
+              "method": "POST",
+              "path": "/chat/completions",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "ok",
+              "atMs": 7965
+            }
+          ],
+          "hostRetries": 0,
+          "settlement": "`usage` with host-reported 10 in / 5 out (unverified)"
+        }
+      ],
+      "unattributed": [],
+      "refusals": [],
+      "backendCalls": 1,
+      "stubRequests": 1,
+      "journalLatched": null,
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/copilot-attempt/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/copilot-attempt/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 50738 exited (status 143) after SIGTERM",
+      "verdict": "HOLDS",
+      "why": "1 attempt journaled (attempt mode) before 1 stub request, with an auth header; settled once, `usage` with host-reported 10 in / 5 out (unverified)"
+    },
+    {
+      "kind": "attempt",
+      "name": "attempt refused by a seeded gate",
+      "what": "block 1's prefix is seeded with its 10 attempts, so the journal's admission refuses the turn before any backend call",
+      "model": "anthropic/claude-opus-5-5",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "ok"
+      },
+      "seeded": 10,
+      "expect": "refused",
+      "turnTimeoutMs": 150000,
+      "seededIssued": 10,
+      "issuedAfter": 10,
+      "attempts": [],
+      "unattributed": [],
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts"
+        }
+      ],
+      "backendCalls": 0,
+      "stubRequests": 0,
+      "journalLatched": null,
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/attempt-refused-by-a-seeded-gate/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/attempt-refused-by-a-seeded-gate/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 51508 exited (status 143) after SIGTERM",
+      "verdict": "HOLDS",
+      "why": "refused inside the journal's admission, worded in attempts, before any backend call; 0 stub requests; no `issued` line added"
+    },
+    {
+      "kind": "attempt",
+      "name": "hang past the turn deadline",
+      "what": "the Messages stub never answers; the adapter gives up at 5000 ms and the attempt must settle abandoned within 10000 ms",
+      "model": "anthropic/claude-opus-5-5",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "hang"
+      },
+      "seeded": 0,
+      "expect": "abandoned",
+      "turnTimeoutMs": 5000,
+      "seededIssued": 0,
+      "issuedAfter": 1,
+      "attempts": [
+        {
+          "attempt": 1,
+          "admittedAtMs": 6768,
+          "settledAtMs": 11801,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "oauth-probe-hang-past-the-turn-deadline",
+            "mode": "attempts"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "unknown",
+              "why": "the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+              "executionId": "exec-1",
+              "abandoned": true
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "hang",
+              "atMs": 7759,
+              "closedAfterMs": 4069
+            }
+          ],
+          "hostRetries": 0,
+          "settlement": "`unknown` (abandoned)"
+        }
+      ],
+      "unattributed": [],
+      "refusals": [
+        {
+          "cause": "halted",
+          "reason": "the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block 1 prefix, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
+        }
+      ],
+      "backendCalls": 1,
+      "stubRequests": 1,
+      "journalLatched": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block 1 prefix, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/hang-past-the-turn-deadline/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/hang-past-the-turn-deadline/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 51721 exited (status 143) after SIGTERM",
+      "verdict": "HOLDS",
+      "why": "1 attempt settled unknown with `abandoned: true` within its bound, and the journal latched: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block 1 prefix, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported"
+    },
+    {
+      "kind": "attempt",
+      "name": "persistent 500",
+      "what": "the Messages stub answers every request with HTTP 500; block 1's prefix is seeded with 9 attempts, so exactly one attempt is admitted and MAD's own retry is refused; the stub counts the host's hidden retries within it",
+      "model": "anthropic/claude-opus-5-5",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "500"
+      },
+      "seeded": 9,
+      "expect": "host-retries",
+      "turnTimeoutMs": 150000,
+      "seededIssued": 9,
+      "issuedAfter": 10,
+      "attempts": [
+        {
+          "attempt": 1,
+          "admittedAtMs": 6973,
+          "settledAtMs": 82961,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "oauth-probe-persistent-500",
+            "mode": "attempts"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [
+            {
+              "index": 1,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 7975
+            },
+            {
+              "index": 2,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 10469
+            },
+            {
+              "index": 3,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 14706
+            },
+            {
+              "index": 4,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 23861
+            },
+            {
+              "index": 5,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 43042
+            },
+            {
+              "index": 6,
+              "provider": "anthropic",
+              "method": "POST",
+              "path": "/v1/messages",
+              "model": true,
+              "authHeaderPresent": true,
+              "behaviour": "500",
+              "atMs": 82937
+            }
+          ],
+          "hostRetries": 5,
+          "settlement": "`usage` with host-reported 0 in / 0 out (unverified)"
+        }
+      ],
+      "unattributed": [],
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts"
+        }
+      ],
+      "backendCalls": 1,
+      "stubRequests": 6,
+      "journalLatched": null,
+      "proxyTargets": [
+        "api.githubcopilot.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/persistent-500/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/persistent-500/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 52350 exited (status 143) after SIGTERM",
+      "verdict": "HOLDS",
+      "why": "1 attempt journaled before its first stub request and settled `usage` with host-reported 0 in / 0 out (unverified); the stub counted 6 request(s) against it, 5 of them host retries: ungated and uncounted on the OAuth route, disclosed, not a failure"
+    },
+    {
+      "kind": "attempt",
+      "name": "openai attempt",
+      "what": "one discover turn on openai/gpt-6-luna; its OAuth transport ignores baseURL, so nothing stands in for it and only the egress target the proxy refused is recorded",
+      "model": "openai/gpt-6-luna",
+      "route": "oauth",
+      "accounting": "attempts",
+      "stubScript": {
+        "queue": [],
+        "otherwise": "ok"
+      },
+      "seeded": 9,
+      "expect": "unprobed",
+      "turnTimeoutMs": 150000,
+      "seededIssued": 9,
+      "issuedAfter": 10,
+      "attempts": [
+        {
+          "attempt": 1,
+          "admittedAtMs": 7318,
+          "settledAtMs": 8293,
+          "issued": {
+            "type": "issued",
+            "physicalId": "request-1",
+            "category": "blocks",
+            "block": 1,
+            "phase": "prefix",
+            "stage": "discover",
+            "slot": "discovery-1",
+            "attempt": 1,
+            "runId": "oauth-probe-openai-attempt",
+            "mode": "attempts"
+          },
+          "settled": {
+            "type": "settled",
+            "physicalId": "request-1",
+            "settlement": {
+              "kind": "usage",
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              }
+            }
+          },
+          "requests": [],
+          "hostRetries": 0,
+          "settlement": "`usage` with host-reported 0 in / 0 out (unverified)"
+        }
+      ],
+      "unattributed": [],
+      "refusals": [
+        {
+          "cause": "budget",
+          "reason": "block 1's shared prefix allowance is exhausted: 10 of 10 admitted attempts"
+        }
+      ],
+      "backendCalls": 1,
+      "stubRequests": 0,
+      "journalLatched": null,
+      "proxyTargets": [
+        "api.githubcopilot.com:443",
+        "chatgpt.com:443"
+      ],
+      "postStop": {
+        "held": [
+          "`<scratch>/placeholders/openai-attempt/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/openai-attempt/home/.local/share/opencode/auth.json`",
+          "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+          "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)"
+        ],
+        "problems": []
+      },
+      "journalProblems": [],
+      "hostStop": "process 54724 exited (status 143) after SIGTERM",
+      "verdict": "UNPROBED",
+      "why": "OpenAI's OAuth transport ignores baseURL, so no stub stood in for it and nothing was observed of it. 1 attempt(s) were admitted; 0 stub request(s) arrived; the proxy refused api.githubcopilot.com:443, chatgpt.com:443; the attempt settled `usage` with host-reported 0 in / 0 out (unverified)"
+    }
+  ],
+  "proxyAttempts": [
+    {
+      "at": 1790354639427,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354639514,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354647747,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354647818,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354656006,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354656087,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354664931,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354665000,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354674369,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354674435,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354682219,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354682289,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354695383,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354695443,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354779808,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354779886,
+      "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1"
+    },
+    {
+      "at": 1790354780862,
+      "line": "CONNECT chatgpt.com:443 HTTP/1.1"
+    }
+  ],
+  "findings": [
+    {
+      "id": "R1",
+      "text": "the host's own retries on a failing provider (`persistent 500`): 1 admitted attempt(s); the stub counted 6 request(s), 5 of them host retries. On the OAuth route a host retry is neither gated nor counted: MAD counts the attempt once. Disclosed, not a failure"
+    },
+    {
+      "id": "E1",
+      "text": "startup egress with no prompt sent: `registry with placeholders`: the proxy refused api.githubcopilot.com:443; `registry with the real data directory`: the proxy refused api.githubcopilot.com:443. A production host is not sandboxed, so these connections would leave the machine before MAD admits any attempt"
+    },
+    {
+      "id": "O1",
+      "text": "OpenAI's OAuth transport ignores baseURL and is UNPROBED: beyond the startup connections (E1) the proxy refused chatgpt.com:443; 0 stub request(s) arrived. Paired gate 7 stays OPEN until a separately human-authorized bounded pilot covers it"
+    },
+    {
+      "id": "H1",
+      "text": "an attempt past its deadline: 1 attempt settled unknown with `abandoned: true` within its bound, and the journal latched: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block 1 prefix, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported; the stub request closed 4069 ms after it arrived"
+    }
+  ],
+  "scope": [
+    "opencode 1.18.32 (binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e) on this machine, the Anthropic plugin @ex-machina/opencode-anthropic-auth@1.8.1, one-slot discover, the scripted stub behaviours above; not every host, build, provider, stage or failure",
+    "OpenAI's OAuth transport was not observed: it ignores baseURL, so no stub stood in for it. Nothing here covers it",
+    "placeholder sign-ins with a far-future expiry: no token refresh was exercised, and where a real refresh writes is not established",
+    "each attempt records how it was settled. A `usage` settlement carries the host's own token report, an unverified diagnostic: the persistent-500 and openai attempts settle `usage` with zero host-reported tokens, which is not a known zero cost",
+    "a stub request is attributed to the attempt whose window it arrived in; attempts ran one at a time",
+    "the turn deadline was 150000 ms (5000 ms in the hang scenario)",
+    "the host's own retries, tool steps and held-open requests are not gated or counted on the OAuth route; token spend and subscription quota are unmeasured there"
+  ]
+}
