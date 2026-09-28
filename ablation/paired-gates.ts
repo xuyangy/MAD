@@ -198,7 +198,9 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "The zero-bill OAuth probe (ablation/evidence/oauth-attempts-2026-09-25.json) covered Anthropic and Copilot but left " +
       "OpenAI unprobed. The authorized live pilot (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped after one " +
       "journaled attempt returned model-error without an answer; no chatgpt.com CONNECT was proxy-observed, the second " +
-      "attempt did not run, and the third admission was not asked. OpenAI attempt accounting is not established, so this " +
+      "attempt did not run, and the third admission was not asked. A later non-billing inspection of the host database WAL " +
+      "found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed " +
+      "(ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). OpenAI attempt accounting is not established, so this " +
       "gate stays OPEN",
   },
   {

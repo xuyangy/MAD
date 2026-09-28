@@ -85,6 +85,15 @@ describe("PAIRED_GATES", () => {
     expect(pilot.thirdAdmission.asked).toBe(false)
     expect(pilot.proxy.connects.map((connect) => connect.target)).not.toContain("chatgpt.com:443")
     expect(gate.note).toContain("OpenAI attempt accounting is not established, so this gate stays OPEN")
+    const diagnosisFile = /ablation\/evidence\/oauth-pilot-diagnosis-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
+    expect(diagnosisFile).toBeDefined()
+    const diagnosis = JSON.parse(await Bun.file(new URL(`../${diagnosisFile}`, import.meta.url)).text()) as {
+      diagnoses: string
+      observed: { errorName: string; errorMessage: string }
+    }
+    expect(diagnosis.diagnoses).toBe(pilotFile!)
+    expect(`${diagnosis.observed.errorName}: ${diagnosis.observed.errorMessage}`).toBe("UnknownError: Token refresh failed: 401")
+    expect(gate.note).toContain("found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed")
   })
 
   test("gate 4 states the api-key unit unchanged and the oauth unit in admitted attempts", () => {

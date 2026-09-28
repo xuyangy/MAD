@@ -1,0 +1,36 @@
+{
+  "kind": "DERIVED DIAGNOSIS — non-billing inspection of host state after the one live OAuth pilot run",
+  "diagnoses": "ablation/evidence/oauth-pilot-live-2026-09-28.json",
+  "inspectedAt": "2026-09-28",
+  "billing": "none: no host was started, no network connection was made and no provider was prompted",
+  "gateEffect": "closes no gate: gate 7 stays OPEN and gate 8 stays OPEN",
+  "method": [
+    "the host's own log, <data-dir>/opencode/log/opencode.log, is written at INFO level and ends at the attempt's session creation (2026-09-28T14:46:59Z) with no error line",
+    "the attempt's session was deleted after the attempt, but its assistant message survives in the host database's write-ahead log, <data-dir>/opencode/opencode.db-wal",
+    "the WAL was searched for error objects by name (`strings -n 8` piped to a pattern for `\"error\":{\"name\":...}`), with token-like strings redacted before printing; only the error name, its short message, the provider and model identifiers, the message timestamps and the token object were read"
+  ],
+  "observed": {
+    "providerID": "openai",
+    "modelID": "gpt-6-luna",
+    "messageCreatedEpochMs": 1790606819261,
+    "messageCompletedEpochMs": 1790606820329,
+    "durationMs": 1068,
+    "errorName": "UnknownError",
+    "errorMessage": "Token refresh failed: 401",
+    "hostReportedTokens": { "input": 0, "output": 0, "reasoning": 0, "cacheRead": 0, "cacheWrite": 0 },
+    "copiesInWal": 4,
+    "otherErrorsInWal": "one older error, an `APIError` from the 2026-09-25 zero-bill probe's local stub; none other from 2026-09-28"
+  },
+  "correlation": [
+    "the message was created at 2026-09-28T14:46:59.261Z, inside the pilot's run (reservation 14:46:44Z, evidence written 14:47:05Z), and lasted 1068 ms; the pilot evidence records attempt 1 from 14700 ms to 15881 ms (1181 ms) after its start",
+    "the pilot evidence records one tunnelled CONNECT to auth.openai.com:443 during attempt 1 and no proxy-observed CONNECT to chatgpt.com:443",
+    "the auth target's lstat and stat size, mtime and inode were unchanged across the run"
+  ],
+  "reading": "the host reported `UnknownError: Token refresh failed: 401` for the pilot's one attempt. This is the host's own error for that attempt. It does not establish which credential field was rejected, and it does not prove that no physical request was made to any provider",
+  "limits": [
+    "the WAL is host state, not a MAD record; its contents are what opencode 1.18.32 wrote, read after the fact",
+    "no credential, request body or response body was copied; no raw WAL excerpt is kept here",
+    "the proxy log and the sandbox denials are not complete censuses of egress",
+    "the host's zero-initialized token object on an errored message is not a known zero cost: story 2-8c3b's persistent-500 attempt made 6 requests and reported the same zeros"
+  ]
+}
