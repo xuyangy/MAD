@@ -1473,9 +1473,12 @@ Measured on opencode 1.18.32 on 2026-09-25:
   production host is not sandboxed, so that connection leaves the machine before MAD admits any attempt.
 - **O1 — OpenAI is UNPROBED.** Its OAuth transport ignores `baseURL`; beyond the startup connection the
   proxy refused `chatgpt.com:443`, and no stub stood in for it. Nothing here covers OpenAI's transport.
-- **Settlements are host diagnostics.** The persistent-500 and openai attempts settled `usage` with zero
-  host-reported tokens. That is the host's own unverified report, not a known zero cost; the adapter's
-  mapping of a failed attempt's missing usage to zero is unchanged here.
+- **Settlements are host diagnostics.** The committed evidence records the persistent-500 attempt
+  (6 requests) and the openai attempt (0 stub requests) as `usage` with zero host-reported tokens. That is
+  the host's own unverified report, not a known zero cost. Both ended in a host error with an all-zero
+  token object, so the adapter now settles each of them `unknown` (not abandoned, so no halt in attempt
+  mode), and the probe records each attempt's allowlisted host-error category (see "Failed-turn
+  settlement and the host-error record (story 2-8c6)" below).
 
 **The store guard on the probe (story 2-8c4).** Every probe host passes the ordinary store guard
 before the spawn. Both listing scenarios are held to the ordinary guard after the exit too, so the
@@ -1654,6 +1657,50 @@ is allowed by design.
 **Gate 7 stays OPEN.** It closes only by a reviewed, committed change to `ablation/paired-gates.ts`, and
 only if every attempt of an authorized live run was journaled before any proxy-observed connection,
 counted once and settled. Neither the dry run nor this command's existence authorizes anything.
+
+### Failed-turn settlement and the host-error record (story 2-8c6)
+
+**The settlement rule.** When a settled host message carries an error and its `tokens` object maps to
+all zeros (input, output, reasoning, cache read, cache write), `OpencodeModelBackend` settles the turn
+`unknown`, not `usage`. opencode zero-initializes that object and leaves it at zero on a failed turn,
+whether the turn failed before any request (the live pilot's `Token refresh failed: 401`,
+`ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json`) or after six (story 2-8c3b's persistent-500
+attempt), so the zeros are not knowledge. An errored turn with any non-zero field keeps its tokens.
+`empty-response`, `schema-invalid` and successful turns are unchanged. The failure stays `model-error`,
+so AD-6b's retry classification does not move. A metered turn (story 2-8c2) takes the meter's figure
+instead, whatever the host reported: the meter sees every physical request, so a metered turn with 0
+physical requests is a known zero.
+
+**Route effects.**
+
+- OAuth attempt mode (the pilot, the probe, `paired --provider-mode oauth`): the attempt is counted
+  exactly as before. A non-abandoned `unknown` is a diagnostic, latches no halt, and the manifest lists
+  it among the unknown diagnostics. The pilot's stop reason stays "ended in an error".
+- The api-key relay route (`paired`, `accounting-probe`): unchanged; the meter decides.
+- Unmetered tokens mode (`ablation/live.ts`, the adversarial runner): the journal latches its
+  UNKNOWN-amount halt on such a turn, as the protocol's stop rule requires for a potentially billed
+  execution. The failure kind, and so AD-6b's retry classification, is unchanged, but the halt refuses
+  every later admission, so no AD-6b retry follows such a turn on this route.
+- An ordinary review (the plugin): the ledger records an unknown execution, and the run reads
+  usage-incomplete.
+
+**The host-error record.** The pilot's attempts and the probe's attempts each carry `hostError`, from
+`ablation/host-error.ts`. It classifies the envelope's failure and message into one of five categories:
+
+| Category | When | Code |
+|---|---|---|
+| `oauth-token-refresh-rejected` | the message is exactly `UnknownError: Token refresh failed: <status>`, status 400, 401 or 403 | that status |
+| `provider-api-error` | the message begins `APIError:` | none |
+| `turn-timeout` | a `transport-error` whose message is the backend's own deadline message | none |
+| `transport-failure` | any other `transport-error` | none |
+| `unrecognized` | anything else | none |
+
+The refresh and timeout patterns match the whole message; `provider-api-error` is a prefix match with a
+fixed output. The summary comes from a fixed table per category, with only the allowlisted code
+interpolated, so no character of the host's message reaches the evidence: a message carrying a
+credential, JSON, control characters or 100 kB of text is `unrecognized` (or `provider-api-error` when
+it begins `APIError:`) and is recorded only as that category's fixed summary. A successful turn records
+`hostError: null`. The evidence files committed before this rule are left as they were written.
 
 ## The adversarial suite (story 2-7b): a library, not a command
 

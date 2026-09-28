@@ -96,6 +96,20 @@ type UsageAnnotation = { tokens: TokenUsage } | { usageUnknown: UsageUnknown }
  */
 const HOST_REPORTED_NO_USAGE = "the turn settled and the host reported no usage for it"
 
+/**
+ * Story 2-8c6 — an errored turn whose host `tokens` object is all zero.
+ *
+ * opencode zero-initializes the token object on an assistant message and leaves
+ * it at zero when the turn fails, whether the failure came before any request
+ * (a rejected OAuth token refresh) or after several (a provider that answered
+ * HTTP 500 to every retry). Those zeros are an initializer, not a measurement,
+ * so the turn's usage is unknown unless a stronger source (the 2-8c2 meter)
+ * establishes it.
+ */
+const HOST_ERROR_ZERO_TOKENS =
+  "the turn ended in a host error and the host reported an all-zero token object, which it " +
+  "also reports for an errored turn that made requests, so the zeros are not a known usage"
+
 const CANCELLED_IN_FLIGHT =
   "the run was cancelled while this turn was in flight, so the request was issued and " +
   "its usage was never reported"
@@ -254,6 +268,16 @@ function mapTokens(tokens: {
     cacheRead: tokens.cache?.read ?? 0,
     cacheWrite: tokens.cache?.write ?? 0,
   }
+}
+
+function isAllZero(tokens: TokenUsage): boolean {
+  return (
+    tokens.input === 0 &&
+    tokens.output === 0 &&
+    tokens.reasoning === 0 &&
+    tokens.cacheRead === 0 &&
+    tokens.cacheWrite === 0
+  )
 }
 
 function describeError(error: unknown): string {
@@ -873,8 +897,14 @@ export class OpencodeModelBackend implements ModelBackend {
       : { usageUnknown: { executionId, why: HOST_REPORTED_NO_USAGE } }
 
     if (info?.error) {
+      // Story 2-8c6 — on an errored turn an all-zero token object is the host's
+      // initializer, not a known zero. Any non-zero field is still knowledge.
+      const errored: UsageAnnotation =
+        "tokens" in usage && isAllZero(usage.tokens)
+          ? { usageUnknown: { executionId, why: HOST_ERROR_ZERO_TOKENS } }
+          : usage
       // Returned, not thrown — a domain outcome the caller retries once (AD-6b).
-      return { ok: false, slot, failure: "model-error", message: describeError(info.error), ...usage }
+      return { ok: false, slot, failure: "model-error", message: describeError(info.error), ...errored }
     }
 
     if (info?.structured === undefined || info.structured === null) {
@@ -943,11 +973,15 @@ export class OpencodeModelBackend implements ModelBackend {
    * `entries` with a zero bill and the run would then read as COMPLETE.
    *
    * It uses the same `mapTokens` the settled path uses, so an early and a late
-   * payload cannot be mapped two ways.
+   * payload cannot be mapped two ways, and the same story 2-8c6 rule: a late
+   * message that carries an error and an all-zero token object reports nothing,
+   * because those zeros are the host's initializer, not a known usage.
    */
   private reportLateUsage(executionId: string, settled: PromptResultLike): void {
-    const tokens = settled?.data?.info?.tokens
-    if (!tokens) return
-    this.lateUsage?.report({ executionId, tokens: mapTokens(tokens) })
+    const info = settled?.data?.info
+    if (!info?.tokens) return
+    const tokens = mapTokens(info.tokens)
+    if (info.error && isAllZero(tokens)) return
+    this.lateUsage?.report({ executionId, tokens })
   }
 }

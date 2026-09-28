@@ -4,7 +4,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
+import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { createLateUsageSink } from "../core/ports/late-usage.ts"
+import { settlementOf } from "../core/stages/settlement.ts"
+import { z } from "zod"
 import { acquireLock, ATTEMPT_MODE_STOP_PREFIX, JOURNAL_FILE, LOCK_FILE, openJournal, type JournalIo, type JournalLine, type PairedJournal } from "./journal.ts"
 import { existsSync } from "node:fs"
 import { createExperimentGovernor, HALT_MARKER_FILE } from "./governor.ts"
@@ -1568,5 +1571,84 @@ describe("attempt mode (story 2-8c3a)", () => {
     const flushed = await handle.flush()
     expect(flushed).toMatchObject({ ok: true, persisted: 1 })
     expect((await lines(root)).at(-1)).toEqual({ type: "settled", physicalId: "request-1", settlement: { kind: "unknown", why: "the host reported nothing" } })
+  })
+})
+
+/**
+ * Story 2-8c6 — an errored turn whose host token object is all zero, read by the
+ * production adapter over a stand-in client, then settled through each mode.
+ */
+describe("an errored zero-token turn (story 2-8c6)", () => {
+  async function erroredSettlement() {
+    const client = {
+      session: {
+        create: async () => ({ data: { id: "ses_stand_in" } }),
+        prompt: async () => ({
+          data: {
+            info: {
+              error: { name: "UnknownError", data: { message: "Token refresh failed: 401" } },
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        }),
+        delete: async () => ({ data: true }),
+      },
+    }
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://127.0.0.1:9",
+      directory: "/stand-in",
+      slots: [
+        {
+          slot: "discovery-1",
+          providerId: "openai",
+          modelId: "gpt-6-luna",
+          identity: "gpt-6-luna",
+          lineage: { lineage: "unverified", label: "lineage unverified", verified: false },
+          toolcall: true,
+          alsoAvailableVia: [],
+        },
+      ],
+      client: client as never,
+    })
+    const envelope = await backend.runTurn("discovery-1", "i", "d", z.object({ reply: z.string() }))
+    expect(!envelope.ok && envelope.failure).toBe("model-error")
+    return settlementOf(envelope, false)
+  }
+
+  test("attempt mode: the attempt counts once, is an unknown diagnostic, and latches nothing", async () => {
+    const root = await tempDir()
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const opened = await openJournal(root, lock.lock, now, undefined, "attempts")
+    if (!opened.ok) throw new Error(opened.reason)
+    const journal = opened.journal
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    const first = await admission.admit(discover())
+    if (!first.ok) throw new Error("refused")
+    const settlement = await erroredSettlement()
+    expect(settlement).toMatchObject({ kind: "unknown" })
+    expect(settlement).not.toHaveProperty("abandoned")
+    await first.settle(settlement)
+    const bill = journal.bill()
+    expect(bill.byPhase.find((phase) => phase.phase === "prefix")!.requests).toBe(1)
+    expect(bill.unknown).toHaveLength(1)
+    expect(bill.halt).toBeNull()
+    expect(bill.stop).toBeNull()
+    expect((await admission.admit(discover("discovery-2"))).ok).toBe(true)
+    await journal.close()
+  })
+
+  test("tokens mode: the journal latches its UNKNOWN-amount halt", async () => {
+    const root = await tempDir()
+    const journal = await opened(root)
+    const admission = journal.admission({ block: 1, phase: "prefix", runId: () => "run-a" })
+    const first = await admission.admit(discover())
+    if (!first.ok) throw new Error("refused")
+    await first.settle(await erroredSettlement())
+    const bill = journal.bill()
+    expect(bill.halt).toContain("billed an UNKNOWN amount")
+    expect(bill.unknown).toHaveLength(1)
+    expect((await admission.admit(discover("discovery-2"))).ok).toBe(false)
+    await journal.close()
   })
 })

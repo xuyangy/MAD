@@ -92,8 +92,12 @@
  * requests, so the per-attempt physical request count is not shown. The sandbox
  * denials the unified log reported are listed apart from the proxy's log; neither
  * is a complete census of direct connections. The evidence holds no request or
- * response content: an attempt is recorded by its failure kind, its settlement and
- * host-reported tokens labelled unverified. The auth target is recorded only as
+ * response content: an attempt is recorded by its failure kind, its settlement,
+ * host-reported tokens labelled unverified, and an allowlisted host-error record
+ * (`ablation/host-error.ts`: a category, an optional code and a fixed summary; the
+ * host's message is omitted). An attempt that ended in a host error with an
+ * all-zero host token object settles `unknown`, not a known zero, and still
+ * stops as "ended in an error". The auth target is recorded only as
  * changed or unchanged flags for size, mtime and inode.
  *
  * Only a run that exits 0 writes `oauth-pilot.json`. Every other outcome after the
@@ -140,6 +144,7 @@ import {
   type PostStopChecks,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
+import { hostErrorOf, type HostError } from "../ablation/host-error.ts"
 import { authLinkPaths, overlapProblem } from "../ablation/oauth-payload.ts"
 import { gatePreflight, OAUTH_PILOT_PROPOSAL, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RosterSlot } from "../core/domain/roster.ts"
@@ -225,6 +230,10 @@ export const EVIDENCE_WORDING = [
     "the host's own retries and side requests are neither gated nor counted on the OAuth route",
   "no request or response content is recorded: an attempt is recorded by its failure kind, its journal settlement and its " +
     "host-reported tokens, which are unverified diagnostics, not a cost",
+  "a failed attempt's `hostError` is an allowlisted category, an optional allowlisted code and a fixed summary; the host's " +
+    "error message is omitted",
+  "an attempt that ended in a host error with an all-zero host token object is settled `unknown`: the host reports the same " +
+    "zeros for an errored turn that made requests, so they are not a known usage",
 ]
 
 // ---------------------------------------------------------------------------
@@ -481,6 +490,8 @@ export interface PilotAttempt {
   failure: string | null
   /** Whether `runTurn` threw instead of returning. */
   threw: boolean
+  /** Story 2-8c6 — the allowlisted host-error record, or `null` when the turn answered. The host's message is never kept. */
+  hostError: HostError | null
   settlement: AdmissionSettlement
   /** Why the journal could not record the settlement, or `null`. */
   settleError: string | null
@@ -623,6 +634,7 @@ export async function runAttempts(input: AttemptInput): Promise<AttemptSequence>
       answered: envelope.ok,
       failure: envelope.ok ? null : envelope.failure,
       threw,
+      hostError: hostErrorOf(envelope),
       settlement,
       settleError,
       cleanupUnresolved: envelope.cleanupUnresolved !== undefined,
@@ -716,6 +728,7 @@ const attemptRecord = (attempt: PilotAttempt, started: number): Record<string, u
   answered: attempt.answered,
   failure: attempt.failure,
   threw: attempt.threw,
+  hostError: attempt.hostError,
   settlement: settlementRecord(attempt.settlement),
   settleError: attempt.settleError,
   cleanupUnresolved: attempt.cleanupUnresolved,

@@ -17,6 +17,8 @@ import { JOURNAL_FILE } from "../ablation/journal.ts"
 import type { OAuthRoute, StopOutcome } from "../ablation/managed-host.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink } from "../ablation/oauth-payload.fixture.ts"
 import type { OAuthStubRequest } from "../ablation/oauth-stub.ts"
+import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
+import type { RosterSlot } from "../core/domain/roster.ts"
 import { abandonedTurn, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
 import {
   ABANDON_SLACK_MS,
@@ -24,6 +26,7 @@ import {
   attributeRequests,
   egressTargets,
   EVIDENCE_FILE,
+  hostErrorBackend,
   main,
   parseProbeArgs,
   placeholderAuth,
@@ -35,6 +38,7 @@ import {
   registryVerdict,
   SCENARIOS,
   selfTestVerdict,
+  type AttemptMark,
   type AttemptRecord,
   type AttemptScenarioFacts,
   type ProbeEvidence,
@@ -77,6 +81,7 @@ function attempt(extra: Partial<AttemptRecord> = {}): AttemptRecord {
     requests: [{ index: 1, provider: "anthropic", method: "POST", path: "/v1/messages", model: true, authHeaderPresent: true, behaviour: "ok", atMs: 150 }],
     hostRetries: 0,
     settlement: "`unknown`",
+    hostError: null,
     ...extra,
   }
 }
@@ -310,7 +315,13 @@ function standIn(options: { postStopProblems?: string[] } = {}) {
       async runTurn<T>(slot: string, _instructions: string, _input: string, schema: ZodType<T>): Promise<Envelope<T>> {
         const provider = given.slots[0]!.providerId
         const base = route?.baseURLs?.[provider]
-        if (base === undefined) return { ok: false, slot, failure: "transport-error", message: "no stub stands in", usageUnknown: { executionId: "exec-x", why: "refused" } }
+        // openai has no stub: the host's settled message is an error with its zero-initialized token object.
+        if (base === undefined) {
+          return hostSettled<T>(given, slot, schema, {
+            error: { name: "UnknownError", data: { message: "no stub stands in" } },
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          })
+        }
         const url = provider === "anthropic" ? `${base}/messages` : `${base}/chat/completions`
         for (let tries = 0; tries < 3; tries += 1) {
           let status: number
@@ -323,12 +334,29 @@ function standIn(options: { postStopProblems?: string[] } = {}) {
           }
           if (status === 200) return { ok: true, slot, value: schema.parse({ findings: [] }) }
         }
-        return { ok: false, slot, failure: "model-error", message: "HTTP 500", usageUnknown: { executionId: "exec-500", why: "none reported" } }
+        // Story 2-8c6 — the host's settled message after its retries: an APIError with its
+        // zero-initialized token object, read by the production adapter.
+        return hostSettled<T>(given, slot, schema, {
+          error: { name: "APIError", data: { message: "Internal Server Error" } },
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
       },
     }),
     scenarios: SCENARIOS.map((scenario): Scenario => (scenario.kind === "attempt" && scenario.expect === "abandoned" ? { ...scenario, turnTimeoutMs: 200 } : scenario)),
   }
   return { hooks, started, placeholderRuns, stops: () => stops }
+}
+
+/** The production `OpencodeModelBackend` reading one settled host message from a stand-in client: no host, no network. */
+function hostSettled<T>(given: { directory: string; slots: RosterSlot[] }, slot: string, schema: ZodType<T>, info: unknown): Promise<Envelope<T>> {
+  const client = {
+    session: {
+      create: async () => ({ data: { id: "ses_stand_in" } }),
+      prompt: async () => ({ data: { info } }),
+      delete: async () => ({ data: true }),
+    },
+  }
+  return new OpencodeModelBackend({ serverUrl: "http://127.0.0.1:9", directory: given.directory, slots: given.slots, client: client as never }).runTurn(slot, "i", "d", schema)
 }
 
 async function runProbe(hooks: ProbeHooks, extra: { platform?: string } = {}) {
@@ -379,6 +407,27 @@ describe("a run against a stand-in host", () => {
     expect(text).not.toContain("mad-probe-placeholder-access")
     const retries = evidence.findings.find((finding) => finding.id === "R1")!
     expect(retries.text).toContain("3 request(s), 2 of them host retries")
+    // Story 2-8c6 — the persistent-500 attempt made requests and the host reported zeros: it settles `unknown`.
+    const attemptsOf = (name: string) => (evidence.scenarios.find((scenario) => scenario.name === name) as { attempts: AttemptRecord[] }).attempts
+    const failed = attemptsOf("persistent 500")
+    expect(failed).toHaveLength(1)
+    expect(failed[0]!.requests.length).toBe(3)
+    expect(failed[0]!.settled?.settlement).toMatchObject({ kind: "unknown" })
+    expect(failed[0]!.settled?.settlement).not.toHaveProperty("abandoned")
+    expect(failed[0]!.settlement).toBe("`unknown`")
+    expect(failed[0]!.hostError).toEqual({ category: "provider-api-error", code: null, summary: expect.stringContaining("message is omitted") })
+    expect(text).not.toContain("Internal Server Error")
+    expect(attemptsOf("anthropic attempt")[0]!.hostError).toBeNull()
+    // The openai attempt made no stub request and the host reported the same zeros: it settles `unknown` too.
+    const openai = attemptsOf("openai attempt")
+    expect(openai).toHaveLength(1)
+    expect(openai[0]!.requests).toHaveLength(0)
+    expect(openai[0]!.settled?.settlement).toMatchObject({ kind: "unknown" })
+    expect(openai[0]!.settled?.settlement).not.toHaveProperty("abandoned")
+    expect(openai[0]!.settlement).toBe("`unknown`")
+    expect(openai[0]!.hostError).toMatchObject({ category: "unrecognized", code: null })
+    expect(text).not.toContain("no stub stands in")
+    expect(evidence.scope.join(" ")).toContain("the host's error message is omitted")
   })
 
   test("a post-stop problem fails the run", async () => {
@@ -491,5 +540,50 @@ describe("main: the deadline and an incomplete run", () => {
     expect(result.code).toBe(1)
     expect(result.errors).toContain("INCOMPLETE — no host identity was recorded")
     expect(existsSync(join(result.out, EVIDENCE_FILE))).toBe(false)
+  })
+})
+
+describe("the host-error record's attempt (story 2-8c6)", () => {
+  const failing = (message: string): ModelBackend => ({
+    capabilities: () => ({ tools: false }),
+    async runTurn<T>(slot: string): Promise<Envelope<T>> {
+      return { ok: false, slot, failure: "model-error", message }
+    },
+  })
+  const throwing: ModelBackend = {
+    capabilities: () => ({ tools: false }),
+    async runTurn() {
+      throw new Error("the stand-in transport broke: Bearer sk-SECRET")
+    },
+  }
+  const schema = { parse: (value: unknown) => value } as unknown as ZodType<unknown>
+
+  test("a turn records on the one admitted, unsettled attempt", async () => {
+    const marks: AttemptMark[] = [{ attempt: 1, admittedAt: 1 }]
+    await hostErrorBackend(failing("APIError: boom"), marks).runTurn("discovery-1", "i", "d", schema)
+    expect(marks[0]!.hostError?.category).toBe("provider-api-error")
+  })
+
+  test("a turn with no open attempt does not overwrite a settled attempt's record", async () => {
+    const recorded = { category: "provider-api-error" as const, code: null, summary: "kept" }
+    const marks: AttemptMark[] = [{ attempt: 1, admittedAt: 1, settledAt: 2, hostError: recorded, claimed: true }]
+    await hostErrorBackend(failing("UnknownError: Token refresh failed: 401"), marks).runTurn("discovery-1", "i", "d", schema)
+    expect(marks[0]!.hostError).toBe(recorded)
+  })
+
+  test("a second turn on an attempt already claimed, or with two attempts open, records nothing", async () => {
+    const claimed: AttemptMark[] = [{ attempt: 1, admittedAt: 1, claimed: true, hostError: null }]
+    await hostErrorBackend(failing("APIError: boom"), claimed).runTurn("discovery-1", "i", "d", schema)
+    expect(claimed[0]!.hostError).toBeNull()
+    const two: AttemptMark[] = [{ attempt: 1, admittedAt: 1 }, { attempt: 1, admittedAt: 2 }]
+    await hostErrorBackend(failing("APIError: boom"), two).runTurn("discovery-1", "i", "d", schema)
+    expect(two.map((mark) => mark.hostError)).toEqual([undefined, undefined])
+  })
+
+  test("a turn that throws records `transport-failure`, keeps nothing of the error, and rethrows", async () => {
+    const marks: AttemptMark[] = [{ attempt: 1, admittedAt: 1 }]
+    await expect(hostErrorBackend(throwing, marks).runTurn("discovery-1", "i", "d", schema)).rejects.toThrow("stand-in transport broke")
+    expect(marks[0]!.hostError).toMatchObject({ category: "transport-failure", code: null })
+    expect(JSON.stringify(marks[0]!.hostError)).not.toContain("SECRET")
   })
 })

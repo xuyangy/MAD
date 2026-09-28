@@ -21,6 +21,8 @@ import { acquireLock, JOURNAL_FILE, openJournal, type PairedJournal } from "../a
 import type { ManagedHostStart, StopOutcome } from "../ablation/managed-host.ts"
 import type { PreparedMeasure } from "../ablation/oauth-payload.ts"
 import { HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
+import type { RosterSlot } from "../core/domain/roster.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import type { RequestAdmission } from "../core/ports/admission.ts"
 import { abandonedTurn, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
@@ -120,6 +122,42 @@ function sequenceWith(journal: PairedJournal, backend: ModelBackend, connects: (
       return bill.stop ?? bill.halt
     },
   })
+}
+
+/** The host's zero-initialized token object, as opencode leaves it on an errored message. */
+const HOST_ZERO_TOKENS = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+const REFRESH_401 = { name: "UnknownError", data: { message: "Token refresh failed: 401" } }
+const INJECTED_SECRET = "sk-proj-INJECTEDSECRET0123456789"
+
+/**
+ * The production `OpencodeModelBackend` over a stand-in client whose prompt
+ * settles an errored message with the host's all-zero token object: no host, no
+ * network, no real provider.
+ */
+function erroredOpencode(error: unknown, options: { directory: string; slots: RosterSlot[]; timeoutMs: number; tools: Record<string, boolean> }): ModelBackend & { prompts: () => number } {
+  let prompts = 0
+  const client = {
+    session: {
+      create: async () => ({ data: { id: "ses_stand_in" } }),
+      prompt: async () => {
+        prompts += 1
+        return { data: { info: { error, tokens: HOST_ZERO_TOKENS } } }
+      },
+      delete: async () => ({ data: true }),
+    },
+  }
+  const backend = new OpencodeModelBackend({ serverUrl: "http://127.0.0.1:9", ...options, client: client as never })
+  return Object.assign(backend, { prompts: () => prompts })
+}
+
+const STAND_IN_SLOT: RosterSlot = {
+  slot: "discovery-1",
+  providerId: "openai",
+  modelId: "gpt-6-luna",
+  identity: "gpt-6-luna",
+  lineage: { lineage: "unverified", label: "lineage unverified", verified: false },
+  toolcall: true,
+  alsoAvailableVia: [],
 }
 
 const connect = (target: string | null, at = Date.now(), outcome: ProxyConnect["outcome"] = "refused"): ProxyConnect => ({
@@ -251,6 +289,34 @@ describe("the attempt sequence, on a real seeded journal", () => {
     expect(run.third).toMatchObject({ asked: false, backendCalls: 0 })
   })
 
+  test("a refresh rejected before any request settles `unknown` with its host-error category, stops, and latches no halt (2-8c6)", async () => {
+    const journal = await seededJournal()
+    const backend = erroredOpencode(REFRESH_401, { directory: "/stand-in", slots: [STAND_IN_SLOT], timeoutMs: PILOT_TURN_TIMEOUT_MS, tools: { ...PILOT_TOOLS } })
+    const run = await sequenceWith(journal, backend)
+    const bill = journal.bill()
+    await journal.close()
+    expect(backend.prompts()).toBe(1)
+    expect(run.attempts).toHaveLength(1)
+    expect(run.attempts[0]!.settlement.kind).toBe("unknown")
+    expect(run.attempts[0]!.settlement).not.toHaveProperty("abandoned")
+    expect(run.attempts[0]!.hostError).toEqual({
+      category: "oauth-token-refresh-rejected",
+      code: 401,
+      summary: expect.stringContaining("HTTP 401"),
+    })
+    expect(run.stop).toEqual({ reason: "attempt 1 ended in an error (model-error)", after: "attempt 1" })
+    // Attempt mode: a non-abandoned unknown is a diagnostic, counted as an attempt, and latches nothing.
+    expect(bill.halt).toBeNull()
+    expect(bill.stop).toBeNull()
+  })
+
+  test("an answered attempt records `hostError: null`", async () => {
+    const journal = await seededJournal()
+    const run = await sequenceWith(journal, scriptedBackend([answer, answer]))
+    await journal.close()
+    expect(run.attempts.map((attempt) => attempt.hostError)).toEqual([null, null])
+  })
+
   test("a settlement other than usage stops the run", async () => {
     const journal = await seededJournal()
     const backend = scriptedBackend([(slot) => ({ ok: true, slot, value: { reply: "ok" } }), answer])
@@ -282,7 +348,7 @@ describe("the attempt sequence, on a real seeded journal", () => {
     ])
     const run = await sequenceWith(journal, backend)
     await journal.close()
-    expect(run.attempts[0]).toMatchObject({ threw: true, answered: false })
+    expect(run.attempts[0]).toMatchObject({ threw: true, answered: false, hostError: { category: "transport-failure", code: null } })
     expect(run.attempts[0]!.settlement).toMatchObject({ kind: "unknown", abandoned: true })
     expect(run.stop).toEqual({ reason: "attempt 1: the backend threw after the request was issued, which halts", after: "attempt 1" })
     expect(backend.calls).toHaveLength(1)
@@ -463,7 +529,7 @@ describe("the attempt sequence, on a real seeded journal", () => {
   })
 
   test("the stop rules, in order", () => {
-    const base: PilotAttempt = { attempt: 1, askedAt: 0, admittedAt: 0, settledAt: 1, answered: true, failure: null, threw: false, settlement: { kind: "usage", tokens }, settleError: null, cleanupUnresolved: false }
+    const base: PilotAttempt = { attempt: 1, askedAt: 0, admittedAt: 0, settledAt: 1, answered: true, failure: null, threw: false, hostError: null, settlement: { kind: "usage", tokens }, settleError: null, cleanupUnresolved: false }
     const abandoned = { kind: "unknown" as const, why: "x", abandoned: true as const }
     const throwText = "attempt 1: the backend threw after the request was issued, which halts"
     const timeoutText = `attempt 1 did not end within its ${PILOT_TURN_TIMEOUT_MS} ms bound: it was settled abandoned, which halts`
@@ -517,7 +583,7 @@ describe("the auth target: flags, never values", () => {
 
 describe("timing and findings", () => {
   const attempts: PilotAttempt[] = [
-    { attempt: 1, askedAt: 900, admittedAt: 1_000, settledAt: 2_000, answered: false, failure: "model-error", threw: false, settlement: { kind: "usage", tokens: emptyTokenUsage() }, settleError: null, cleanupUnresolved: false },
+    { attempt: 1, askedAt: 900, admittedAt: 1_000, settledAt: 2_000, answered: false, failure: "model-error", threw: false, hostError: null, settlement: { kind: "usage", tokens: emptyTokenUsage() }, settleError: null, cleanupUnresolved: false },
   ]
   const sequence = { attempts, firstAskedAt: 900 }
 
@@ -722,6 +788,44 @@ describe("a dry run against a stand-in host", () => {
     expect(evidence.sandboxDenials).toEqual({ ok: true, source: "stand-in", entries: [] })
     expect(evidence.findings.find((finding) => finding.id === "D1")!.text).toContain("this dry run exercised attempt 1 (failed)")
     expect(text).not.toContain("no attempt settle")
+  })
+
+  test("a credential-bearing host error reaches the evidence only as an allowlisted category (2-8c6)", async () => {
+    const root = await temp()
+    const out = join(root, "out")
+    const error = { name: "UnknownError", data: { message: `Token refresh failed: 401 Bearer ${INJECTED_SECRET}` } }
+    const { value } = await captured(() =>
+      main(["bun", "oauth-pilot.ts", "--out", out], {
+        platform: "darwin",
+        home: join(root, "user-home"),
+        selfTest: async () => ({ ok: true, control: "connected", loopback: "connected", external: [{ target: "1.1.1.1:443", outcome: "refused: EPERM" }], why: "held" }),
+        prepare: async (dir) => {
+          await mkdir(dir, { recursive: true })
+          return { ok: true }
+        },
+        startHost: standInHost([]),
+        backendFor: (_host, options) => erroredOpencode(error, options),
+        statAuthTarget,
+        sandboxDenials: async () => ({ ok: true, source: "stand-in", entries: [] }),
+      }),
+    )
+    expect(value).toBe(0)
+    const text = await readFile(join(out, EVIDENCE_FILE), "utf8")
+    expect(text).not.toContain(INJECTED_SECRET)
+    expect(text).not.toContain("Bearer")
+    expect(text).not.toContain("Token refresh failed")
+    const evidence = JSON.parse(text) as PilotEvidence
+    expect(evidence.attempts[0]).toMatchObject({
+      answered: false,
+      failure: "model-error",
+      hostError: { category: "unrecognized", code: null },
+      settlement: { kind: "unknown" },
+    })
+    // One copy of each statement, in the evidence's fixed wording; the scope does not repeat it.
+    expect(evidence.wording.filter((line) => line.includes("the host's error message is omitted"))).toHaveLength(1)
+    expect(evidence.wording.filter((line) => line.includes("all-zero host token object is settled `unknown`"))).toHaveLength(1)
+    expect(evidence.scope.join(" ")).not.toContain("all-zero")
+    expect(evidence.scope.join(" ")).not.toContain("message is omitted")
   })
 
   test("a failed sandbox self-test refuses and starts no host", async () => {

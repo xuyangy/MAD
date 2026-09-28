@@ -565,6 +565,66 @@ describe("runTurn — usage the host did not report is UNKNOWN, never zero (AC1)
     expect(result.usageUnknown).toBeDefined()
   })
 
+  const ZERO_TOKENS = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+
+  test("an errored turn with an all-zero `tokens` object is UNKNOWN, not a known zero (2-8c6)", async () => {
+    // The live pilot's attempt: the token refresh failed before any request, and
+    // the host reported the same zeros as for a turn that made six requests.
+    const result = await backendWith({
+      reply: {
+        data: { info: { error: { name: "UnknownError", data: { message: "Token refresh failed: 401" } }, tokens: ZERO_TOKENS } },
+      },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(!result.ok && result.failure).toBe("model-error")
+    expect(!result.ok && result.message).toBe("UnknownError: Token refresh failed: 401")
+    expect("tokens" in result).toBe(false)
+    expect(result.usageUnknown?.executionId).toBe("exec-1")
+    expect(result.usageUnknown?.why).toContain("all-zero token object")
+    expect(result.usageUnknown?.abandoned).toBeUndefined()
+  })
+
+  test("an errored turn whose zero object omits fields is UNKNOWN too", async () => {
+    const result = await backendWith({
+      reply: { data: { info: { error: { name: "APIError", data: { message: "HTTP 500" } }, tokens: {} } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(!result.ok && result.failure).toBe("model-error")
+    expect("tokens" in result).toBe(false)
+    expect(result.usageUnknown?.why).toContain("all-zero token object")
+  })
+
+  test("an errored turn with any NON-ZERO field keeps its tokens (2-8c6)", async () => {
+    const result = await backendWith({
+      reply: { data: { info: { error: { name: "APIError" }, tokens: { ...ZERO_TOKENS, input: 12 } } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(!result.ok && result.failure).toBe("model-error")
+    expect(result.tokens).toEqual({ input: 12, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+    expect("usageUnknown" in result).toBe(false)
+  })
+
+  test("non-error outcomes with an all-zero `tokens` object stay known zeros (2-8c6)", async () => {
+    const zero = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const success = await backendWith({
+      reply: { data: { info: { structured: PAYLOAD, tokens: ZERO_TOKENS } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const empty = await backendWith({
+      reply: { data: { info: { tokens: ZERO_TOKENS } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const invalid = await backendWith({
+      reply: { data: { info: { structured: { findings: [{ claim: 42 }] }, tokens: ZERO_TOKENS } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(success.ok).toBe(true)
+    expect(!empty.ok && empty.failure).toBe("empty-response")
+    expect(!invalid.ok && invalid.failure).toBe("schema-invalid")
+    for (const result of [success, empty, invalid]) {
+      expect(result.tokens).toEqual(zero)
+      expect("usageUnknown" in result).toBe(false)
+    }
+  })
+
   test("an EMPTY-RESPONSE envelope with no `tokens` does too", async () => {
     const result = await backendWith({
       reply: { data: { info: {} } },
@@ -990,6 +1050,39 @@ describe("runTurn — late usage, awaited by nothing (AC2)", () => {
     expect(lateUsage.reports).toEqual([])
   })
 
+  test("an abandoned request that settles with an error and an all-zero token object reports NOTHING (2-8c6)", async () => {
+    const lateUsage = collectingReporter()
+    const { backend, settlePrompt } = backendWith(
+      { pendingPrompt: true },
+      { timeoutMs: 10, cleanupTimeoutMs: 10, lateUsage },
+    )
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    settlePrompt({
+      data: {
+        info: {
+          error: { name: "APIError", data: { message: "Internal Server Error" } },
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+      },
+    })
+    await flush()
+    expect(lateUsage.reports).toEqual([])
+  })
+
+  test("an abandoned request that settles with an error and a NON-ZERO token object still reports (2-8c6)", async () => {
+    const lateUsage = collectingReporter()
+    const { backend, settlePrompt } = backendWith(
+      { pendingPrompt: true },
+      { timeoutMs: 10, cleanupTimeoutMs: 10, lateUsage },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    settlePrompt({ data: { info: { error: { name: "APIError" }, tokens: HOST_TOKENS } } })
+    await flush()
+    expect(lateUsage.reports).toEqual([{ executionId: result.usageUnknown!.executionId, tokens: HOST_TOKENS_MAPPED }])
+  })
+
   test("an abandoned request that eventually FAILS reports nothing and stays silent", async () => {
     // A floating rejection on this path is an unhandled rejection surfacing in a
     // run that has already finished, from code whose entire purpose is to not
@@ -1133,6 +1226,32 @@ describe("runTurn — a metered turn (story 2-8c2)", () => {
     expect(!result.ok && result.failure).toBe("cancelled")
     expect(events).toContain("close (deletes so far: 0)")
     expect(result.usageUnknown).toBeDefined()
+  })
+
+  test("an errored zero-token turn takes the meter's figure: 0 physical requests is a known zero (2-8c6)", async () => {
+    const zero: TokenUsage = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const errored = {
+      reply: {
+        data: {
+          info: {
+            error: { name: "UnknownError", data: { message: "Token refresh failed: 401" } },
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          },
+        },
+      },
+    }
+    const noRequests = await meteredBackend(errored, { kind: "usage", tokens: zero, physicalRequests: 0 }).backend.runTurn(
+      "discovery-1", "i", "d", SCHEMA, undefined, HANDLE,
+    )
+    expect(!noRequests.ok && noRequests.failure).toBe("model-error")
+    expect(noRequests.tokens).toEqual(zero)
+    expect("usageUnknown" in noRequests).toBe(false)
+
+    const measured = await meteredBackend(errored, { kind: "usage", tokens: MEASURED, physicalRequests: 6 }).backend.runTurn(
+      "discovery-1", "i", "d", SCHEMA, undefined, HANDLE,
+    )
+    expect(measured.tokens).toEqual(MEASURED)
+    expect("usageUnknown" in measured).toBe(false)
   })
 
   test("without a handle nothing is opened, and the host's figure stands", async () => {

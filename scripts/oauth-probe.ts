@@ -71,6 +71,7 @@ import {
   type SpawnHost,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
+import { classifyHostError, hostErrorOf, type HostError } from "../ablation/host-error.ts"
 import { authLinkPaths, type PreparedMeasure } from "../ablation/oauth-payload.ts"
 import { startOAuthStub, type OAuthStub, type OAuthStubBehaviour, type OAuthStubRequest } from "../ablation/oauth-stub.ts"
 import type { RosterSlot } from "../core/domain/roster.ts"
@@ -239,6 +240,10 @@ export interface AttemptMark {
   attempt: number
   admittedAt: number
   settledAt?: number
+  /** Story 2-8c6 — the attempt's host-error record, set by `hostErrorBackend` when its turn returns. */
+  hostError?: HostError | null
+  /** Story 2-8c6 — set by `hostErrorBackend` when a turn takes this attempt as its own. */
+  claimed?: boolean
 }
 
 /** A stub request as the evidence carries it: its time is relative to the scenario's start. */
@@ -256,6 +261,13 @@ export interface AttemptRecord {
   hostRetries: number
   /** How the attempt was settled, in words (`settlementKind`). */
   settlement: string
+  /**
+   * Story 2-8c6 — an allowlisted category, an optional allowlisted code and a fixed
+   * summary (`ablation/host-error.ts`); the host's message is omitted. `null` when
+   * the turn answered or the backend was not called for the attempt; a turn that
+   * threw records `transport-failure`.
+   */
+  hostError: HostError | null
 }
 
 /**
@@ -751,7 +763,36 @@ function countingBackend(inner: ModelBackend, calls: { count: number }): ModelBa
   }
 }
 
-function markingAdmission(inner: RequestAdmission, marks: AttemptMark[], refusals: { cause: string; reason: string }[]): RequestAdmission {
+/**
+ * Story 2-8c6 — records each turn's host-error record on the attempt it belongs to.
+ *
+ * The attempt is the one admitted attempt that has not settled and that no other
+ * turn has claimed. The admission handle cannot name it: the stage wraps the
+ * journal's handle (`stageGatedTurn`) before the backend sees it. A turn with no
+ * such attempt (none open, or several at once) records nothing, so it never
+ * overwrites another attempt's record. A turn that throws is recorded as a
+ * transport failure and the throw goes on.
+ */
+export function hostErrorBackend(inner: ModelBackend, marks: readonly AttemptMark[]): ModelBackend {
+  return {
+    capabilities: (slot) => inner.capabilities(slot),
+    async runTurn(slot, instructions, input, schema, signal, admitted) {
+      const open = marks.filter((entry) => entry.settledAt === undefined && entry.claimed !== true)
+      const mark = open.length === 1 ? open[0]! : undefined
+      if (mark !== undefined) mark.claimed = true
+      try {
+        const envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
+        if (mark !== undefined) mark.hostError = hostErrorOf(envelope)
+        return envelope
+      } catch (error) {
+        if (mark !== undefined) mark.hostError = classifyHostError("transport-error", "")
+        throw error
+      }
+    },
+  }
+}
+
+export function markingAdmission(inner: RequestAdmission, marks: AttemptMark[], refusals: { cause: string; reason: string }[]): RequestAdmission {
   return {
     async admit(request: AdmissionRequest): Promise<AdmissionDecision> {
       const decision = await inner.admit(request)
@@ -847,7 +888,7 @@ export async function runAttempt(context: ProbeContext, scenario: Extract<Scenar
     const backend = (context.backendFor ?? ((probeHost, given) => new OpencodeModelBackend({ serverUrl: probeHost.url, ...given })))(host, options)
     await discover({
       roster,
-      backend: countingBackend(backend, calls),
+      backend: hostErrorBackend(countingBackend(backend, calls), marks),
       instructions: CODING_DISCOVERY_GENERALIST,
       input: PROBE_INPUT,
       clock,
@@ -900,6 +941,7 @@ export async function runAttempt(context: ProbeContext, scenario: Extract<Scenar
       requests,
       hostRetries: Math.max(0, requests.length - 1),
       settlement: "",
+      hostError: mark.hostError ?? null,
     }
   }).map((record) => ({ ...record, settlement: settlementKind(record) }))
   const facts: AttemptScenarioFacts = {
@@ -1048,8 +1090,10 @@ export function buildEvidence(input: {
       "OpenAI's OAuth transport was not observed: it ignores baseURL, so no stub stood in for it. Nothing here covers it",
       "placeholder sign-ins with a far-future expiry: no token refresh was exercised, and where a real refresh writes is not established",
       "each attempt records how it was settled. A `usage` settlement carries the host's own token report, an unverified " +
-        "diagnostic: the persistent-500 and openai attempts settle `usage` with zero host-reported tokens, which is not a " +
-        "known zero cost",
+        "diagnostic. An attempt that ended in a host error with an all-zero host token object settles `unknown`, not a " +
+        "known zero: the host reports the same zeros for an errored turn that made requests (the persistent-500 attempt)",
+      "each failed attempt records `hostError`: an allowlisted category, an optional allowlisted code and a fixed summary; " +
+        "the host's error message is omitted",
       "a stub request is attributed to the attempt whose window it arrived in; attempts ran one at a time",
       `the turn deadline was ${SCENARIO_TURN_TIMEOUT_MS} ms (${HANG_TURN_TIMEOUT_MS} ms in the hang scenario)`,
       "the host's own retries, tool steps and held-open requests are not gated or counted on the OAuth route; token spend and " +
