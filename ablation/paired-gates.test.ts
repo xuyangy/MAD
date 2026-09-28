@@ -59,7 +59,7 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("gate 7's note names the probe evidence and its summary, and the summary is what that file records", async () => {
+  test("gate 7's note names the probe and pilot evidence, and each summary is what its file records", async () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 7)!
     const file = /ablation\/evidence\/oauth-attempts-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
     expect(file).toBeDefined()
@@ -69,7 +69,22 @@ describe("PAIRED_GATES", () => {
       ["registry with placeholders", "registry with the real data directory", "anthropic attempt", "copilot attempt", "attempt refused by a seeded gate", "hang past the turn deadline", "persistent 500"].sort(),
     )
     expect(evidence.summary["openai attempt"]).toBe("UNPROBED")
-    expect(gate.note).toContain("openai is UNPROBED, so the gate stays OPEN")
+    expect(gate.note).toContain("left OpenAI unprobed")
+    const pilotFile = /ablation\/evidence\/oauth-pilot-live-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
+    expect(pilotFile).toBeDefined()
+    const pilot = JSON.parse(await Bun.file(new URL(`../${pilotFile}`, import.meta.url)).text()) as {
+      status: string
+      anyAttemptAnswered: boolean
+      attempts: { failure: string | null }[]
+      thirdAdmission: { asked: boolean }
+      proxy: { connects: { target: string }[] }
+    }
+    expect(pilot.status).toBe("FAILED")
+    expect(pilot.anyAttemptAnswered).toBe(false)
+    expect(pilot.attempts.map((attempt) => attempt.failure)).toEqual(["model-error"])
+    expect(pilot.thirdAdmission.asked).toBe(false)
+    expect(pilot.proxy.connects.map((connect) => connect.target)).not.toContain("chatgpt.com:443")
+    expect(gate.note).toContain("OpenAI attempt accounting is not established, so this gate stays OPEN")
   })
 
   test("gate 4 states the api-key unit unchanged and the oauth unit in admitted attempts", () => {

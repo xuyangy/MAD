@@ -195,8 +195,11 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d " +
       "starts. Never closed from the paid paired evaluation",
     note:
-      "story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic " +
-      "and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN",
+      "The zero-bill OAuth probe (ablation/evidence/oauth-attempts-2026-09-25.json) covered Anthropic and Copilot but left " +
+      "OpenAI unprobed. The authorized live pilot (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped after one " +
+      "journaled attempt returned model-error without an answer; no chatgpt.com CONNECT was proxy-observed, the second " +
+      "attempt did not run, and the third admission was not asked. OpenAI attempt accounting is not established, so this " +
+      "gate stays OPEN",
   },
   {
     number: 8,
