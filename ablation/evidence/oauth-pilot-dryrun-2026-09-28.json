@@ -1,0 +1,277 @@
+{
+  "kind": "MEASURED RUNTIME CASE — the OAuth pilot's dry run (story 2-8c5): a real `opencode serve` in OAuth mode on placeholder sign-ins, inside a loopback-only sandbox, behind a proxy that refuses every CONNECT",
+  "story": "2-8c5",
+  "mode": "dry",
+  "measuredAt": "2026-09-28T13:12:11.530Z",
+  "paidTokens": "none. The host ran inside a sandbox that denied all outbound traffic but loopback, behind a proxy that refused every CONNECT, on placeholder sign-ins. No request reached a provider.",
+  "wording": [
+    "every connection listed under `proxy.connects` is a proxy-observed CONNECT: a connection that does not use the proxy is not seen, so the list is never all egress",
+    "the per-attempt physical request count is not shown: TLS and HTTP/2 hide requests inside a proxy-observed CONNECT, and the host's own retries and side requests are neither gated nor counted on the OAuth route",
+    "no request or response content is recorded: an attempt is recorded by its failure kind, its journal settlement and its host-reported tokens, which are unverified diagnostics, not a cost"
+  ],
+  "gateEffect": "this command closes no gate: gate 7 stays OPEN and gate 8 is unchanged; either changes only by a reviewed, committed change to ablation/paired-gates.ts",
+  "authorization": "not consulted: the dry run bills nothing and uses no real sign-in",
+  "sandbox": {
+    "ok": true,
+    "control": "unsandboxed TCP connect to 1.1.1.1:443, no byte sent: connected",
+    "loopback": "connected",
+    "external": [
+      {
+        "target": "1.1.1.1:443",
+        "outcome": "refused: ECONNREFUSED"
+      },
+      {
+        "target": "https://example.com/",
+        "outcome": "refused: ConnectionRefused"
+      }
+    ],
+    "why": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused",
+    "profile": "(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))(allow network-outbound (remote unix-socket))"
+  },
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "matchesMeasuredHost": true,
+    "environmentKeys": [
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "OPENCODE_CONFIG",
+      "OPENCODE_DISABLE_MODELS_FETCH",
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "PATH",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "generatedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "autoupdate": false,
+      "share": "disabled",
+      "plugin": [
+        "file://<scratch>/mad-managed-host-SlZDmd/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"
+      ],
+      "enabled_providers": [
+        "openai"
+      ],
+      "model": "openai/gpt-6-luna",
+      "small_model": "openai/gpt-6-luna"
+    },
+    "reportedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "command": {},
+      "plugin": [
+        "file://<scratch>/mad-managed-host-SlZDmd/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"
+      ],
+      "share": "disabled",
+      "autoupdate": false,
+      "enabled_providers": [
+        "openai"
+      ],
+      "model": "openai/gpt-6-luna",
+      "small_model": "openai/gpt-6-luna",
+      "username": "unknown",
+      "mode": {},
+      "agent": {}
+    },
+    "payload": {
+      "anthropicAuth": {
+        "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+        "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+        "entries": 3669
+      },
+      "configSeed": {
+        "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+        "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+        "entries": 3654
+      },
+      "catalogueSha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    }
+  },
+  "hostStart": "process 24151 started and verified",
+  "hostStartAtMs": 12960,
+  "route": {
+    "enabled_providers": [
+      "openai"
+    ],
+    "model": "openai/gpt-6-luna",
+    "small_model": "openai/gpt-6-luna",
+    "prompt": "Reply with the word ok.",
+    "tools": {
+      "*": false,
+      "StructuredOutput": true
+    },
+    "turnTimeoutMs": 120000,
+    "maxAdmittedAttempts": 2,
+    "dataDir": "a fresh probe-owned placeholder data directory"
+  },
+  "journal": {
+    "root": "<out>/journal",
+    "seededAttempts": 8,
+    "lines": [
+      {
+        "type": "issued",
+        "physicalId": "request-1",
+        "category": "blocks",
+        "block": 1,
+        "phase": "prefix",
+        "stage": "discover",
+        "slot": "discovery-1",
+        "attempt": 1,
+        "runId": "oauth-pilot-dry",
+        "mode": "attempts"
+      },
+      {
+        "type": "settled",
+        "physicalId": "request-1",
+        "settlement": {
+          "kind": "usage",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      }
+    ],
+    "problems": []
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "askedAtMs": 20433,
+      "admittedAtMs": 20435,
+      "settledAtMs": 21443,
+      "answered": false,
+      "failure": "model-error",
+      "threw": false,
+      "settlement": {
+        "kind": "usage",
+        "hostReportedTokensUnverified": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      },
+      "settleError": null,
+      "cleanupUnresolved": false
+    }
+  ],
+  "anyAttemptAnswered": false,
+  "thirdAdmission": {
+    "asked": false,
+    "refusal": null,
+    "backendCalls": 0,
+    "why": "not asked: the pilot stopped, and nothing further is admitted"
+  },
+  "backendCalls": 1,
+  "stop": {
+    "reason": "attempt 1 ended in an error (model-error)",
+    "after": "attempt 1"
+  },
+  "firstAskedAtMs": 20433,
+  "proxy": {
+    "allowedToTunnel": [],
+    "stopRuleAllows": [
+      "chatgpt.com:443",
+      "auth.openai.com:443"
+    ],
+    "connects": [
+      {
+        "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1",
+        "target": "api.githubcopilot.com:443",
+        "outcome": "refused",
+        "atMs": 20344,
+        "window": "before the first admission was asked",
+        "stopRule": "copilot-startup"
+      },
+      {
+        "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1",
+        "target": "api.githubcopilot.com:443",
+        "outcome": "refused",
+        "atMs": 20409,
+        "window": "before the first admission was asked",
+        "stopRule": "copilot-startup"
+      },
+      {
+        "line": "CONNECT chatgpt.com:443 HTTP/1.1",
+        "target": "chatgpt.com:443",
+        "outcome": "refused",
+        "atMs": 21416,
+        "window": "attempt 1",
+        "stopRule": "allowed-host"
+      }
+    ],
+    "afterStop": []
+  },
+  "sandboxDenials": {
+    "ok": true,
+    "source": "`/usr/bin/log show --style ndjson --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"network-outbound\"'` over the host's run, 3000 ms after its exit, with 2000 ms each side",
+    "entries": []
+  },
+  "storeGuardAndSymlink": {
+    "beforeSpawn": "held: the managed host spawns only after the payload digests, the auth symlink, the data directory's shape and disjointness and the store guard pass",
+    "hostStop": "process 24151 exited (status 143) after SIGTERM",
+    "postStop": {
+      "held": [
+        "`<scratch>/placeholders/oauth-pilot/data/opencode/auth.json` is still a symlink to `<scratch>/placeholders/oauth-pilot/home/.local/share/opencode/auth.json`",
+        "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+        "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)",
+        "placeholder store after the run: session=0, message=0, part=0, permission=0, credential=0, account=0, account_state=0, control_account=0, expected probe state (`<scratch>/placeholders/oauth-pilot/data/opencode/opencode.db`, a fresh probe-owned placeholder data directory; not an empty-store check)"
+      ],
+      "problems": []
+    }
+  },
+  "authTarget": {
+    "observed": "the placeholder target only, by lstat and stat; never opened",
+    "flags": {
+      "lstat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      },
+      "stat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      }
+    }
+  },
+  "findings": [
+    {
+      "id": "S1",
+      "text": "1 attempt(s) admitted; none returned a model answer; journal settlements: attempt 1 `usage`; stopped after attempt 1: attempt 1 ended in an error (model-error)"
+    },
+    {
+      "id": "C1",
+      "text": "with `enabled_providers: [\"openai\"]` and placeholder sign-ins for openai, anthropic and github-copilot, the proxy observed 2 CONNECT(s) to api.githubcopilot.com:443, the first at 20344 ms (before the first admission was asked); 2 before the first admission was asked, refused and recorded as the expected startup event, which does not stop the pilot; 0 after it, which stop the pilot. This is bounded to what this run's proxy observed: a connection that does not use the proxy is not seen by it; the sandbox denials are listed separately"
+    },
+    {
+      "id": "E1",
+      "text": "proxy-observed CONNECTs: 3, to api.githubcopilot.com:443 (refused), chatgpt.com:443 (refused); sandbox denials the unified log reported over the host's window: 0, each counted against the host's process tree (0 naming the host's own process). Neither is a complete census of direct connections"
+    },
+    {
+      "id": "D1",
+      "text": "this dry run exercised attempt 1 (failed). The dry run cannot exercise the 2-attempt ceiling or the refused third admission: its proxy refuses every CONNECT, so its first attempt always fails and stops the run. They are proven by the stand-in tests in `scripts/oauth-pilot.test.ts`, reported separately"
+    }
+  ],
+  "scope": [
+    "one run, on this machine, opencode 1.18.32 (binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e); not every host, build, account or failure",
+    "placeholder sign-ins: no token was refreshed and no provider was reached; the dry run shows the attempt sequence as far as it ran, the stop rules it met and what the proxy and the sandbox saw, not OpenAI's transport",
+    "an admitted attempt bounds neither the physical requests the host sends nor subscription quota"
+  ]
+}

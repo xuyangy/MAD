@@ -10,13 +10,15 @@
  * nothing else about readiness, refuses while this file differs from HEAD, and
  * records its committed blob and every gate's status in the sealed schedule.
  *
- * ## Two phases, and no probe exception
+ * ## Three phases, and no probe or pilot exception
  *
  * Each gate names the phase it is required for: `accounting-probe` (story 2-8c's
- * bounded, authorized probe) or `evaluation` (the three blocks). The launcher
- * asks `gatePreflight(PAIRED_GATES, "evaluation", route)` for the route its
- * `--provider-mode` selects, `api-key` by default. A gate required
- * only for the probe is printed and never consulted for the evaluation, so
+ * bounded, authorized probe), `oauth-pilot` (story 2-8c5's bounded OpenAI OAuth
+ * pilot, `bun run oauth-pilot --live`) or `evaluation` (the three blocks). The
+ * launcher asks `gatePreflight(PAIRED_GATES, "evaluation", route)` for the route
+ * its `--provider-mode` selects, `api-key` by default; the pilot asks
+ * `gatePreflight(PAIRED_GATES, "oauth-pilot", "oauth")`. A gate required only for
+ * the probe or the pilot is printed and never consulted for the evaluation, so
  * closing it can never stand in for an evaluation gate.
  *
  * ## Routes (story 2-8c3a)
@@ -29,7 +31,7 @@
  *
  * ## Authorization is a decision, not an engineering task
  *
- * Gates 3 and 4 are spend authorizations owned by the human who owns the budget.
+ * Gates 3, 4 and 8 are spend authorizations owned by the human who owns the budget.
  * No story closes them, and the completion of this story or any other is not
  * authorization.
  *
@@ -38,7 +40,8 @@
  */
 
 export type GateKind = "engineering" | "authorization"
-export type GatePhase = "accounting-probe" | "evaluation"
+export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation"
+export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation"]
 export type GateStatus = "OPEN" | "CLOSED"
 /** Story 2-8c3a — how the managed host reaches its providers. */
 export type GateRoute = "api-key" | "oauth"
@@ -70,6 +73,15 @@ export interface CheckedNonGate {
 }
 
 export const HUMAN_BUDGET_OWNER = "the human budget owner"
+
+/**
+ * Story 2-8c5 — the exposure document gate 8 authorizes against, pinned by its
+ * sha256. `bun run oauth-pilot --live` refuses when the file on disk differs.
+ */
+export const OAUTH_PILOT_PROPOSAL = {
+  path: "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md",
+  sha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+} as const
 
 export const PAIRED_GATES: readonly PairedGate[] = [
   {
@@ -186,6 +198,23 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic " +
       "and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN",
   },
+  {
+    number: 8,
+    name: "OAuth pilot spend authorization",
+    kind: "authorization",
+    phase: "oauth-pilot",
+    routes: ["oauth"],
+    owner: HUMAN_BUDGET_OWNER,
+    status: "OPEN",
+    requires:
+      "the budget owner authorizes one run of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to " +
+      `openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in ${OAUTH_PILOT_PROPOSAL.path} ` +
+      `(sha256 ${OAUTH_PILOT_PROPOSAL.sha256}; \`--live\` refuses if the file differs). One run only: \`--live\` creates ` +
+      "ablation/evidence/oauth-pilot-live.reservation exclusively before it touches a host, the auth target, the data directory " +
+      "or the network, and refuses while it exists or live evidence (ablation/evidence/oauth-pilot-live-*.json) is present; " +
+      "nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never " +
+      "stands in for gate 4 or closes gate 7",
+  },
 ]
 
 export const PAIRED_NON_GATES: readonly CheckedNonGate[] = [
@@ -255,8 +284,8 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase, ro
     if (gate.kind !== "engineering" && gate.kind !== "authorization") {
       problems.push(`gate ${gate.number} (${gate.name}) has kind ${JSON.stringify(gate.kind)}, which is neither engineering nor authorization`)
     }
-    if (gate.phase !== "accounting-probe" && gate.phase !== "evaluation") {
-      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is neither accounting-probe nor evaluation`)
+    if (!GATE_PHASES.includes(gate.phase)) {
+      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is not accounting-probe, oauth-pilot or evaluation`)
     }
     if (!wellFormedRoutes(gate)) {
       problems.push(`gate ${gate.number} (${gate.name}) has routes ${JSON.stringify(gate.routes)}, which are not a non-empty list of api-key and oauth`)

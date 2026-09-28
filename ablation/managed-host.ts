@@ -95,13 +95,14 @@
  *   than 0, a missing table or an unreadable database refuses the start, or joins
  *   the outcome's `postStop` problems.
  * - **The probe's placeholder stores (story 2-8c4).** `startProbePlaceholderHost`,
- *   which only the zero-bill probe calls, is `startManagedHost` for a route whose data
- *   directory is a fresh probe placeholder: `<scratch>/placeholders/<name>/data`
- *   beside its `home`, under a probe scratch directory directly in the system temp
- *   directory, with no database yet. Every check above holds, the pre-spawn store
- *   guard included; after the exit, the store's counts are recorded as expected probe
- *   state (`probeStoreAfterRun`) instead of being held to 0. `ManagedHostOptions`
- *   has no field that reaches it.
+ *   which only the zero-bill probe and the OAuth pilot's dry run (story 2-8c5) call,
+ *   is `startManagedHost` for a route whose data directory is a fresh probe
+ *   placeholder: `<scratch>/placeholders/<name>/data` beside its `home`, under a
+ *   probe scratch directory directly in the system temp directory, with no database
+ *   yet. Every check above holds, the pre-spawn store guard included; after the
+ *   exit, the store's counts are recorded as expected probe state
+ *   (`probeStoreAfterRun`) instead of being held to 0. `ManagedHostOptions` has no
+ *   field that reaches it.
  *
  * AD-1: this tree may import from `core/`; nothing under `core/` imports it.
  */
@@ -797,7 +798,10 @@ export async function startManagedHost(options: ManagedHostOptions): Promise<Man
   }
 }
 
-/** The prefix of the zero-bill probe's scratch directory, made directly in the system temp directory. */
+/**
+ * The prefix of the scratch directory of the zero-bill probe and of the OAuth
+ * pilot's dry run, made directly in the system temp directory.
+ */
 export const PROBE_SCRATCH_PREFIX = "mad-oauth-probe-"
 /** Where the probe makes each scenario's placeholder data directory and home: `<scratch>/placeholders/<name>/{data,home}`. */
 export const PROBE_PLACEHOLDER_DIR = "placeholders"
@@ -811,12 +815,13 @@ export interface ProbePlaceholderStore {
 
 /**
  * Story 2-8c4 — `startManagedHost` for the zero-bill probe's fresh placeholder data
- * directories only. The route is refused before anything is created unless its data
- * directory is `<scratch>/placeholders/<name>/data`, its home that directory's
- * sibling `home`, and `scratch` a `mad-oauth-probe-…` directory directly in the
- * system temp directory; the pre-spawn store guard must then find no database. After
- * the exit the store's counts are recorded as expected probe state, never as an
- * empty store; every other post-stop check is unchanged. It never rejects.
+ * directories only; the OAuth pilot's dry run (story 2-8c5) uses it for its own.
+ * The route is refused before anything is created unless its data directory is
+ * `<scratch>/placeholders/<name>/data`, its home that directory's sibling `home`,
+ * and `scratch` a `mad-oauth-probe-…` directory directly in the system temp
+ * directory; the pre-spawn store guard must then find no database. After the exit
+ * the store's counts are recorded as expected probe state, never as an empty store;
+ * every other post-stop check is unchanged. It never rejects.
  */
 export async function startProbePlaceholderHost(options: OAuthHostOptions, placeholder: ProbePlaceholderStore): Promise<ManagedHostStart> {
   try {

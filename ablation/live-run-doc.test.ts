@@ -548,7 +548,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     }
   })
 
-  test("the opening summary names gate 4 as the refusal, and gates 3 and 7 as not consulted", async () => {
+  test("the opening summary names gate 4 as the refusal, and gates 3, 7 and 8 as not consulted", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("gate 4 below is OPEN and is required for the evaluation")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
@@ -558,8 +558,12 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     const onRoute = (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes("api-key")
     const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(gate)).map((gate) => gate.number)
     expect(required).toEqual([4])
-    const oauthOnly = PAIRED_GATES.filter((gate) => gate.status === "OPEN" && !onRoute(gate)).map((gate) => gate.number)
+    const oauthOnly = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && !onRoute(gate)).map((gate) => gate.number)
     expect(oauthOnly).toEqual([7])
+    expect(text).toContain(
+      "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
+    )
+    expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8])
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {
@@ -815,6 +819,150 @@ describe("LIVE-RUN.md documents the OAuth attempt probe that was actually run", 
       expect(text, phrase).toContain(phrase)
     }
     expect(text).not.toContain("evaluation complete")
+  })
+})
+
+/**
+ * Story 2-8c5 — the OAuth pilot command: its two modes, gate 8, the exposure
+ * wording, the stops, and the dry run's committed evidence.
+ */
+describe("LIVE-RUN.md documents the OAuth pilot command", () => {
+  const section = async (): Promise<string> => between(await liveRunDoc(), "## OAuth pilot (story 2-8c5)", "\n## ", "the OAuth pilot section")
+  const DRY_RUN = "ablation/evidence/oauth-pilot-dryrun-2026-09-28.json"
+
+  test("it states both modes, gate 8 for one run, the attempts, the stops and the exposure, in the proposal's wording", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    for (const phrase of [
+      "bun run oauth-pilot --out /tmp/mad-oauth-pilot-dry",
+      "bun run oauth-pilot --live --oauth-data-dir ~/.local/share/mad-opencode-oauth",
+      "**The dry run is the default, and bills nothing.**",
+      "`--oauth-data-dir` is refused without `--live`",
+      "**The dry run structurally cannot exercise the 2-attempt ceiling:** its proxy refuses every `CONNECT`, so its first attempt always fails and stops the run.",
+      "`bun run oauth-prepare`, which runs npm unsandboxed, with network access",
+      "**The live run is refused unless gate 8 is CLOSED, for one run.**",
+      '`gatePreflight(PAIRED_GATES, "oauth-pilot", "oauth")`',
+      "No flag, variable or file can authorize it.",
+      "it never stands in for gate 4",
+      "**Gate 8 authorizes one run.**",
+      "`--live` creates the reservation `ablation/evidence/oauth-pilot-live.reservation` exclusively (`O_CREAT|O_EXCL`), so of two concurrent invocations only one can create it and the other refuses.",
+      "It records when it was created, the gate table's blob, the pinned proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE evidence included, records it too.",
+      "**Nothing deletes it**, not after a failure and not after an interruption: while it exists, every further `--live` refuses, whatever `--out` it names.",
+      "A further run needs the human's explicit decision, and the budget owner re-opens gate 8 after the run",
+      "the reservation `ablation/evidence/oauth-pilot-live.reservation` exists, committed or not, or cannot be created;",
+      "`ablation/evidence` exists but cannot be read;",
+      "its sha256 differs from the one gate 8 pins (`OAUTH_PILOT_PROPOSAL`): the proposal changed after authorization",
+      "a live run's evidence (`ablation/evidence/oauth-pilot-live-*.json`) is committed, or lies in the tree uncommitted",
+      "`--out` already holds `oauth-pilot.json` or `oauth-pilot.INCOMPLETE.json`",
+      "a reused `--out`, journal included, is refused, never overwritten",
+      "`--out` overlaps the pilot's scratch directory, the data directory or `--oauth-prepared`, or `--oauth-prepared` overlaps the data directory",
+      "tunnels `CONNECT` only to `chatgpt.com:443` and `auth.openai.com:443`",
+      "never the values",
+      "At most **2 admitted attempts**",
+      '"Reply with the word ok."',
+      "120,000 ms",
+      "a backend-call count of 0",
+      "an attempt whose backend threw after the request was issued, that timed out (settled abandoned, which halts)",
+      "`cleanupUnresolved`, even when it otherwise returned usage",
+      "an admission or a settlement that throws included. A post-stop failure fails the exit code.",
+      "there is no upper bound on requests",
+      "MAD cannot see or bound the quota used",
+      "**The evidence says proxy-observed CONNECT, never all egress**",
+      "the per-attempt physical request count is not shown",
+      "The residual risks of the OAuth route (story 2-8c4, above) all apply",
+      "**Gate 7 stays OPEN.**",
+      "**Both modes run the host in the same sandbox.**",
+      "(`SANDBOX_PROFILE`, through `sandboxSpawn`), after the same self-test",
+      "The loopback `HTTPS_PROXY` runs outside the sandbox, in the pilot's own process, and is the host's only way out.",
+      "If the OpenAI transport ignores `HTTPS_PROXY`, the sandbox denies its connection, the attempt fails, the pilot fails closed, and gate 7 stays OPEN.",
+      "inside the sandbox, behind a loopback proxy that tunnels `CONNECT` only to",
+      "**The Copilot startup exception.** A `CONNECT` to exactly `api.githubcopilot.com:443` before the first admission was asked is an expected startup event",
+      "The boundary is the moment the first admission was asked for, which no `issued` line can precede, so it is stricter than the first `issued` line.",
+      "The proxy refuses it (it is never tunnelled), it is recorded with its time, and it does not stop the pilot.",
+      "The same `CONNECT` once the first admission has been asked stops the pilot, and so does any other foreign `CONNECT`.",
+      "**After the host stops.** The proxy's whole log is checked again",
+      "3 s after the host's exit, the macOS unified log is read",
+      "every denial is counted against the host's process tree, whatever process id it names, and fails the exit code in both modes",
+      "In the live run, a unified log that could not be read also fails the exit code.",
+      "**Proxy-observed CONNECTs and sandbox denials are listed apart.**",
+      "Neither is a complete census of direct connections.",
+      "**Only a run that exits 0 writes `oauth-pilot.json`.** In both modes, every outcome after the journal opened that exits non-zero writes `<out>/oauth-pilot.INCOMPLETE.json` instead, labelled INCOMPLETE, and never `oauth-pilot.json`.",
+      '`status: "FAILED"`, its `failures`, and every diagnostic the full evidence would hold',
+      "The dry run's expected stop at attempt 1 exits 0, so it writes `oauth-pilot.json`.",
+      "A signal that arrives after `oauth-pilot.json` was written, during cleanup, still ends the run 130: that file is demoted into the one INCOMPLETE file, keeping its fuller content",
+      "the ceiling and the refused third admission are proven by stand-in tests",
+      DRY_RUN,
+    ]) {
+      expect(text.includes(phrase), phrase).toBe(true)
+    }
+  })
+
+  test("the doc never says the live run is unsandboxed, nor that no attempt settles", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    expect(text).not.toMatch(/live run is unsandboxed|no OS sandbox/)
+    expect(text).not.toMatch(/no attempt settle/)
+  })
+
+  test("the launcher's table refusals name the oauth-pilot phase", async () => {
+    const text = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(text.includes("no authorization gate for the checked phase on the checked route (the evaluation for this launcher; `oauth-pilot`, gate 8, for `bun run oauth-pilot --live`) is refused.")).toBe(true)
+  })
+
+  test("the dry run's findings in the doc are what the committed evidence records", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const evidence = JSON.parse(await Bun.file(new URL(`../${DRY_RUN}`, import.meta.url)).text()) as {
+      mode: string
+      anyAttemptAnswered: boolean
+      attempts: { answered: boolean; failure: string; settlement: { kind: string; hostReportedTokensUnverified?: Record<string, number> } }[]
+      backendCalls: number
+      thirdAdmission: { asked: boolean }
+      host: { version: string }
+      hostStartAtMs: number
+      firstAskedAtMs: number
+      sandbox: { ok: boolean }
+      proxy: { allowedToTunnel: string[]; connects: { target: string; outcome: string; window: string; stopRule: string; atMs: number }[]; afterStop: string[] }
+      sandboxDenials: { ok: boolean; entries: unknown[] }
+      storeGuardAndSymlink: { postStop: { problems: string[] } }
+      authTarget: { flags: Record<string, Record<string, string>> }
+      stop: { reason: string; after: string }
+      findings: { id: string; text: string }[]
+      wording: string[]
+      gateEffect: string
+    }
+    const has = (phrase: string) => expect(text.includes(phrase), phrase).toBe(true)
+    expect(evidence.mode).toBe("dry")
+    expect(evidence.host.version).toBe("1.18.32")
+    has("**The dry run, measured on opencode 1.18.32 on 2026-09-28**")
+    expect(evidence.sandbox.ok).toBe(true)
+    expect(evidence.proxy.allowedToTunnel).toEqual([])
+    expect(evidence.proxy.connects.every((entry) => entry.outcome === "refused")).toBe(true)
+    expect(evidence.proxy.afterStop).toEqual([])
+    has(`Proxy-observed \`CONNECT\`s: ${evidence.proxy.connects.length}, all refused.`)
+    // Copilot at startup: refused, recorded, no stop; the doc's numbers are derived from the evidence.
+    const copilot = evidence.proxy.connects.filter((entry) => entry.target === "api.githubcopilot.com:443")
+    expect(copilot.every((entry) => entry.window === "before the first admission was asked" && entry.stopRule === "copilot-startup")).toBe(true)
+    const afterStart = ((copilot[0]!.atMs - evidence.hostStartAtMs) / 1000).toFixed(1)
+    const beforeAsk = evidence.firstAskedAtMs - copilot[copilot.length - 1]!.atMs
+    has(`the proxy observed ${copilot.length} \`CONNECT\`s to \`api.githubcopilot.com:443\` about ${afterStart} s after the host's start began and before the first admission was asked; the second came ${beforeAsk} ms before it.`)
+    // The first attempt: admitted, its chatgpt.com CONNECT refused, no auth.openai.com CONNECT, no model answer, settled, and the stop.
+    expect(evidence.proxy.connects.filter((entry) => entry.target === "chatgpt.com:443").map((entry) => entry.window)).toEqual(["attempt 1"])
+    expect(evidence.proxy.connects.filter((entry) => entry.target === "auth.openai.com:443")).toEqual([])
+    has("inside it the proxy observed and refused a `CONNECT` to `chatgpt.com:443`, so in this run the OpenAI transport honoured `HTTPS_PROXY`. No `CONNECT` to `auth.openai.com:443` was observed.")
+    expect(evidence.anyAttemptAnswered).toBe(false)
+    expect(evidence.attempts).toHaveLength(1)
+    expect(evidence.attempts[0]).toMatchObject({ answered: false, failure: "model-error", settlement: { kind: "usage" } })
+    expect(Object.values(evidence.attempts[0]!.settlement.hostReportedTokensUnverified ?? {}).every((value) => value === 0)).toBe(true)
+    expect(evidence.backendCalls).toBe(1)
+    expect(evidence.thirdAdmission.asked).toBe(false)
+    expect(evidence.stop).toEqual({ reason: "attempt 1 ended in an error (model-error)", after: "attempt 1" })
+    has("The turn ended in a `model-error`. The journal settled it `usage` with host-reported tokens of 0 (unverified)")
+    has("the backend was called once, and the second attempt was not sent")
+    expect(evidence.findings.find((finding) => finding.id === "D1")!.text).toContain("The dry run cannot exercise the 2-attempt ceiling")
+    expect(evidence.sandboxDenials).toMatchObject({ ok: true })
+    has(`The unified log reported ${evidence.sandboxDenials.entries.length} sandbox denials over the host's window.`)
+    expect(evidence.storeGuardAndSymlink.postStop.problems).toEqual([])
+    expect(Object.values(evidence.authTarget.flags).flatMap((flags) => Object.values(flags)).every((flag) => flag === "unchanged")).toBe(true)
+    expect(evidence.wording.join(" ")).toContain("proxy-observed CONNECT")
+    expect(evidence.gateEffect).toContain("this command closes no gate")
   })
 })
 

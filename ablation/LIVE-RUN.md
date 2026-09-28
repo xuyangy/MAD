@@ -822,12 +822,14 @@ required for the evaluation, so the command prints every check and exits 1 befor
 schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
 evaluation. Gate 7 is OPEN as well; it covers only the oauth route, so it is printed and not consulted
 for the api-key route. With `--provider-mode oauth` (see "The OAuth route" below) gates 4 and 7 both
-refuse. Nothing in this section authorizes billing, and the command's existence is not authorization.
+refuse. Gate 8 is OPEN too; it is required only for the OAuth pilot (see "OAuth pilot (story 2-8c5)"
+below), so it is printed and not consulted for the evaluation. Nothing in this section authorizes
+billing, and the command's existence is not authorization.
 
 ### The paired gates
 
 `ablation/paired-gates.ts` holds `PAIRED_GATES`: each gate's number, name, kind (`engineering` or
-`authorization`), the phase it is required for (`accounting-probe` or `evaluation`), the routes it
+`authorization`), the phase it is required for (`accounting-probe`, `oauth-pilot` or `evaluation`), the routes it
 covers (`api-key`, `oauth`, or every route when it names none), its owner, its status and, when
 CLOSED, its evidence. **Authority lives only in the repository.** No flag,
 environment variable or file read at run time can close a gate; a gate closes by a reviewed change to
@@ -835,11 +837,12 @@ that file, committed: the launcher refuses while `ablation/paired-gates.ts` diff
 (staged, unstaged or untracked), and the sealed schedule's `config.gates` records the committed blob,
 the route and every gate's status. The launcher checks the `evaluation` phase on the route
 `--provider-mode` selects, `api-key` unless `--provider-mode oauth` is passed, so a gate required for
-story 2-8c's probe alone, or one covering only the other route, never lets the three blocks run and
-never blocks them. A table with an unknown kind, phase, route or status, a
+story 2-8c's probe or story 2-8c5's pilot alone, or one covering only the other route, never lets the
+three blocks run and never blocks them. A table with an unknown kind, phase, route or status, a
 CLOSED gate with no evidence, an OPEN gate carrying evidence, a repeated number, an authorization gate
-the human budget owner does not own, or no authorization gate for the evaluation on the checked route
-is refused.
+the human budget owner does not own, or no authorization gate for the checked phase on the checked
+route (the evaluation for this launcher; `oauth-pilot`, gate 8, for `bun run oauth-pilot --live`) is
+refused.
 
 1. **host request accounting — CLOSED.** Engineering, required for evaluation on the api-key route only. Owner: story 2-8c2. Requires: every physical provider request individually admitted and accounted, with host retries refused, on the measured host: each request passes the stage's ledger gate and the journal's gates before it is forwarded, is settled with the usage the provider returned for it or as unknown, and a request after a failed one in the same attempt is refused, never forwarded. Evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts.
 2. **shared gates verified on a real host — CLOSED.** Engineering, required for evaluation. Owner: story 2-8c. Requires: the journal's global, Blocks and phase gates verified against a real host before the first paid request. Evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts.
@@ -848,6 +851,7 @@ is refused.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
 6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
 7. **OAuth attempt accounting — OPEN.** Engineering, required for evaluation on the oauth route only. Owner: story 2-8c3b. Requires: story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d starts. Never closed from the paid paired evaluation. Consulted only with `--provider-mode oauth`; printed and not consulted for the api-key route. Note: story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN.
+8. **OAuth pilot spend authorization — OPEN.** Authorization, required for oauth-pilot on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes one run of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402; `--live` refuses if the file differs). One run only: `--live` creates ablation/evidence/oauth-pilot-live.reservation exclusively before it touches a host, the auth target, the data directory or the network, and refuses while it exists or live evidence (ablation/evidence/oauth-pilot-live-*.json) is present; nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7. Printed, and not consulted by this launcher; `bun run oauth-pilot --live` consults it alone. No story closes it.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
 `PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
@@ -1489,6 +1493,167 @@ its records carry no store line; it is not re-run.
 needs OpenAI's transport covered by a separately human-authorized bounded pilot, reviewed before story
 2-8d. The probe exercised placeholder sign-ins only, so no token refresh was exercised, and it never
 claims token cost or subscription quota on this route.
+
+## OAuth pilot (story 2-8c5)
+
+```
+bun run oauth-pilot --out /tmp/mad-oauth-pilot-dry [--oauth-prepared /scratch/mad-oauth-prepared]
+bun run oauth-pilot --live --oauth-data-dir ~/.local/share/mad-opencode-oauth \
+  --oauth-prepared /scratch/mad-oauth-prepared --out /scratch/mad-oauth-pilot
+```
+
+`scripts/oauth-pilot.ts` is the command for the bounded OpenAI OAuth pilot that paired gate 7 needs.
+OpenAI's OAuth transport ignores a redirected `baseURL`, so the probe above cannot observe it (O1), and
+protocol v2 A11 lets such a transport be covered only by a separately authorized, bounded pilot reviewed
+before the evaluation. The proposal is
+`_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md`. The evidence is
+`<out>/oauth-pilot.json`, redacted, with no request or response content.
+
+**Both modes run the host in the same sandbox.** The pilot runs only on macOS. In both modes the host
+runs inside the probe's loopback-only sandbox (`SANDBOX_PROFILE`, through `sandboxSpawn`), after the same
+self-test, so it has no direct route to any external host. The loopback `HTTPS_PROXY` runs outside the
+sandbox, in the pilot's own process, and is the host's only way out. If the OpenAI transport ignores
+`HTTPS_PROXY`, the sandbox denies its connection, the attempt fails, the pilot fails closed, and gate 7
+stays OPEN.
+
+**The dry run is the default, and bills nothing.** Its proxy refuses every `CONNECT`. It runs on a fresh
+probe-owned placeholder data directory (`startProbePlaceholderHost`) whose sign-ins are placeholders for
+openai, anthropic and github-copilot, as a real store holding all three would be. It runs the same
+attempt sequence and stop rules as the live run. It never touches your `auth.json` or your data
+directory, and `--oauth-data-dir` is refused without `--live`; the only file it stats is its own
+placeholder target. **The dry run structurally cannot exercise the 2-attempt ceiling:** its proxy
+refuses every `CONNECT`, so its first attempt always fails and stops the run. Its evidence says so; the
+ceiling and the refused third admission are proven by stand-in tests (`scripts/oauth-pilot.test.ts`),
+reported separately. Without `--oauth-prepared`, the dry run first builds the prepared directory with
+`bun run oauth-prepare`, which runs npm unsandboxed, with network access; pass `--oauth-prepared` to
+skip that step.
+
+**The live run is refused unless gate 8 is CLOSED, for one run.** `--live` first checks, before any
+host, any stat of the real auth target, any opening of the data directory and any network connection,
+that `ablation/paired-gates.ts` is HEAD's blob and that `gatePreflight(PAIRED_GATES, "oauth-pilot", "oauth")`
+passes: gate 8, "OAuth pilot spend authorization", owned by the human budget owner, must be CLOSED. No
+flag, variable or file can authorize it. With the shipped table it exits 1 naming gate 8 OPEN. Gate 8
+follows gate 3's pattern: it is required only for its own phase, never consulted for the evaluation, and
+it never stands in for gate 4. **Gate 8 authorizes one run.** Once every refusal below has passed, and
+before any host, auth-target stat, data-directory open or network connection, `--live` creates the
+reservation `ablation/evidence/oauth-pilot-live.reservation` exclusively (`O_CREAT|O_EXCL`), so of two
+concurrent invocations only one can create it and the other refuses. It records when it was created, the
+gate table's blob, the pinned proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE
+evidence included, records it too. **Nothing deletes it**, not after a failure and not after an
+interruption: while it exists, every further `--live` refuses, whatever `--out` it names. A further run
+needs the human's explicit decision, and the budget owner re-opens gate 8 after the run; the committed
+live evidence, `ablation/evidence/oauth-pilot-live-<date>.json`, refuses a further run as well.
+`--live` refuses, before the same touches, when:
+
+- `ablation/paired-gates.ts` differs from HEAD, or gate 8 is not CLOSED in it;
+- the reservation `ablation/evidence/oauth-pilot-live.reservation` exists, committed or not, or cannot be
+  created;
+- `ablation/evidence` exists but cannot be read;
+- the exposure document `_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md`
+  is missing, or its sha256 differs from the one gate 8 pins (`OAUTH_PILOT_PROPOSAL`): the proposal
+  changed after authorization;
+- a live run's evidence (`ablation/evidence/oauth-pilot-live-*.json`) is committed, or lies in the tree
+  uncommitted, or `git ls-tree` cannot say;
+- `--out` already holds `oauth-pilot.json` or `oauth-pilot.INCOMPLETE.json`, or is not empty (a reused
+  `--out`, journal included, is refused, never overwritten);
+- `--out` overlaps the pilot's scratch directory, the data directory or `--oauth-prepared`, or
+  `--oauth-prepared` overlaps the data directory.
+
+Once authorized, one host runs through `startManagedHost` in OAuth mode on `--oauth-data-dir` and
+`--oauth-prepared`, with every check that mode makes (payload digests, the auth symlink, the data
+directory's shape and disjointness, the store guard before and after), inside the sandbox, behind a
+loopback proxy that tunnels `CONNECT` only to `chatgpt.com:443` and `auth.openai.com:443`, refuses every
+other host and logs each `CONNECT` with its time. Before and after the host run MAD `lstat`s and `stat`s
+`~/.local/share/opencode/auth.json` without opening it, and records only changed or unchanged flags for
+its size, mtime and inode, never the values. A change shows file activity during the live interval, not
+necessarily a refresh caused by the host.
+
+**The attempts.** `enabled_providers` is `["openai"]`, and `model` and `small_model` are both
+`openai/gpt-6-luna`. At most **2 admitted attempts** (`PILOT_MAX_ATTEMPTS`, pinned by a test), one after
+the other, each one `runTurn` through the production `OpencodeModelBackend` with the prompt "Reply with the
+word ok.", no host tools (`{"*":false,"StructuredOutput":true}`) and a 120,000 ms bound. The journal runs in
+attempt mode on block 1's prefix, seeded with 8 settled attempts, so it admits exactly two. After two
+attempts with no stop, a third admission is asked for; the journal refuses it, and its evidence is that
+refusal and a backend-call count of 0.
+
+**Stops.** Nothing further is admitted, and the reason is recorded, on the first of: a refused host start
+(a preflight failure); an attempt whose backend threw after the request was issued, that timed out
+(settled abandoned, which halts), that ended in an error or a provider refusal, that was settled other
+than `usage`, or that returned `cleanupUnresolved`, even when it otherwise returned usage; a
+proxy-observed `CONNECT` to any host outside `chatgpt.com:443` and `auth.openai.com:443`, with the one
+exception below; a journal integrity or persistence failure, an admission or a settlement that throws
+included. A post-stop failure fails the exit code.
+
+**The Copilot startup exception.** A `CONNECT` to exactly `api.githubcopilot.com:443` before the first
+admission was asked is an expected startup event: the host makes it even with only `openai` enabled (C1
+below). The boundary is the moment the first admission was asked for, which no `issued` line can
+precede, so it is stricter than the first `issued` line. The proxy refuses it (it is never tunnelled),
+it is recorded with its time, and it does not stop the pilot. The same `CONNECT` once the first
+admission has been asked stops the pilot, and so does any other foreign `CONNECT`.
+
+**After the host stops.** The proxy's whole log is checked again: a `CONNECT` the stop rule rejects, or a
+tunnelled `CONNECT` outside every attempt's window, fails the live run's exit code even when it arrived
+after the sequence's last check. Then, 3 s after the host's exit, the macOS unified log is read for
+sandbox network-outbound denials over the host's window, with 2 s of margin each side (never reaching
+back past the sandbox self-test). Only the host and its children run sandboxed then, so every denial is
+counted against the host's process tree, whatever process id it names, and fails the exit code in both
+modes. In the live run, a unified log that could not be read also fails the exit code.
+
+**Proxy-observed CONNECTs and sandbox denials are listed apart.** The proxy's log holds only the
+connections sent to the proxy. The sandbox denials are what the macOS unified log reported for the
+host's run; the log may drop or coalesce entries. Neither is a complete census of direct connections.
+
+**Only a run that exits 0 writes `oauth-pilot.json`.** In both modes, every outcome after the journal
+opened that exits non-zero writes `<out>/oauth-pilot.INCOMPLETE.json` instead, labelled INCOMPLETE, and
+never `oauth-pilot.json`. A run that completed but failed a check (a stop, a sandbox denial, an unreadable
+unified log, a post-stop failure, a proxy connection found after the stop, a cleanup failure) gets
+`status: "FAILED"`, its `failures`, and every diagnostic the full evidence would hold: the sequence, the
+stop, the proxy's log and its re-check, the sandbox denials, the post-stop results, the reservation and
+the auth-target flags. A run that threw, passed its deadline or was interrupted (SIGINT or SIGTERM) gets
+`status: "INCOMPLETE"`, with the journal closed first and the sequence so far, the proxy's log, the
+journal, the reservation and the failure; it exits non-zero (130 when interrupted). A signal that arrives
+after `oauth-pilot.json` was written, during cleanup, still ends the run 130: that file is demoted into
+the one INCOMPLETE file, keeping its fuller content, with `status: "FAILED"` and `interruptedBy` naming
+the signal, and deleted. The dry run's expected stop at attempt 1 exits 0, so it writes `oauth-pilot.json`.
+
+**Maximum exposure, stated honestly (from the proposal).** Admitted attempts: at most 2, the only bounded
+figure. Physical requests are not bounded by the attempt count: host retries are neither gated nor
+counted on this route (R1 measured 1 attempt → 6 requests), opencode's side requests go to the same model
+uncounted, and there is no upper bound on requests. Host-reported tokens are unverified diagnostics.
+Subscription quota is unmeasured: the pilot draws on your ChatGPT subscription through its OAuth sign-in,
+and MAD cannot see or bound the quota used. MAD makes no per-token charge; whether the subscription has
+overage charges is not established. **The evidence says proxy-observed CONNECT, never all egress**, and
+states that the per-attempt physical request count is not shown: TLS and HTTP/2 hide requests. The
+residual risks of the OAuth route (story 2-8c4, above) all apply. Because the live host is sandboxed
+and the proxy is its only way out, a runtime fetch (risk 1) cannot leave the machine except through a
+tunnel to the two allowed hosts, and the Copilot startup connection (risk 2) is refused by the proxy or
+denied by the sandbox; risks 3 to 6 apply in full, and a refresh through `auth.openai.com:443` (risk 5)
+is allowed by design.
+
+**The dry run, measured on opencode 1.18.32 on 2026-09-28** (`ablation/evidence/oauth-pilot-dryrun-2026-09-28.json`):
+
+- **C1 — the Copilot startup connection.** With `enabled_providers: ["openai"]` and placeholder sign-ins
+  for all three providers, the proxy observed 2 `CONNECT`s to `api.githubcopilot.com:443` about 7.4 s
+  after the host's start began and before the first admission was asked; the second came 24 ms before
+  it. Both were refused and recorded as the startup event, and neither stopped the pilot.
+  `enabled_providers` did not stop the startup connection in this run. This is bounded to what the proxy
+  observed: a connection that does not use the proxy is not seen by it.
+- **S1 — no attempt returned a model answer.** Attempt 1 was admitted and its `issued` line written;
+  inside it the proxy observed and refused a `CONNECT` to `chatgpt.com:443`, so in this run the OpenAI
+  transport honoured `HTTPS_PROXY`. No `CONNECT` to `auth.openai.com:443` was observed. The turn ended in
+  a `model-error`. The journal settled it `usage` with host-reported tokens of 0 (unverified), and the
+  stop rule fired after attempt 1: the backend was called once, and the second attempt was not sent.
+- **D1 — what this run exercised.** Only the first, failed attempt, as every dry run must. The 2-attempt
+  ceiling and the refused third admission are proven by the stand-in tests in
+  `scripts/oauth-pilot.test.ts`, reported separately.
+- **E1 — proxy and sandbox, apart.** Proxy-observed `CONNECT`s: 3, all refused. The unified log reported
+  0 sandbox denials over the host's window. Neither is a complete census of direct connections.
+- The placeholder store's post-stop checks held, and the placeholder target's size, mtime and inode were
+  unchanged.
+
+**Gate 7 stays OPEN.** It closes only by a reviewed, committed change to `ablation/paired-gates.ts`, and
+only if every attempt of an authorized live run was journaled before any proxy-observed connection,
+counted once and settled. Neither the dry run nor this command's existence authorizes anything.
 
 ## The adversarial suite (story 2-7b): a library, not a command
 

@@ -10,8 +10,12 @@
  *   each connection (`CONNECT host:443 HTTP/1.1`, or a plain request line), even
  *   when it arrives in pieces, records it, answers `403` and closes. It forwards
  *   nothing.
+ * - **The allowlisting proxy** (story 2-8c5) tunnels a `CONNECT` only to a named
+ *   `host:port` and refuses every other connection as the refusing proxy does. It
+ *   logs each connection's request line with its time and outcome. With no host
+ *   named it refuses everything.
  *
- * Both bind to 127.0.0.1 only.
+ * All three bind to 127.0.0.1 only.
  *
  * ## How the stub answers
  *
@@ -314,6 +318,243 @@ export function startRefusingProxy(): RefusingProxy {
     hostname: listener.hostname,
     port: listener.port,
     attempts: () => attempts.map((attempt) => ({ ...attempt })),
+    stop: () => listener.stop(true),
+  }
+}
+
+/** Story 2-8c5 — one connection the allowlisting proxy saw, and what it did with it. */
+export interface ProxyConnect extends ProxyAttempt {
+  /** The `host:port` of a `CONNECT`, lower-cased, or `null` for any other request line. */
+  target: string | null
+  /** `tunnelled` to an allowed target, `refused` with 403, or `upstream-failed` (allowed, and the upstream connection failed; answered 502). */
+  outcome: "tunnelled" | "refused" | "upstream-failed"
+}
+
+export interface AllowlistProxy {
+  url: string
+  hostname: string
+  port: number
+  /** The `host:port` targets it tunnels to, lower-cased. Empty: it refuses every connection. */
+  allowed: readonly string[]
+  /** Every connection, in arrival order. */
+  connects(): ProxyConnect[]
+  stop(): void
+}
+
+/** The most bytes queued toward either side of a tunnel before it is closed. Reading pauses as soon as anything queues, so this is a backstop. */
+export const PROXY_QUEUE_CAP = 16 * 1024 * 1024
+
+type Socketish = { write(data: string | Uint8Array): number; end(): unknown; pause(): unknown; resume(): unknown }
+
+/** Bytes waiting to be written toward one side of a tunnel, and whether that side ends once they are written. */
+interface Pipe {
+  queue: Uint8Array[]
+  bytes: number
+  endWhenDrained: boolean
+}
+
+const newPipe = (): Pipe => ({ queue: [], bytes: 0, endWhenDrained: false })
+
+/** Writes `chunk` toward `sink`, queueing what it did not take and pausing `source` until `flush` empties the queue. False when the queue passed the cap. */
+function send(sink: Socketish, pipe: Pipe, chunk: Uint8Array, source: Socketish | undefined): boolean {
+  if (pipe.queue.length === 0) {
+    const written = Math.max(0, sink.write(chunk))
+    if (written >= chunk.byteLength) return true
+    chunk = chunk.subarray(written)
+  }
+  pipe.queue.push(chunk)
+  pipe.bytes += chunk.byteLength
+  source?.pause()
+  return pipe.bytes <= PROXY_QUEUE_CAP
+}
+
+/** Writes what `pipe` holds toward `sink`; once it is empty, resumes `source` and ends `sink` if that was asked for. */
+function flush(sink: Socketish, pipe: Pipe, source: Socketish | undefined): void {
+  while (pipe.queue.length > 0) {
+    const chunk = pipe.queue[0]!
+    const written = Math.max(0, sink.write(chunk))
+    pipe.bytes -= Math.min(written, chunk.byteLength)
+    if (written < chunk.byteLength) {
+      pipe.queue[0] = chunk.subarray(written)
+      return
+    }
+    pipe.queue.shift()
+  }
+  source?.resume()
+  if (pipe.endWhenDrained) sink.end()
+}
+
+/** Ends `sink` once everything queued toward it is written. */
+function endAfterDrain(sink: Socketish, pipe: Pipe): void {
+  if (pipe.queue.length === 0) sink.end()
+  else pipe.endWhenDrained = true
+}
+
+/** The lower-cased `host:port` of a well-formed `CONNECT host:port HTTP/x` line, or `null`. */
+function connectTarget(line: string): string | null {
+  const parts = line.split(" ")
+  return parts[0] === "CONNECT" && parts.length === 3 && /^[^\s:]+:\d{1,5}$/.test(parts[1] ?? "") ? parts[1]!.toLowerCase() : null
+}
+
+/**
+ * Story 2-8c5 — a proxy that tunnels `CONNECT host:port` only when `host:port`
+ * (compared lower-cased, exactly: no wildcard, no suffix match) is in `allowed`,
+ * and answers every other connection, a plain request line included, `403` and
+ * closes. Each connection's request line is logged with its time and outcome. It
+ * observes only what is sent to it: a connection that does not use it is not seen.
+ * A tunnel pauses reading from one side while bytes toward the other are queued,
+ * writes every queued byte before it ends a side, and closes when a queue passes
+ * `PROXY_QUEUE_CAP`.
+ *
+ * `options.resolve` is for tests only: it says where a tunnel to an allowed target
+ * goes, so a test can allow a synthetic name and point it at a loopback stand-in.
+ * The default is the target itself. The log always names the requested target.
+ */
+export function startAllowlistProxy(
+  allowed: readonly string[],
+  options: { resolve?: (host: string, port: number) => { hostname: string; port: number } } = {},
+): AllowlistProxy {
+  const allow = new Set(allowed.map((target) => target.toLowerCase()))
+  const log: ProxyConnect[] = []
+  interface State {
+    buffer: Buffer
+    phase: "head" | "connecting" | "tunnel" | "done"
+    upstream?: Socketish
+    toUpstream: Pipe
+    toClient: Pipe
+  }
+  const refuse = (socket: Socketish, status = "403 Forbidden") => {
+    socket.write(`HTTP/1.1 ${status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
+    socket.end()
+  }
+  /** A queue passed the cap: both sides are closed at once. */
+  const overflow = (socket: Socketish, state: State) => {
+    state.phase = "done"
+    state.upstream?.end()
+    socket.end()
+  }
+  const listener = Bun.listen<State>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        socket.data = { buffer: Buffer.alloc(0), phase: "head", toUpstream: newPipe(), toClient: newPipe() }
+      },
+      data(socket, chunk) {
+        const state = socket.data
+        if (state.phase === "done") return
+        if (state.phase === "tunnel" && state.upstream !== undefined) {
+          if (!send(state.upstream, state.toUpstream, new Uint8Array(chunk), socket)) overflow(socket, state)
+          return
+        }
+        if (state.phase === "connecting") {
+          state.toUpstream.queue.push(new Uint8Array(chunk))
+          state.toUpstream.bytes += chunk.byteLength
+          if (state.toUpstream.bytes > PROXY_QUEUE_CAP) overflow(socket, state)
+          return
+        }
+        state.buffer = Buffer.concat([state.buffer, Buffer.from(chunk)])
+        const text = state.buffer.toString("latin1")
+        const lineEnd = text.indexOf("\r\n")
+        const headEnd = text.indexOf("\r\n\r\n")
+        if (lineEnd < 0 && text.length < MAX_LINE) return
+        const line = (lineEnd < 0 ? text : text.slice(0, lineEnd)).slice(0, MAX_LINE)
+        const target = connectTarget(line)
+        if (target === null || !allow.has(target)) {
+          state.phase = "done"
+          log.push({ at: Date.now(), line, target, outcome: "refused" })
+          refuse(socket)
+          return
+        }
+        // An allowed CONNECT: wait for the end of its headers before opening the tunnel.
+        if (headEnd < 0) {
+          if (state.buffer.length > 16 * MAX_LINE) {
+            state.phase = "done"
+            log.push({ at: Date.now(), line, target, outcome: "refused" })
+            refuse(socket)
+          }
+          return
+        }
+        const entry: ProxyConnect = { at: Date.now(), line, target, outcome: "tunnelled" }
+        log.push(entry)
+        state.phase = "connecting"
+        const rest = state.buffer.subarray(Buffer.byteLength(text.slice(0, headEnd + 4), "latin1"))
+        if (rest.length > 0) {
+          state.toUpstream.queue.push(new Uint8Array(rest))
+          state.toUpstream.bytes += rest.length
+        }
+        state.buffer = Buffer.alloc(0)
+        const [host, port] = [target.slice(0, target.lastIndexOf(":")), Number(target.slice(target.lastIndexOf(":") + 1))]
+        const failed = () => {
+          if (state.phase !== "connecting") return
+          state.phase = "done"
+          entry.outcome = "upstream-failed"
+          refuse(socket, "502 Bad Gateway")
+        }
+        const upstreamAt = options.resolve?.(host, port) ?? { hostname: host, port }
+        Bun.connect({
+          hostname: upstreamAt.hostname,
+          port: upstreamAt.port,
+          socket: {
+            open(upstream) {
+              if (state.phase !== "connecting") {
+                upstream.end()
+                return
+              }
+              state.upstream = upstream
+              state.phase = "tunnel"
+              send(socket, state.toClient, new TextEncoder().encode("HTTP/1.1 200 Connection Established\r\n\r\n"), undefined)
+              flush(upstream, state.toUpstream, socket)
+            },
+            data(upstream, data) {
+              if (!send(socket, state.toClient, new Uint8Array(data), upstream)) overflow(socket, state)
+            },
+            drain(upstream) {
+              flush(upstream, state.toUpstream, socket)
+            },
+            close() {
+              if (state.phase === "tunnel") {
+                state.phase = "done"
+                endAfterDrain(socket, state.toClient)
+              }
+            },
+            error() {
+              failed()
+              if (state.phase === "tunnel") {
+                state.phase = "done"
+                endAfterDrain(socket, state.toClient)
+              }
+            },
+            connectError() {
+              failed()
+            },
+          },
+        }).catch(failed)
+      },
+      drain(socket) {
+        flush(socket, socket.data.toClient, socket.data.upstream)
+      },
+      close(socket) {
+        const state = socket.data
+        // A client that sent part of a head and hung up is still a connection, logged with the target its line names.
+        if (state.phase === "head" && state.buffer.length > 0) {
+          const text = state.buffer.toString("latin1")
+          const lineEnd = text.indexOf("\r\n")
+          const line = (lineEnd < 0 ? text : text.slice(0, lineEnd)).slice(0, MAX_LINE)
+          log.push({ at: Date.now(), line, target: lineEnd < 0 ? null : connectTarget(line), outcome: "refused" })
+        }
+        const upstream = state.upstream
+        state.phase = "done"
+        if (upstream !== undefined) endAfterDrain(upstream, state.toUpstream)
+      },
+    },
+  })
+  return {
+    url: `http://127.0.0.1:${listener.port}`,
+    hostname: listener.hostname,
+    port: listener.port,
+    allowed: [...allow],
+    connects: () => log.map((entry) => ({ ...entry })),
     stop: () => listener.stop(true),
   }
 }

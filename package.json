@@ -22,7 +22,8 @@
     "paired": "bun run scripts/paired.ts",
     "accounting-probe": "bun run scripts/accounting-probe.ts",
     "oauth-prepare": "bun run scripts/oauth-prepare.ts",
-    "oauth-probe": "bun run scripts/oauth-probe.ts"
+    "oauth-probe": "bun run scripts/oauth-probe.ts",
+    "oauth-pilot": "bun run scripts/oauth-pilot.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.18",

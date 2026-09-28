@@ -163,7 +163,7 @@ import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { writeLabelledTree, type GitResult, type RunGit } from "./materialize-labelled-change.ts"
 
 /** This repository: the reviewed worktree may neither be it, sit inside it, nor contain it. */
-const REPO_ROOT = resolve(import.meta.dir, "..")
+export const REPO_ROOT = resolve(import.meta.dir, "..")
 export const PROTOCOL_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md")
 /** Story 2-8c3b — the protocol the OAuth route seals under: attempt accounting is defined only by v2. */
 export const PROTOCOL_V2_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md")
@@ -668,7 +668,8 @@ export function nonReturnedReason(command: string, outcome: BlameExecOutcome): s
   }
 }
 
-function boundedGit(options: { spawn: SpawnBlame; deadlineMs: number; cleanupMs: number }): RunGit {
+/** Git run through the bounded launcher, as the preflight runs it. Story 2-8c5's pilot reads the gate table's state through it too. */
+export function boundedGit(options: { spawn: SpawnBlame; deadlineMs: number; cleanupMs: number }): RunGit {
   return async (cwd, args, stdin): Promise<GitResult> => {
     const command = `git ${args.join(" ")}`
     if (stdin !== undefined) throw new PreflightGitError(`\`${command}\` needs standard input, which the bounded launcher does not give`)
