@@ -208,7 +208,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "oauth-pilot",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       "the budget owner authorizes one run of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to " +
       `openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in ${OAUTH_PILOT_PROPOSAL.path} ` +
@@ -217,12 +217,10 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "or the network, and refuses while it exists or live evidence (ablation/evidence/oauth-pilot-live-*.json) is present; " +
       "nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never " +
       "stands in for gate 4 or closes gate 7",
-    evidence:
-      "the human budget owner authorized one run on 2026-09-28, in the session, accepting the exposure stated in " +
-      `${OAUTH_PILOT_PROPOSAL.path} (sha256 ${OAUTH_PILOT_PROPOSAL.sha256}): at most 2 admitted attempts of ` +
-      "\"Reply with the word ok.\" to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with no upper bound on " +
-      "physical requests, side requests or subscription quota. The review channel had declined to authorize it in the " +
-      "owner's place for that reason; the owner decided directly. Tests: ablation/paired-gates.test.ts",
+    note:
+      "The budget owner authorized one live OAuth pilot run on 2026-09-28. That run is recorded in " +
+      "ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED), with its committed reservation at " +
+      "ablation/evidence/oauth-pilot-live.reservation. The one-run authorization is spent; no further live run is authorized",
   },
 ]
 
