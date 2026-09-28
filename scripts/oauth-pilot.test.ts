@@ -631,6 +631,7 @@ describe("the live run is refused unless gate 8 is CLOSED in the committed table
     const { value, err } = await captured(() =>
       main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(root, "data"), "--oauth-prepared", join(root, "prepared"), "--out", out], {
         ...tripwires(touched),
+        repoRoot: root,
         gates: openEight,
         gateTable: async () => ({ ok: true, blob: "shipped" }),
       }),
