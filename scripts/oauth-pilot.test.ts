@@ -175,12 +175,15 @@ describe("arguments", () => {
   })
 })
 
+/** Gate 8 OPEN: the refusal the live run gives until the budget owner closes it. */
+const openEight = PAIRED_GATES.map((gate): PairedGate => (gate.number === 8 ? { ...gate, status: "OPEN", evidence: undefined } : gate))
+
 describe("authorization", () => {
   const committed = async () => ({ ok: true as const, blob: "abc123" })
   const closedEight = PAIRED_GATES.map((gate): PairedGate => (gate.number === 8 ? { ...gate, status: "CLOSED", evidence: "authorized by the budget owner" } : gate))
 
-  test("the shipped table refuses: gate 8 is OPEN", async () => {
-    const result = await authorize(PAIRED_GATES, committed)
+  test("a table with gate 8 OPEN refuses", async () => {
+    const result = await authorize(openEight, committed)
     expect(result.ok).toBe(false)
     expect(result.problems).toHaveLength(1)
     expect(result.problems[0]).toStartWith("gate 8 (OAuth pilot spend authorization) is OPEN")
@@ -621,13 +624,14 @@ async function captured<T>(run: () => Promise<T>): Promise<{ value: T; err: stri
 }
 
 describe("the live run is refused unless gate 8 is CLOSED in the committed table", () => {
-  test("on the shipped table: exit 1 naming gate 8 OPEN, before any host, stat, data-directory open or connection", async () => {
+  test("with gate 8 OPEN: exit 1 naming gate 8 OPEN, before any host, stat, data-directory open or connection", async () => {
     const root = await temp()
     const out = join(root, "out")
     const touched: string[] = []
     const { value, err } = await captured(() =>
       main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(root, "data"), "--oauth-prepared", join(root, "prepared"), "--out", out], {
         ...tripwires(touched),
+        gates: openEight,
         gateTable: async () => ({ ok: true, blob: "shipped" }),
       }),
     )
@@ -1532,7 +1536,7 @@ describe("the default gate-table wiring", () => {
     expect(err).toContain(`REFUSED: ${GATE_TABLE_FILE} differs from HEAD`)
   })
 
-  test("with no gateTable seam, the committed table is read and gate 8 OPEN refuses", async () => {
+  test("with no gateTable seam, the committed table is read and a table with gate 8 OPEN refuses", async () => {
     const root = await liveRepo(async (dir) => {
       await mkdir(join(dir, "ablation"), { recursive: true })
       await writeFile(join(dir, GATE_TABLE_FILE), "// the committed table\n")
@@ -1542,6 +1546,7 @@ describe("the default gate-table wiring", () => {
       main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(scratchDir, "data"), "--oauth-prepared", join(scratchDir, "prepared"), "--out", join(scratchDir, "out")], {
         ...tripwires([]),
         repoRoot: root,
+        gates: openEight,
       }),
     )
     expect(value).toBe(1)
