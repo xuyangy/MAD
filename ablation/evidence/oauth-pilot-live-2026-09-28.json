@@ -1,0 +1,293 @@
+{
+  "kind": "INCOMPLETE — MEASURED RUNTIME CASE — the bounded OpenAI OAuth pilot (story 2-8c5): a real `opencode serve` in OAuth mode on the ChatGPT OAuth sign-in, inside a loopback-only sandbox, behind a proxy that tunnels CONNECT only to the allowed hosts",
+  "story": "2-8c5",
+  "mode": "live",
+  "measuredAt": "2026-09-28T14:47:05.488Z",
+  "paidTokens": "unmeasured. The attempts drew on the ChatGPT subscription through its OAuth sign-in; MAD charges nothing per token and cannot see or bound the quota used. Host-reported tokens below are unverified diagnostics.",
+  "wording": [
+    "every connection listed under `proxy.connects` is a proxy-observed CONNECT: a connection that does not use the proxy is not seen, so the list is never all egress",
+    "the per-attempt physical request count is not shown: TLS and HTTP/2 hide requests inside a proxy-observed CONNECT, and the host's own retries and side requests are neither gated nor counted on the OAuth route",
+    "no request or response content is recorded: an attempt is recorded by its failure kind, its journal settlement and its host-reported tokens, which are unverified diagnostics, not a cost"
+  ],
+  "gateEffect": "this command closes no gate: gate 7 stays OPEN and gate 8 is unchanged; either changes only by a reviewed, committed change to ablation/paired-gates.ts",
+  "reservation": {
+    "story": "2-8c5",
+    "createdAt": "2026-09-28T14:46:44.464Z",
+    "gateTableBlob": "ce7912533246f4f5d9972ef170480db8dd8b3798",
+    "proposalSha256": "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+    "out": "<out>"
+  },
+  "authorization": {
+    "ok": true,
+    "lines": [
+      "ablation/paired-gates.ts is HEAD's blob ce7912533246f4f5d9972ef170480db8dd8b3798",
+      "gate 1 — host request accounting — engineering, required for evaluation on route api-key (not consulted for oauth-pilot), owner story 2-8c2 — CLOSED — evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts",
+      "gate 2 — shared gates verified on a real host — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8c — CLOSED — evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts",
+      "gate 3 — accounting-probe spend authorization — authorization, required for accounting-probe (not consulted for oauth-pilot), owner the human budget owner — OPEN — note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub",
+      "gate 4 — evaluation spend authorization — authorization, required for evaluation (not consulted for oauth-pilot), owner the human budget owner — OPEN",
+      "gate 5 — worktree identity — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8b — CLOSED — evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts",
+      "gate 6 — production Tools wiring — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8b — CLOSED — evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts",
+      "gate 7 — OAuth attempt accounting — engineering, required for evaluation on route oauth (not consulted for oauth-pilot), owner story 2-8c3b — OPEN — note: story 2-8c3b's zero-bill probe, ablation/evidence/oauth-attempts-2026-09-25.json: both registries, the anthropic and copilot attempts, the seeded refusal, the hang and the persistent 500 HOLD; openai is UNPROBED, so the gate stays OPEN",
+      "gate 8 — OAuth pilot spend authorization — authorization, required for oauth-pilot on route oauth, owner the human budget owner — CLOSED — evidence: the human budget owner authorized one run on 2026-09-28, in the session, accepting the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402): at most 2 admitted attempts of \"Reply with the word ok.\" to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with no upper bound on physical requests, side requests or subscription quota. The review channel had declined to authorize it in the owner's place for that reason; the owner decided directly. Tests: ablation/paired-gates.test.ts"
+    ],
+    "problems": [],
+    "blob": "ce7912533246f4f5d9972ef170480db8dd8b3798"
+  },
+  "sandbox": {
+    "ok": true,
+    "control": "unsandboxed TCP connect to 1.1.1.1:443, no byte sent: connected",
+    "loopback": "connected",
+    "external": [
+      {
+        "target": "1.1.1.1:443",
+        "outcome": "refused: ECONNREFUSED"
+      },
+      {
+        "target": "https://example.com/",
+        "outcome": "refused: ConnectionRefused"
+      }
+    ],
+    "why": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused",
+    "profile": "(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))(allow network-outbound (remote unix-socket))"
+  },
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "matchesMeasuredHost": true,
+    "environmentKeys": [
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "OPENCODE_CONFIG",
+      "OPENCODE_DISABLE_MODELS_FETCH",
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "PATH",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "generatedConfig": {
+      "$schema": "https://opencode.ai/config.json",
+      "autoupdate": false,
+      "share": "disabled",
+      "plugin": [
+        "file://<scratch>/mad-managed-host-P0i6vS/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"
+      ],
+      "enabled_providers": [
+        "openai"
+      ],
+      "model": "openai/gpt-6-luna",
+      "small_model": "openai/gpt-6-luna"
+    },
+    "reportedConfig": "not recorded in the live run; the managed host verified it against `generatedConfig` before any client call",
+    "payload": {
+      "anthropicAuth": {
+        "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+        "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+        "entries": 3669
+      },
+      "configSeed": {
+        "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+        "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+        "entries": 3654
+      },
+      "catalogueSha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    }
+  },
+  "hostStart": "process 68741 started and verified",
+  "hostStartAtMs": 8058,
+  "route": {
+    "enabled_providers": [
+      "openai"
+    ],
+    "model": "openai/gpt-6-luna",
+    "small_model": "openai/gpt-6-luna",
+    "prompt": "Reply with the word ok.",
+    "tools": {
+      "*": false,
+      "StructuredOutput": true
+    },
+    "turnTimeoutMs": 120000,
+    "maxAdmittedAttempts": 2,
+    "dataDir": "<data-dir>"
+  },
+  "journal": {
+    "root": "<out>/journal",
+    "seededAttempts": 8,
+    "lines": [
+      {
+        "type": "issued",
+        "physicalId": "request-1",
+        "category": "blocks",
+        "block": 1,
+        "phase": "prefix",
+        "stage": "discover",
+        "slot": "discovery-1",
+        "attempt": 1,
+        "runId": "oauth-pilot-live",
+        "mode": "attempts"
+      },
+      {
+        "type": "settled",
+        "physicalId": "request-1",
+        "settlement": {
+          "kind": "usage",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      }
+    ],
+    "problems": []
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "askedAtMs": 14700,
+      "admittedAtMs": 14703,
+      "settledAtMs": 15881,
+      "answered": false,
+      "failure": "model-error",
+      "threw": false,
+      "settlement": {
+        "kind": "usage",
+        "hostReportedTokensUnverified": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      },
+      "settleError": null,
+      "cleanupUnresolved": false
+    }
+  ],
+  "anyAttemptAnswered": false,
+  "thirdAdmission": {
+    "asked": false,
+    "refusal": null,
+    "backendCalls": 0,
+    "why": "not asked: the pilot stopped, and nothing further is admitted"
+  },
+  "backendCalls": 1,
+  "stop": {
+    "reason": "attempt 1 ended in an error (model-error)",
+    "after": "attempt 1"
+  },
+  "firstAskedAtMs": 14700,
+  "proxy": {
+    "allowedToTunnel": [
+      "chatgpt.com:443",
+      "auth.openai.com:443"
+    ],
+    "stopRuleAllows": [
+      "chatgpt.com:443",
+      "auth.openai.com:443"
+    ],
+    "connects": [
+      {
+        "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1",
+        "target": "api.githubcopilot.com:443",
+        "outcome": "refused",
+        "atMs": 14604,
+        "window": "before the first admission was asked",
+        "stopRule": "copilot-startup"
+      },
+      {
+        "line": "CONNECT api.githubcopilot.com:443 HTTP/1.1",
+        "target": "api.githubcopilot.com:443",
+        "outcome": "refused",
+        "atMs": 14674,
+        "window": "before the first admission was asked",
+        "stopRule": "copilot-startup"
+      },
+      {
+        "line": "CONNECT auth.openai.com:443 HTTP/1.1",
+        "target": "auth.openai.com:443",
+        "outcome": "tunnelled",
+        "atMs": 15642,
+        "window": "attempt 1",
+        "stopRule": "allowed-host"
+      }
+    ],
+    "afterStop": []
+  },
+  "sandboxDenials": {
+    "ok": true,
+    "source": "`/usr/bin/log show --style ndjson --predicate 'sender == \"Sandbox\" AND eventMessage CONTAINS \"network-outbound\"'` over the host's run, 3000 ms after its exit, with 2000 ms each side",
+    "entries": []
+  },
+  "storeGuardAndSymlink": {
+    "beforeSpawn": "held: the managed host spawns only after the payload digests, the auth symlink, the data directory's shape and disjointness and the store guard pass",
+    "hostStop": "process 68741 exited (status 143) after SIGTERM",
+    "postStop": {
+      "held": [
+        "`<data-dir>/opencode/auth.json` is still a symlink to `<home>/.local/share/opencode/auth.json`",
+        "the seeded config lock is unchanged (sha256 c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3)",
+        "the seeded config tree is unchanged but for the host's own `.gitignore` (digest ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151)",
+        "the OAuth store is empty: `<data-dir>/opencode/opencode.db`: session=0, message=0, part=0, permission=0, credential=0, account=0, account_state=0, control_account=0 (every named table empty; counted by SELECT COUNT(*) on a read-only connection)"
+      ],
+      "problems": []
+    }
+  },
+  "authTarget": {
+    "observed": "<home>/.local/share/opencode/auth.json by lstat and stat; never opened",
+    "flags": {
+      "lstat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      },
+      "stat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      }
+    }
+  },
+  "findings": [
+    {
+      "id": "S1",
+      "text": "1 attempt(s) admitted; none returned a model answer; journal settlements: attempt 1 `usage`; stopped after attempt 1: attempt 1 ended in an error (model-error)"
+    },
+    {
+      "id": "C1",
+      "text": "with `enabled_providers: [\"openai\"]`, the proxy observed 2 CONNECT(s) to api.githubcopilot.com:443, the first at 14604 ms (before the first admission was asked); 2 before the first admission was asked, refused and recorded as the expected startup event, which does not stop the pilot; 0 after it, which stop the pilot. This is bounded to what this run's proxy observed: a connection that does not use the proxy is not seen by it; the sandbox denials are listed separately"
+    },
+    {
+      "id": "E1",
+      "text": "proxy-observed CONNECTs: 3, to api.githubcopilot.com:443 (refused), auth.openai.com:443 (tunnelled); sandbox denials the unified log reported over the host's window: 0, each counted against the host's process tree (0 naming the host's own process). Neither is a complete census of direct connections"
+    },
+    {
+      "id": "A1",
+      "text": "proxy-observed CONNECTs to an allowed host before the first admission was asked: 0; after the last settled line: 0. The third admission: not asked: the pilot stopped, and nothing further is admitted, backend calls 0"
+    }
+  ],
+  "scope": [
+    "one run, on this machine, opencode 1.18.32 (binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e); not every host, build, account or failure",
+    "a change in the auth target's metadata shows file activity during the live interval, not necessarily a refresh caused by the host; unchanged metadata proves neither that no write happened nor where a refresh went",
+    "an admitted attempt bounds neither the physical requests the host sends nor subscription quota"
+  ],
+  "status": "FAILED",
+  "incomplete": "the pilot stopped after attempt 1: attempt 1 ended in an error (model-error); 1 attempt(s) ran; both must answer and settle `usage`; the third admission: not asked: the pilot stopped, and nothing further is admitted",
+  "failures": [
+    "the pilot stopped after attempt 1: attempt 1 ended in an error (model-error)",
+    "1 attempt(s) ran; both must answer and settle `usage`",
+    "the third admission: not asked: the pilot stopped, and nothing further is admitted"
+  ]
+}
