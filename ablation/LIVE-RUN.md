@@ -851,7 +851,7 @@ refused.
 5. **worktree identity — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the handed --directory is proved to be exactly the sealed labelled change before the coin toss. Evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts.
 6. **production Tools wiring — CLOSED.** Engineering, required for evaluation. Owner: story 2-8b. Requires: the run drives the production Tools port with its shipped blame deadlines. Evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts.
 7. **OAuth attempt accounting — OPEN.** Engineering, required for evaluation on the oauth route only. Owner: story 2-8c3b. Requires: story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d starts. Never closed from the paid paired evaluation. Consulted only with `--provider-mode oauth`; printed and not consulted for the api-key route. Note: The zero-bill OAuth probe (ablation/evidence/oauth-attempts-2026-09-25.json) covered Anthropic and Copilot but left OpenAI unprobed. The authorized live pilot (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped after one journaled attempt returned model-error without an answer; no chatgpt.com CONNECT was proxy-observed, the second attempt did not run, and the third admission was not asked. A later non-billing inspection of the host database WAL found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). OpenAI attempt accounting is not established, so this gate stays OPEN.
-8. **OAuth pilot spend authorization — OPEN.** Authorization, required for oauth-pilot on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes one run of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402; `--live` refuses if the file differs). One run only: `--live` creates ablation/evidence/oauth-pilot-live.reservation exclusively before it touches a host, the auth target, the data directory or the network, and refuses while it exists or live evidence (ablation/evidence/oauth-pilot-live-*.json) is present; nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7. Printed, and not consulted by this launcher; `bun run oauth-pilot --live` consults it alone. No story closes it. Note: The budget owner authorized one live OAuth pilot run on 2026-09-28. That run is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED), with its committed reservation at ablation/evidence/oauth-pilot-live.reservation. The one-run authorization is spent; no further live run is authorized.
+8. **OAuth pilot spend authorization — OPEN.** Authorization, required for oauth-pilot on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes run 2 (`OAUTH_PILOT_RUN`, story 2-8c7) of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5; `--live` refuses if the file differs). One run only: `--live` creates ablation/evidence/oauth-pilot-live-run-2.reservation exclusively before it touches a host, the auth target, the data directory or the network, and refuses while it exists, while an earlier run's committed reservation or evidence is missing, changed or malformed, or while any other oauth-pilot-live* file is committed, untracked or in ablation/evidence; nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7. Printed, and not consulted by this launcher; `bun run oauth-pilot --live` consults it alone. No story closes it. Note: The budget owner authorized run 1 on 2026-09-28. It is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED: attempt 1 returned model-error without an answer and no further attempt ran), with its committed reservation at ablation/evidence/oauth-pilot-live.reservation; a later non-billing inspection of the host database WAL found a token-refresh 401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). That authorization is spent. Run 2 is not authorized while this gate is OPEN.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
 `PAIRED_GATES`. The adversarial suite's prerequisites, and their 400,000-token allowance, are that
@@ -1537,26 +1537,46 @@ that `ablation/paired-gates.ts` is HEAD's blob and that `gatePreflight(PAIRED_GA
 passes: gate 8, "OAuth pilot spend authorization", owned by the human budget owner, must be CLOSED. No
 flag, variable or file can authorize it. With gate 8 OPEN it exits 1 naming gate 8. Gate 8
 follows gate 3's pattern: it is required only for its own phase, never consulted for the evaluation, and
-it never stands in for gate 4. **Gate 8 authorizes one run.** Once every refusal below has passed, and
-before any host, auth-target stat, data-directory open or network connection, `--live` creates the
-reservation `ablation/evidence/oauth-pilot-live.reservation` exclusively (`O_CREAT|O_EXCL`), so of two
-concurrent invocations only one can create it and the other refuses. It records when it was created, the
-gate table's blob, the pinned proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE
-evidence included, records it too. **Nothing deletes it**, not after a failure and not after an
-interruption: while it exists, every further `--live` refuses, whatever `--out` it names. A further run
-needs the human's explicit decision, and the budget owner re-opens gate 8 after the run; the committed
-live evidence, `ablation/evidence/oauth-pilot-live-<date>.json`, refuses a further run as well.
-`--live` refuses, before the same touches, when:
+it never stands in for gate 4. **Gate 8 authorizes one run.** Which run is committed beside the gate:
+`OAUTH_PILOT_RUN` in `ablation/paired-gates.ts` names run 2 (story 2-8c7) and lists every earlier run
+with its reservation, its evidence and the proposal sha256 both record. The committed-table check makes
+it reviewed authority; no flag, environment variable, file or date names a run, and the command line takes
+none. Run N from 2 on owns the reservation
+`ablation/evidence/oauth-pilot-live-run-N.reservation` and the committed evidence
+`ablation/evidence/oauth-pilot-live-run-N-<date>.json`. Whichever file the run wrote in `--out`,
+`oauth-pilot.json`, or `oauth-pilot.INCOMPLETE.json` when it did not exit 0, is the one committed as
+`ablation/evidence/oauth-pilot-live-run-2-<date>.json`, as run 1's INCOMPLETE file was committed under
+its legacy name. **Run 1 is the migration case:** it ran on
+2026-09-28, before runs were numbered, and its files keep their legacy names,
+`ablation/evidence/oauth-pilot-live.reservation` and `ablation/evidence/oauth-pilot-live-2026-09-28.json`.
+They are listed in `OAUTH_PILOT_RUN.prior`, checked for provenance, never moved and never ignored. Once
+every refusal below has passed, and before any host, auth-target stat, data-directory open or network
+connection, `--live` creates run 2's reservation `ablation/evidence/oauth-pilot-live-run-2.reservation`
+exclusively (`O_CREAT|O_EXCL`), so of two concurrent invocations only one can create it and the other
+refuses. It records the run, `story: "2-8c7"`, when it was created, the gate table's blob, the pinned
+proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE evidence included, records it
+too. **Nothing deletes it**, not after a failure and not after an interruption: a failed or interrupted
+run consumes the authorization, and while it exists every further `--live` refuses, whatever `--out` it
+names. A further run needs the human's explicit decision, and the budget owner re-opens gate 8 after the
+run. None of these checks reads, stats or hashes `auth.json`. `--live` refuses, before the same touches,
+when:
 
 - `ablation/paired-gates.ts` differs from HEAD, or gate 8 is not CLOSED in it;
-- the reservation `ablation/evidence/oauth-pilot-live.reservation` exists, committed or not, or cannot be
-  created;
-- `ablation/evidence` exists but cannot be read;
 - the exposure document `_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md`
-  is missing, or its sha256 differs from the one gate 8 pins (`OAUTH_PILOT_PROPOSAL`): the proposal
-  changed after authorization;
-- a live run's evidence (`ablation/evidence/oauth-pilot-live-*.json`) is committed, or lies in the tree
-  uncommitted, or `git ls-tree` cannot say;
+  is missing, uncommitted or differs from HEAD, or its sha256 differs from the one gate 8 pins
+  (`OAUTH_PILOT_PROPOSAL`): the proposal changed after authorization;
+- `OAUTH_PILOT_RUN.run` is not an integer of at least 2, or `prior` is not exactly runs 1 to run − 1 under
+  their own names: a reused run, a gap or a duplicate;
+- a prior run's reservation or evidence is missing, uncommitted, modified, not JSON, or has the wrong
+  shape: a reservation whose `proposalSha256` differs from the one `OAUTH_PILOT_RUN` records for it, or
+  an evidence file whose `reservation.proposalSha256` differs. The digest and the story are compared,
+  never the two reservation objects whole, since the evidence redacts `out`;
+- run 2's reservation or evidence (`ablation/evidence/oauth-pilot-live-run-2-*.json`) is committed,
+  untracked or in `ablation/evidence` (ignored included): run 2 already reserved or ran;
+- any other `oauth-pilot-live*` file is committed anywhere, untracked anywhere or in `ablation/evidence`:
+  an unaccounted live file;
+- git cannot list HEAD or the untracked files, or `ablation/evidence` exists but cannot be read;
+- run 2's reservation cannot be created;
 - `--out` already holds `oauth-pilot.json` or `oauth-pilot.INCOMPLETE.json`, or is not empty (a reused
   `--out`, journal included, is refused, never overwritten);
 - `--out` overlaps the pilot's scratch directory, the data directory or `--oauth-prepared`, or

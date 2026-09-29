@@ -35,6 +35,14 @@
  * No story closes them, and the completion of this story or any other is not
  * authorization.
  *
+ * ## Which OAuth pilot run gate 8 authorizes (story 2-8c7)
+ *
+ * `OAUTH_PILOT_RUN` names the one run gate 8 covers and every earlier run, with
+ * the files each one left. It lives in this table, never in a flag, a variable or
+ * a date, so the committed-table check makes the run's identity reviewed
+ * authority: no flag, environment variable, file or date names a run, and the
+ * command line takes none.
+ *
  * AD-1: this tree may import from `core/` and `fixtures/`. Nothing under `core/`
  * imports it.
  */
@@ -80,8 +88,60 @@ export const HUMAN_BUDGET_OWNER = "the human budget owner"
  */
 export const OAUTH_PILOT_PROPOSAL = {
   path: "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md",
-  sha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+  sha256: "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
 } as const
+
+/** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
+export interface OAuthPilotPriorRun {
+  run: number
+  /** Its reservation, relative to the repository. */
+  reservation: string
+  /** Its committed evidence, relative to the repository. */
+  evidence: string
+  /** The proposal sha256 its reservation and its evidence record. */
+  proposalSha256: string
+}
+
+/** Story 2-8c7 — the live OAuth pilot run gate 8 authorizes, and every run before it, in order. */
+export interface OAuthPilotRun {
+  run: number
+  prior: readonly OAuthPilotPriorRun[]
+}
+
+/** Where a live pilot's reservation and committed evidence live. */
+export const OAUTH_PILOT_EVIDENCE_DIR = "ablation/evidence"
+
+/**
+ * Run 1's reservation. Run 1 predates run numbers, so its names carry none: a
+ * migration case, listed in `OAUTH_PILOT_RUN.prior` and never renamed.
+ */
+export const OAUTH_PILOT_RUN_1_RESERVATION = `${OAUTH_PILOT_EVIDENCE_DIR}/oauth-pilot-live.reservation`
+
+/** Run N's reservation, for N ≥ 2; run 1's is `OAUTH_PILOT_RUN_1_RESERVATION`. */
+export function oauthPilotReservation(run: number): string {
+  return run === 1 ? OAUTH_PILOT_RUN_1_RESERVATION : `${OAUTH_PILOT_EVIDENCE_DIR}/oauth-pilot-live-run-${run}.reservation`
+}
+
+/** Run N's committed evidence file name, for N ≥ 2: `oauth-pilot-live-run-N-<date>.json`. Run 1's is `oauth-pilot-live-<date>.json`. */
+export function oauthPilotEvidencePattern(run: number): RegExp {
+  return run === 1 ? /^oauth-pilot-live-\d{4}-\d{2}-\d{2}\.json$/ : new RegExp(`^oauth-pilot-live-run-${run}-\\d{4}-\\d{2}-\\d{2}\\.json$`)
+}
+
+/**
+ * Story 2-8c7 — the run gate 8 authorizes. Run 1 ran on 2026-09-28 and failed at
+ * attempt 1; its reservation and evidence are committed under their legacy names.
+ */
+export const OAUTH_PILOT_RUN: OAuthPilotRun = {
+  run: 2,
+  prior: [
+    {
+      run: 1,
+      reservation: "ablation/evidence/oauth-pilot-live.reservation",
+      evidence: "ablation/evidence/oauth-pilot-live-2026-09-28.json",
+      proposalSha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+    },
+  ],
+}
 
 export const PAIRED_GATES: readonly PairedGate[] = [
   {
@@ -212,17 +272,20 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
     requires:
-      "the budget owner authorizes one run of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to " +
-      `openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in ${OAUTH_PILOT_PROPOSAL.path} ` +
-      `(sha256 ${OAUTH_PILOT_PROPOSAL.sha256}; \`--live\` refuses if the file differs). One run only: \`--live\` creates ` +
-      "ablation/evidence/oauth-pilot-live.reservation exclusively before it touches a host, the auth target, the data directory " +
-      "or the network, and refuses while it exists or live evidence (ablation/evidence/oauth-pilot-live-*.json) is present; " +
-      "nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never " +
-      "stands in for gate 4 or closes gate 7",
+      `the budget owner authorizes run ${OAUTH_PILOT_RUN.run} (\`OAUTH_PILOT_RUN\`, story 2-8c7) of story 2-8c5's \`bun run oauth-pilot --live\`: ` +
+      "at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in " +
+      `${OAUTH_PILOT_PROPOSAL.path} (sha256 ${OAUTH_PILOT_PROPOSAL.sha256}; \`--live\` refuses if the file differs). One run only: ` +
+      `\`--live\` creates ${oauthPilotReservation(OAUTH_PILOT_RUN.run)} exclusively before it touches a host, the auth target, the data ` +
+      "directory or the network, and refuses while it exists, while an earlier run's committed reservation or evidence is missing, " +
+      "changed or malformed, or while any other oauth-pilot-live* file is committed, untracked or in ablation/evidence; nothing " +
+      "deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests " +
+      "the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7",
     note:
-      "The budget owner authorized one live OAuth pilot run on 2026-09-28. That run is recorded in " +
-      "ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED), with its committed reservation at " +
-      "ablation/evidence/oauth-pilot-live.reservation. The one-run authorization is spent; no further live run is authorized",
+      "The budget owner authorized run 1 on 2026-09-28. It is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json " +
+      "(FAILED: attempt 1 returned model-error without an answer and no further attempt ran), with its committed reservation at " +
+      "ablation/evidence/oauth-pilot-live.reservation; a later non-billing inspection of the host database WAL found a token-refresh " +
+      "401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). That authorization is spent. Run 2 is not " +
+      "authorized while this gate is OPEN",
   },
 ]
 

@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -20,7 +20,7 @@ import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type PairedJournal } from "../ablation/journal.ts"
 import type { ManagedHostStart, StopOutcome } from "../ablation/managed-host.ts"
 import type { PreparedMeasure } from "../ablation/oauth-payload.ts"
-import { HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotReservation, PAIRED_GATES, type OAuthPilotRun, type PairedGate } from "../ablation/paired-gates.ts"
 import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import type { RosterSlot } from "../core/domain/roster.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
@@ -31,11 +31,11 @@ import {
   authorize,
   denialEntries,
   LIVE_EVIDENCE_DIR,
-  LIVE_RESERVATION,
   logTimestamp,
   managedPilotHost,
   oneRunProblems,
   reserveLiveRun,
+  runIdentityProblems,
   type HostStarters,
   BEFORE_FIRST_ASK,
   connectRule,
@@ -690,6 +690,29 @@ async function captured<T>(run: () => Promise<T>): Promise<{ value: T; err: stri
 }
 
 describe("the live run is refused unless gate 8 is CLOSED in the committed table", () => {
+  test("the shipped tree (the real table, this repository, the default git): exit 1, with no host, stat, connection or reservation change", async () => {
+    const root = await temp()
+    const touched: string[] = []
+    const reservation = new URL(`../${oauthPilotReservation(OAUTH_PILOT_RUN.run)}`, import.meta.url).pathname
+    const snapshot = async () => (existsSync(reservation) ? await readFile(reservation) : null)
+    const before = await snapshot()
+    const { value, err } = await captured(() =>
+      main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(root, "data"), "--oauth-prepared", join(root, "prepared"), "--out", join(root, "out")], {
+        ...tripwires(touched),
+        // "linux", never "darwin": the platform refusal comes before `--out` and the reservation, so even with
+        // gate 8 CLOSED for run 2 this test can never create the real reservation and spend the authorization.
+        platform: "linux",
+      }),
+    )
+    expect(value).toBe(1)
+    expect(touched).toEqual([])
+    expect(existsSync(join(root, "out"))).toBe(false)
+    const eight = PAIRED_GATES.find((gate) => gate.number === 8)!
+    expect(err).toContain(eight.status === "OPEN" ? "REFUSED: gate 8 (OAuth pilot spend authorization) is OPEN" : "REFUSED")
+    const after = await snapshot()
+    expect(after === null ? null : after.toString("base64")).toBe(before === null ? null : before.toString("base64"))
+  })
+
   test("with gate 8 OPEN: exit 1 naming gate 8 OPEN, before any host, stat, data-directory open or connection", async () => {
     const root = await temp()
     const out = join(root, "out")
@@ -1181,15 +1204,22 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
   })
 
   describe("the durable one-run reservation", () => {
-    const reservationAt = (repoRoot: string) => join(repoRoot, LIVE_RESERVATION)
+    const reservationAt = (repoRoot: string) => join(repoRoot, RUN_2_RESERVATION)
 
-    test("a first run creates the reservation, recording its time, the gate table's blob, the pinned proposal and --out; the evidence records it", async () => {
-      const run = await liveRun({ backend: scriptedBackend([answer, answer]) })
+    test("an authorized run creates run 2's reservation, recording the run, its time, the gate table's blob, the pinned proposal and --out; the evidence records it; run 1's files are untouched", async () => {
+      const repoRoot = await liveRepo()
+      const priorFiles = OAUTH_PILOT_RUN.prior.flatMap((prior) => [prior.reservation, prior.evidence])
+      const before = await Promise.all(priorFiles.map((path) => readFile(join(repoRoot, path))))
+      const run = await liveRun({ backend: scriptedBackend([answer, answer]), repoRoot })
       expect(run.value).toBe(0)
+      expect(run.requests).toHaveLength(1)
       const written = JSON.parse(await readFile(reservationAt(run.repoRoot), "utf8")) as Record<string, unknown>
-      expect(written).toMatchObject({ story: "2-8c5", gateTableBlob: "committed", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out: run.out })
+      expect(written).toMatchObject({ run: 2, story: "2-8c7", gateTableBlob: "committed", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out: run.out })
       expect(Date.parse(written.createdAt as string)).not.toBeNaN()
-      expect(run.evidence!.reservation).toMatchObject({ proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out: "<out>" })
+      expect(run.evidence!.reservation).toMatchObject({ run: 2, story: "2-8c7", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out: "<out>" })
+      const after = await Promise.all(priorFiles.map((path) => readFile(join(repoRoot, path))))
+      for (const [index, bytes] of after.entries()) expect(bytes.equals(before[index]!), priorFiles[index]).toBe(true)
+      expect(await readFile(join(repoRoot, OAUTH_PILOT_RUN.prior[0]!.reservation))).toEqual(await readFile(join(REPO, OAUTH_PILOT_RUN.prior[0]!.reservation)))
     })
 
     test("a second run with a different --out refuses before any host, stat, proxy or data-directory touch", async () => {
@@ -1209,17 +1239,20 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
       expect(value).toBe(1)
       expect(touched).toEqual([])
       expect(existsSync(join(root, "second-out"))).toBe(false)
-      expect(err).toContain(`REFUSED: the live reservation \`${LIVE_RESERVATION}\` exists`)
+      expect(err).toContain(`REFUSED: run 2's reservation \`${RUN_2_RESERVATION}\` already exists (`)
     })
 
-    test("a reservation left by a failed or interrupted run, committed or not, refuses", async () => {
+    test("run 2's reservation left by a failed or interrupted run, committed, untracked or ignored, refuses", async () => {
       const uncommitted = await liveRepo()
-      await writeFile(reservationAt(uncommitted), '{"story":"2-8c5","note":"an interrupted run"}\n')
-      const committedRoot = await liveRepo(async (dir) => writeFile(join(dir, LIVE_RESERVATION), "{}\n"))
+      await writeFile(reservationAt(uncommitted), '{"run":2,"story":"2-8c7","note":"an interrupted run"}\n')
+      const committedRoot = await liveRepo(async (dir) => writeFile(join(dir, RUN_2_RESERVATION), "{}\n"))
       await rm(reservationAt(committedRoot))
+      const ignored = await liveRepo(async (dir) => writeFile(join(dir, ".gitignore"), `/${RUN_2_RESERVATION}\n`))
+      await writeFile(reservationAt(ignored), "{}\n")
       for (const [repoRoot, expected] of [
-        [uncommitted, `the live reservation \`${LIVE_RESERVATION}\` exists`],
-        [committedRoot, `the live reservation \`${LIVE_RESERVATION}\` is committed`],
+        [uncommitted, `run 2's reservation \`${RUN_2_RESERVATION}\` already exists (untracked, in ablation/evidence)`],
+        [committedRoot, `run 2's reservation \`${RUN_2_RESERVATION}\` already exists (committed)`],
+        [ignored, `run 2's reservation \`${RUN_2_RESERVATION}\` already exists (in ablation/evidence)`],
       ] as const) {
         const root = await temp()
         const touched: string[] = []
@@ -1247,10 +1280,13 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
       expect([a.value, b.value].sort()).toEqual([0, 1])
       const loser = a.value === 1 ? a : b
       const winner = a.value === 0 ? a : b
-      expect(loser.err).toMatch(/REFUSED: the live reservation `ablation\/evidence\/oauth-pilot-live\.reservation` (already exists: another `--live` reserved gate 8's one run first|exists)/)
+      // Both runs spy on the same console concurrently, so a refusal may land in either capture.
+      expect(`${a.err}\n${b.err}`).toMatch(/REFUSED: run 2's reservation `ablation\/evidence\/oauth-pilot-live-run-2\.reservation` already exists/)
       expect(loser.requests).toEqual([])
       expect(loser.stats).toEqual([])
-      const written = JSON.parse(await readFile(join(repoRoot, LIVE_RESERVATION), "utf8")) as { out: string }
+      expect(loser.proxies).toEqual([])
+      const written = JSON.parse(await readFile(join(repoRoot, RUN_2_RESERVATION), "utf8")) as { out: string; run: number }
+      expect(written.run).toBe(2)
       expect(written.out).toBe(winner.out)
     })
 
@@ -1385,13 +1421,20 @@ console.log(JSON.stringify(out))
 // ---------------------------------------------------------------------------
 
 const PROPOSAL_SOURCE = new URL(`../${OAUTH_PILOT_PROPOSAL.path}`, import.meta.url).pathname
+/** This repository, whose committed run-1 files the fixtures copy. */
+const REPO = new URL("../", import.meta.url).pathname
+const RUN_2_RESERVATION = oauthPilotReservation(OAUTH_PILOT_RUN.run)
+const RUN_1 = OAUTH_PILOT_RUN.prior[0]!
 
 function git(cwd: string, ...args: string[]): void {
   const result = Bun.spawnSync(["git", "-c", "user.name=pilot-test", "-c", "user.email=pilot-test@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
   if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr.toString()}`)
 }
 
-/** A temp repository holding a copy of the pinned exposure document, with one commit. */
+/**
+ * A temp repository holding copies of the pinned exposure document and of run 1's
+ * committed reservation and evidence, with one commit; `setup` runs before it.
+ */
 async function liveRepo(setup: (root: string) => Promise<void> = async () => undefined): Promise<string> {
   const root = await temp()
   git(root, "init", "-q")
@@ -1399,6 +1442,9 @@ async function liveRepo(setup: (root: string) => Promise<void> = async () => und
   await writeFile(join(root, OAUTH_PILOT_PROPOSAL.path), await readFile(PROPOSAL_SOURCE))
   await mkdir(join(root, LIVE_EVIDENCE_DIR), { recursive: true })
   await writeFile(join(root, LIVE_EVIDENCE_DIR, "oauth-pilot-dryrun-2026-09-28.json"), "{}\n")
+  for (const prior of OAUTH_PILOT_RUN.prior) {
+    for (const path of [prior.reservation, prior.evidence]) await writeFile(join(root, path), await readFile(join(REPO, path)))
+  }
   await setup(root)
   git(root, "add", "-A")
   git(root, "commit", "-q", "-m", "fixture")
@@ -1507,21 +1553,45 @@ describe("gate 8 authorizes one run", () => {
     const eight = PAIRED_GATES.find((gate) => gate.number === 8)!
     expect(eight.requires).toContain(`(sha256 ${OAUTH_PILOT_PROPOSAL.sha256}; \`--live\` refuses if the file differs)`)
     expect(eight.requires).toContain("the budget owner re-opens this gate after the run")
+    expect(eight.requires).toContain("the budget owner authorizes run 2 (`OAUTH_PILOT_RUN`, story 2-8c7)")
+    expect(eight.requires).toContain(`creates ${RUN_2_RESERVATION} exclusively`)
   })
 
-  async function refusedLive(repoRoot: string, prepareOut?: (out: string) => Promise<void>) {
+  test("the committed run identity is run 2, with run 1's legacy files as its one prior run", () => {
+    expect(OAUTH_PILOT_RUN).toEqual({
+      run: 2,
+      prior: [
+        {
+          run: 1,
+          reservation: "ablation/evidence/oauth-pilot-live.reservation",
+          evidence: "ablation/evidence/oauth-pilot-live-2026-09-28.json",
+          proposalSha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+        },
+      ],
+    })
+    expect(runIdentityProblems(OAUTH_PILOT_RUN)).toEqual([])
+    expect(RUN_2_RESERVATION).toBe("ablation/evidence/oauth-pilot-live-run-2.reservation")
+  })
+
+  async function refusedLive(repoRoot: string, prepareOut?: (out: string) => Promise<void>, pilotRun?: OAuthPilotRun) {
     const root = await temp()
     const out = join(root, "out")
     await prepareOut?.(out)
     const touched: string[] = []
+    const evidenceBefore = await readdir(join(repoRoot, LIVE_EVIDENCE_DIR)).catch(() => [] as string[])
     const run = await captured(() =>
       main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(root, "data"), "--oauth-prepared", join(root, "prepared"), "--out", out], {
         ...tripwires(touched),
         repoRoot,
         gates: closedEight,
         gateTable: async () => ({ ok: true, blob: "committed" }),
+        ...(pilotRun === undefined ? {} : { pilotRun }),
       }),
     )
+    expect(run.value).toBe(1)
+    expect(touched).toEqual([])
+    // No reservation, nor any other file, was created in the evidence directory.
+    expect(await readdir(join(repoRoot, LIVE_EVIDENCE_DIR)).catch(() => [] as string[])).toEqual(evidenceBefore)
     return { ...run, touched, out }
   }
 
@@ -1545,21 +1615,150 @@ describe("gate 8 authorizes one run", () => {
     expect(gone.err).toContain("the exposure document gate 8 pins, could not be read")
   })
 
-  test("a committed live run's evidence refuses a second run", async () => {
-    const root = await liveRepo(async (dir) => writeFile(join(dir, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-01.json"), "{}\n"))
-    await rm(join(root, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-01.json"))
-    const run = await refusedLive(root)
-    expect(run.value).toBe(1)
-    expect(run.touched).toEqual([])
-    expect(run.err).toContain("a live run's evidence is committed (oauth-pilot-live-2026-10-01.json)")
+  test("an undeclared live file, committed (anywhere), untracked or ignored, refuses as unaccounted", async () => {
+    const committed = await liveRepo(async (dir) => {
+      await writeFile(join(dir, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-01.json"), "{}\n")
+      await mkdir(join(dir, "docs"), { recursive: true })
+      await writeFile(join(dir, "docs", "oauth-pilot-live-copy.json"), "{}\n")
+    })
+    await rm(join(committed, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-01.json"))
+    const one = await refusedLive(committed)
+    expect(one.err).toContain("`ablation/evidence/oauth-pilot-live-2026-10-01.json` (committed) is an unaccounted live pilot file")
+    expect(one.err).toContain("`docs/oauth-pilot-live-copy.json` (committed) is an unaccounted live pilot file")
+    const untracked = await liveRepo()
+    await writeFile(join(untracked, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-02.json"), "{}\n")
+    await writeFile(join(untracked, "oauth-pilot-live-run-3.reservation"), "{}\n")
+    const two = await refusedLive(untracked)
+    expect(two.err).toContain("`ablation/evidence/oauth-pilot-live-2026-10-02.json` (untracked, in ablation/evidence) is an unaccounted live pilot file")
+    expect(two.err).toContain("`oauth-pilot-live-run-3.reservation` (untracked) is an unaccounted live pilot file")
+    const ignored = await liveRepo(async (dir) => writeFile(join(dir, ".gitignore"), "/ablation/evidence/*.tmp\n"))
+    await writeFile(join(ignored, LIVE_EVIDENCE_DIR, "oauth-pilot-live-scratch.tmp"), "x")
+    const three = await refusedLive(ignored)
+    expect(three.err).toContain("`ablation/evidence/oauth-pilot-live-scratch.tmp` (in ablation/evidence) is an unaccounted live pilot file")
   })
 
-  test("an uncommitted live run's evidence in the tree refuses too", async () => {
+  test("run 2's evidence, committed or in the tree, refuses: run 2 has already run", async () => {
+    const name = "oauth-pilot-live-run-2-2026-10-01.json"
+    const committed = await liveRepo(async (dir) => writeFile(join(dir, LIVE_EVIDENCE_DIR, name), "{}\n"))
+    expect((await refusedLive(committed)).err).toContain(`run 2's evidence \`${LIVE_EVIDENCE_DIR}/${name}\` already exists (committed, in ablation/evidence): run 2 has already run`)
+    const untracked = await liveRepo()
+    await writeFile(join(untracked, LIVE_EVIDENCE_DIR, name), "{}\n")
+    expect((await refusedLive(untracked)).err).toContain(`run 2's evidence \`${LIVE_EVIDENCE_DIR}/${name}\` already exists (untracked, in ablation/evidence)`)
+  })
+
+  test("run 1's reservation or evidence missing, uncommitted, edited or malformed: exit 1 naming the file and why", async () => {
+    const missing = await liveRepo()
+    await rm(join(missing, RUN_1.reservation))
+    expect((await refusedLive(missing)).err).toContain(`REFUSED: run 1's reservation \`${RUN_1.reservation}\` is missing or modified (\` D ${RUN_1.reservation}\`)`)
+
+    const uncommitted = await liveRepo()
+    git(uncommitted, "rm", "-q", "--cached", RUN_1.evidence)
+    git(uncommitted, "commit", "-q", "-m", "uncommit run 1's evidence")
+    expect((await refusedLive(uncommitted)).err).toContain(`REFUSED: run 1's evidence \`${RUN_1.evidence}\` is not committed`)
+
+    const edited = await liveRepo()
+    await writeFile(join(edited, RUN_1.evidence), `${await readFile(join(edited, RUN_1.evidence), "utf8")} `)
+    expect((await refusedLive(edited)).err).toContain(`REFUSED: run 1's evidence \`${RUN_1.evidence}\` is missing or modified (\` M ${RUN_1.evidence}\`)`)
+
+    const notJson = await liveRepo(async (dir) => writeFile(join(dir, RUN_1.reservation), "not json\n"))
+    expect((await refusedLive(notJson)).err).toContain(`REFUSED: run 1's reservation \`${RUN_1.reservation}\` is not JSON`)
+
+    const otherPin = await liveRepo(async (dir) => {
+      const record = JSON.parse(await readFile(join(dir, RUN_1.reservation), "utf8")) as Record<string, unknown>
+      await writeFile(join(dir, RUN_1.reservation), `${JSON.stringify({ ...record, proposalSha256: OAUTH_PILOT_PROPOSAL.sha256 }, null, 2)}\n`)
+    })
+    expect((await refusedLive(otherPin)).err).toContain(`REFUSED: run 1's reservation \`${RUN_1.reservation}\` has the wrong shape: its proposalSha256 is "${OAUTH_PILOT_PROPOSAL.sha256}", not ${RUN_1.proposalSha256}`)
+
+    const evidenceShape = await liveRepo(async (dir) => {
+      const evidence = JSON.parse(await readFile(join(dir, RUN_1.evidence), "utf8")) as Record<string, unknown>
+      await writeFile(join(dir, RUN_1.evidence), `${JSON.stringify({ ...evidence, reservation: { ...(evidence.reservation as object), proposalSha256: "0".repeat(64) } }, null, 2)}\n`)
+    })
+    expect((await refusedLive(evidenceShape)).err).toContain(`REFUSED: run 1's evidence \`${RUN_1.evidence}\` has the wrong shape: its \`reservation.\`proposalSha256 is "${"0".repeat(64)}"`)
+
+    const noReservation = await liveRepo(async (dir) => writeFile(join(dir, RUN_1.evidence), "[]\n"))
+    expect((await refusedLive(noReservation)).err).toContain(`REFUSED: run 1's evidence \`${RUN_1.evidence}\` has the wrong shape: it records no \`reservation\` object`)
+  })
+
+  test("the exposure document uncommitted or differing from HEAD refuses, even with its pinned sha256", async () => {
+    const untracked = await liveRepo()
+    git(untracked, "rm", "-q", "--cached", OAUTH_PILOT_PROPOSAL.path)
+    git(untracked, "commit", "-q", "-m", "uncommit the proposal")
+    const run = await refusedLive(untracked)
+    expect(run.err).toContain(`REFUSED: ${OAUTH_PILOT_PROPOSAL.path} differs from HEAD (\`?? ${OAUTH_PILOT_PROPOSAL.path}\`)`)
+    expect(run.err).toContain(`REFUSED: ${OAUTH_PILOT_PROPOSAL.path} is not committed`)
+    expect(run.err).not.toContain("changed after gate 8 pinned it")
+  })
+
+  test("a reused or gapped run identity refuses before any touch", async () => {
     const root = await liveRepo()
-    await writeFile(join(root, LIVE_EVIDENCE_DIR, "oauth-pilot-live-2026-10-02.json"), "{}\n")
+    const reused = await refusedLive(root, undefined, { run: 1, prior: [] })
+    expect(reused.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 1: run 1 has run and is spent")
+    // A malformed identity names no run of its own, so run 1's files are unaccounted, never "run 1's reservation already exists".
+    expect(reused.err).toContain(`REFUSED: \`${RUN_1.reservation}\` (committed, in ablation/evidence) is an unaccounted live pilot file`)
+    expect(reused.err).not.toContain("already exists")
+    const gap = await refusedLive(root, undefined, { run: 3, prior: [RUN_1] })
+    expect(gap.err).toContain("REFUSED: OAUTH_PILOT_RUN.prior lists runs [1], not exactly runs 1 to 2 before run 3")
+    const duplicate = await refusedLive(root, undefined, { run: 2, prior: [RUN_1, RUN_1] })
+    expect(duplicate.err).toContain("REFUSED: OAUTH_PILOT_RUN.prior lists runs [1, 1], not exactly runs [1]")
+    const renamed = await refusedLive(root, undefined, { run: 2, prior: [{ ...RUN_1, reservation: "ablation/evidence/oauth-pilot-live-run-1.reservation" }] })
+    expect(renamed.err).toContain("OAUTH_PILOT_RUN.prior names run 1's reservation `ablation/evidence/oauth-pilot-live-run-1.reservation`")
+    expect(runIdentityProblems({ run: 2.5, prior: [RUN_1] })).toHaveLength(1)
+    expect(runIdentityProblems({ run: 2 ** 40, prior: [RUN_1] })).toEqual([`OAUTH_PILOT_RUN.prior lists runs [1], not exactly runs 1 to ${2 ** 40 - 1} before run ${2 ** 40}: a gap, a duplicate or a reused run`])
+  })
+
+  test("a fractional run identity through main: exit 1 before any touch, and no own-run names built from it", async () => {
+    const root = await liveRepo()
+    await writeFile(join(root, LIVE_EVIDENCE_DIR, "oauth-pilot-live-run-2x5-2026-10-01.json"), "{}\n")
+    const run = await refusedLive(root, undefined, { run: 2.5, prior: [RUN_1] })
+    expect(run.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 2.5: run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2")
+    expect(run.err).toContain("`ablation/evidence/oauth-pilot-live-run-2x5-2026-10-01.json` (untracked, in ablation/evidence) is an unaccounted live pilot file")
+    expect(existsSync(join(root, "ablation/evidence/oauth-pilot-live-run-2.5.reservation"))).toBe(false)
+  })
+
+  test("a live file matched case-insensitively is unaccounted", async () => {
+    const root = await liveRepo()
+    await writeFile(join(root, LIVE_EVIDENCE_DIR, "OAuth-Pilot-Live-2026-10-01.json"), "{}\n")
     const run = await refusedLive(root)
-    expect(run.value).toBe(1)
-    expect(run.err).toContain(`a live run's evidence is in ${LIVE_EVIDENCE_DIR} (oauth-pilot-live-2026-10-02.json)`)
+    expect(run.err).toContain("REFUSED: `ablation/evidence/OAuth-Pilot-Live-2026-10-01.json` (untracked, in ablation/evidence) is an unaccounted live pilot file")
+  })
+
+  test("run 1's reservation without a story, or evidence recording another story, has the wrong shape", async () => {
+    const noStory = await liveRepo(async (dir) => {
+      const { story: _story, ...rest } = JSON.parse(await readFile(join(dir, RUN_1.reservation), "utf8")) as Record<string, unknown>
+      await writeFile(join(dir, RUN_1.reservation), `${JSON.stringify(rest, null, 2)}\n`)
+    })
+    const one = await refusedLive(noStory)
+    expect(one.err).toContain(`REFUSED: run 1's reservation \`${RUN_1.reservation}\` has the wrong shape: it records no story`)
+    const otherStory = await liveRepo(async (dir) => {
+      const evidence = JSON.parse(await readFile(join(dir, RUN_1.evidence), "utf8")) as Record<string, unknown>
+      await writeFile(join(dir, RUN_1.evidence), `${JSON.stringify({ ...evidence, reservation: { ...(evidence.reservation as object), story: "2-8c9" } }, null, 2)}\n`)
+    })
+    const two = await refusedLive(otherStory)
+    expect(two.err).toContain(`REFUSED: run 1's evidence \`${RUN_1.evidence}\` records the reservation's story "2-8c9", but its reservation records "2-8c5"`)
+  })
+
+  test("a prior run whose evidence lies outside ablation/evidence or is misnamed, or whose sha256 is not 64 hex characters, refuses", async () => {
+    const root = await liveRepo()
+    const outside = await refusedLive(root, undefined, { run: 2, prior: [{ ...RUN_1, evidence: "docs/oauth-pilot-live-2026-09-28.json" }] })
+    expect(outside.err).toContain("REFUSED: OAUTH_PILOT_RUN.prior names run 1's evidence `docs/oauth-pilot-live-2026-09-28.json`, which is not run 1's evidence name in ablation/evidence")
+    const misnamed = await refusedLive(root, undefined, { run: 2, prior: [{ ...RUN_1, evidence: "ablation/evidence/oauth-pilot-live-run-1-2026-09-28.json" }] })
+    expect(misnamed.err).toContain("REFUSED: OAUTH_PILOT_RUN.prior names run 1's evidence `ablation/evidence/oauth-pilot-live-run-1-2026-09-28.json`, which is not run 1's evidence name in ablation/evidence")
+    const shortSha = await refusedLive(root, undefined, { run: 2, prior: [{ ...RUN_1, proposalSha256: "1245e113" }] })
+    expect(shortSha.err).toContain("REFUSED: OAUTH_PILOT_RUN.prior records no sha256 for run 1's proposal")
+  })
+
+  test("a prior run 2 whose committed reservation or evidence records another run refuses", async () => {
+    const run2 = { run: 2, reservation: RUN_2_RESERVATION, evidence: `${LIVE_EVIDENCE_DIR}/oauth-pilot-live-run-2-2026-10-01.json`, proposalSha256: OAUTH_PILOT_PROPOSAL.sha256 }
+    const reservation = { run: 7, story: "2-8c7", createdAt: "2026-10-01T00:00:00.000Z", gateTableBlob: "b", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out: "/o" }
+    const root = await liveRepo(async (dir) => {
+      await writeFile(join(dir, run2.reservation), `${JSON.stringify(reservation, null, 2)}\n`)
+      await writeFile(join(dir, run2.evidence), `${JSON.stringify({ reservation: { ...reservation, run: 2, out: "<out>" } }, null, 2)}\n`)
+    })
+    const run = await refusedLive(root, undefined, { run: 3, prior: [RUN_1, run2] })
+    expect(run.err).toContain(`REFUSED: run 2's reservation \`${RUN_2_RESERVATION}\` has the wrong shape: its run is 7, not 2`)
+    expect(run.err).not.toContain(`run 2's evidence \`${run2.evidence}\` has the wrong shape`)
+    expect(run.err).not.toContain("unaccounted")
+    expect(existsSync(join(root, oauthPilotReservation(3)))).toBe(false)
   })
 
   test("--out holding an earlier run's evidence, full or partial, refuses", async () => {
@@ -1576,17 +1775,16 @@ describe("gate 8 authorizes one run", () => {
 
   test("reserveLiveRun is exclusive: of eight concurrent creations exactly one succeeds, the rest are refused, and the winner's record stays", async () => {
     const root = await liveRepo()
-    const record = (out: string) => ({ story: "2-8c5" as const, createdAt: new Date().toISOString(), gateTableBlob: "b", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out })
+    const record = (out: string) => ({ run: 2, story: "2-8c7" as const, createdAt: new Date().toISOString(), gateTableBlob: "b", proposalSha256: OAUTH_PILOT_PROPOSAL.sha256, out })
     const results = await Promise.all(Array.from({ length: 8 }, (_, index) => reserveLiveRun(root, record(`/out-${index}`))))
     const won = results.flatMap((result, index) => (result.ok ? [index] : []))
     expect(won).toHaveLength(1)
-    for (const result of results) if (!result.ok) expect(result.why).toContain("already exists: another `--live` reserved gate 8's one run first")
-    expect((JSON.parse(await readFile(join(root, LIVE_RESERVATION), "utf8")) as { out: string }).out).toBe(`/out-${won[0]}`)
+    for (const result of results) if (!result.ok) expect(result.why).toContain("already exists: another `--live` reserved run 2 first")
+    expect((JSON.parse(await readFile(join(root, RUN_2_RESERVATION), "utf8")) as { out: string }).out).toBe(`/out-${won[0]}`)
   })
 
   test("the reservation's path is the one the pinned proposal names", async () => {
-    expect(LIVE_RESERVATION).toBe("ablation/evidence/oauth-pilot-live.reservation")
-    expect(await readFile(PROPOSAL_SOURCE, "utf8")).toContain(`\`${LIVE_RESERVATION}\``)
+    expect(await readFile(PROPOSAL_SOURCE, "utf8")).toContain(`\`${RUN_2_RESERVATION}\``)
   })
 
   test("an evidence directory that exists but cannot be read refuses; a missing one does not", async () => {
@@ -1595,14 +1793,16 @@ describe("gate 8 authorizes one run", () => {
     await chmod(dir, 0o000)
     try {
       const problems = await oneRunProblems(root, join(root, "out"), defaultGitForTest())
-      expect(problems).toEqual([expect.stringContaining(`${LIVE_EVIDENCE_DIR} could not be read (`)])
-      expect(problems[0]).toContain("an earlier live run or its reservation cannot be ruled out")
+      expect(problems).toContainEqual(expect.stringContaining(`${LIVE_EVIDENCE_DIR} could not be read (`))
+      expect(problems.join("\n")).toContain("an earlier live run or its reservation cannot be ruled out")
     } finally {
       await chmod(dir, 0o755)
     }
     const missing = await liveRepo()
     await rm(join(missing, LIVE_EVIDENCE_DIR), { recursive: true })
-    expect(await oneRunProblems(missing, join(missing, "out"), defaultGitForTest())).toEqual([])
+    const gone = await oneRunProblems(missing, join(missing, "out"), defaultGitForTest())
+    expect(gone.join("\n")).not.toContain("could not be read")
+    expect(gone).toContainEqual(expect.stringContaining(`run 1's reservation \`${RUN_1.reservation}\` is missing or modified`))
   })
 
   test("a repository whose git cannot list HEAD refuses", async () => {
@@ -1610,8 +1810,7 @@ describe("gate 8 authorizes one run", () => {
     await mkdir(join(root, OAUTH_PILOT_PROPOSAL.path, ".."), { recursive: true })
     await writeFile(join(root, OAUTH_PILOT_PROPOSAL.path), await readFile(PROPOSAL_SOURCE))
     const problems = await oneRunProblems(root, join(root, "out"), defaultGitForTest())
-    expect(problems).toHaveLength(1)
-    expect(problems[0]).toContain("whether a live run's evidence is committed could not be established")
+    expect(problems).toContainEqual(expect.stringContaining("what HEAD holds could not be established"))
   })
 })
 

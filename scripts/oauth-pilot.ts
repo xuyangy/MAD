@@ -34,16 +34,26 @@
  *   network access.
  * - **The live run** (`--live`) is refused unless paired gate 8, "OAuth pilot
  *   spend authorization", is CLOSED in a committed, unmodified
- *   `ablation/paired-gates.ts`, and only for one run: it also refuses when the
- *   exposure document differs from `OAUTH_PILOT_PROPOSAL`'s sha256, when a live
- *   run's evidence (`ablation/evidence/oauth-pilot-live-*.json`) or its reservation
- *   (`LIVE_RESERVATION`) is committed or in the tree, when `ablation/evidence`
- *   cannot be read, or when `--out` already holds a pilot's evidence. It then
- *   creates the reservation exclusively, so only one invocation can hold it; nothing
- *   deletes it, so a further run needs the human's explicit decision. The
- *   authorization and the one-run checks are the first thing it does after reading
- *   its arguments; the reservation follows the platform and `--out` checks. All of
- *   it comes before any host, any stat of the real auth target, any opening of the
+ *   `ablation/paired-gates.ts`, and only for the one run that table's
+ *   `OAUTH_PILOT_RUN` names (run 2; story 2-8c7). It also refuses when the exposure
+ *   document is uncommitted, differs from HEAD or from `OAUTH_PILOT_PROPOSAL`'s
+ *   sha256; when `OAUTH_PILOT_RUN.prior` is not exactly runs 1 to run − 1; when a
+ *   prior run's reservation or evidence is missing, uncommitted, modified, not JSON
+ *   or records another proposal sha256 (run 1's legacy names,
+ *   `ablation/evidence/oauth-pilot-live.reservation` and
+ *   `oauth-pilot-live-2026-09-28.json`, are that migration case, checked and never
+ *   moved); when this run's reservation or evidence
+ *   (`ablation/evidence/oauth-pilot-live-run-2.reservation`,
+ *   `oauth-pilot-live-run-2-<date>.json`) or any other undeclared
+ *   `oauth-pilot-live*` file is committed, untracked or in `ablation/evidence`;
+ *   when git or `ablation/evidence` cannot be read; or when `--out` already holds a
+ *   pilot's evidence. It then creates this run's reservation exclusively, so only
+ *   one invocation can hold it; nothing deletes it, so a failed or interrupted run
+ *   consumes the authorization and a further run needs the human's explicit
+ *   decision. The authorization and the one-run checks are the first thing it does
+ *   after reading its arguments; the reservation follows the platform and `--out`
+ *   checks. None of it reads, stats or hashes the auth target. All of it comes
+ *   before any host, any stat of the real auth target, any opening of the
  *   data directory and any network connection. No flag, variable or file can authorize it. Once authorized, one
  *   host runs through `startManagedHost` in OAuth mode on `--oauth-data-dir` and
  *   `--oauth-prepared`, with every check that mode makes (payload digests, the
@@ -124,7 +134,7 @@
 
 import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
-import { basename, isAbsolute, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 import { z } from "zod"
 
@@ -146,7 +156,18 @@ import {
 } from "../ablation/managed-host.ts"
 import { hostErrorOf, type HostError } from "../ablation/host-error.ts"
 import { authLinkPaths, overlapProblem } from "../ablation/oauth-payload.ts"
-import { gatePreflight, OAUTH_PILOT_PROPOSAL, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import {
+  gatePreflight,
+  OAUTH_PILOT_EVIDENCE_DIR,
+  OAUTH_PILOT_PROPOSAL,
+  OAUTH_PILOT_RUN,
+  oauthPilotEvidencePattern,
+  oauthPilotReservation,
+  PAIRED_GATES,
+  type OAuthPilotPriorRun,
+  type OAuthPilotRun,
+  type PairedGate,
+} from "../ablation/paired-gates.ts"
 import type { RosterSlot } from "../core/domain/roster.ts"
 import type { AdmissionSettlement, RequestAdmission } from "../core/ports/admission.ts"
 import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
@@ -746,7 +767,7 @@ export interface PilotEvidence {
   paidTokens: string
   wording: string[]
   gateEffect: string
-  /** The live run's reservation (`LIVE_RESERVATION`), which nothing deletes; a string in the dry run. */
+  /** The live run's reservation (`oauthPilotReservation(run)`), which nothing deletes; a string in the dry run. */
   reservation: LiveReservation | string
   authorization: Authorization | string
   sandbox: SelfTest & { profile: string }
@@ -851,61 +872,200 @@ export function findingsFrom(input: {
 // One authorization, one run
 // ---------------------------------------------------------------------------
 
-/** Where a committed live run's evidence lives, as `oauth-pilot-live-<date>.json`. */
-export const LIVE_EVIDENCE_DIR = "ablation/evidence"
-export const LIVE_EVIDENCE_PATTERN = /^oauth-pilot-live-.*\.json$/
-/**
- * The one live run's reservation, relative to the repository. `--live` creates it
- * exclusively before it touches a host, the auth target, the data directory or the
- * network; while it exists, committed or not, every further `--live` refuses.
- * Nothing deletes it: a further run needs the human's explicit decision.
- */
-export const LIVE_RESERVATION = `${LIVE_EVIDENCE_DIR}/oauth-pilot-live.reservation`
+/** Where live runs' reservations and committed evidence live. */
+export const LIVE_EVIDENCE_DIR = OAUTH_PILOT_EVIDENCE_DIR
+/** Every live run's reservation and evidence file name starts with this; `oneRunProblems` accounts for each such file. */
+export const LIVE_FILE_PREFIX = "oauth-pilot-live"
+
+/** Where a live file was found. */
+type LiveFileSource = "committed" | "untracked" | `in ${typeof LIVE_EVIDENCE_DIR}`
 
 /**
- * Why gate 8's authorization does not cover this run, or none: the exposure
- * document differs from the one gate 8 pins; the live reservation, or a live run's
- * evidence, is committed or lies in the tree; the evidence directory cannot be
- * read; or `--out` already holds a pilot's evidence. Reads only the repository and
+ * Why `identity` is not a run gate 8 can authorize: `run` must be an integer of at
+ * least 2 (run 1 is the committed migration case), and `prior` must list exactly
+ * runs 1 to `run - 1`, in order, each under its own names (run 1's legacy ones,
+ * `oauthPilotReservation` and `oauthPilotEvidencePattern` for the rest) with a
+ * sha256.
+ */
+export function runIdentityProblems(identity: OAuthPilotRun): string[] {
+  const problems: string[] = []
+  if (!Number.isInteger(identity.run) || identity.run < 2) {
+    problems.push(`OAUTH_PILOT_RUN names run ${JSON.stringify(identity.run)}: run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2`)
+    return problems
+  }
+  const runs = identity.prior.map((prior) => prior.run)
+  // The length first, so a huge `run` never builds a huge list.
+  if (runs.length !== identity.run - 1 || runs.some((prior, index) => prior !== index + 1)) {
+    const expected = identity.run === 2 ? "[1]" : `1 to ${identity.run - 1}`
+    problems.push(`OAUTH_PILOT_RUN.prior lists runs [${runs.join(", ")}], not exactly runs ${expected} before run ${identity.run}: a gap, a duplicate or a reused run`)
+    return problems
+  }
+  for (const prior of identity.prior) {
+    if (prior.reservation !== oauthPilotReservation(prior.run)) {
+      problems.push(`OAUTH_PILOT_RUN.prior names run ${prior.run}'s reservation \`${prior.reservation}\`, not \`${oauthPilotReservation(prior.run)}\``)
+    }
+    if (dirname(prior.evidence) !== LIVE_EVIDENCE_DIR || !oauthPilotEvidencePattern(prior.run).test(basename(prior.evidence))) {
+      problems.push(`OAUTH_PILOT_RUN.prior names run ${prior.run}'s evidence \`${prior.evidence}\`, which is not run ${prior.run}'s evidence name in ${LIVE_EVIDENCE_DIR}`)
+    }
+    if (!/^[0-9a-f]{64}$/.test(prior.proposalSha256)) problems.push(`OAUTH_PILOT_RUN.prior records no sha256 for run ${prior.run}'s proposal`)
+  }
+  return problems
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+
+/**
+ * Why a prior run's committed reservation or evidence is not what `OAUTH_PILOT_RUN`
+ * records, or none. Each file must be committed, unchanged from HEAD and JSON; the
+ * reservation must record the prior run's proposal sha256 and a story (and, from
+ * run 2 on, its run); the evidence's `reservation` must record the same sha256 and
+ * story. The two reservation objects are never compared whole: the evidence
+ * redacts `out`.
+ */
+async function priorRunProblems(root: string, prior: OAuthPilotPriorRun, committed: ReadonlySet<string>, git: RunGit): Promise<string[]> {
+  const problems: string[] = []
+  const records: Partial<Record<"reservation" | "evidence", Record<string, unknown>>> = {}
+  for (const role of ["reservation", "evidence"] as const) {
+    const path = prior[role]
+    const named = `run ${prior.run}'s ${role} \`${path}\``
+    if (!committed.has(path)) {
+      problems.push(`${named} is not committed: an earlier run's files are checked for provenance, and this one has none`)
+      continue
+    }
+    const status = await git(root, ["status", "--porcelain=v1", "--untracked-files=all", "--", path])
+    if (status.exitCode !== 0) {
+      problems.push(`whether ${named} is unchanged could not be established: \`git status\` exited ${status.exitCode}: ${status.stderr.trim() || "no detail"}`)
+      continue
+    }
+    if (status.stdout.trim().length > 0) {
+      problems.push(`${named} is missing or modified (\`${status.stdout.trimEnd()}\`): an earlier run's committed files are never changed`)
+      continue
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await readFile(join(root, path), "utf8"))
+    } catch (error) {
+      problems.push(`${named} is not JSON (${messageOf(error)})`)
+      continue
+    }
+    const record = role === "reservation" ? parsed : isRecord(parsed) ? parsed.reservation : undefined
+    if (!isRecord(record)) {
+      problems.push(`${named} has the wrong shape: ${role === "reservation" ? "it is not an object" : "it records no `reservation` object"}`)
+      continue
+    }
+    const where = role === "reservation" ? "" : "`reservation.`"
+    if (record.proposalSha256 !== prior.proposalSha256) {
+      problems.push(`${named} has the wrong shape: its ${where}proposalSha256 is ${JSON.stringify(record.proposalSha256)}, not ${prior.proposalSha256} as OAUTH_PILOT_RUN records for run ${prior.run}`)
+    }
+    if (typeof record.story !== "string" || record.story.length === 0) problems.push(`${named} has the wrong shape: it records no ${where}story`)
+    if (prior.run >= 2 && record.run !== prior.run) problems.push(`${named} has the wrong shape: its ${where}run is ${JSON.stringify(record.run)}, not ${prior.run}`)
+    records[role] = record
+  }
+  if (records.reservation !== undefined && records.evidence !== undefined && records.reservation.story !== records.evidence.story) {
+    problems.push(`run ${prior.run}'s evidence \`${prior.evidence}\` records the reservation's story ${JSON.stringify(records.evidence.story)}, but its reservation records ${JSON.stringify(records.reservation.story)}`)
+  }
+  return problems
+}
+
+/**
+ * Why gate 8's authorization does not cover run `identity.run`, or none. Refuses
+ * when the run identity is malformed; when the exposure document is not committed,
+ * differs from HEAD, or its sha256 differs from `OAUTH_PILOT_PROPOSAL`'s pin; when a
+ * prior run's committed files fail `priorRunProblems`; when any `oauth-pilot-live*`
+ * file, committed anywhere, untracked anywhere, or in `ablation/evidence` (ignored
+ * included), is not one of the prior runs' declared files (this run's own
+ * reservation or evidence is named as such, anything else as unaccounted); when git
+ * cannot list HEAD or the untracked files, or `ablation/evidence` cannot be read;
+ * or when `--out` already holds a pilot's evidence. Reads only the repository and
  * `--out`; never a host, the auth target or the network.
  */
-export async function oneRunProblems(root: string, out: string, git: RunGit): Promise<string[]> {
-  const problems: string[] = []
-  const proposal = join(root, OAUTH_PILOT_PROPOSAL.path)
+export async function oneRunProblems(root: string, out: string, git: RunGit, identity: OAuthPilotRun = OAUTH_PILOT_RUN): Promise<string[]> {
+  const identityProblems = runIdentityProblems(identity)
+  const problems: string[] = [...identityProblems]
+  const proposal = OAUTH_PILOT_PROPOSAL.path
   try {
-    const digest = new Bun.CryptoHasher("sha256").update(await readFile(proposal)).digest("hex")
+    const status = await git(root, ["status", "--porcelain=v1", "--untracked-files=all", "--", proposal])
+    if (status.exitCode !== 0) {
+      problems.push(`whether ${proposal} is committed could not be established: \`git status\` exited ${status.exitCode}: ${status.stderr.trim() || "no detail"}`)
+    } else if (status.stdout.trim().length > 0) {
+      problems.push(`${proposal} differs from HEAD (\`${status.stdout.trimEnd()}\`): gate 8 authorizes against the committed proposal`)
+    }
+  } catch (error) {
+    problems.push(`whether ${proposal} is committed could not be established: ${messageOf(error)}`)
+  }
+  try {
+    const digest = new Bun.CryptoHasher("sha256").update(await readFile(join(root, proposal))).digest("hex")
     if (digest !== OAUTH_PILOT_PROPOSAL.sha256) {
-      problems.push(`${OAUTH_PILOT_PROPOSAL.path} changed after gate 8 pinned it (sha256 ${digest}, pinned ${OAUTH_PILOT_PROPOSAL.sha256}); the exposure the budget owner authorized is not the one on disk`)
+      problems.push(`${proposal} changed after gate 8 pinned it (sha256 ${digest}, pinned ${OAUTH_PILOT_PROPOSAL.sha256}); the exposure the budget owner authorized is not the one on disk`)
     }
   } catch (error) {
-    problems.push(`${OAUTH_PILOT_PROPOSAL.path}, the exposure document gate 8 pins, could not be read: ${messageOf(error)}`)
+    problems.push(`${proposal}, the exposure document gate 8 pins, could not be read: ${messageOf(error)}`)
   }
+
+  // Every `oauth-pilot-live*` file git or the evidence directory knows of, by path, with where it was seen.
+  const found = new Map<string, Set<LiveFileSource>>()
+  const note = (path: string, source: LiveFileSource) => {
+    // Case-insensitive: darwin's default filesystem is.
+    if (!basename(path).toLowerCase().startsWith(LIVE_FILE_PREFIX)) return
+    const sources = found.get(path) ?? new Set<LiveFileSource>()
+    sources.add(source)
+    found.set(path, sources)
+  }
+  let committed: Set<string> | null = null
   try {
-    const listed = await git(root, ["ls-tree", "--name-only", "HEAD", "--", `${LIVE_EVIDENCE_DIR}/`])
+    const listed = await git(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
     if (listed.exitCode !== 0) {
-      problems.push(`whether a live run's evidence is committed could not be established: \`git ls-tree\` exited ${listed.exitCode}: ${listed.stderr.trim() || "no detail"}`)
+      problems.push(`what HEAD holds could not be established: \`git ls-tree\` exited ${listed.exitCode}: ${listed.stderr.trim() || "no detail"}`)
     } else {
-      const names = listed.stdout.split("\n").map((path) => basename(path.trim()))
-      const committed = names.filter((name) => LIVE_EVIDENCE_PATTERN.test(name))
-      if (committed.length > 0) problems.push(`a live run's evidence is committed (${committed.join(", ")}): gate 8 authorizes one run, and it has run`)
-      if (names.includes(basename(LIVE_RESERVATION))) problems.push(`the live reservation \`${LIVE_RESERVATION}\` is committed: gate 8 authorizes one run, and it was reserved`)
+      committed = new Set(listed.stdout.split("\0").filter((path) => path.length > 0))
+      if (!committed.has(proposal)) problems.push(`${proposal} is not committed: gate 8 authorizes against the committed proposal`)
+      for (const path of committed) note(path, "committed")
     }
   } catch (error) {
-    problems.push(`whether a live run's evidence is committed could not be established: ${messageOf(error)}`)
+    problems.push(`what HEAD holds could not be established: ${messageOf(error)}`)
   }
-  let present: string[] = []
   try {
-    present = await readdir(join(root, LIVE_EVIDENCE_DIR))
+    const others = await git(root, ["ls-files", "-z", "--others", "--exclude-standard"])
+    if (others.exitCode !== 0) {
+      problems.push(`the untracked files could not be listed: \`git ls-files\` exited ${others.exitCode}: ${others.stderr.trim() || "no detail"}`)
+    } else {
+      for (const path of others.stdout.split("\0")) if (path.length > 0) note(path, "untracked")
+    }
   } catch (error) {
-    // A missing directory holds no evidence and no reservation; any other failure to read it refuses.
+    problems.push(`the untracked files could not be listed: ${messageOf(error)}`)
+  }
+  try {
+    for (const name of await readdir(join(root, LIVE_EVIDENCE_DIR))) note(`${LIVE_EVIDENCE_DIR}/${name}`, `in ${LIVE_EVIDENCE_DIR}`)
+  } catch (error) {
+    // A missing directory holds no live file; any other failure to read it refuses.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       problems.push(`${LIVE_EVIDENCE_DIR} could not be read (${messageOf(error)}), so an earlier live run or its reservation cannot be ruled out`)
     }
   }
-  const uncommitted = present.filter((name) => LIVE_EVIDENCE_PATTERN.test(name))
-  if (uncommitted.length > 0) problems.push(`a live run's evidence is in ${LIVE_EVIDENCE_DIR} (${uncommitted.join(", ")}): gate 8 authorizes one run, and it has run`)
-  if (present.includes(basename(LIVE_RESERVATION))) {
-    problems.push(`the live reservation \`${LIVE_RESERVATION}\` exists: an earlier \`--live\` reserved gate 8's one run, whether it succeeded, failed or was interrupted`)
+
+  const declared = new Set(identity.prior.flatMap((prior) => [prior.reservation, prior.evidence]))
+  const run = identity.run
+  // A malformed identity names no run of its own: every undeclared live file is then unaccounted.
+  const own = identityProblems.length === 0 ? { reservation: oauthPilotReservation(run), evidence: oauthPilotEvidencePattern(run) } : null
+  for (const [path, sources] of [...found].sort(([a], [b]) => a.localeCompare(b))) {
+    if (declared.has(path)) continue
+    const where = [...sources].join(", ")
+    if (own !== null && path === own.reservation) {
+      problems.push(`run ${run}'s reservation \`${path}\` already exists (${where}): gate 8's authorization for run ${run} was already used, whether that run succeeded, failed or was interrupted`)
+    } else if (own !== null && dirname(path) === LIVE_EVIDENCE_DIR && own.evidence.test(basename(path))) {
+      problems.push(`run ${run}'s evidence \`${path}\` already exists (${where}): run ${run} has already run`)
+    } else {
+      problems.push(`\`${path}\` (${where}) is an unaccounted live pilot file: OAUTH_PILOT_RUN declares no such file for an earlier run`)
+    }
+  }
+  if (committed !== null && identityProblems.length === 0) {
+    for (const prior of identity.prior) {
+      try {
+        problems.push(...(await priorRunProblems(root, prior, committed, git)))
+      } catch (error) {
+        problems.push(`run ${prior.run}'s committed files could not be checked: ${messageOf(error)}`)
+      }
+    }
   }
   for (const file of [EVIDENCE_FILE, PARTIAL_EVIDENCE_FILE]) {
     if (await lstat(join(out, file)).then(() => true, () => false)) problems.push(`--out already holds \`${file}\` from an earlier run`)
@@ -913,9 +1073,10 @@ export async function oneRunProblems(root: string, out: string, git: RunGit): Pr
   return problems
 }
 
-/** What the live reservation records. No secret: the gate table's blob, the pinned proposal and `--out`. */
+/** What a live run's reservation records. No secret: the run, the gate table's blob, the pinned proposal and `--out`. */
 export interface LiveReservation {
-  story: "2-8c5"
+  run: number
+  story: "2-8c7"
   createdAt: string
   gateTableBlob: string | null
   proposalSha256: string
@@ -923,11 +1084,14 @@ export interface LiveReservation {
 }
 
 /**
- * Creates `LIVE_RESERVATION` exclusively (`wx`: O_CREAT|O_EXCL), so of two
- * invocations only one can create it; the other is refused. Never removed.
+ * Creates run `reservation.run`'s reservation (`oauthPilotReservation`)
+ * exclusively (`wx`: O_CREAT|O_EXCL), so of two invocations only one can create
+ * it; the other is refused. Never removed: a failed or interrupted run consumes
+ * the authorization.
  */
 export async function reserveLiveRun(root: string, reservation: LiveReservation): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
-  const path = join(root, LIVE_RESERVATION)
+  const relative = oauthPilotReservation(reservation.run)
+  const path = join(root, relative)
   try {
     await mkdir(join(root, LIVE_EVIDENCE_DIR), { recursive: true })
     await writeFile(path, `${JSON.stringify(reservation, null, 2)}\n`, { encoding: "utf8", flag: "wx" })
@@ -938,8 +1102,8 @@ export async function reserveLiveRun(root: string, reservation: LiveReservation)
       ok: false,
       why:
         code === "EEXIST"
-          ? `the live reservation \`${LIVE_RESERVATION}\` already exists: another \`--live\` reserved gate 8's one run first`
-          : `the live reservation \`${LIVE_RESERVATION}\` could not be created (${messageOf(error)})`,
+          ? `run ${reservation.run}'s reservation \`${relative}\` already exists: another \`--live\` reserved run ${reservation.run} first`
+          : `run ${reservation.run}'s reservation \`${relative}\` could not be created (${messageOf(error)})`,
     }
   }
 }
@@ -1044,6 +1208,8 @@ export interface PilotHooks {
   gateTable?: () => Promise<GateTableState>
   /** The repository the gate table, the exposure document and committed live evidence are read from. */
   repoRoot?: string
+  /** The run identity the one-run checks and the reservation use; the default is the committed `OAUTH_PILOT_RUN`. */
+  pilotRun?: OAuthPilotRun
   selfTest?: () => Promise<SelfTest>
   prepare?: (out: string) => Promise<{ ok: boolean; problems?: string[] }>
   /** Starts the proxy; the default is `startAllowlistProxy`, with `PILOT_ALLOWED_CONNECTS` when live and nothing when dry. */
@@ -1075,7 +1241,14 @@ const pilotWith = (hooks: PilotHooks): PilotBody => async (context) => {
   const reservation: LiveReservation | string =
     context.reservation === null
       ? "none: the dry run makes no reservation"
-      : { story: context.reservation.story, createdAt: context.reservation.createdAt, gateTableBlob: context.reservation.gateTableBlob, proposalSha256: context.reservation.proposalSha256, out: context.reservation.out }
+      : {
+          run: context.reservation.run,
+          story: context.reservation.story,
+          createdAt: context.reservation.createdAt,
+          gateTableBlob: context.reservation.gateTableBlob,
+          proposalSha256: context.reservation.proposalSha256,
+          out: context.reservation.out,
+        }
   const { out, mode } = args
   const started = Date.now()
   const scratchParent = await realpath(await mkdtemp(join(tmpdir(), mode === "dry" ? PROBE_SCRATCH_PREFIX : PILOT_SCRATCH_PREFIX)))
@@ -1429,13 +1602,14 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
   }
   const args = parsed.args
   let authorization: Authorization | null = null
+  const pilotRun = seams.pilotRun ?? OAUTH_PILOT_RUN
   if (args.mode === "live") {
     const root = seams.repoRoot ?? REPO_ROOT
     const git = seams.git ?? defaultGit()
     // The first live operation: nothing below runs unless gate 8 is CLOSED in the committed table, for this one run.
     authorization = await authorize(seams.gates ?? PAIRED_GATES, seams.gateTable ?? (() => gateTableState(git, root)))
     if (authorization.ok) {
-      const once = await oneRunProblems(root, args.out, git)
+      const once = await oneRunProblems(root, args.out, git, pilotRun)
       if (once.length > 0) authorization = { ...authorization, ok: false, problems: once }
     }
     if (!authorization.ok) {
@@ -1444,7 +1618,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
           "REFUSED — the live OAuth pilot is not authorized.",
           ...authorization.lines.map((line) => `  ${line}`),
           ...authorization.problems.map((problem) => `REFUSED: ${problem}`),
-          "Gate 8 closes only by a reviewed, committed change to ablation/paired-gates.ts, for one run; no flag, variable or file can close it.",
+          `Gate 8 closes only by a reviewed, committed change to ablation/paired-gates.ts, for run ${pilotRun.run} alone (OAUTH_PILOT_RUN); no flag, environment variable, file or date can close it or name a run, and the command line takes none.`,
           "No host was started; the real auth target was not stat-ed; the data directory was not opened; no network connection was made.",
         ].join("\n"),
       )
@@ -1466,7 +1640,8 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
   if (args.mode === "live") {
     // After every refusal that needs no touch, and before any host, auth-target stat, data-directory open or connection.
     const created: LiveReservation = {
-      story: "2-8c5",
+      run: pilotRun.run,
+      story: "2-8c7",
       createdAt: new Date().toISOString(),
       gateTableBlob: authorization?.blob ?? null,
       proposalSha256: OAUTH_PILOT_PROPOSAL.sha256,
@@ -1478,7 +1653,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
       return 1
     }
     reservation = { ...created, path: reserved.path }
-    console.log(`reserved gate 8's one live run: ${reserved.path} (never deleted; a further run needs the human's explicit decision)`)
+    console.log(`reserved gate 8's live run ${pilotRun.run}: ${reserved.path} (never deleted; a further run needs the human's explicit decision)`)
   }
   const deadlineMs = seams.deadlineMs ?? PILOT_DEADLINE_MS
   const settleMs = seams.settleMs ?? BODY_SETTLE_MS

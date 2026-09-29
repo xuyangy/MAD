@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { MEASURED_HOST } from "./managed-host.ts"
-import { gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
+import { gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
   gates.map((gate) => ({ ...gate, status: "CLOSED", evidence: gate.evidence ?? "a reviewed change" }))
@@ -146,13 +146,34 @@ describe("PAIRED_GATES", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 8)!
     expect(gate.status).toBe("OPEN")
     expect(gate.evidence).toBeUndefined()
-    for (const text of ["authorized one live OAuth pilot run on 2026-09-28", "ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED)", "ablation/evidence/oauth-pilot-live.reservation", "no further live run is authorized"]) {
+    for (const text of [
+      "authorized run 1 on 2026-09-28",
+      "ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED: attempt 1 returned model-error without an answer",
+      "found a token-refresh 401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json)",
+      "ablation/evidence/oauth-pilot-live.reservation",
+      "That authorization is spent.",
+      "Run 2 is not authorized while this gate is OPEN",
+    ]) {
       expect(gate.note).toContain(text)
     }
     expect(gate.requires).toContain(OAUTH_PILOT_PROPOSAL.sha256)
+    expect(gate.requires).toContain("the budget owner authorizes run 2 (`OAUTH_PILOT_RUN`, story 2-8c7)")
+    expect(gate.requires).toContain(`creates ${oauthPilotReservation(OAUTH_PILOT_RUN.run)} exclusively`)
+    expect(oauthPilotReservation(OAUTH_PILOT_RUN.run)).toBe("ablation/evidence/oauth-pilot-live-run-2.reservation")
     for (const text of ["`bun run oauth-pilot --live`", "at most 2 admitted attempts", "openai/gpt-6-luna", "2-8d-openai-oauth-pilot-proposal.md", "never stands in for gate 4 or closes gate 7"]) {
       expect(gate.requires).toContain(text)
     }
+  })
+
+  test("OAUTH_PILOT_RUN names run 2, and its one prior run is run 1 under its legacy, committed names", () => {
+    expect(OAUTH_PILOT_RUN.run).toBe(2)
+    expect(OAUTH_PILOT_RUN.prior.map((prior) => prior.run)).toEqual([1])
+    const [run1] = OAUTH_PILOT_RUN.prior
+    expect(run1!.reservation).toBe(oauthPilotReservation(1))
+    expect(oauthPilotEvidencePattern(1).test(run1!.evidence.split("/").pop()!)).toBe(true)
+    expect(oauthPilotEvidencePattern(2).test("oauth-pilot-live-run-2-2026-10-01.json")).toBe(true)
+    expect(oauthPilotEvidencePattern(2).test("oauth-pilot-live-2026-10-01.json")).toBe(false)
+    expect(oauthPilotEvidencePattern(1).test("oauth-pilot-live-run-2-2026-10-01.json")).toBe(false)
   })
 
   test("gate 3 stays OPEN and unused, with a note that 2-8c spent no paid tokens", () => {
