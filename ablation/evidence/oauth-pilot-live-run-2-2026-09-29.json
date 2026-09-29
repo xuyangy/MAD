@@ -1,0 +1,158 @@
+{
+  "kind": "INCOMPLETE — MEASURED RUNTIME CASE — the bounded OpenAI OAuth pilot (story 2-8c5): a real `opencode serve` in OAuth mode on the ChatGPT OAuth sign-in, inside a loopback-only sandbox, behind a proxy that tunnels CONNECT only to the allowed hosts",
+  "story": "2-8c5",
+  "mode": "live",
+  "measuredAt": "2026-09-29T10:44:45.409Z",
+  "paidTokens": "unmeasured. The attempts drew on the ChatGPT subscription through its OAuth sign-in; MAD charges nothing per token and cannot see or bound the quota used. Host-reported tokens below are unverified diagnostics.",
+  "wording": [
+    "every connection listed under `proxy.connects` is a proxy-observed CONNECT: a connection that does not use the proxy is not seen, so the list is never all egress",
+    "the per-attempt physical request count is not shown: TLS and HTTP/2 hide requests inside a proxy-observed CONNECT, and the host's own retries and side requests are neither gated nor counted on the OAuth route",
+    "no request or response content is recorded: an attempt is recorded by its failure kind, its journal settlement and its host-reported tokens, which are unverified diagnostics, not a cost",
+    "a failed attempt's `hostError` is an allowlisted category, an optional allowlisted code and a fixed summary; the host's error message is omitted",
+    "an attempt that ended in a host error with an all-zero host token object is settled `unknown`: the host reports the same zeros for an errored turn that made requests, so they are not a known usage"
+  ],
+  "gateEffect": "this command closes no gate: gate 7 stays OPEN and gate 8 is unchanged; either changes only by a reviewed, committed change to ablation/paired-gates.ts",
+  "reservation": {
+    "run": 2,
+    "story": "2-8c7",
+    "createdAt": "2026-09-29T10:44:36.893Z",
+    "gateTableBlob": "c28e422c624c022cf8e8d416361066fb0774d5f9",
+    "proposalSha256": "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
+    "out": "<out>"
+  },
+  "authorization": {
+    "ok": true,
+    "lines": [
+      "ablation/paired-gates.ts is HEAD's blob c28e422c624c022cf8e8d416361066fb0774d5f9",
+      "gate 1 — host request accounting — engineering, required for evaluation on route api-key (not consulted for oauth-pilot), owner story 2-8c2 — CLOSED — evidence: `bun run accounting-probe` drove the measured opencode 1.18.32 host through the relay (ablation/request-meter.ts) to the local stub, zero-bill. All eight scenarios HOLD: success, persistent 500, 429 then success, 400, hang past the adapter timeout, host-tool step, unoffered tool, and a step refused mid-turn. Every request the stub received had a durable `issued` line before it was forwarded and a `settled` line equal to what the stub served, or `unknown` when it served nothing. The host's retries were refused by the relay and never reached the stub (F2). Tool steps were admitted as step 2 and recorded in full (F3, N2). The relay closed the hung request when its attempt ended (H1). The step refused by the journal reached nothing (S1). Attribution uses the session id the measured host sends in `x-session-affinity` and `X-Session-Id` (A1), a fact about this build, not an opencode contract. Any provider error status is settled unknown, which latches the journal's halt. Only one-slot discover on block 1's prefix was driven. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json. Tests: ablation/request-meter.test.ts, ablation/journal.test.ts, scripts/accounting-probe.test.ts",
+      "gate 2 — shared gates verified on a real host — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8c — CLOSED — evidence: `bun run accounting-probe` (scripts/accounting-probe.ts) on the managed host (ablation/managed-host.ts, the measured opencode 1.18.32 build) seeded one journal per gate and drove the real discover stage, a real OpencodeModelBackend and the journal's admission: the global, Blocks and phase gates each refused inside the journal's admission, before any backend call, with 0 backend calls and 0 stub requests. Only block 1's prefix phase was exercised, with one slot; no concurrent or multi-slot admission was tested. Story 2-8c2's run of the probe, with the relay between the host and the stub, showed the same three refusals. Evidence file: ablation/evidence/host-accounting-2026-09-24-relay.json (story 2-8c's run: ablation/evidence/host-accounting-2026-09-24.json). Tests: scripts/accounting-probe.test.ts",
+      "gate 3 — accounting-probe spend authorization — authorization, required for accounting-probe (not consulted for oauth-pilot), owner the human budget owner — OPEN — note: story 2-8c's probe spent no paid tokens and did not use this gate: its host's only provider was a local stub",
+      "gate 4 — evaluation spend authorization — authorization, required for evaluation (not consulted for oauth-pilot), owner the human budget owner — OPEN",
+      "gate 5 — worktree identity — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8b — CLOSED — evidence: scripts/paired.ts `worktreeIdentity` compares --directory with a reference copy written by `writeLabelledTree` (scripts/materialize-labelled-change.ts): paths, entry types, hard links, sizes, bytes, executable bits, the local git config, .git/info, non-sample hooks, HEAD^{tree}, porcelain status, a commit count of 1 and the commit's author, committer and message, every git call bounded and run with no GIT_* variable, no fsmonitor and no hooks; checked at stage 1 and rechecked at stage 3. Tests: scripts/paired.test.ts",
+      "gate 6 — production Tools wiring — engineering, required for evaluation (not consulted for oauth-pilot), owner story 2-8b — CLOSED — evidence: scripts/paired.ts `toolsWiringProblem` checks what the Tools factory reports: the adapter must be `opencodeTools` and both blame deadlines the shipped defaults; the shipped default factory is `opencodeTools` built with no deadline override, and `config.tools` records the same three facts. Checked before the coin toss; unconfirmed blame cleanup aborts the run through its signal. Tests: scripts/paired.test.ts",
+      "gate 7 — OAuth attempt accounting — engineering, required for evaluation on route oauth (not consulted for oauth-pilot), owner story 2-8c3b — OPEN — note: The zero-bill OAuth probe (ablation/evidence/oauth-attempts-2026-09-25.json) covered Anthropic and Copilot but left OpenAI unprobed. The authorized live pilot (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped after one journaled attempt returned model-error without an answer; no chatgpt.com CONNECT was proxy-observed, the second attempt did not run, and the third admission was not asked. A later non-billing inspection of the host database WAL found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). OpenAI attempt accounting is not established, so this gate stays OPEN",
+      "gate 8 — OAuth pilot spend authorization — authorization, required for oauth-pilot on route oauth, owner the human budget owner — CLOSED — evidence: the human budget owner authorized run 2 on 2026-09-29, in the session, accepting the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5): at most 2 admitted attempts of \"Reply with the word ok.\" to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with no upper bound on physical requests, side requests or subscription quota. Tests: ablation/paired-gates.test.ts — note: The budget owner authorized run 1 on 2026-09-28. It is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED: attempt 1 returned model-error without an answer and no further attempt ran), with its committed reservation at ablation/evidence/oauth-pilot-live.reservation; a later non-billing inspection of the host database WAL found a token-refresh 401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). That authorization is spent"
+    ],
+    "problems": [],
+    "blob": "c28e422c624c022cf8e8d416361066fb0774d5f9"
+  },
+  "sandbox": {
+    "ok": true,
+    "control": "unsandboxed TCP connect to 1.1.1.1:443, no byte sent: connected",
+    "loopback": "connected",
+    "external": [
+      {
+        "target": "1.1.1.1:443",
+        "outcome": "refused: ECONNREFUSED"
+      },
+      {
+        "target": "https://example.com/",
+        "outcome": "refused: ConnectionRefused"
+      }
+    ],
+    "why": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused",
+    "profile": "(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))(allow network-outbound (remote unix-socket))"
+  },
+  "host": null,
+  "hostStart": "the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+  "hostStartAtMs": 8073,
+  "route": {
+    "enabled_providers": [
+      "openai"
+    ],
+    "model": "openai/gpt-6-luna",
+    "small_model": "openai/gpt-6-luna",
+    "prompt": "Reply with the word ok.",
+    "tools": {
+      "*": false,
+      "StructuredOutput": true
+    },
+    "turnTimeoutMs": 120000,
+    "maxAdmittedAttempts": 2,
+    "dataDir": "<data-dir>"
+  },
+  "journal": {
+    "root": "<out>/journal",
+    "seededAttempts": 8,
+    "lines": [],
+    "problems": []
+  },
+  "attempts": [],
+  "anyAttemptAnswered": false,
+  "thirdAdmission": {
+    "asked": false,
+    "refusal": null,
+    "backendCalls": 0,
+    "why": "not asked: the pilot stopped, and nothing further is admitted"
+  },
+  "backendCalls": 0,
+  "stop": {
+    "reason": "a preflight failure: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "after": "the host start"
+  },
+  "firstAskedAtMs": null,
+  "proxy": {
+    "allowedToTunnel": [
+      "chatgpt.com:443",
+      "auth.openai.com:443"
+    ],
+    "stopRuleAllows": [
+      "chatgpt.com:443",
+      "auth.openai.com:443"
+    ],
+    "connects": [],
+    "afterStop": []
+  },
+  "sandboxDenials": "not read: no host started",
+  "storeGuardAndSymlink": {
+    "beforeSpawn": "the host was not started; see `hostStart`",
+    "hostStop": "no host was started",
+    "postStop": null
+  },
+  "authTarget": {
+    "observed": "<home>/.local/share/opencode/auth.json by lstat and stat; never opened",
+    "flags": {
+      "lstat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      },
+      "stat": {
+        "size": "unchanged",
+        "mtime": "unchanged",
+        "inode": "unchanged"
+      }
+    }
+  },
+  "findings": [
+    {
+      "id": "S1",
+      "text": "0 attempt(s) admitted; none returned a model answer; stopped after the host start: a preflight failure: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    {
+      "id": "C1",
+      "text": "the Copilot startup question is unanswered: no host started"
+    },
+    {
+      "id": "E1",
+      "text": "proxy-observed CONNECTs: none. Neither is a complete census of direct connections"
+    },
+    {
+      "id": "A1",
+      "text": "proxy-observed CONNECTs to an allowed host before the first admission was asked: 0; after the last settled line: 0. The third admission: not asked: the pilot stopped, and nothing further is admitted, backend calls 0"
+    }
+  ],
+  "scope": [
+    "one run, on this machine; not every host, build, account or failure",
+    "a change in the auth target's metadata shows file activity during the live interval, not necessarily a refresh caused by the host; unchanged metadata proves neither that no write happened nor where a refresh went",
+    "an admitted attempt bounds neither the physical requests the host sends nor subscription quota"
+  ],
+  "status": "FAILED",
+  "incomplete": "the host did not start: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e; the pilot stopped after the host start: a preflight failure: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e; 0 attempt(s) ran; both must answer and settle `usage`; the third admission: not asked: the pilot stopped, and nothing further is admitted",
+  "failures": [
+    "the host did not start: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "the pilot stopped after the host start: a preflight failure: the managed host was refused: the host is not the measured build (binary sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9, version not read: the binary was not started; measured sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e, version 1.18.32): the binary `/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe` has sha256 f53aae8eb68d832ab1bcd27bed88c02de910be61f4b5f90068ae8e93d5e794c9; the measured build's is 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "0 attempt(s) ran; both must answer and settle `usage`",
+    "the third admission: not asked: the pilot stopped, and nothing further is admitted"
+  ]
+}
