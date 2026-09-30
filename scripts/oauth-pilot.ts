@@ -35,31 +35,42 @@
  * - **The live run** (`--live`) is refused unless paired gate 8, "OAuth pilot
  *   spend authorization", is CLOSED in a committed, unmodified
  *   `ablation/paired-gates.ts`, and only for the one run that table's
- *   `OAUTH_PILOT_RUN` names (run 2; story 2-8c7). It also refuses when the exposure
+ *   `OAUTH_PILOT_RUN` names (run 3; stories 2-8c7 and 2-8c8). It also refuses when the exposure
  *   document is uncommitted, differs from HEAD or from `OAUTH_PILOT_PROPOSAL`'s
  *   sha256; when `OAUTH_PILOT_RUN.prior` is not exactly runs 1 to run − 1; when a
  *   prior run's reservation or evidence is missing, uncommitted, modified, not JSON
  *   or records another proposal sha256 (run 1's legacy names,
  *   `ablation/evidence/oauth-pilot-live.reservation` and
  *   `oauth-pilot-live-2026-09-28.json`, are that migration case, checked and never
- *   moved); when this run's reservation or evidence
- *   (`ablation/evidence/oauth-pilot-live-run-2.reservation`,
- *   `oauth-pilot-live-run-2-<date>.json`) or any other undeclared
+ *   moved; run 2's are `oauth-pilot-live-run-2.reservation` and
+ *   `oauth-pilot-live-run-2-2026-09-29.json`); when this run's reservation or evidence
+ *   (`ablation/evidence/oauth-pilot-live-run-3.reservation`,
+ *   `oauth-pilot-live-run-3-<date>.json`) or any other undeclared
  *   `oauth-pilot-live*` file is committed, untracked or in `ablation/evidence`;
  *   when git or `ablation/evidence` cannot be read; or when `--out` already holds a
- *   pilot's evidence. It then creates this run's reservation exclusively, so only
- *   one invocation can hold it; nothing deletes it, so a failed or interrupted run
- *   consumes the authorization and a further run needs the human's explicit
- *   decision. The authorization and the one-run checks are the first thing it does
- *   after reading its arguments; the reservation follows the platform and `--out`
- *   checks. None of it reads, stats or hashes the auth target. All of it comes
- *   before any host, any stat of the real auth target, any opening of the
- *   data directory and any network connection. No flag, variable or file can authorize it. Once authorized, one
- *   host runs through `startManagedHost` in OAuth mode on `--oauth-data-dir` and
- *   `--oauth-prepared`, with every check that mode makes (payload digests, the
- *   auth symlink, the data directory's shape and disjointness, the store guard
- *   before and after). Its proxy tunnels `CONNECT` only to
- *   `PILOT_ALLOWED_CONNECTS`.
+ *   pilot's evidence. Next it refuses when `--oauth-prepared`, `--oauth-data-dir`
+ *   and `--out` overlap (`pathOverlaps`: each path is resolved, and no directory's
+ *   contents are read). Then it makes the managed host's own binary-hash and
+ *   prepared-digest checks (`hostPreCheck`, through the helpers `startManagedHost`
+ *   calls, with the same defaults). These read only the binary file and the
+ *   prepared directory; the binary is never started. An overlap or a mismatch
+ *   refuses with the authorization unused and nothing written to `--out`. It then
+ *   creates this run's reservation exclusively, so only one invocation can hold it;
+ *   nothing deletes it, so a failed or interrupted run consumes the authorization
+ *   and a further run needs the human's explicit decision. The authorization and
+ *   the one-run checks are the first thing it does after reading its arguments;
+ *   the platform, `--out`, overlap and host pre-checks follow, then the
+ *   reservation. None of it reads, stats or hashes the auth target. All of it comes
+ *   before any host, any stat of the real auth target, any opening of the data
+ *   directory and any network connection. No flag, variable or file can authorize
+ *   it. Once authorized, one host runs through `startManagedHost` in OAuth mode on
+ *   `--oauth-data-dir` and `--oauth-prepared`, with the pre-check's options and the
+ *   real binary path it hashed, and with every check that mode makes: the binary
+ *   hash and payload digests again, the auth symlink, the data directory's shape
+ *   and disjointness, the store guard before and after. That re-check comes after
+ *   the reservation: a binary or payload that changed between the pre-check and the
+ *   spawn is refused there, and that run has spent the authorization. Its proxy
+ *   tunnels `CONNECT` only to `PILOT_ALLOWED_CONNECTS`.
  *
  * ## The attempts
  *
@@ -143,11 +154,15 @@ import { startAllowlistProxy, type AllowlistProxy, type ProxyConnect } from "../
 import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type IssuedLine, type SettledLine } from "../ablation/journal.ts"
 import {
+  checkPrepared,
+  identifyBinary,
   MEASURED_HOST,
+  OAUTH_PAYLOAD,
   PROBE_PLACEHOLDER_DIR,
   PROBE_SCRATCH_PREFIX,
   startManagedHost,
   startProbePlaceholderHost,
+  type BinaryIdentityOptions,
   type ManagedHostStart,
   type OAuthHostOptions,
   type OAuthRoute,
@@ -155,7 +170,7 @@ import {
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import { hostErrorOf, type HostError } from "../ablation/host-error.ts"
-import { authLinkPaths, overlapProblem } from "../ablation/oauth-payload.ts"
+import { authLinkPaths, overlapProblem, type PayloadPins } from "../ablation/oauth-payload.ts"
 import {
   gatePreflight,
   OAUTH_PILOT_EVIDENCE_DIR,
@@ -1076,7 +1091,7 @@ export async function oneRunProblems(root: string, out: string, git: RunGit, ide
 /** What a live run's reservation records. No secret: the run, the gate table's blob, the pinned proposal and `--out`. */
 export interface LiveReservation {
   run: number
-  story: "2-8c7"
+  story: "2-8c8"
   createdAt: string
   gateTableBlob: string | null
   proposalSha256: string
@@ -1108,6 +1123,60 @@ export async function reserveLiveRun(root: string, reservation: LiveReservation)
   }
 }
 
+/** The options of the live host pre-check: `startManagedHost`'s own binary options, and the prepared directory's pins. */
+export type HostCheckOptions = BinaryIdentityOptions & { pins?: PayloadPins }
+
+export type HostPreCheck = { ok: true; check: HostCheckOptions & { binary: string } } | { ok: false; problems: string[] }
+
+/**
+ * Story 2-8c8 — the managed host's binary-hash and prepared-digest checks
+ * (`identifyBinary`, `checkPrepared`: the helpers `startManagedHost` calls, with
+ * `startManagedHost`'s defaults), made before the live run's reservation so a
+ * mismatch leaves the authorization unused. It reads only the binary file and the
+ * prepared directory: it never starts the binary, opens the data directory, stats
+ * the auth target or connects anywhere. On success it returns `options` with
+ * `binary` set to the real path it hashed; the live host is started with exactly
+ * those options (`HostRequest.check`), so `startManagedHost` re-hashes that same
+ * path and re-verifies the prepared directory against the same pins before the
+ * spawn. A mismatch that re-check finds comes after the reservation and spends
+ * the authorization.
+ */
+export async function hostPreCheck(prepared: string, options: HostCheckOptions = {}): Promise<HostPreCheck> {
+  const problems: string[] = []
+  const identified = await identifyBinary(options)
+  if (!identified.ok) problems.push(identified.reason)
+  const verified = await checkPrepared(prepared, options.pins ?? OAUTH_PAYLOAD)
+  if (!verified.ok) problems.push(verified.reason)
+  return identified.ok && problems.length === 0 ? { ok: true, check: { ...options, binary: identified.binary } } : { ok: false, problems }
+}
+
+type NamedPath = { name: string; path: string }
+
+/**
+ * The pairs of the pilot's own paths that must not overlap: `--oauth-prepared` and
+ * `--out`, and, live, the data directory and `--out`, and `--oauth-prepared` and
+ * the data directory. `overlapProblem` resolves each path; nothing reads a
+ * directory's contents. The scratch directory is checked by the body, which makes it.
+ */
+export function pathOverlaps(args: PilotArgs): [NamedPath, NamedPath][] {
+  const overlaps: [NamedPath, NamedPath][] = []
+  if (args.prepared !== undefined) overlaps.push([{ name: "prepared directory", path: args.prepared }, { name: "--out", path: args.out }])
+  if (args.mode === "live") {
+    overlaps.push([{ name: "OAuth data directory", path: args.dataDir! }, { name: "--out", path: args.out }])
+    overlaps.push([{ name: "prepared directory", path: args.prepared! }, { name: "OAuth data directory", path: args.dataDir! }])
+  }
+  return overlaps
+}
+
+/** The first overlap among `overlaps`, or none. */
+async function firstOverlap(overlaps: readonly [NamedPath, NamedPath][]): Promise<string | null> {
+  for (const [a, b] of overlaps) {
+    const overlap = await overlapProblem(a, b)
+    if (overlap !== null) return overlap
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Running it
 // ---------------------------------------------------------------------------
@@ -1126,13 +1195,20 @@ export interface HostRequest {
   scratchParent: string
   workDir: string
   onSpawn: (host: Stoppable) => void
+  /** Live only: the options the pre-check passed with, its resolved binary included; the host is checked again with exactly these. */
+  check?: HostCheckOptions
 }
 
 /** The managed host's options in either mode: always spawned through `sandboxSpawn`, with the pilot's proxy as its only way out. */
 export function pilotHostOptions(request: HostRequest, onSpawn: (host: Stoppable) => void): OAuthHostOptions {
+  const check = request.check ?? {}
   return {
     mode: "oauth",
-    oauth: request.route,
+    oauth: check.pins === undefined ? request.route : { ...request.route, pins: check.pins },
+    ...(check.binary === undefined ? {} : { binary: check.binary }),
+    ...(check.resolveBinary === undefined ? {} : { resolveBinary: check.resolveBinary }),
+    ...(check.hashFile === undefined ? {} : { hashFile: check.hashFile }),
+    ...(check.measured === undefined ? {} : { measured: check.measured }),
     proxy: request.proxy,
     scratchParent: request.scratchParent,
     verifyDirectories: [request.workDir],
@@ -1210,6 +1286,13 @@ export interface PilotHooks {
   repoRoot?: string
   /** The run identity the one-run checks and the reservation use; the default is the committed `OAUTH_PILOT_RUN`. */
   pilotRun?: OAuthPilotRun
+  /**
+   * The live host pre-check's options, for `identifyBinary` and `checkPrepared`.
+   * The default is none: the managed host's own defaults (`opencode` on PATH,
+   * `realpath`, `sha256File`, `MEASURED_HOST`, `OAUTH_PAYLOAD`). The live host is
+   * started with the same options and the binary path the pre-check resolved.
+   */
+  hostCheck?: HostCheckOptions
   selfTest?: () => Promise<SelfTest>
   prepare?: (out: string) => Promise<{ ok: boolean; problems?: string[] }>
   /** Starts the proxy; the default is `startAllowlistProxy`, with `PILOT_ALLOWED_CONNECTS` when live and nothing when dry. */
@@ -1230,6 +1313,8 @@ export interface PilotContext {
   signal: AbortSignal
   /** The live run's reservation, as created; `null` in the dry run. */
   reservation: (LiveReservation & { path: string }) | null
+  /** Live: the host pre-check's options, with the binary it resolved; `null` in the dry run. */
+  hostCheck: HostCheckOptions | null
   /** Set by the body once its journal is open: closes the journal and writes the partial evidence, once. main calls it on a signal or at the deadline. */
   interrupt: { partial?: (why: string) => Promise<void> }
 }
@@ -1262,18 +1347,11 @@ const pilotWith = (hooks: PilotHooks): PilotBody => async (context) => {
   }
   console.log(`sandbox self-test: ${selfTest.why}`)
 
-  const overlaps: [{ name: string; path: string }, { name: string; path: string }][] = [[{ name: "--out", path: out }, { name: "pilot's scratch directory", path: scratchParent }]]
-  if (args.prepared !== undefined) overlaps.push([{ name: "prepared directory", path: args.prepared }, { name: "--out", path: out }])
-  if (mode === "live") {
-    overlaps.push([{ name: "OAuth data directory", path: args.dataDir! }, { name: "--out", path: out }])
-    overlaps.push([{ name: "prepared directory", path: args.prepared! }, { name: "OAuth data directory", path: args.dataDir! }])
-  }
-  for (const [a, b] of overlaps) {
-    const overlap = await overlapProblem(a, b)
-    if (overlap !== null) {
-      console.error(`REFUSED — ${overlap}. No host was started.`)
-      return 1
-    }
+  // Live, `main` has already refused every overlap but the scratch directory's; they are checked again here.
+  const overlap = await firstOverlap([[{ name: "--out", path: out }, { name: "pilot's scratch directory", path: scratchParent }], ...pathOverlaps(args)])
+  if (overlap !== null) {
+    console.error(`REFUSED — ${overlap}. No host was started.`)
+    return 1
   }
 
   let prepared = args.prepared
@@ -1388,7 +1466,15 @@ const pilotWith = (hooks: PilotHooks): PilotBody => async (context) => {
   let failure: string | undefined
   try {
     try {
-      host = await (hooks.startHost ?? managedPilotHost)({ mode, route, proxy: proxy.url, scratchParent, workDir, onSpawn: (spawned) => live.add(spawned) })
+      host = await (hooks.startHost ?? managedPilotHost)({
+        mode,
+        route,
+        proxy: proxy.url,
+        scratchParent,
+        workDir,
+        onSpawn: (spawned) => live.add(spawned),
+        ...(context.hostCheck === null ? {} : { check: context.hostCheck }),
+      })
       hostStart = `process ${host.pid} started and verified`
     } catch (error) {
       if (!(error instanceof HostRefused)) throw error
@@ -1635,13 +1721,36 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
     console.error(refused)
     return 1
   }
+  let hostCheck: HostCheckOptions | null = null
+  if (args.mode === "live") {
+    const untouched = "No host was started; the real auth target was not stat-ed; the data directory was not opened; no network connection was made."
+    // The paths first, resolved only, so a mistyped path never spends the authorization and the pre-check never walks the data directory.
+    const overlap = await firstOverlap(pathOverlaps(args))
+    if (overlap !== null) {
+      console.error(`REFUSED — ${overlap}; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.\n${untouched}`)
+      return 1
+    }
+    // The managed host's own binary and prepared checks, before the reservation, so a mismatch leaves the authorization unused.
+    const checked = await hostPreCheck(args.prepared!, seams.hostCheck)
+    if (!checked.ok) {
+      console.error(
+        [
+          `REFUSED — the managed host's pre-check failed; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
+          ...checked.problems.map((problem) => `REFUSED: ${problem}`),
+          untouched,
+        ].join("\n"),
+      )
+      return 1
+    }
+    hostCheck = checked.check
+  }
   await mkdir(args.out, { recursive: true })
   let reservation: PilotContext["reservation"] = null
   if (args.mode === "live") {
     // After every refusal that needs no touch, and before any host, auth-target stat, data-directory open or connection.
     const created: LiveReservation = {
       run: pilotRun.run,
-      story: "2-8c7",
+      story: "2-8c8",
       createdAt: new Date().toISOString(),
       gateTableBlob: authorization?.blob ?? null,
       proposalSha256: OAUTH_PILOT_PROPOSAL.sha256,
@@ -1735,7 +1844,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
   let timer: ReturnType<typeof setTimeout> | undefined
   let settleTimer: ReturnType<typeof setTimeout> | undefined
   try {
-    const context: PilotContext = { args, authorization, scratch, live, servers, signal: controller.signal, reservation, interrupt }
+    const context: PilotContext = { args, authorization, scratch, live, servers, signal: controller.signal, reservation, hostCheck, interrupt }
     const body = (seams.body ?? pilotWith(seams))(context).then(
       (code) => ({ code }),
       (error: unknown) => ({ failed: messageOf(error) }),

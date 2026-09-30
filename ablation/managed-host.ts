@@ -38,7 +38,8 @@
  * - **The build.** The sha256 of the resolved binary (the real path that is also
  *   the one spawned) equals `MEASURED_HOST`'s before anything is spawned, so an
  *   unmeasured binary never runs with the credential; the version the host then
- *   reports on `/global/health` equals it too.
+ *   reports on `/global/health` equals it too. `identifyBinary` is that hash check,
+ *   exported so a caller can make it before anything of its own is committed.
  * - **The config.** `GET /config`, for the host's own directory and for every
  *   directory the caller names, has an empty `plugin` list, exactly one provider
  *   (the generated block), and every other key equal to the generated config,
@@ -69,7 +70,7 @@
  *   digests and the catalogue's sha256 (`ablation/oauth-payload.ts`). The Anthropic
  *   sign-in plugin, the config seed and the catalogue are then copied into the
  *   host's private root, and every copy is verified again, so what the host loads is
- *   what was verified.
+ *   what was verified. `checkPrepared` is that first verification, exported too.
  * - **The config.** `plugin` is exactly the `file://` spec of the private copy of the
  *   Anthropic sign-in plugin, `enabled_providers` exactly the OAuth provider ids, and no
  *   credential appears anywhere. A `provider` key appears only when the probe passes
@@ -783,6 +784,51 @@ function defaultBinary(): string {
   return found
 }
 
+/** How the opencode binary is found and identified: `startManagedHost`'s own options, with its defaults. */
+export type BinaryIdentityOptions = Pick<HostOptionsBase, "binary" | "resolveBinary" | "hashFile" | "measured">
+
+export type BinaryIdentity = { ok: true; binary: string; sha256: string } | { ok: false; reason: string }
+
+/**
+ * The binary check `startManagedHost` makes before anything is created: `binary`
+ * (default `opencode` on this process's PATH) is resolved to its real path and
+ * hashed, and refused unless the hash is `measured`'s (default `MEASURED_HOST`).
+ * It reads only the binary file and never starts it. The reason is unredacted.
+ * Never rejects.
+ */
+export async function identifyBinary(options: BinaryIdentityOptions): Promise<BinaryIdentity> {
+  const measured = options.measured ?? MEASURED_HOST
+  let binary: string
+  let sha256: string
+  try {
+    binary = await (options.resolveBinary ?? realpath)(options.binary ?? defaultBinary())
+    sha256 = await (options.hashFile ?? sha256File)(binary)
+  } catch (error) {
+    return { ok: false, reason: `the opencode binary could not be identified: ${messageOf(error)}` }
+  }
+  if (sha256 !== measured.sha256) {
+    return {
+      ok: false,
+      reason:
+        `the host is not the measured build (binary sha256 ${sha256}, version not read: the binary was not started; measured sha256 ` +
+        `${measured.sha256}, version ${measured.version}): the binary \`${binary}\` has sha256 ${sha256}; the measured build's is ${measured.sha256}`,
+    }
+  }
+  return { ok: true, binary, sha256 }
+}
+
+export type PreparedCheck = { ok: true; measured: PreparedMeasure } | { ok: false; reason: string }
+
+/**
+ * The prepared-directory check `startManagedHost` makes in OAuth mode before
+ * anything is created: `verifyPrepared` against `pins`. It reads only the
+ * prepared directory. Never rejects.
+ */
+export async function checkPrepared(prepared: string, pins: PayloadPins): Promise<PreparedCheck> {
+  const verified = await verifyPrepared(prepared, pins)
+  return verified.ok ? { ok: true, measured: verified.measured } : { ok: false, reason: `the prepared directory \`${prepared}\` is refused: ${verified.problems.join("; ")}` }
+}
+
 /**
  * Start the managed host and verify it. On a refusal or a throw the host is
  * stopped and the private directories removed before this returns; on success
@@ -877,33 +923,18 @@ async function start(
   const stopMs = options.stopMs ?? DEFAULT_STOP_MS
   const requestMs = options.requestMs ?? DEFAULT_REQUEST_MS
 
-  let binary: string
-  let sha256: string
-  try {
-    binary = await (options.resolveBinary ?? realpath)(options.binary ?? defaultBinary())
-    sha256 = await (options.hashFile ?? sha256File)(binary)
-  } catch (error) {
-    return { ok: false, reason: redact(`the opencode binary could not be identified: ${messageOf(error)}`), stopped: null }
-  }
   // Refused before the spawn: an unmeasured binary never runs with the credential in its environment.
-  if (sha256 !== measured.sha256) {
-    return {
-      ok: false,
-      reason: redact(
-        `the host is not the measured build (binary sha256 ${sha256}, version not read: the binary was not started; measured sha256 ` +
-          `${measured.sha256}, version ${measured.version}): the binary \`${binary}\` has sha256 ${sha256}; the measured build's is ${measured.sha256}`,
-      ),
-      stopped: null,
-    }
-  }
+  const identified = await identifyBinary(options)
+  if (!identified.ok) return { ok: false, reason: redact(identified.reason), stopped: null }
+  const { binary, sha256 } = identified
 
   // OAuth mode, before anything is created: the payloads as pinned, and the data directory's shape and place.
   const pins = route?.pins ?? OAUTH_PAYLOAD
   const home = route?.home ?? homedir()
   let measuredPayload: PreparedMeasure | undefined
   if (route !== undefined) {
-    const verified = await verifyPrepared(route.prepared, pins)
-    if (!verified.ok) return { ok: false, reason: `the prepared directory \`${route.prepared}\` is refused: ${verified.problems.join("; ")}`, stopped: null }
+    const verified = await checkPrepared(route.prepared, pins)
+    if (!verified.ok) return { ok: false, reason: verified.reason, stopped: null }
     measuredPayload = verified.measured
     const shape = await dataDirProblems(route.dataDir, home)
     if (shape.length > 0) return { ok: false, reason: `the OAuth data directory is refused: ${shape.join("; ")}`, stopped: null }

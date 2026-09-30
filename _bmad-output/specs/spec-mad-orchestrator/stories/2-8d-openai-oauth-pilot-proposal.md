@@ -1,15 +1,16 @@
 ---
 title: 'Story 2-8d — bounded OpenAI OAuth pilot: proposal'
 created: '2026-09-25'
-status: 'revised for run 2'
+status: 'revised for run 3'
 decides: 'the human (pilot authorization); the review channel (evidence review, gate 7)'
 ---
 
 # Bounded OpenAI OAuth pilot: proposal
 
-**Status: a proposal for run 2, for the review channel (window 2), then for the human.** It authorizes
-nothing. It is not the protocol-v2 freeze, and it is not gate 4 (the evaluation's spend). Run 1 ran once,
-on 2026-09-28, and failed at its first attempt (see "Run 1"). Run 2 is the run this proposal asks for.
+**Status: a proposal for run 3, for the review channel (window 2), then for the human.** It authorizes
+nothing. It is not the protocol-v2 freeze, and it is not gate 4 (the evaluation's spend). Run 1 ran on
+2026-09-28 and failed at its first attempt. Run 2 ran on 2026-09-29 and failed at host preflight, with no
+attempt (see "Runs 1 and 2"). Run 3 is the run this proposal asks for.
 
 ## Why a pilot
 
@@ -20,7 +21,7 @@ loopback stubs. OpenAI's ChatGPT OAuth transport ignores a redirected `baseURL` 
 without billing be closed only on a separately authorized, bounded pilot reviewed before the evaluation,
 never on the paid evaluation itself. This is that pilot.
 
-## Run 1
+## Runs 1 and 2
 
 The budget owner authorized run 1 on 2026-09-28. It is recorded in
 `ablation/evidence/oauth-pilot-live-2026-09-28.json` (FAILED), and its reservation is committed at
@@ -31,15 +32,32 @@ reported a token-refresh failure, HTTP 401, for that attempt
 proxy-observed, the second attempt did not run and the third admission was not asked. OpenAI attempt
 accounting stays unestablished, so gate 7 stays OPEN. Run 1's authorization is spent.
 
-What is different for run 2:
-- **The sign-in.** The human reports a fresh ChatGPT sign-in with ordinary opencode. That is an
-  unverified claim: MAD never reads `auth.json`, and makes no expiry pre-check. Run 2 can fail the same way
-  run 1 did.
+The budget owner authorized run 2 on 2026-09-29. It is recorded in
+`ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json` (FAILED at host preflight), and its reservation
+is committed at `ablation/evidence/oauth-pilot-live-run-2.reservation`. The installed opencode had
+auto-updated to 1.18.33, whose binary sha256 is not the measured 1.18.32 build's, so the managed host
+refused to start it. No attempt was admitted, the backend was never called, no `CONNECT` was
+proxy-observed and nothing was billed. The reservation had been created before that check, so run 2's
+authorization is spent too.
+
+What is different for run 3:
+- **The path and host checks precede the reservation (story 2-8c8).** Before it creates the reservation,
+  `--live` refuses overlapping `--oauth-prepared`, `--oauth-data-dir` and `--out` paths, then makes the
+  managed host's own binary-hash and prepared-digest checks, through the same helpers
+  `startManagedHost` calls. An overlap or a mismatch refuses with run 3's authorization unused. The host
+  is started on the real binary path the pre-check hashed and checks both again immediately before the
+  spawn. That re-check comes after the reservation: a binary or payload that changes between the
+  pre-check and the spawn is refused, and run 3's authorization is then spent, as run 2's was.
+- **The binary.** The human reports that opencode's auto-update is now disabled and 1.18.32 reinstalled.
+  That is an unverified claim; the pre-check is what verifies the binary's hash.
+- **The sign-in.** After run 1's refresh 401 the human reported a fresh ChatGPT sign-in with ordinary
+  opencode; run 2 admitted no attempt, so nothing has exercised it. That is an unverified claim: MAD
+  never reads `auth.json`, and makes no expiry pre-check. Run 3 can fail the same way run 1 did.
 - **Settlement and diagnostics (story 2-8c6).** An attempt that ends in a host error with an all-zero
-  host token object now settles `unknown`, never a known zero, and still stops the run as "ended in an
+  host token object settles `unknown`, never a known zero, and still stops the run as "ended in an
   error". Each attempt records an allowlisted host-error record: a category (a refresh rejected with
   400, 401 or 403 reads `oauth-token-refresh-rejected` with that code), an optional allowlisted code and a
-  fixed summary. The host's message is never recorded, so run 2's evidence states a refresh failure
+  fixed summary. The host's message is never recorded, so run 3's evidence states a refresh failure
   without a WAL inspection.
 - **Unchanged:** the model, the route, the prompt, the sandbox and proxy, the stop conditions and the
   ceiling of 2 admitted attempts.
@@ -75,8 +93,9 @@ What is different for run 2:
 ## Stop conditions
 
 The command stops, admits nothing further and records why, on the first of:
-- any preflight failure: binary or payload digests, the auth symlink, the data-directory shape and
-  disjointness, or the store guard (every guarded table 0);
+- any preflight failure: binary or payload digests (checked before the reservation, and again before the
+  spawn, where a failure comes after the reservation and spends the authorization), the auth symlink, the
+  data-directory shape and disjointness, or the store guard (every guarded table 0);
 - the first attempt ending in an error, a refusal by the provider, a settlement other than `usage`,
   or no answer within 120,000 ms. An attempt that does not end within its bound is abandoned and halts
   (v2 A10), and the second attempt is not sent;
@@ -96,8 +115,9 @@ The command stops, admits nothing further and records why, on the first of:
   requests. As an illustration only, not a maximum and not a forecast: the measured R1 case of 6 requests
   per attempt, over 2 attempts plus a side request each, would be 14 requests. TLS and HTTP/2 hide
   request counts, so the proxy log counts proxy-observed connections, not requests.
-- **A second run adds its own exposure.** Run 1's requests, whatever they were, are spent. Run 2 has
-  its own 2-attempt ceiling and its own unbounded physical-request exposure, on top of run 1's.
+- **A further run adds its own exposure.** Run 1's requests, whatever they were, are spent; run 2 made
+  none. Run 3 has its own 2-attempt ceiling and its own unbounded physical-request exposure, on top of
+  run 1's.
 - **Tokens:** host-reported tokens are unverified diagnostics (v2 A7). As an estimate only, opencode's
   system prompt makes each request's input some thousands of tokens.
 - **Subscription quota:** unmeasured. The pilot draws on the human's ChatGPT subscription through its
@@ -113,10 +133,9 @@ The command stops, admits nothing further and records why, on the first of:
 
 ## Evidence, and what it can close
 
-Committed as `ablation/evidence/oauth-pilot-live-run-2-<date>.json`, redacted, with no request or response
+Committed as `ablation/evidence/oauth-pilot-live-run-3-<date>.json`, redacted, with no request or response
 content. The file committed is whichever one the run wrote in `--out`: `oauth-pilot.json`, or
-`oauth-pilot.INCOMPLETE.json` when it did not exit 0, as run 1's INCOMPLETE file was committed under its
-legacy name. It holds:
+`oauth-pilot.INCOMPLETE.json` when it did not exit 0, as run 1's and run 2's INCOMPLETE files were. It holds:
 - the journal's `issued` and `settled` lines;
 - the proxy's log of proxy-observed `CONNECT`s with timestamps. It can show no proxy-observed `CONNECT`
   before an attempt's `issued` line, none for the refused attempt, and none to another host. It cannot
@@ -135,16 +154,19 @@ text must say so.
 
 ## One run only
 
-Gate 8 authorizes one run, run 2. Its identity, `OAUTH_PILOT_RUN` in `ablation/paired-gates.ts`, is
+Gate 8 authorizes one run, run 3. Its identity, `OAUTH_PILOT_RUN` in `ablation/paired-gates.ts`, is
 committed beside the gate: no flag, environment variable, file or date names a run, and the command line
-takes none. Before it touches a host, the
-auth target, the data directory or the network, `--live` checks that run 1's committed reservation and
-evidence are unchanged and record run 1's proposal, then creates run 2's reservation file
-`ablation/evidence/oauth-pilot-live-run-2.reservation` exclusively. If that file already exists, or any
-other live pilot file than run 1's is present, it refuses, whether an earlier run succeeded, failed or
-was interrupted, and whatever `--out` it used. Two invocations cannot both create it. Nothing deletes
-it, so a failed or interrupted run 2 consumes the authorization. A further run needs the human's
-explicit decision, and the budget owner re-opens gate 8 after the run.
+takes none. Before it starts a host or touches the auth target, the data directory or the network,
+`--live` checks that runs 1 and 2's committed reservations and evidence are unchanged and record their
+own proposals, refuses overlapping `--oauth-prepared`, `--oauth-data-dir` and `--out` paths, and makes
+the managed host's binary-hash and prepared-digest checks; an overlap or a mismatch there refuses with
+the authorization unused. It then creates run 3's reservation file
+`ablation/evidence/oauth-pilot-live-run-3.reservation` exclusively. If that file already exists, or any
+other live pilot file than runs 1 and 2's is present, it refuses, whether an earlier run succeeded,
+failed or was interrupted, and whatever `--out` it used. Two invocations cannot both create it. Nothing
+deletes it, so a run 3 that fails or is interrupted after the reservation consumes the authorization,
+including a binary or payload mismatch the host's own re-check finds. A
+further run needs the human's explicit decision, and the budget owner re-opens gate 8 after the run.
 
 ## Built first, at no cost
 
@@ -156,8 +178,9 @@ explicit decision, and the budget owner re-opens gate 8 after the run.
   Copilot startup connection. It may exercise only the first, failed attempt; the ceiling and the refused
   third admission are proven by stand-in tests.
 
-Story 2-8c6 (failed-turn settlement and host-error diagnostics) and story 2-8c7 (run 2's identity and
-reservation) were built the same way, at no cost. The live run is the only step the human authorizes.
+Story 2-8c6 (failed-turn settlement and host-error diagnostics), story 2-8c7 (the run identity and
+reservation) and story 2-8c8 (the host checks before the reservation, and run 3's identity) were built
+the same way, at no cost. The live run is the only step the human authorizes.
 
 ## Residual risks on the OAuth route
 
@@ -197,8 +220,14 @@ Quoted in full from `ablation/LIVE-RUN.md`:
 >    they are empty. **2-8d's run proposal must name these six tables too before the human is asked to
 >    authorize a bounded pilot.**
 
+One further risk applies to this pilot's host, outside the quoted section:
+
+- **The host's auto-update.** MAD does not disable opencode's auto-update in the host it launches. The
+  disabled auto-update is the human's own setting, which MAD does not verify; an update between the
+  pre-check and the spawn is refused by the host's re-check and spends the authorization.
+
 ## The decision asked of the human
 
-Authorize, or decline, **run 2 of `bun run oauth-pilot`**, one run: at most 2 admitted attempts to
+Authorize, or decline, **run 3 of `bun run oauth-pilot`**, one run: at most 2 admitted attempts to
 `openai/gpt-6-luna` through the ChatGPT OAuth sign-in, with the exposure above. This decision is
 separate from freezing protocol v2 and from gate 4.

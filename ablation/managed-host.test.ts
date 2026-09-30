@@ -11,8 +11,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
+  checkPrepared,
   configDrift,
   HOST_CONFIG_GITIGNORE,
+  identifyBinary,
   hostConfig,
   oauthConfigDrift,
   oauthHostConfig,
@@ -1077,6 +1079,32 @@ describe("OAuth mode: starting and stopping", () => {
     if (!result.ok) throw new Error(result.reason)
     await fakeStore(route.dataDir, { session: 1 })
     expect((await result.host.stop()).postStop?.problems.join("\n")).toContain("holds session=1; every named table must be empty")
+  })
+
+  test("story 2-8c8 — `identifyBinary` and `checkPrepared` give the refusal text `startManagedHost` gives, reading only the binary and the prepared directory", async () => {
+    const { route } = await oauthFixture()
+    const hashed: string[] = []
+    const wrongHash = { binary: "/opt/opencode", resolveBinary: async (path: string) => path, hashFile: async (path: string) => (hashed.push(path), "0".repeat(64)) }
+    const identified = await identifyBinary(wrongHash)
+    const host = fakeHost()
+    const started = await startOAuth(host, route, wrongHash)
+    expect(identified).toEqual({ ok: false, reason: started.ok ? "" : started.reason })
+    expect(hashed).toEqual(["/opt/opencode", "/opt/opencode"])
+    expect(host.requests).toEqual([])
+
+    const unreadable = await identifyBinary({ binary: "/opt/opencode", resolveBinary: async () => { throw new Error("ENOENT") } })
+    expect(unreadable).toEqual({ ok: false, reason: "the opencode binary could not be identified: ENOENT" })
+    expect(await identifyBinary({ ...wrongHash, hashFile: async () => MEASURED_HOST.sha256 })).toEqual({ ok: true, binary: "/opt/opencode", sha256: MEASURED_HOST.sha256 })
+    const custom = { version: "0.0.1", sha256: "1".repeat(64) }
+    expect((await identifyBinary({ ...wrongHash, hashFile: async () => custom.sha256, measured: custom })).ok).toBe(true)
+
+    expect((await checkPrepared(route.prepared, route.pins!)).ok).toBe(true)
+    await writeFile(join(route.prepared, route.pins!.catalogue.file), "{}\n")
+    const prepared = await checkPrepared(route.prepared, route.pins!)
+    const refused = await startOAuth(fakeHost(), route)
+    expect(prepared.ok).toBe(false)
+    expect(prepared.ok ? "" : prepared.reason).toBe(refused.ok ? "" : refused.reason)
+    expect(prepared.ok ? "" : prepared.reason).toContain(`the prepared directory \`${route.prepared}\` is refused: the model catalogue`)
   })
 
   test("an unmeasured binary is refused before the payloads are even read", async () => {

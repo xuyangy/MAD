@@ -160,20 +160,36 @@ describe("PAIRED_GATES", () => {
       expect(gate.note).toContain(text)
     }
     expect(gate.requires).toContain(OAUTH_PILOT_PROPOSAL.sha256)
-    expect(gate.requires).toContain("the budget owner authorizes run 2 (`OAUTH_PILOT_RUN`, story 2-8c7)")
+    expect(gate.requires).toContain("the budget owner authorizes run 3 (`OAUTH_PILOT_RUN`, stories 2-8c7 and 2-8c8)")
+    expect(gate.requires).toContain("before the reservation, `--live` checks the managed host's binary hash and prepared digests, refusing with the authorization unused on a mismatch")
     expect(gate.requires).toContain(`creates ${oauthPilotReservation(OAUTH_PILOT_RUN.run)} exclusively`)
-    expect(oauthPilotReservation(OAUTH_PILOT_RUN.run)).toBe("ablation/evidence/oauth-pilot-live-run-2.reservation")
+    expect(oauthPilotReservation(OAUTH_PILOT_RUN.run)).toBe("ablation/evidence/oauth-pilot-live-run-3.reservation")
     for (const text of ["`bun run oauth-pilot --live`", "at most 2 admitted attempts", "openai/gpt-6-luna", "2-8d-openai-oauth-pilot-proposal.md", "never stands in for gate 4 or closes gate 7"]) {
       expect(gate.requires).toContain(text)
     }
   })
 
-  test("OAUTH_PILOT_RUN names run 2, and its one prior run is run 1 under its legacy, committed names", () => {
-    expect(OAUTH_PILOT_RUN.run).toBe(2)
-    expect(OAUTH_PILOT_RUN.prior.map((prior) => prior.run)).toEqual([1])
-    const [run1] = OAUTH_PILOT_RUN.prior
+  test("OAUTH_PILOT_RUN names run 3; its prior runs are run 1 under its legacy names and run 2 under its own, as committed", () => {
+    expect(OAUTH_PILOT_RUN.run).toBe(3)
+    expect(OAUTH_PILOT_RUN.prior.map((prior) => prior.run)).toEqual([1, 2])
+    const [run1, run2] = OAUTH_PILOT_RUN.prior
+    expect(run1).toEqual({
+      run: 1,
+      reservation: "ablation/evidence/oauth-pilot-live.reservation",
+      evidence: "ablation/evidence/oauth-pilot-live-2026-09-28.json",
+      proposalSha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+    })
+    expect(run2).toEqual({
+      run: 2,
+      reservation: "ablation/evidence/oauth-pilot-live-run-2.reservation",
+      evidence: "ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json",
+      proposalSha256: "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
+    })
     expect(run1!.reservation).toBe(oauthPilotReservation(1))
+    expect(run2!.reservation).toBe(oauthPilotReservation(2))
     expect(oauthPilotEvidencePattern(1).test(run1!.evidence.split("/").pop()!)).toBe(true)
+    expect(oauthPilotEvidencePattern(2).test(run2!.evidence.split("/").pop()!)).toBe(true)
+    expect(run2!.proposalSha256).not.toBe(OAUTH_PILOT_PROPOSAL.sha256)
     expect(oauthPilotEvidencePattern(2).test("oauth-pilot-live-run-2-2026-10-01.json")).toBe(true)
     expect(oauthPilotEvidencePattern(2).test("oauth-pilot-live-2026-10-01.json")).toBe(false)
     expect(oauthPilotEvidencePattern(1).test("oauth-pilot-live-run-2-2026-10-01.json")).toBe(false)

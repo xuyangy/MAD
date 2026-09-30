@@ -88,7 +88,7 @@ export const HUMAN_BUDGET_OWNER = "the human budget owner"
  */
 export const OAUTH_PILOT_PROPOSAL = {
   path: "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md",
-  sha256: "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
+  sha256: "2a241e0125a49259daaac2c33480c7044f5f49983211322f6263ab8cb444ccfb",
 } as const
 
 /** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
@@ -128,17 +128,25 @@ export function oauthPilotEvidencePattern(run: number): RegExp {
 }
 
 /**
- * Story 2-8c7 — the run gate 8 authorizes. Run 1 ran on 2026-09-28 and failed at
- * attempt 1; its reservation and evidence are committed under their legacy names.
+ * Stories 2-8c7 and 2-8c8 — the run gate 8 authorizes. Run 1 ran on 2026-09-28 and
+ * failed at attempt 1; its reservation and evidence are committed under their
+ * legacy names. Run 2 ran on 2026-09-29 and failed at host preflight, with no
+ * attempt; its reservation and evidence are committed under run 2's names.
  */
 export const OAUTH_PILOT_RUN: OAuthPilotRun = {
-  run: 2,
+  run: 3,
   prior: [
     {
       run: 1,
       reservation: "ablation/evidence/oauth-pilot-live.reservation",
       evidence: "ablation/evidence/oauth-pilot-live-2026-09-28.json",
       proposalSha256: "1245e11370e7df1e9f73a9c2b356334327c315ef0d079c9bd208c275df893402",
+    },
+    {
+      run: 2,
+      reservation: "ablation/evidence/oauth-pilot-live-run-2.reservation",
+      evidence: "ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json",
+      proposalSha256: "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
     },
   ],
 }
@@ -272,10 +280,11 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
     requires:
-      `the budget owner authorizes run ${OAUTH_PILOT_RUN.run} (\`OAUTH_PILOT_RUN\`, story 2-8c7) of story 2-8c5's \`bun run oauth-pilot --live\`: ` +
+      `the budget owner authorizes run ${OAUTH_PILOT_RUN.run} (\`OAUTH_PILOT_RUN\`, stories 2-8c7 and 2-8c8) of story 2-8c5's \`bun run oauth-pilot --live\`: ` +
       "at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in " +
       `${OAUTH_PILOT_PROPOSAL.path} (sha256 ${OAUTH_PILOT_PROPOSAL.sha256}; \`--live\` refuses if the file differs). One run only: ` +
-      `\`--live\` creates ${oauthPilotReservation(OAUTH_PILOT_RUN.run)} exclusively before it touches a host, the auth target, the data ` +
+      "before the reservation, `--live` checks the managed host's binary hash and prepared digests, refusing with the authorization unused on a mismatch; it then " +
+      `creates ${oauthPilotReservation(OAUTH_PILOT_RUN.run)} exclusively before it starts a host or touches the auth target, the data ` +
       "directory or the network, and refuses while it exists, while an earlier run's committed reservation or evidence is missing, " +
       "changed or malformed, or while any other oauth-pilot-live* file is committed, untracked or in ablation/evidence; nothing " +
       "deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests " +
