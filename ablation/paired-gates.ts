@@ -278,7 +278,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "oauth-pilot",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       `the budget owner authorizes run ${OAUTH_PILOT_RUN.run} (\`OAUTH_PILOT_RUN\`, stories 2-8c7 and 2-8c8) of story 2-8c5's \`bun run oauth-pilot --live\`: ` +
       "at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in " +
@@ -289,11 +289,6 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "changed or malformed, or while any other oauth-pilot-live* file is committed, untracked or in ablation/evidence; nothing " +
       "deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests " +
       "the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7",
-    evidence:
-      `the human budget owner authorized run ${OAUTH_PILOT_RUN.run} on 2026-09-30, in the session, accepting the exposure stated in ` +
-      `${OAUTH_PILOT_PROPOSAL.path} (sha256 ${OAUTH_PILOT_PROPOSAL.sha256}): at most 2 admitted attempts of ` +
-      "\"Reply with the word ok.\" to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with no upper bound on " +
-      "physical requests, side requests or subscription quota. Tests: ablation/paired-gates.test.ts",
     note:
       "The budget owner authorized run 1 on 2026-09-28. It is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json " +
       "(FAILED: attempt 1 returned model-error without an answer and no further attempt ran), with its committed reservation at " +
@@ -301,7 +296,11 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). That authorization is spent. The budget " +
       "owner authorized run 2 on 2026-09-29. It is recorded in ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json (FAILED at " +
       "host preflight: the installed opencode binary was not the measured build, so no host started and no attempt was admitted), " +
-      "with its committed reservation at ablation/evidence/oauth-pilot-live-run-2.reservation. That authorization is spent too",
+      "with its committed reservation at ablation/evidence/oauth-pilot-live-run-2.reservation. That authorization is spent too. " +
+      "The budget owner authorized run 3 on 2026-09-30. It is recorded in ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json " +
+      "(both attempts answered and settled usage; the third admission was refused inside the journal with 0 backend calls), with " +
+      "its committed reservation at ablation/evidence/oauth-pilot-live-run-3.reservation. That authorization is spent; no further " +
+      "live run is authorized",
   },
 ]
 
