@@ -561,7 +561,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     const oauthOnly = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && !onRoute(gate)).map((gate) => gate.number)
     expect(oauthOnly).toEqual([7])
     expect(text).toContain(
-      "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
+      "Gate 8 is CLOSED; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8])
   })
