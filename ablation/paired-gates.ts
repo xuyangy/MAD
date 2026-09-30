@@ -255,21 +255,36 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: "story 2-8c3b",
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       "story 2-8c3b's zero-bill OAuth probe evidence: the host starts with the roster's OAuth providers and lists them, " +
       "every attempt is journaled before it is issued and counted once, a refused attempt reaches nothing, and an " +
       "attempt that does not end within its bound is stopped and recorded. OpenAI's OAuth transport is covered, or the " +
       "gate is closed only by a separately human-authorized bounded pilot whose evidence is reviewed before story 2-8d " +
       "starts. Never closed from the paid paired evaluation",
+    evidence:
+      "OpenAI's OAuth transport is covered by the human-authorized bounded pilot's run 3 " +
+      "(ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json), reviewed by the review channel on 2026-09-30: on the measured " +
+      "opencode 1.18.32 host, which listed OpenAI, two admitted attempts to openai/gpt-6-luna each have one journal `issued` line " +
+      "before the backend call and one `settled` line, returned an answer within 120 s and settled usage; the third admission was " +
+      "refused inside the journal with 0 backend calls and no new `issued` line. The zero-bill OAuth probe " +
+      "(ablation/evidence/oauth-attempts-2026-09-25.json) covers Anthropic and Copilot, a seeded refusal that reached nothing, and " +
+      "an attempt past its turn deadline that was stopped, settled unknown and abandoned, and latched a halt. Scope: this build, " +
+      "the OAuth route and the pilot's one-slot discover attempts. Admitted attempts are counted; physical provider requests, host " +
+      "retries, side requests, host-reported tokens and subscription quota are neither established nor bounded by the attempt " +
+      "count. One chatgpt.com:443 CONNECT was tunnelled, during attempt 1; a reused tunnel cannot count requests for either " +
+      "attempt. Two refused api.githubcopilot.com:443 startup CONNECTs came before the first admission was asked, so not every " +
+      "proxy-observed connection followed an `issued` line; no allowed-host CONNECT was observed before the first admission or " +
+      "after the last settlement. The proxy log and the zero sandbox denials reported are not a complete egress census. " +
+      "Tests: ablation/paired-gates.test.ts, scripts/oauth-pilot.test.ts, scripts/oauth-probe.test.ts",
     note:
-      "The zero-bill OAuth probe (ablation/evidence/oauth-attempts-2026-09-25.json) covered Anthropic and Copilot but left " +
-      "OpenAI unprobed. The authorized live pilot (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped after one " +
-      "journaled attempt returned model-error without an answer; no chatgpt.com CONNECT was proxy-observed, the second " +
-      "attempt did not run, and the third admission was not asked. A later non-billing inspection of the host database WAL " +
-      "found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed " +
-      "(ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). OpenAI attempt accounting is not established, so this " +
-      "gate stays OPEN",
+      "Limits carried to story 2-8d: the store guard held its guarded tables at 0 before and after the pilot, but opencode's " +
+      "logs, `project` and `event` rows and six unguarded session-capable tables (session_message, session_entry, session_input, " +
+      "todo, session_share, workspace) can persist in the OAuth data directory across runs, and their effect on comparison is " +
+      "unmeasured. The pilot's sandbox does not show production egress control: the runtime code-fetch risk stays open on an " +
+      "unsandboxed launch. Earlier runs: run 1 (ablation/evidence/oauth-pilot-live-2026-09-28.json) stopped at attempt 1 on a " +
+      "token-refresh 401 (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json); run 2 " +
+      "(ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json) was refused at host preflight with no attempt",
   },
   {
     number: 8,

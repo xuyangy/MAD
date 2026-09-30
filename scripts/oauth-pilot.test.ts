@@ -1075,7 +1075,7 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     )
     expect(run.err).toContain("the unified log reported 1 sandbox denial(s) over the host's window, counted against the host's process tree: a connection went around the proxy")
     expect(run.failed!.gateEffect).toBe(GATE_EFFECT)
-    expect(GATE_EFFECT).toContain("this command closes no gate: gate 7 stays OPEN")
+    expect(GATE_EFFECT).toContain("this command closes no gate: gates 7 and 8 change only by a reviewed, committed change")
   })
 
   test("a denial that does not name the host's pid still fails the live run: only the host's tree runs sandboxed", async () => {

@@ -1796,7 +1796,7 @@ describe("the OAuth route: flags", () => {
 })
 
 describe("the OAuth route: stage 1", () => {
-  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN, gate 7 OPEN and protocol v2 not frozen, and starts no host", async () => {
+  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN and protocol v2 not frozen, and starts no host", async () => {
     const env = await oauthSetup()
     const host = oauthHost()
     const { overrides, clientCalls } = oauthOverrides(env, host)
@@ -1806,7 +1806,7 @@ describe("the OAuth route: stage 1", () => {
     expect(result.code).toBe(1)
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
     expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
-    expect(diagnostic).toContain("gate 7 (OAuth attempt accounting) is OPEN")
+    expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
     expect(diagnostic).toContain("protocol v2 is not frozen")
     expect(diagnostic).not.toContain("gate 1 ")
     expect(result.text).toContain("PASS  OAuth prepared payloads")
@@ -1830,7 +1830,7 @@ describe("the OAuth route: stage 1", () => {
     expect(diagnostic).toContain("session=3, message=6")
     expect(diagnostic).toContain("every named table must be empty")
     expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
-    expect(diagnostic).toContain("gate 7 (OAuth attempt accounting) is OPEN")
+    expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
     expect(diagnostic).toContain("protocol v2 is not frozen")
     expect(result.text).toContain("OAuth store failed")
     expect(result.text).not.toContain(ROW_CONTENT_MARKER)

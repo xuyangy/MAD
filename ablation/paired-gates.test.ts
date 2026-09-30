@@ -34,7 +34,7 @@ describe("PAIRED_GATES", () => {
       [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
       [5, "worktree identity", "engineering", "evaluation", "story 2-8b", "CLOSED"],
       [6, "production Tools wiring", "engineering", "evaluation", "story 2-8b", "CLOSED"],
-      [7, "OAuth attempt accounting", "engineering", "evaluation", "story 2-8c3b", "OPEN"],
+      [7, "OAuth attempt accounting", "engineering", "evaluation", "story 2-8c3b", "CLOSED"],
       [8, "OAuth pilot spend authorization", "authorization", "oauth-pilot", HUMAN_BUDGET_OWNER, "OPEN"],
     ])
     // Routes: gate 1 covers the api-key route, gates 7 and 8 the oauth route, and every other gate both.
@@ -50,50 +50,61 @@ describe("PAIRED_GATES", () => {
     ])
   })
 
-  test("gate 7 is OPEN, needs 2-8c3b's zero-bill probe, and is never closed from the paid evaluation", () => {
+  test("gate 7 is CLOSED on the pilot's run 3 and the zero-bill probe, and is never closed from the paid evaluation", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 7)!
-    expect(gate.status).toBe("OPEN")
-    expect(gate.evidence).toBeUndefined()
+    expect(gate.status).toBe("CLOSED")
+    for (const text of [
+      "ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json",
+      "ablation/evidence/oauth-attempts-2026-09-25.json",
+      "reviewed by the review channel on 2026-09-30",
+      "the third admission was refused inside the journal with 0 backend calls",
+      "settled unknown and abandoned, and latched a halt",
+      "Scope: this build, the OAuth route and the pilot's one-slot discover attempts",
+      "physical provider requests, host retries, side requests, host-reported tokens and subscription quota are neither established nor bounded by the attempt count",
+      "a reused tunnel cannot count requests for either attempt",
+      "not every proxy-observed connection followed an `issued` line",
+      "not a complete egress census",
+    ]) {
+      expect(gate.evidence).toContain(text)
+    }
     for (const text of ["2-8c3b", "zero-bill OAuth probe", "OpenAI's OAuth transport", "separately human-authorized bounded pilot", "before story 2-8d", "Never closed from the paid paired evaluation"]) {
       expect(gate.requires).toContain(text)
     }
   })
 
-  test("gate 7's note names the probe and pilot evidence, and each summary is what its file records", async () => {
+  test("gate 7's evidence files record what it says, and its note carries the limits and the earlier runs", async () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 7)!
-    const file = /ablation\/evidence\/oauth-attempts-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
-    expect(file).toBeDefined()
-    const evidence = JSON.parse(await Bun.file(new URL(`../${file}`, import.meta.url)).text()) as { summary: Record<string, string> }
-    const holds = Object.entries(evidence.summary).filter(([, verdict]) => verdict === "HOLDS").map(([name]) => name)
-    expect(holds.sort()).toEqual(
-      ["registry with placeholders", "registry with the real data directory", "anthropic attempt", "copilot attempt", "attempt refused by a seeded gate", "hang past the turn deadline", "persistent 500"].sort(),
-    )
-    expect(evidence.summary["openai attempt"]).toBe("UNPROBED")
-    expect(gate.note).toContain("left OpenAI unprobed")
-    const pilotFile = /ablation\/evidence\/oauth-pilot-live-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
-    expect(pilotFile).toBeDefined()
-    const pilot = JSON.parse(await Bun.file(new URL(`../${pilotFile}`, import.meta.url)).text()) as {
-      status: string
+    const read = async <T,>(path: string) => JSON.parse(await Bun.file(new URL(`../${path}`, import.meta.url)).text()) as T
+    const probe = await read<{ summary: Record<string, string> }>("ablation/evidence/oauth-attempts-2026-09-25.json")
+    for (const name of ["anthropic attempt", "copilot attempt", "attempt refused by a seeded gate", "hang past the turn deadline"]) expect(probe.summary[name]).toBe("HOLDS")
+    const run3 = await read<{
+      status?: string
       anyAttemptAnswered: boolean
-      attempts: { failure: string | null }[]
-      thirdAdmission: { asked: boolean }
-      proxy: { connects: { target: string }[] }
+      attempts: { answered: boolean; failure: string | null; settlement: { kind: string } }[]
+      thirdAdmission: { asked: boolean; backendCalls: number }
+      proxy: { connects: { target: string; outcome: string; window: string }[] }
+      journal: { lines: { type: string }[] }
+    }>("ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json")
+    expect(run3.status).toBeUndefined()
+    expect(run3.anyAttemptAnswered).toBe(true)
+    expect(run3.attempts.map((attempt) => [attempt.answered, attempt.failure, attempt.settlement.kind])).toEqual([[true, null, "usage"], [true, null, "usage"]])
+    expect(run3.journal.lines.map((line) => line.type)).toEqual(["issued", "settled", "issued", "settled"])
+    expect(run3.thirdAdmission).toMatchObject({ asked: true, backendCalls: 0 })
+    expect(run3.proxy.connects.filter((connect) => connect.outcome === "tunnelled").map((connect) => [connect.target, connect.window])).toEqual([["chatgpt.com:443", "attempt 1"]])
+    expect(run3.proxy.connects.filter((connect) => connect.outcome === "refused").map((connect) => [connect.target, connect.window])).toEqual([
+      ["api.githubcopilot.com:443", "before the first admission was asked"],
+      ["api.githubcopilot.com:443", "before the first admission was asked"],
+    ])
+    for (const text of [
+      "Limits carried to story 2-8d",
+      "session_message, session_entry, session_input, todo, session_share, workspace",
+      "the runtime code-fetch risk stays open on an unsandboxed launch",
+      "ablation/evidence/oauth-pilot-live-2026-09-28.json",
+      "ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json",
+      "ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json",
+    ]) {
+      expect(gate.note).toContain(text)
     }
-    expect(pilot.status).toBe("FAILED")
-    expect(pilot.anyAttemptAnswered).toBe(false)
-    expect(pilot.attempts.map((attempt) => attempt.failure)).toEqual(["model-error"])
-    expect(pilot.thirdAdmission.asked).toBe(false)
-    expect(pilot.proxy.connects.map((connect) => connect.target)).not.toContain("chatgpt.com:443")
-    expect(gate.note).toContain("OpenAI attempt accounting is not established, so this gate stays OPEN")
-    const diagnosisFile = /ablation\/evidence\/oauth-pilot-diagnosis-[\d-]+\.json/.exec(gate.note ?? "")?.[0]
-    expect(diagnosisFile).toBeDefined()
-    const diagnosis = JSON.parse(await Bun.file(new URL(`../${diagnosisFile}`, import.meta.url)).text()) as {
-      diagnoses: string
-      observed: { errorName: string; errorMessage: string }
-    }
-    expect(diagnosis.diagnoses).toBe(pilotFile!)
-    expect(`${diagnosis.observed.errorName}: ${diagnosis.observed.errorMessage}`).toBe("UnknownError: Token refresh failed: 401")
-    expect(gate.note).toContain("found `UnknownError: Token refresh failed: 401` for that attempt; no chatgpt.com CONNECT was proxy-observed")
   })
 
   test("gate 4 states the api-key unit unchanged and the oauth unit in admitted attempts", () => {
@@ -233,10 +244,10 @@ describe("gatePreflight", () => {
     expect(result.lines[0]).toContain("required for evaluation on route api-key, owner story 2-8c2 — CLOSED")
   })
 
-  test("the shipped table refuses the oauth evaluation on gates 4 and 7, and gate 1 is not consulted", () => {
+  test("the shipped table refuses the oauth evaluation on gate 4 alone, and gate 1 is not consulted", () => {
     const result = gatePreflight(PAIRED_GATES, "evaluation", "oauth")
     expect(result.ok).toBe(false)
-    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4", "gate 7"])
+    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
     expect(result.lines[0]).toContain("host request accounting — engineering, required for evaluation on route api-key (not consulted for route oauth)")
     expect(result.lines[7]).toContain("gate 8 — OAuth pilot spend authorization — authorization, required for oauth-pilot on route oauth (not consulted for evaluation)")
   })

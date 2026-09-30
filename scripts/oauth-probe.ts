@@ -1027,7 +1027,7 @@ export function findingsFrom(scenarios: readonly ScenarioRecord[]): { id: string
           ? `OpenAI: ${missing("openai attempt")}`
           : `OpenAI's OAuth transport ignores baseURL and is UNPROBED: beyond the startup connections (E1) the proxy refused ` +
             `${promptTargets(openai).length === 0 ? "no connection" : promptTargets(openai).join(", ")}; ${openai.stubRequests} stub request(s) arrived. ` +
-            "Paired gate 7 stays OPEN until a separately human-authorized bounded pilot covers it",
+            "The probe alone does not close paired gate 7: OpenAI's transport needs a separately human-authorized bounded pilot",
     },
     {
       id: "H1",

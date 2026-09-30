@@ -553,13 +553,13 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     expect(text).toContain("gate 4 below is OPEN and is required for the evaluation")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
     expect(text).toContain(
-      "Gate 7 is OPEN as well; it covers only the oauth route, so it is printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) gates 4 and 7 both refuse.",
+      "Gate 7 is CLOSED; it covers only the oauth route, so it is printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) gate 4 refuses.",
     )
     const onRoute = (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes("api-key")
     const required = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(gate)).map((gate) => gate.number)
     expect(required).toEqual([4])
     const oauthOnly = PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && !onRoute(gate)).map((gate) => gate.number)
-    expect(oauthOnly).toEqual([7])
+    expect(oauthOnly).toEqual([])
     expect(text).toContain(
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
@@ -569,7 +569,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### Attempt-mode accounting (story 2-8c3a)", " ### ", "the attempt-mode section")
     expect(text).toContain("**`--provider-mode oauth` selects it**")
-    expect(text).toContain("gate 7 stays OPEN")
+    expect(text).toContain("the OAuth pilot's run 3 covered it")
     for (const figure of [ATTEMPT_ALLOWANCES.prefix, ATTEMPT_ALLOWANCES.continuation, ATTEMPT_ALLOWANCES.block, ATTEMPT_ALLOWANCES.blocks]) {
       expect(text).toContain(String(figure))
     }
@@ -632,7 +632,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
     expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
-    expect(text).toContain("lists gate 4 OPEN, gate 7 OPEN and protocol v2 not frozen")
+    expect(text).toContain("lists gate 4 OPEN and protocol v2 not frozen")
     for (const phrase of [
       "bun run oauth-prepare --out /scratch/mad-oauth-prepared",
       "--provider-mode oauth",
@@ -788,7 +788,7 @@ describe("LIVE-RUN.md documents the OAuth attempt probe that was actually run", 
     }
   })
 
-  test("it states its isolation, its findings and that gate 7 stays OPEN", async () => {
+  test("it states its isolation, its findings, and that the probe alone leaves OpenAI unprobed and the later pilot closed gate 7", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     for (const phrase of [
       "bun run oauth-probe --out /tmp/mad-oauth-probe",
@@ -805,7 +805,7 @@ describe("LIVE-RUN.md documents the OAuth attempt probe that was actually run", 
       "**E1 — startup egress.**",
       "**O1 — OpenAI is UNPROBED.**",
       "`chatgpt.com:443`",
-      "**Gate 7 stays OPEN.**",
+      "**This evidence alone does not close gate 7.**",
       "Nothing here covers OpenAI's transport.",
       '(allow network-outbound (remote unix-socket))',
       "the test is inconclusive and the probe refuses",
@@ -890,11 +890,13 @@ describe("LIVE-RUN.md documents the OAuth pilot command", () => {
       "**The evidence says proxy-observed CONNECT, never all egress**",
       "the per-attempt physical request count is not shown",
       "The residual risks of the OAuth route (story 2-8c4, above) all apply",
-      "**Gate 7 stays OPEN.**",
+      "**Gate 7 closes only by a reviewed, committed change to `ablation/paired-gates.ts`**",
+      "on an authorized live run in which each attempt's `issued` line precedes its backend call, each attempt is counted once and settled, no allowed-host CONNECT is observed before the first admission, and the Copilot startup CONNECTs are refused and recorded under the exception above.",
+      "It closed on the reviewed run-3 evidence (`ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json`), reviewed on 2026-09-30.",
       "**Both modes run the host in the same sandbox.**",
       "(`SANDBOX_PROFILE`, through `sandboxSpawn`), after the same self-test",
       "The loopback `HTTPS_PROXY` runs outside the sandbox, in the pilot's own process, and is the host's only way out.",
-      "If the OpenAI transport ignores `HTTPS_PROXY`, the sandbox denies its connection, the attempt fails, the pilot fails closed, and gate 7 stays OPEN.",
+      "If the OpenAI transport ignores `HTTPS_PROXY`, the sandbox denies its connection, the attempt fails, the pilot fails closed, and the run cannot close gate 7.",
       "inside the sandbox, behind a loopback proxy that tunnels `CONNECT` only to",
       "**The Copilot startup exception.** A `CONNECT` to exactly `api.githubcopilot.com:443` before the first admission was asked is an expected startup event",
       "The boundary is the moment the first admission was asked for, which no `issued` line can precede, so it is stricter than the first `issued` line.",

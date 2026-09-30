@@ -772,7 +772,7 @@ const attemptRecord = (attempt: PilotAttempt, started: number): Record<string, u
 
 /** What every evidence file says about the gates, whatever it observed. */
 export const GATE_EFFECT =
-  "this command closes no gate: gate 7 stays OPEN and gate 8 is unchanged; either changes only by a reviewed, committed change to ablation/paired-gates.ts"
+  "this command closes no gate: gates 7 and 8 change only by a reviewed, committed change to ablation/paired-gates.ts"
 
 export interface PilotEvidence {
   kind: string
