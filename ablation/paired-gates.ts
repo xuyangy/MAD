@@ -238,14 +238,14 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
-    evidence:
-      "the human budget owner authorized, on 2026-10-02, in the session, one live paired evaluation of story 2-8d on the oauth " +
+    note:
+      "The human budget owner authorized, on 2026-10-02, in the session, one live paired evaluation of story 2-8d on the oauth " +
       `route (\`bun run paired --live --provider-mode oauth\`), accepting the exposure stated in ${EVALUATION_RUN_PROPOSAL.path} ` +
       `(sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): the roster openai/gpt-6-luna, ` +
       "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability lens slots, under frozen " +
@@ -255,7 +255,9 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "of scripts/paired.ts refuses any other pin list, and refuses while the reservation " +
       `${EVALUATION_RUN.reservation} exists on disk or at HEAD; once every stage-1 check passes, and before a host starts, it ` +
       "creates that reservation exclusively in this repository, so a second run into any --out is refused, and nothing " +
-      "deletes it. Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts",
+      "deletes it. Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +
+      "`GET /config` for --directory had no answer within 10000 ms, so no model session started and no attempt was admitted), " +
+      `with its committed reservation at ${EVALUATION_RUN.reservation}. That authorization is spent; no further live run is authorized`,
   },
   {
     number: 5,

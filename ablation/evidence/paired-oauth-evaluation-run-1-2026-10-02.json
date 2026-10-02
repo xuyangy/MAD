@@ -1,0 +1,35 @@
+{
+  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 1: refused at stage 2 before any model session",
+  "story": "2-8d",
+  "run": 1,
+  "status": "FAILED at stage 2 (managed host): `GET /config` for --directory had no answer within 10000 ms",
+  "measuredAt": "2026-10-02T16:24:46.139Z",
+  "command": "bun run paired --live --provider-mode oauth --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot --pin openai/gpt-6-luna --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-5-mini --oauth-data-dir <data-dir> --oauth-prepared <prepared> --directory <labelled-change> --out <out>",
+  "authorization": "gate 4, CLOSED at 3b8f2de on the human budget owner's 2026-10-02 authorization of one live paired evaluation; gate table blob c7b845023a6a453268eeda6930d28c9fa8e819f0",
+  "reservation": {
+    "path": "ablation/evidence/paired-oauth-evaluation-run-1.reservation",
+    "createdAt": "2026-10-02T16:24:46.139Z",
+    "effect": "created after every stage-1 check passed and before the host started; it uses gate 4's one authorization whatever the run's outcome"
+  },
+  "stage1": "every check PASSED: flags, --directory and --out containment, bundle root, frozen protocol v2 (sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2), gate table committed, paired gates, OAuth route, prepared payloads (each digest as pinned in OAUTH_PAYLOAD), data directory (a fresh directory whose opencode/auth.json links to the user's sign-ins), OAuth store (no database yet), authorized evaluation run, production Tools wiring, worktree identity (labelled-change-1)",
+  "stage2": {
+    "host": "the measured opencode 1.18.32 build in OAuth mode on the user's real sign-ins; per the launcher's banner it connects to api.githubcopilot.com with the real sign-in at startup, before any admission",
+    "refusal": "`GET /config` for <labelled-change> could not be read: no answer within 10000 ms (the host's private cwd answered first)",
+    "hostLog": "opencode's own log ends at `fromDirectory directory=<labelled-change>`; the zero-bill placeholder run below logs the same last line and still answered, so the log does not show where the request waited",
+    "stop": "process exited (status 143) after SIGTERM, confirmed",
+    "postStop": "the auth symlink still points to the user's sign-ins; the seeded config lock and tree unchanged but for the host's own .gitignore; the OAuth store empty (session, message, part, permission, credential, account, account_state and control_account all 0)"
+  },
+  "billing": "no model session, no coin toss, no schedule, no start marker and no admitted attempt; --out was never created. Physical requests the host made at startup with the real sign-ins, including the api.githubcopilot.com connection, are not counted or bounded by MAD",
+  "diagnosis": {
+    "method": "zero-bill: the same measured host, started directly through startManagedHost with no prompt, asked `GET /config?directory=` for a plain directory and for a byte copy of the labelled change",
+    "apiKeyMode": "a provider block at a dead local port and no sign-in: plain 53 ms; labelled-change copy 318 ms, then 4 ms; also 318 ms with the copy placed beside the original under the same parent directory",
+    "oauthModePlaceholders": "OAuth mode on placeholder sign-ins (scripts/oauth-probe.ts writePlaceholders), anthropic and github-copilot at a dead local port: plain 35 ms; labelled-change copy 291 ms, then 3 ms",
+    "git": "under the host's PATH and an empty HOME, git rev-parse --show-toplevel, rev-list --max-parents=0 --all and status --porcelain each finish within 0.12 s in the labelled change",
+    "precedent": "no real host was asked about a git repository before this run: the accounting probe, the OAuth probe and the pilot's runs passed a plain scratch directory holding one file",
+    "conclusion": "not reproduced without the real sign-ins. The 10000 ms refusal arose only with the real sign-ins and a git-repository --directory; what the host waited on is not established"
+  },
+  "wording": [
+    "this run measured nothing about debate: no block ran",
+    "the cause is not established; the diagnosis rules out the repository's size, git itself, the directory's location and OAuth mode on placeholder sign-ins"
+  ]
+}
