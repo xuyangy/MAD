@@ -31,7 +31,9 @@
  *
  * ## Authorization is a decision, not an engineering task
  *
- * Gates 3, 4 and 8 are spend authorizations owned by the human who owns the budget.
+ * Gates 3, 4, 8 and 9 are spend authorizations owned by the human who owns the budget.
+ * Gate 4 covers the evaluation on the oauth route and gate 9 on the api-key route,
+ * so closing one never authorizes the other route's spend.
  * No story closes them, and the completion of this story or any other is not
  * authorization.
  *
@@ -89,6 +91,15 @@ export const HUMAN_BUDGET_OWNER = "the human budget owner"
 export const OAUTH_PILOT_PROPOSAL = {
   path: "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md",
   sha256: "2a241e0125a49259daaac2c33480c7044f5f49983211322f6263ab8cb444ccfb",
+} as const
+
+/**
+ * Story 2-8d — the exposure document gate 4 was authorized against, with its
+ * sha256 at authorization. Provenance only: no launcher reads or checks it.
+ */
+export const EVALUATION_RUN_PROPOSAL = {
+  path: "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-proposal.md",
+  sha256: "eab2783a386574f8f8f85d3646efddbdaf35e3c8d244d23580df913f3f6a2c1e",
 } as const
 
 /** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
@@ -211,13 +222,23 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "evaluation spend authorization",
     kind: "authorization",
     phase: "evaluation",
+    routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
     requires:
-      "the budget owner authorizes the three paired blocks' spend: on the api-key route in ledger tokens, the three " +
-      "blocks' token spend under PAIRED_ALLOWANCES, unchanged; on the oauth route in admitted attempts, 100 per block " +
+      "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
-      "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1)",
+      "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
+      "The api-key route's spend is gate 9's",
+    note:
+      "the human budget owner authorized, on 2026-10-02, in the session, one live paired evaluation of story 2-8d on the oauth " +
+      `route (\`bun run paired --live --provider-mode oauth\`), accepting the exposure stated in ${EVALUATION_RUN_PROPOSAL.path} ` +
+      `(sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): the roster openai/gpt-6-luna, ` +
+      "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability lens slots, under frozen " +
+      "protocol v2, at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block), with no " +
+      "upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend (gate 9). " +
+      "This gate stays OPEN until a reviewed change closes it together with a launcher guard that admits exactly that one " +
+      "run (an exclusive reservation shared across output roots) on exactly that roster and first pin",
   },
   {
     number: 5,
@@ -316,6 +337,18 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "(both attempts answered and settled usage; the third admission was refused inside the journal with 0 backend calls), with " +
       "its committed reservation at ablation/evidence/oauth-pilot-live-run-3.reservation. That authorization is spent; no further " +
       "live run is authorized",
+  },
+  {
+    number: 9,
+    name: "api-key evaluation spend authorization",
+    kind: "authorization",
+    phase: "evaluation",
+    routes: ["api-key"],
+    owner: HUMAN_BUDGET_OWNER,
+    status: "OPEN",
+    requires:
+      "the budget owner authorizes the three paired blocks' spend on the api-key route in ledger tokens: the three blocks' " +
+      "token spend under PAIRED_ALLOWANCES, unchanged. Closing gate 4, which covers only the oauth route, never stands in for it",
   },
 ]
 

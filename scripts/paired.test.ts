@@ -298,7 +298,7 @@ async function nothingScheduled(out: string, scratchParent: string): Promise<voi
 }
 
 describe("the shipped gate table", () => {
-  test("prints every gate with its owner and status, names gate 4 the refusal, creates no client and writes nothing", async () => {
+  test("prints every gate with its owner and status, names gate 9 the api-key refusal, creates no client and writes nothing", async () => {
     const env = await setup()
     const { overrides, clientCalls, backend, host } = overridesFor(env)
     // No `gates` override: `main` reads the shipped table itself.
@@ -307,8 +307,11 @@ describe("the shipped gate table", () => {
 
     expect(result.code).toBe(1)
     expect(result.text).toContain("FAIL  paired gates (ablation/paired-gates.ts, phase evaluation)")
-    const four = PAIRED_GATES.find((entry) => entry.number === 4)!
-    expect(result.text).toContain(`REFUSED: gate 4 (${four.name}) is OPEN; owner: ${four.owner}`)
+    const nine = PAIRED_GATES.find((entry) => entry.number === 9)!
+    expect(result.text).toContain(`REFUSED: gate 9 (${nine.name}) is OPEN; owner: ${nine.owner}`)
+    // Gate 4 covers only the oauth route: printed, and never consulted here, OPEN or CLOSED.
+    expect(result.text).not.toContain("REFUSED: gate 4 ")
+    expect(result.text).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth (not consulted for route api-key)")
     expect(result.text).not.toContain("REFUSED: gate 1 ")
     expect(result.text).not.toContain("REFUSED: gate 2 ")
     // Gate 7 covers only the oauth route, so the api-key launcher prints it and never consults it.
@@ -323,7 +326,7 @@ describe("the shipped gate table", () => {
       expect(result.text).toContain(`gate ${gate.number} — ${gate.name}`)
       expect(result.text).toContain(`owner ${gate.owner} — ${gate.status}`)
     }
-    for (const number of [3, 4]) {
+    for (const number of [3, 9]) {
       const gate = PAIRED_GATES.find((entry) => entry.number === number)!
       expect(gate.status).toBe("OPEN")
       expect(result.text).toContain(`gate ${number} — ${gate.name}`)
@@ -1632,13 +1635,14 @@ describe("the managed host (story 2-8c)", () => {
     expect(result.text).toContain("The managed host's plugin install left @opencode-ai/plugin 1.18.32 in its config directory.")
   })
 
-  test("with the shipped gates and valid flags, gate 4 is named OPEN, exit 1, and no host or relay is started", async () => {
+  test("with the shipped gates and valid flags, gate 9 is named OPEN, exit 1, and no host or relay is started", async () => {
     const env = await setup()
     const { overrides, host, meter } = overridesFor(env)
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.code).toBe(1)
     expect(result.text).not.toContain("REFUSED: gate 1 ")
-    expect(result.text).toContain("REFUSED: gate 4 (evaluation spend authorization) is OPEN")
+    expect(result.text).toContain("REFUSED: gate 9 (api-key evaluation spend authorization) is OPEN")
+    expect(result.text).not.toContain("REFUSED: gate 4 ")
     expect(result.text).toContain("PASS  managed host provider block")
     expect(host.started).toEqual([])
     expect(meter.started).toEqual([])
@@ -1807,6 +1811,8 @@ describe("the OAuth route: stage 1", () => {
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
     expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
     expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
+    expect(diagnostic).not.toContain("gate 9 ")
+    expect(result.text).toContain("gate 9 — api-key evaluation spend authorization — authorization, required for evaluation on route api-key (not consulted for route oauth)")
     expect(diagnostic).not.toContain("protocol v2 is not frozen")
     expect(result.text).toContain("PASS  frozen protocol")
     expect(result.text).toContain("PROTOCOL-mad-evaluation-v2 v2 sha256:")
@@ -1821,7 +1827,7 @@ describe("the OAuth route: stage 1", () => {
     await nothingScheduled(env.out, env.scratchParent)
   })
 
-  test("story 2-8c4 — the spike's leftover sessions refuse at stage 1 beside the gates and v2, by names and counts only, and no host starts", async () => {
+  test("story 2-8c4 — the spike's leftover sessions refuse at stage 1 beside gate 4, by names and counts only, and no host starts", async () => {
     const env = await oauthSetup()
     await fakeStore(env.dataDir, { session: 3, message: 6 })
     const host = oauthHost()
