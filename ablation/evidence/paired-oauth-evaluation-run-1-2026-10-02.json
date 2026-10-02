@@ -26,10 +26,11 @@
     "oauthModePlaceholders": "OAuth mode on placeholder sign-ins (scripts/oauth-probe.ts writePlaceholders), anthropic and github-copilot at a dead local port: plain 35 ms; labelled-change copy 291 ms, then 3 ms",
     "git": "under the host's PATH and an empty HOME, git rev-parse --show-toplevel, rev-list --max-parents=0 --all and status --porcelain each finish within 0.12 s in the labelled change",
     "precedent": "no real host was asked about a git repository before this run: the accounting probe, the OAuth probe and the pilot's runs passed a plain scratch directory holding one file",
-    "conclusion": "not reproduced without the real sign-ins. The 10000 ms refusal arose only with the real sign-ins and a git-repository --directory; what the host waited on is not established"
+    "conclusion": "not reproduced without the real sign-ins. The 10000 ms refusal arose only with the real sign-ins and a git-repository --directory; what the host waited on is not established",
+    "followUp": "a later repetition on the real sign-ins with run 1's own data directory and --directory, with no model session, also answered: ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json"
   },
   "wording": [
     "this run measured nothing about debate: no block ran",
-    "the cause is not established; the diagnosis rules out the repository's size, git itself, the directory's location and OAuth mode on placeholder sign-ins"
+    "the cause is not established; the diagnosis makes the repository's size, git itself, the directory's location and OAuth mode on placeholder sign-ins less likely as causes without ruling any out, nor an intermittent interaction with the real sign-ins"
   ]
 }

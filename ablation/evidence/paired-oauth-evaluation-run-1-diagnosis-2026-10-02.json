@@ -1,0 +1,34 @@
+{
+  "kind": "DIAGNOSIS — story 2-8d's OAuth evaluation run 1, refused at stage 2 when `GET /config` for --directory gave no answer within 10000 ms: repetitions of that one request with no model session",
+  "story": "2-8d",
+  "diagnoses": "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json",
+  "measuredOn": "2026-10-02, after run 1",
+  "method": "the measured opencode 1.18.32 host (binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e), started directly through ablation/managed-host.ts startManagedHost with `verifyDirectories: []`, then asked `GET /config?directory=` for a plain directory holding one file and for a git-repository directory, each with its own client-side limit; no prompt was sent, so no model session existed and no attempt was admitted; the host was then stopped and the stop confirmed",
+  "cases": [
+    {
+      "name": "api-key mode, no sign-in",
+      "conditions": "a provider block at a dead local port (127.0.0.1:9) and a placeholder host key; private data directory; a byte copy of the labelled change under the session scratch directory",
+      "elapsedMs": { "plain": 53, "gitFirst": 318, "gitSecond": 4 }
+    },
+    {
+      "name": "api-key mode, copy beside the original",
+      "conditions": "as above, with the copy at <home>/trash/mad-runs/labelled-change-diag, the original's parent directory",
+      "elapsedMs": { "plain": 54, "gitFirst": 318, "gitSecond": 4 }
+    },
+    {
+      "name": "OAuth mode, placeholder sign-ins",
+      "conditions": "scripts/oauth-probe.ts writePlaceholders: a fresh data directory whose auth link points to placeholder sign-ins; anthropic and github-copilot base URLs at a dead local port; the prepared directory of run 1; a byte copy of the labelled change",
+      "elapsedMs": { "plain": 35, "gitFirst": 291, "gitSecond": 3 }
+    },
+    {
+      "name": "OAuth mode, the real sign-ins",
+      "conditions": "run 1's own data directory (<home>/trash/mad-runs/oauth-data, its auth link to the user's sign-ins), run 1's prepared directory and run 1's --directory itself; no base URL override, so the host made its ordinary startup connections with the real sign-ins",
+      "elapsedMs": { "plain": 30, "gitFirst": 499, "gitSecond": 3 },
+      "afterwards": "the stop confirmed; the post-stop checks held; `git status --porcelain` in --directory showed only the labelled change itself"
+    }
+  ],
+  "git": "under the host's PATH (/usr/bin:/bin:/usr/sbin:/sbin) and an empty HOME, `git rev-parse --show-toplevel`, `rev-list --max-parents=0 --all` and `status --porcelain` in the labelled change each finished within 0.12 s",
+  "hostLog": "the placeholder case's opencode log also ends at `fromDirectory directory=<the git copy>` although the request answered, so run 1's log ending there does not show where its request waited",
+  "billing": "no model session and no admitted attempt in any case. The real-sign-in case's startup traffic, including the connection to api.githubcopilot.com, is not counted or bounded by MAD",
+  "conclusion": "run 1's wait did not recur in any case, including the real sign-ins with run 1's own data directory and --directory. Repository size, git itself and the directory's location are made less likely as causes; none is ruled out, nor is an intermittent interaction with the real sign-ins or the network. The cause is not established"
+}

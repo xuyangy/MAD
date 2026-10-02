@@ -632,12 +632,19 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
     expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
-    expect(text).toContain("lists gate 4 OPEN (its one authorized run is spent), the committed run-1 reservation, and any launch-time condition below that fails")
+    expect(text).toContain("lists gate 4 OPEN (its one authorized run is spent) and any launch-time condition below that fails")
+    expect(text).toContain("The separate `authorized evaluation run` check verifies that run 1's reservation and evidence are committed.")
+    expect(text).not.toContain("the committed run-1 reservation, and")
     expect(text).toContain("Stage 1 passes the frozen protocol v2.")
     for (const phrase of [
-      "**The one authorized OAuth evaluation (story 2-8d).**",
+      "**The guarded OAuth evaluation run (story 2-8d).**",
+      "names the one run gate 4 may authorize, run 2, prepared and pending the budget owner's authorization (gate 4 is OPEN)",
+      "`ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json`",
+      "each read is bounded on its own, so the reads in sequence may take several times that before stage 2 refuses",
       `\`${EVALUATION_RUN.reservation}\``,
-      "Stage 1's `authorized evaluation run` check refuses any other pin list, and refuses while the reservation exists on disk (untracked or ignored included) or at HEAD.",
+      "Stage 1's `authorized evaluation run` check refuses any other pin list, refuses while the reservation exists on disk (untracked or ignored included) or at HEAD, and refuses unless each earlier run's reservation and evidence are committed at HEAD.",
+      "The launcher now gives each of the host's verification reads `PAIRED_HOST_REQUEST_MS` (60000 ms)",
+      "`ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json`",
       "before stage 2 starts a host, the launcher creates the reservation exclusively (`O_CREAT|O_EXCL`) in this repository",
       "a second run into any bundle root is refused",
       "Nothing deletes it",

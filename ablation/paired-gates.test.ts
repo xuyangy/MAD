@@ -126,15 +126,15 @@ describe("PAIRED_GATES", () => {
       "at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block)",
       "no upper bound on physical requests, host retries, side requests or subscription quota",
       "and no api-key spend (gate 9)",
-      `\`EVALUATION_RUN\` (run ${EVALUATION_RUN.run}) holds the pins in --pin order`,
-      "stage 1 of scripts/paired.ts refuses any other pin list",
-      `refuses while the reservation ${EVALUATION_RUN.reservation} exists on disk or at HEAD`,
-      "before a host starts, it creates that reservation exclusively in this repository, so a second run into any --out is refused",
-      "nothing deletes it",
-      "Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2",
+      "That authorization covered run 1 alone",
+      "Run 1 ran on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2",
       "no model session started and no attempt was admitted",
-      `with its committed reservation at ${EVALUATION_RUN.reservation}`,
+      "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-1.reservation",
+      "a later diagnosis in ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json",
       "That authorization is spent; no further live run is authorized",
+      "`EVALUATION_RUN` now names run 2, prepared and pending the budget owner's authorization",
+      "refuses while run 2's reservation exists on disk or at HEAD",
+      "refuses unless run 1's reservation and evidence are committed at HEAD",
     ]) {
       expect(gate.note).toContain(text)
     }
@@ -147,15 +147,24 @@ describe("PAIRED_GATES", () => {
 
   test("run 1's committed reservation and evidence record what gate 4's note says", async () => {
     const read = async <T,>(path: string) => JSON.parse(await Bun.file(new URL(`../${path}`, import.meta.url)).text()) as T
-    const reservation = await read<{ run: number; story: string; pins: string[]; gateTableBlob: string }>(EVALUATION_RUN.reservation)
+    const [prior] = EVALUATION_RUN.prior
+    expect(prior!.run).toBe(1)
+    const reservation = await read<{ run: number; story: string; pins: string[]; gateTableBlob: string }>(prior!.reservation)
     expect(reservation).toMatchObject({ run: 1, story: "2-8d", pins: [...EVALUATION_RUN.pins] })
     const evidence = await read<{ run: number; status: string; billing: string; diagnosis: { conclusion: string } }>(
-      "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json",
+      prior!.evidence,
     )
     expect(evidence.run).toBe(1)
     expect(evidence.status).toContain("FAILED at stage 2")
     expect(evidence.billing).toContain("no admitted attempt")
     expect(evidence.diagnosis.conclusion).toContain("what the host waited on is not established")
+    const diagnosis = await read<{ diagnoses: string; cases: { name: string; elapsedMs: { gitFirst: number } }[]; conclusion: string }>(
+      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json",
+    )
+    expect(diagnosis.diagnoses).toBe(prior!.evidence)
+    expect(diagnosis.cases.map((entry) => entry.name)).toContain("OAuth mode, the real sign-ins")
+    for (const entry of diagnosis.cases) expect(entry.elapsedMs.gitFirst, entry.name).toBeLessThan(10_000)
+    expect(diagnosis.conclusion).toContain("none is ruled out")
   })
 
   test("gate 9 holds the api-key route's spend in ledger tokens, OPEN, and gate 4 never stands in for it", () => {

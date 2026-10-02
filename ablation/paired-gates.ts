@@ -102,18 +102,40 @@ export const EVALUATION_RUN_PROPOSAL = {
   sha256: "eab2783a386574f8f8f85d3646efddbdaf35e3c8d244d23580df913f3f6a2c1e",
 } as const
 
+/** Story 2-8d — an OAuth evaluation run that already happened, and the committed files it left. */
+export interface EvaluationPriorRun {
+  run: number
+  /** Its reservation, relative to the repository. */
+  reservation: string
+  /** Its committed evidence, relative to the repository. */
+  evidence: string
+}
+
+/** Run N's reservation, relative to the repository. */
+export function evaluationReservation(run: number): string {
+  return `ablation/evidence/paired-oauth-evaluation-run-${run}.reservation`
+}
+
 /**
- * Story 2-8d — the one live OAuth evaluation gate 4 authorizes: its roster as
- * `provider/model` pins in `--pin` order (the first is also `small_model`), and
- * the reservation `bun run paired --live --provider-mode oauth` creates
- * exclusively, in this repository and so across every `--out`, before it starts
- * a host. Nothing deletes the reservation; a failed or interrupted run uses the
- * authorization.
+ * Story 2-8d — the OAuth evaluation run prepared for gate 4's possible authorization: its run, its
+ * roster as `provider/model` pins in `--pin` order (the first is also
+ * `small_model`), the reservation `bun run paired --live --provider-mode oauth`
+ * creates exclusively, in this repository and so across every `--out`, before it
+ * starts a host, and every earlier run, whose files must be committed. Nothing
+ * deletes a reservation; a failed or interrupted run uses its authorization. Run
+ * 1 ran on 2026-10-02 and was refused at stage 2 before any model session.
  */
 export const EVALUATION_RUN = {
-  run: 1,
+  run: 2,
   pins: ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"],
-  reservation: "ablation/evidence/paired-oauth-evaluation-run-1.reservation",
+  reservation: evaluationReservation(2),
+  prior: [
+    {
+      run: 1,
+      reservation: evaluationReservation(1),
+      evidence: "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json",
+    },
+  ] as readonly EvaluationPriorRun[],
 } as const
 
 /** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
@@ -251,13 +273,15 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability lens slots, under frozen " +
       "protocol v2, at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block), with no " +
       "upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend (gate 9). " +
-      `One run on that roster only: \`EVALUATION_RUN\` (run ${EVALUATION_RUN.run}) holds the pins in --pin order, and stage 1 ` +
-      "of scripts/paired.ts refuses any other pin list, and refuses while the reservation " +
-      `${EVALUATION_RUN.reservation} exists on disk or at HEAD; once every stage-1 check passes, and before a host starts, it ` +
-      "creates that reservation exclusively in this repository, so a second run into any --out is refused, and nothing " +
-      "deletes it. Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +
-      "`GET /config` for --directory had no answer within 10000 ms, so no model session started and no attempt was admitted), " +
-      `with its committed reservation at ${EVALUATION_RUN.reservation}. That authorization is spent; no further live run is authorized`,
+      "That authorization covered run 1 alone, which the launcher held to that roster and to the one reservation " +
+      "ablation/evidence/paired-oauth-evaluation-run-1.reservation. Run 1 ran on 2026-10-02 and is recorded in " +
+      "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: `GET /config` for --directory had " +
+      "no answer within 10000 ms, so no model session started and no attempt was admitted), with its committed reservation at " +
+      "ablation/evidence/paired-oauth-evaluation-run-1.reservation and a later diagnosis in " +
+      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json. That authorization is spent; no further live " +
+      "run is authorized. `EVALUATION_RUN` now names run 2, prepared and pending the budget owner's authorization: stage 1 " +
+      "refuses any pin list but its roster in order, refuses while run 2's reservation exists on disk or at HEAD, and refuses " +
+      "unless run 1's reservation and evidence are committed at HEAD",
   },
   {
     number: 5,

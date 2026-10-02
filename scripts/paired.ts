@@ -167,6 +167,18 @@ export const REPO_ROOT = resolve(import.meta.dir, "..")
 export const PROTOCOL_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md")
 /** Story 2-8c3b — the protocol the OAuth route seals under: attempt accounting is defined only by v2. */
 export const PROTOCOL_V2_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md")
+/**
+ * Story 2-8d — how long each of the managed host's verification reads may take
+ * (`/global/health`, and `/config` and `/config/providers` for each directory).
+ * Each read is bounded on its own, so the reads in sequence may take several
+ * times this before stage 2 refuses; startup and stop keep their own bounds.
+ * The OAuth evaluation's run 1 was refused when `GET /config` for the labelled
+ * change gave no answer within the host's 10000 ms default; repetitions with
+ * no model session, on real and on placeholder sign-ins, answered within 0.5 s
+ * (`ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json`),
+ * so the cause is not established.
+ */
+export const PAIRED_HOST_REQUEST_MS = 60_000
 
 /**
  * The preflight's git deadlines: fixed constants, not flags. Each git call in the
@@ -251,8 +263,9 @@ export interface EvaluationReservation {
 
 /**
  * Story 2-8d — stage 1 on the OAuth route: the pins are exactly
- * `EVALUATION_RUN.pins`, in order, and its reservation exists neither on disk
- * (ignored or untracked included) nor at HEAD. Reads only the repository.
+ * `EVALUATION_RUN.pins`, in order; its reservation exists neither on disk
+ * (ignored or untracked included) nor at HEAD; and every earlier run's
+ * reservation and evidence are committed at HEAD. Reads only the repository.
  */
 export async function evaluationRunProblems(pins: readonly string[], seam: EvaluationReservationSeam): Promise<string[]> {
   const problems: string[] = []
@@ -272,6 +285,17 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
     if (await seam.committed(relative)) problems.push(`the reservation \`${relative}\` is committed at HEAD: ${used}`)
   } catch (error) {
     problems.push(`whether the reservation \`${relative}\` is committed could not be established: ${messageOf(error)}`)
+  }
+  for (const prior of EVALUATION_RUN.prior) {
+    for (const [what, path] of [["reservation", prior.reservation], ["evidence", prior.evidence]] as const) {
+      try {
+        if (!(await seam.committed(path))) {
+          problems.push(`run ${prior.run}'s ${what} \`${path}\` is not committed at HEAD: an earlier run must stay on record before run ${EVALUATION_RUN.run} is reserved`)
+        }
+      } catch (error) {
+        problems.push(`whether run ${prior.run}'s ${what} \`${path}\` is committed could not be established: ${messageOf(error)}`)
+      }
+    }
   }
   return problems
 }
@@ -1496,6 +1520,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           mode: "oauth",
           oauth: oauthRoute,
           verifyDirectories: [directory],
+          requestMs: PAIRED_HOST_REQUEST_MS,
           signals: null,
           onSpawn: (spawned) => {
             managed.stop = spawned.stop
@@ -1515,6 +1540,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           block: { ...provider!, baseURL: meter.baseURL },
           credential: meter.hostKey,
           verifyDirectories: [directory],
+          requestMs: PAIRED_HOST_REQUEST_MS,
           signals: null,
           onSpawn: (spawned) => {
             managed.stop = spawned.stop
