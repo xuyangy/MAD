@@ -1078,3 +1078,48 @@ describe("the unhonoured-pin sentence is BOUNDED as a list, not only per entry",
     expect(warning.message).not.toContain("not listed here")
   })
 })
+
+describe("a pinned slot is served by the provider the pin names (AD-4, amended 2026-10-02, story 2-8d)", () => {
+  // openai lists gpt-6-luna before github-copilot does, so dedupe gives the model one entry under openai.
+  const TWO_WAY = [
+    candidate("openai", "gpt-6-sol"),
+    candidate("anthropic", "claude-sonnet-5"),
+    candidate("openai", "gpt-6-luna"),
+    candidate("github-copilot", "gpt-6-luna"),
+  ]
+
+  test("pinning the provider listed second takes the slot through that provider; the first joins alsoAvailableVia", () => {
+    const { roster } = selectRoster(TWO_WAY, {
+      ...OPTS,
+      pins: [pin("openai", "gpt-6-sol"), pin("anthropic", "claude-sonnet-5"), pin("github-copilot", "gpt-6-luna")],
+    })
+    expect(roster.slots.map((s) => `${s.providerId}/${s.modelId}`)).toEqual([
+      "openai/gpt-6-sol",
+      "anthropic/claude-sonnet-5",
+      "github-copilot/gpt-6-luna",
+    ])
+    expect(roster.slots[2]!.alsoAvailableVia).toEqual(["openai"])
+  })
+
+  test("the model still holds one slot: pinning both of its providers collapses the second pin", () => {
+    const { roster } = selectRoster(TWO_WAY, { ...OPTS, pins: [pin("github-copilot", "gpt-6-luna"), pin("openai", "gpt-6-luna")] })
+    const luna = roster.slots.filter((s) => s.modelId === "gpt-6-luna")
+    expect(luna).toHaveLength(1)
+    expect(luna[0]!.providerId).toBe("github-copilot")
+    const resolved = resolvePins(dedupeByIdentity(TWO_WAY), [pin("github-copilot", "gpt-6-luna"), pin("openai", "gpt-6-luna")], 3)
+    expect(resolved.resolutions.map((r) => r.outcome)).toEqual(["filled", "dedupe-collapsed"])
+  })
+
+  test("an unpinned slot keeps the provider listed first", () => {
+    const { roster } = selectRoster(TWO_WAY, OPTS)
+    const luna = roster.slots.find((s) => s.modelId === "gpt-6-luna")
+    expect(luna?.providerId).toBe("openai")
+    expect(luna?.alsoAvailableVia).toEqual(["github-copilot"])
+  })
+
+  test("dedupe keeps one candidate per provider in variants, the first listed first", () => {
+    const deduped = dedupeByIdentity(TWO_WAY)
+    const luna = deduped.find((entry) => entry.candidate.modelId === "gpt-6-luna")!
+    expect(luna.variants?.map((variant) => variant.providerId)).toEqual(["openai", "github-copilot"])
+  })
+})

@@ -42,6 +42,7 @@ import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discove
 import type { LateUsageReporter } from "../core/ports/late-usage.ts"
 import { cancelledTurn, type BackendCapabilities, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
 import { candidate, DEFAULT_JUDGE_ANSWERS, fakeClock, judgeRoleOf } from "../core/test-support/fakes.ts"
+import { selectRoster } from "../core/roster/select.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { main as evalReadMain } from "./eval-read.ts"
 import { main as materializeMain } from "./materialize-labelled-change.ts"
@@ -55,6 +56,7 @@ import {
   guarded,
   main,
   nonReturnedReason,
+  oauthRosterProblems,
   parseFlags,
   PAIRED_HOST_REQUEST_MS,
   PREFLIGHT_GIT_SETTINGS,
@@ -2150,6 +2152,39 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     expect(result.text).toContain("OAuth store failed")
     expect(existsSync(reservationOf(root))).toBe(false)
     expect(host.started).toEqual([])
+  })
+
+  test("run 3's candidate order: the pin github-copilot/gpt-6-luna now takes its slot through github-copilot and stage 2 passes", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      // openai lists gpt-6-luna before github-copilot does; dedupe gives the model one slot (AD-4), and the pin names its provider.
+      enumerate: async () => [
+        candidate("openai", "gpt-6-sol"),
+        candidate("anthropic", "claude-opus-5-5"),
+        candidate("openai", "gpt-6-luna"),
+        candidate("github-copilot", "gpt-6-luna"),
+      ],
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.text).toContain("discovery-3: github-copilot/gpt-6-luna")
+    expect(result.text).not.toContain("discovery-3: openai/gpt-6-luna")
+    expect(result.text).not.toContain("REFUSED at stage 2")
+    expect(result.text).toContain("stage 3 of 4")
+  })
+
+  test("the OAuth roster check refuses a pin whose slot another provider serves, naming both", () => {
+    // An unpinned selection keeps the provider listed first, which is the slot run 3 ran on.
+    const { roster, warnings } = selectRoster(
+      [candidate("openai", "gpt-6-sol"), candidate("anthropic", "claude-opus-5-5"), candidate("openai", "gpt-6-luna"), candidate("github-copilot", "gpt-6-luna")],
+      { slots: 3, providerConfigKey: "provider", lenses: ["security", "reliability"] },
+    )
+    const pins = OAUTH_PINS.map((entry) => ({ providerId: entry.split("/")[0]!, modelId: entry.split("/")[1]! }))
+    expect(oauthRosterProblems(roster, warnings, pins)).toContain(
+      "the pin github-copilot/gpt-6-luna fills slot discovery-3 through openai (openai/gpt-6-luna), not through github-copilot: one model offered by several providers holds one slot, and the OAuth route refuses a pin served by a provider it does not name",
+    )
   })
 
   test("the api-key route neither checks nor makes the OAuth evaluation's reservation", async () => {

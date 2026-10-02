@@ -11,6 +11,9 @@
  *     claim something dedupe has already collapsed. `resolvePins` takes
  *     `readonly Deduped[]` and cannot be handed a `Candidate[]`, so that order
  *     is a compile error to violate rather than a convention to remember.
+ *     AD-4 amended 2026-10-02 (story 2-8d): a pin takes its slot through the
+ *     provider it names, when dedupe kept that provider's candidate for the
+ *     model; the slot count is unchanged.
  * (2) Rank the REMAINDER, filling the slots the pins did not take to maximize
  *     distinct lineages ACROSS THE WHOLE ROSTER first — the lineages the pins
  *     already hold are passed in, so the backfill never spends a slot on a
@@ -101,12 +104,19 @@ export interface Deduped {
   candidate: Candidate
   identity: string
   alsoAvailableVia: string[]
+  /**
+   * Story 2-8d — every provider's candidate for this identity, `candidate` first,
+   * one per provider. A pin naming one of `alsoAvailableVia` takes its slot
+   * through that provider's candidate (AD-4, amended 2026-10-02).
+   */
+  variants?: Candidate[]
 }
 
 /**
  * AD-4 step 1. Order is preserved from the input, so the caller's preference
  * ordering survives; the first provider seen for an identity wins the slot and
- * the rest are recorded as `alsoAvailableVia` for disclosure.
+ * the rest are recorded as `alsoAvailableVia` for disclosure. Each provider's
+ * own candidate is kept in `variants`, for a pin that names that provider.
  */
 export function dedupeByIdentity(candidates: readonly Candidate[]): Deduped[] {
   const byIdentity = new Map<string, Deduped>()
@@ -118,9 +128,12 @@ export function dedupeByIdentity(candidates: readonly Candidate[]): Deduped[] {
       if (!existing.alsoAvailableVia.includes(candidate.providerId)) {
         existing.alsoAvailableVia.push(candidate.providerId)
       }
+      if (existing.variants !== undefined && !existing.variants.some((variant) => variant.providerId === candidate.providerId)) {
+        existing.variants.push(candidate)
+      }
       continue
     }
-    byIdentity.set(identity, { candidate, identity, alsoAvailableVia: [] })
+    byIdentity.set(identity, { candidate, identity, alsoAvailableVia: [], variants: [candidate] })
   }
   return [...byIdentity.values()]
 }
@@ -299,11 +312,31 @@ export function resolvePins(
       continue
     }
     consumed.add(entry)
-    filled.push(entry)
-    resolutions.push({ pin, outcome: "filled", entry })
+    const served = servedBy(entry, wanted)
+    filled.push(served)
+    resolutions.push({ pin, outcome: "filled", entry: served })
   }
 
   return { filled, remaining: deduped.filter((entry) => !consumed.has(entry)), resolutions }
+}
+
+/**
+ * AD-4, amended 2026-10-02 (story 2-8d) — the slot a pin fills is served by the
+ * provider the pin names. Dedupe still gives the model ONE slot; when the pin names
+ * a provider other than the one listed first, the slot takes that provider's own
+ * candidate, and the provider listed first joins `alsoAvailableVia`. A slot with no
+ * candidate kept for the named provider is returned unchanged.
+ */
+function servedBy(entry: Deduped, provider: string): Deduped {
+  if (entry.candidate.providerId.toLowerCase() === provider) return entry
+  const own = entry.variants?.find((variant) => variant.providerId.toLowerCase() === provider)
+  if (own === undefined) return entry
+  return {
+    candidate: own,
+    identity: entry.identity,
+    alsoAvailableVia: [entry.candidate.providerId, ...entry.alsoAvailableVia.filter((via) => via.toLowerCase() !== provider)],
+    variants: entry.variants,
+  }
 }
 
 /**

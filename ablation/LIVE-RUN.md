@@ -1253,7 +1253,11 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
   sign-in, before MAD admits any attempt; stage 2's banner says so.
 - **The roster and the seal.** Stage 2 resolves the roster with the lenses `security` and
   `reliability`, the two lens slots protocol v2's prefix of 10 attempts is sized for, and refuses unless
-  every pin holds a slot. Stage 4 seals `accounting: "attempts"` and `route: "oauth"` under protocol v2
+  every pin holds a slot, and unless each pin's slot is served by the provider the pin names. Dedupe gives
+  one model offered by several providers one slot (AD-4); since AD-4's 2026-10-02 amendment, a pin takes
+  that slot through the provider it names, while an unpinned slot keeps the provider listed first, and the
+  launcher's check is a backstop. The refusal comes before any schedule or attempt, but after the
+  reservation, so it uses that run's authorization. Stage 4 seals `accounting: "attempts"` and `route: "oauth"` under protocol v2
   (`evaluation-protocol-v2.md`), frozen on 2026-10-02: stage 1 refuses a v2 file that is not frozen or
   whose `frozen_hash` does not match its bytes. The
   api-key route keeps its lens-free roster.

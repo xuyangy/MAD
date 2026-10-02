@@ -1869,6 +1869,25 @@ function failureReason(check: Extract<Check, { state: "fail" }>): string {
  */
 export function oauthRosterProblems(roster: Roster, warnings: readonly Warning[], pins: readonly Pin[]): string[] {
   const problems = [...new Set(pins.flatMap((pin) => rosterProblemsFor(roster, warnings, pin)))]
+  // Story 2-8d: on this route each provider is its own sign-in and its own authorization, so a pin must be served by the
+  // provider it names. Dedupe gives one model offered by several providers one slot (AD-4); a pinned slot takes the
+  // provider the pin names, and `rosterProblemsFor` accepts a pin naming any provider of its slot, so this is a backstop.
+  for (const pin of pins) {
+    const identity = normalizeModelIdentity(pin.modelId)
+    const provider = pin.providerId.toLowerCase()
+    const slot = roster.slots.find(
+      (entry) =>
+        entry.identity === identity &&
+        (entry.providerId.toLowerCase() === provider || entry.alsoAvailableVia.some((via) => via.toLowerCase() === provider)),
+    )
+    if (slot !== undefined && slot.providerId.toLowerCase() !== provider) {
+      problems.push(
+        `the pin ${pin.providerId}/${pin.modelId} fills slot ${slot.slot} through ${slot.providerId} (${slot.providerId}/${slot.modelId}), ` +
+          `not through ${pin.providerId}: one model offered by several providers holds one slot, and the OAuth route refuses a ` +
+          "pin served by a provider it does not name",
+      )
+    }
+  }
   const lenses = roster.lensSlots.map((slot) => slot.lens).sort()
   if (JSON.stringify(lenses) !== JSON.stringify([...OAUTH_LENSES].sort())) {
     problems.push(`the roster's lens slots are ${JSON.stringify(lenses)}; the OAuth route needs exactly ${OAUTH_LENSES.join(" and ")}`)
