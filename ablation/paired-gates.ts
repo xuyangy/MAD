@@ -260,28 +260,32 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
+    evidence:
+      "the human budget owner authorized, on 2026-10-02, in the session, run 2 of story 2-8d's live paired " +
+      "evaluation on the oauth route (`bun run paired --live --provider-mode oauth`), accepting the exposure stated in " +
+      `${EVALUATION_RUN_PROPOSAL.path} (sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): ` +
+      "the roster openai/gpt-6-luna, anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability " +
+      "lens slots, under frozen protocol v2, at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 " +
+      "per block), with no upper bound on physical requests, host retries, side requests or subscription quota, and no api-key " +
+      "spend (gate 9). One run on that roster only: `EVALUATION_RUN` (run 2) holds the pins in --pin order, " +
+      "and stage 1 of scripts/paired.ts refuses any other pin list, refuses while the reservation " +
+      "ablation/evidence/paired-oauth-evaluation-run-2.reservation " +
+      "exists on disk or at HEAD, and refuses unless run 1's reservation and evidence are committed at HEAD; once every stage-1 " +
+      "check passes, and before a host starts, it creates that reservation exclusively in this repository, so a second run into " +
+      "any --out is refused, and nothing deletes it. Each of the host's verification reads may take PAIRED_HOST_REQUEST_MS " +
+      "(60000 ms). Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts",
     note:
-      "The human budget owner authorized, on 2026-10-02, in the session, one live paired evaluation of story 2-8d on the oauth " +
-      `route (\`bun run paired --live --provider-mode oauth\`), accepting the exposure stated in ${EVALUATION_RUN_PROPOSAL.path} ` +
-      `(sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): the roster openai/gpt-6-luna, ` +
-      "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability lens slots, under frozen " +
-      "protocol v2, at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block), with no " +
-      "upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend (gate 9). " +
-      "That authorization covered run 1 alone, which the launcher held to that roster and to the one reservation " +
-      "ablation/evidence/paired-oauth-evaluation-run-1.reservation. Run 1 ran on 2026-10-02 and is recorded in " +
-      "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: `GET /config` for --directory had " +
-      "no answer within 10000 ms, so no model session started and no attempt was admitted), with its committed reservation at " +
-      "ablation/evidence/paired-oauth-evaluation-run-1.reservation and a later diagnosis in " +
-      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json. That authorization is spent; no further live " +
-      "run is authorized. `EVALUATION_RUN` now names run 2, prepared and pending the budget owner's authorization: stage 1 " +
-      "refuses any pin list but its roster in order, refuses while run 2's reservation exists on disk or at HEAD, and refuses " +
-      "unless run 1's reservation and evidence are committed at HEAD",
+      "The human budget owner first authorized, on 2026-10-02, run 1 of the same evaluation with the same exposure. Run 1 ran " +
+      "on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +
+      "`GET /config` for --directory had no answer within 10000 ms, so no model session started and no attempt was admitted), " +
+      "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-1.reservation and a later diagnosis in " +
+      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json. That authorization is spent",
   },
   {
     number: 5,
