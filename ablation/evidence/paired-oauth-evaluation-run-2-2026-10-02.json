@@ -1,0 +1,49 @@
+{
+  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 2: HALTED in block 1's ON continuation; 1 of 3 blocks measured, incomplete",
+  "story": "2-8d",
+  "run": 2,
+  "status": "HALTED (attempt-mode stop): attempt `request-26` (block 1 on, judge/discovery-3 attempt 1) timed out at its 600000 ms deadline while in flight; blocks 2 and 3 not attempted; `complete: false`",
+  "authorization": "gate 4, CLOSED at 3fa44f6 on the human budget owner's 2026-10-02 authorization of run 2; gate table blob 02dfc308398f436df0b4b5fdbf6d98c991acf6bc",
+  "reservation": {
+    "path": "ablation/evidence/paired-oauth-evaluation-run-2.reservation",
+    "createdAt": "2026-10-02T17:59:47.237Z"
+  },
+  "command": "bun run paired --live --provider-mode oauth --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot --pin openai/gpt-6-luna --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-5-mini --oauth-data-dir <data-dir> --oauth-prepared <prepared> --directory <labelled-change> --out <out>",
+  "bundle": "<out> (outside the repository, not committed): paired-schedule.json (schedule sha256:74465ad18694ddd9c9a1c591f447289ae84644669ae41d5b211978af00f7edb2, coin tails: block 1 off first, block 2 on first, block 3 off first), paired-start.json (started 2026-10-02T17:59:55.560Z), paired-journal.jsonl, paired-slots.jsonl, unknown-usage-halt.json, prefix/0",
+  "stages": "stages 1 to 3 passed; stage 2's host verification reads answered within PAIRED_HOST_REQUEST_MS; stage 4 sealed the schedule and ran",
+  "roster": {
+    "pool": ["discovery-1 openai/gpt-6-luna", "discovery-2 anthropic/claude-opus-5-5", "discovery-3 github-copilot/gpt-5-mini"],
+    "lenses": ["discovery-lens-security openai/gpt-5.6-terra-fast", "discovery-lens-reliability github-copilot/claude-haiku-4.5"],
+    "lensModels": "the lens slots' models were chosen by roster selection, not pinned: stage 1's authorized-run check binds the three pool pins only, and gate 4's evidence names the lens slots without their models"
+  },
+  "slots": [
+    { "block": 1, "arm": "off", "status": "completed", "started": "2026-10-02T18:01:02.985Z", "ended": "2026-10-02T18:05:40.902Z" },
+    { "block": 1, "arm": "on", "status": "failed", "started": "2026-10-02T18:05:40.903Z", "ended": "2026-10-02T18:17:32.482Z", "reason": "13 findings left unresolved; 2 admissions refused after the halt" },
+    { "block": 2, "arm": "on", "status": "not-attempted" },
+    { "block": 2, "arm": "off", "status": "not-attempted" },
+    { "block": 3, "arm": "off", "status": "not-attempted" },
+    { "block": 3, "arm": "on", "status": "not-attempted" }
+  ],
+  "attempts": {
+    "admitted": 26,
+    "settled": { "usage": 23, "unknown": 3 },
+    "byPhaseAndStage": { "prefix discover": 6, "off judge": 13, "on debate": 4, "on judge": 3 },
+    "thresholds": "block 1: prefix 6 of 10, ON 7 of 45, OFF 13 of 45, block 26 of 100; global 26 of 300",
+    "unknown": [
+      { "id": "request-2", "where": "prefix discover/discovery-2 attempt 1", "why": "host error with an all-zero token object" },
+      { "id": "request-5", "where": "prefix discover/discovery-2 attempt 2", "why": "host error with an all-zero token object" },
+      { "id": "request-26", "where": "on judge/discovery-3 attempt 1", "why": "timed out at its 600000 ms deadline while in flight; usage never reported" }
+    ]
+  },
+  "causes": {
+    "anthropic": "discovery-2 (anthropic/claude-opus-5-5) failed twice with `model-error: UnknownError: Token refresh failed: 400` (`invalid_grant`, `Refresh token expired`): the user's Anthropic sign-in had expired before the run. MAD dropped the slot; block 1's discovery answered 2 of 3 pool models",
+    "halt": "a judge turn on github-copilot/gpt-5-mini held its request open past 600000 ms; the attempt-mode halt latched as protocol v2 A10 requires and admission did not resume. What the host or provider waited on is not established"
+  },
+  "results": "descriptive and partial, from `bun run eval-read --bundle <out>`: block 1 OFF upheld 13 of 13 findings; block 1 ON left 13 of 13 unresolved (the halt), so no paired verdict difference and no ON − OFF attempt contrast is available. Within-prefix CAP-1 at pool coverage 2 of 3 (a partial diagnostic outside the planned summary): pool union 7 of 13, discovery-1 6 of 13, discovery-3 7 of 13. No block is complete, so every planned summary quantity is unavailable",
+  "postStop": "the host process exited (status 143) after SIGTERM, confirmed; the auth symlink still points to the user's sign-ins; the seeded config lock and tree unchanged but for the host's own .gitignore; the OAuth store empty (every named table 0)",
+  "billing": "26 admitted attempts, the exact count. Physical requests, host retries, side requests to small_model (openai/gpt-6-luna), host-reported tokens and subscription quota are not measured or bounded; request-26's request may have been held open past its deadline",
+  "wording": [
+    "this run measured nothing about whether debate earns its cost: the ON arm did not complete",
+    "an expired Anthropic sign-in and a Copilot judge timeout are two separate causes; neither is the launcher's verification read, which run 1 failed on"
+  ]
+}

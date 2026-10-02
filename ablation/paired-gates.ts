@@ -260,14 +260,14 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
-    evidence:
-      "the human budget owner authorized, on 2026-10-02, in the session, run 2 of story 2-8d's live paired " +
+    note:
+      "The human budget owner authorized, on 2026-10-02, in the session, run 2 of story 2-8d's live paired " +
       "evaluation on the oauth route (`bun run paired --live --provider-mode oauth`), accepting the exposure stated in " +
       `${EVALUATION_RUN_PROPOSAL.path} (sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): ` +
       "the roster openai/gpt-6-luna, anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability " +
@@ -279,13 +279,16 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "exists on disk or at HEAD, and refuses unless run 1's reservation and evidence are committed at HEAD; once every stage-1 " +
       "check passes, and before a host starts, it creates that reservation exclusively in this repository, so a second run into " +
       "any --out is refused, and nothing deletes it. Each of the host's verification reads may take PAIRED_HOST_REQUEST_MS " +
-      "(60000 ms). Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts",
-    note:
-      "The human budget owner first authorized, on 2026-10-02, run 1 of the same evaluation with the same exposure. Run 1 ran " +
-      "on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +
+      "(60000 ms). Run 2 ran on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json " +
+      "(HALTED in block 1's ON continuation: a judge attempt on github-copilot/gpt-5-mini timed out at its 600000 ms deadline, " +
+      "after anthropic/claude-opus-5-5 had dropped out on an expired sign-in; 26 attempts admitted, 1 of 3 blocks measured, " +
+      "incomplete), with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-2.reservation. That " +
+      "authorization is spent. The budget owner first authorized run 1 of the same evaluation with the same exposure, on " +
+      "2026-10-02. Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +
       "`GET /config` for --directory had no answer within 10000 ms, so no model session started and no attempt was admitted), " +
       "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-1.reservation and a later diagnosis in " +
-      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json. That authorization is spent",
+      "ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json. That authorization is spent too; no further " +
+      "live run is authorized",
   },
   {
     number: 5,
