@@ -135,14 +135,17 @@ export function evaluationReservation(run: number): string {
  * deletes a reservation; a failed or interrupted run uses its authorization. Run
  * 1 ran on 2026-10-02 and was refused at stage 2 before any model session; run 2
  * ran the same day on the pins openai/gpt-6-luna, anthropic/claude-opus-5-5 and
- * github-copilot/gpt-5-mini and halted in block 1. Run 3's roster replaces those
- * pins: github-copilot/gpt-6-luna, and openai/gpt-6-sol, since one model reached
- * through two providers holds one slot (AD-4).
+ * github-copilot/gpt-5-mini and halted in block 1. Run 3 ran on openai/gpt-6-sol,
+ * anthropic/claude-opus-5-5 and github-copilot/gpt-6-luna and was stopped when the
+ * Copilot pin filled its slot through openai. Run 4 keeps run 3's OpenAI and
+ * Copilot pins, which AD-4's 2026-10-02 amendment now serves through the provider
+ * each names, and replaces anthropic/claude-opus-5-5, which refuses the forced tool
+ * choice, with anthropic/claude-sonnet-5.
  */
 export const EVALUATION_RUN = {
-  run: 3,
-  pins: ["openai/gpt-6-sol", "anthropic/claude-opus-5-5", "github-copilot/gpt-6-luna"],
-  reservation: evaluationReservation(3),
+  run: 4,
+  pins: ["openai/gpt-6-sol", "anthropic/claude-sonnet-5", "github-copilot/gpt-6-luna"],
+  reservation: evaluationReservation(4),
   prior: [
     {
       run: 1,
@@ -153,6 +156,11 @@ export const EVALUATION_RUN = {
       run: 2,
       reservation: evaluationReservation(2),
       evidence: "ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json",
+    },
+    {
+      run: 3,
+      reservation: evaluationReservation(3),
+      evidence: "ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json",
     },
   ] as readonly EvaluationPriorRun[],
 } as const
