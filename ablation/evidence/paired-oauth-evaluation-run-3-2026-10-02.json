@@ -1,0 +1,40 @@
+{
+  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 3: STOPPED by the human during block 1's shared prefix after the roster resolved a pin to a provider it did not name",
+  "story": "2-8d",
+  "run": 3,
+  "status": "CANCELLED by the human in block 1's shared prefix; the in-flight attempt latched the attempt-mode halt; 0 of 3 paired blocks started a continuation; incomplete",
+  "authorization": "gate 4, CLOSED at a808eeb on the human budget owner's 2026-10-02 authorization of run 3 against _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-3-proposal.md (sha256 150dfff1df365d2115115aee57c3d3ccede50af13114f52973931cb057f43a40); gate table blob 5c14eb0b009f8aa6d3cba51a195333acfc019eb5",
+  "reservation": {
+    "path": "ablation/evidence/paired-oauth-evaluation-run-3.reservation",
+    "createdAt": "2026-10-02T19:36:22.991Z"
+  },
+  "command": "bun run paired --live --provider-mode oauth --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot --pin openai/gpt-6-sol --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-6-luna --oauth-data-dir <data-dir> --oauth-prepared <prepared> --directory <labelled-change> --out <out>",
+  "bundle": "<out> (outside the repository, not committed): paired-schedule.json (schedule sha256:3b7bca1af472b61490b37618d32161d759ea415f92f2b1b3894673c37b50a2b8), paired-start.json (started 2026-10-02T19:36:31.845Z), paired-journal.jsonl, paired-slots.jsonl, unknown-usage-halt.json, prefix/0",
+  "roster": {
+    "pinned": ["openai/gpt-6-sol", "anthropic/claude-opus-5-5", "github-copilot/gpt-6-luna"],
+    "resolved": ["discovery-1 openai/gpt-6-sol", "discovery-2 anthropic/claude-opus-5-5", "discovery-3 openai/gpt-6-luna"],
+    "lenses": ["discovery-lens-security openai/gpt-5.6-terra-fast", "discovery-lens-reliability github-copilot/claude-haiku-4.5"],
+    "deviation": "the pin github-copilot/gpt-6-luna filled discovery-3 through openai, not github-copilot: core/roster/select.ts dedupes one model offered by two providers into one entry whose slot takes the first provider listed (AD-4), and resolvePins accepts a pin naming any provider of that entry. Stage 1's authorized-run check compares the --pin text and stage 2 checks only that every pin holds a slot, so neither refused. The human stopped the run on reading the printed roster"
+  },
+  "attempts": {
+    "admitted": 6,
+    "settled": { "usage": 3, "unknown": 3 },
+    "all": "block 1 prefix discover: discovery-1 1, discovery-2 2 (attempt 1 and its retry), discovery-3 1, discovery-lens-security 1, discovery-lens-reliability 1",
+    "unknown": [
+      { "id": "request-2", "where": "prefix discover/discovery-2 attempt 1", "why": "host error with an all-zero token object" },
+      { "id": "request-5", "where": "prefix discover/discovery-2 attempt 2", "why": "host error with an all-zero token object" },
+      { "id": "request-6", "where": "prefix discover/discovery-lens-reliability attempt 1", "why": "the run was cancelled while the turn was in flight; usage never reported" }
+    ],
+    "openaiServedOutsideAuthorization": "request-3 (discovery-3) ran on openai/gpt-6-luna, which gate 4's run-3 evidence did not name"
+  },
+  "causes": {
+    "providerSubstitution": "the deviation above",
+    "anthropic": "discovery-2 (anthropic/claude-opus-5-5) failed twice with `model-error: APIError: tool_choice: type \"tool\" and \"any\" are not supported for this model.`: the sign-in was usable this time, but the model refuses the forced tool choice the structured-output turn sends, so it is expected to fail on every turn",
+    "halt": "the cancellation ended request-6 in flight, which latched the attempt-mode halt as protocol v2 A10 requires"
+  },
+  "billing": "6 admitted attempts, the exact count. Physical requests, host retries, side requests to small_model (openai/gpt-6-sol), host-reported tokens and subscription quota are not measured or bounded; request-6's request may have been held open after the cancellation",
+  "wording": [
+    "this run measured nothing about debate: no continuation started",
+    "the provider substitution is a launcher gap, not an operator error: the command matched gate 4's authorized pins exactly"
+  ]
+}

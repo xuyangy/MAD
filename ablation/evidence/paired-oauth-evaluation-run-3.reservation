@@ -1,0 +1,12 @@
+{
+  "run": 3,
+  "story": "2-8d",
+  "createdAt": "2026-10-02T19:36:22.991Z",
+  "gateTableBlob": "5c14eb0b009f8aa6d3cba51a195333acfc019eb5",
+  "pins": [
+    "openai/gpt-6-sol",
+    "anthropic/claude-opus-5-5",
+    "github-copilot/gpt-6-luna"
+  ],
+  "out": "/Users/xuyangy/trash/mad-runs/bundle-run3"
+}

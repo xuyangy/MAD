@@ -279,28 +279,27 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
-    evidence:
-      "the human budget owner authorized, on 2026-10-02, in the session, run 3 of story 2-8d's live paired evaluation on the " +
+    note:
+      "The human budget owner authorized, on 2026-10-02, in the session, run 3 of story 2-8d's live paired evaluation on the " +
       "oauth route (`bun run paired --live --provider-mode oauth`), accepting the exposure stated in " +
       `${EVALUATION_RUN_3_PROPOSAL.path} (sha256 ${EVALUATION_RUN_3_PROPOSAL.sha256}, recorded as provenance; no launcher checks ` +
       "it): the roster openai/gpt-6-sol, anthropic/claude-opus-5-5 and github-copilot/gpt-6-luna in that --pin order, with the " +
       "security and reliability lens slots whose models roster selection chooses from the catalogue, under frozen protocol v2, " +
       "under admission thresholds of 100 admitted attempts per block and 300 in total (prefix 10, ON 45 and OFF 45 per block), " +
       "which in-flight attempts may overshoot, with no upper bound on physical requests, host retries, side requests or " +
-      "subscription quota, and no api-key spend (gate 9). One run on that roster only: `EVALUATION_RUN` (run 3) holds the pins " +
-      "in --pin order, and stage 1 of scripts/paired.ts refuses any other pin list, refuses while the reservation " +
-      "ablation/evidence/paired-oauth-evaluation-run-3.reservation exists on disk or at HEAD, and refuses unless the " +
-      "reservations and evidence of runs 1 and 2 are committed at HEAD; once every stage-1 check passes, and before a host " +
-      "starts, it creates that reservation exclusively in this repository, so a second run into any --out is refused, and " +
-      "nothing deletes it. Each of the host's verification reads may take PAIRED_HOST_REQUEST_MS (60000 ms). Tests: " +
-      "ablation/paired-gates.test.ts, scripts/paired.test.ts",
-    note:
+      "subscription quota, and no api-key spend (gate 9). That authorization covered run 3 alone, which the launcher held to " +
+      "that --pin list and to the one reservation ablation/evidence/paired-oauth-evaluation-run-3.reservation. Run 3 ran on " +
+      "2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json (CANCELLED by the human " +
+      "in block 1's shared prefix: the pin github-copilot/gpt-6-luna had filled its slot through openai, which roster dedupe " +
+      "allowed and neither stage checked; anthropic/claude-opus-5-5 refused the forced tool choice; 6 attempts admitted, no " +
+      "continuation started, incomplete), with its committed reservation at " +
+      "ablation/evidence/paired-oauth-evaluation-run-3.reservation. That authorization is spent. " +
       "Runs 1 and 2 used earlier authorizations of the same evaluation, both given on 2026-10-02 against " +
       `${EVALUATION_RUN_PROPOSAL.path} (sha256 ${EVALUATION_RUN_PROPOSAL.sha256}) on the roster openai/gpt-6-luna, ` +
       "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini. Run 1 is recorded in " +
@@ -311,7 +310,8 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json (HALTED in block 1's ON continuation: a judge attempt " +
       "on github-copilot/gpt-5-mini timed out at its 600000 ms deadline, after anthropic/claude-opus-5-5 had dropped out on an " +
       "expired sign-in; 26 attempts admitted, block 1 partially observed, 0 of 3 paired blocks completed, incomplete), with " +
-      "its committed reservation at ablation/evidence/paired-oauth-evaluation-run-2.reservation. Both authorizations are spent",
+      "its committed reservation at ablation/evidence/paired-oauth-evaluation-run-2.reservation. Both authorizations are spent too; " +
+      "no further live run is authorized",
   },
   {
     number: 5,
