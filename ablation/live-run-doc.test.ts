@@ -53,7 +53,7 @@ import {
   REPORTING_MILESTONE,
 } from "./evaluation-report.ts"
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
-import { PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
+import { EVALUATION_RUN, PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
 import { STORE_TABLES } from "./oauth-store.ts"
 import { PERSISTENT_HOST_STATE_LIMITATION } from "./evaluation-report.ts"
@@ -548,18 +548,18 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     }
   })
 
-  test("the opening summary names gate 9 as the api-key refusal, gate 4 as the oauth refusal, and gates 3, 7 and 8 as not consulted", async () => {
+  test("the opening summary names gate 9 as the api-key refusal, no oauth gate refusal, and gates 3, 4, 7 and 8 as not consulted", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("**With the shipped gate table the api-key route always refuses:** gate 9 below is OPEN and is required for the evaluation on that route")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
     expect(text).toContain(
-      "Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) gate 4 refuses: it is OPEN, and its note records the human budget owner's authorization of one live paired evaluation on that route, which it closes on only together with a one-run guard.",
+      "Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) every gate the evaluation requires is CLOSED: gate 4 records the human budget owner's authorization of one live paired evaluation on that route, which stage 1 enforces through the authorized roster and the one-run reservation",
     )
     const onRoute = (route: "api-key" | "oauth") => (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes(route)
     const open = (route: "api-key" | "oauth") =>
       PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(route)(gate)).map((gate) => gate.number)
     expect(open("api-key")).toEqual([9])
-    expect(open("oauth")).toEqual([4])
+    expect(open("oauth")).toEqual([])
     expect(text).toContain(
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
@@ -631,9 +631,22 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
 
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
-    expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
-    expect(text).toContain("lists gate 4 OPEN, and any launch-time condition below that fails")
-    expect(text).toContain("Stage 1 passes the frozen protocol v2.")
+    expect(text).toContain("**With the shipped tree stage 1 passes the gates and the frozen protocol v2**")
+    expect(text).toContain("and on any run but the one authorized")
+    expect(text).not.toContain("always refuses at stage 1")
+    for (const phrase of [
+      "**The one authorized OAuth evaluation (story 2-8d).**",
+      `\`${EVALUATION_RUN.reservation}\``,
+      "Stage 1's `authorized evaluation run` check refuses any other pin list, and refuses while the reservation exists on disk (untracked or ignored included) or at HEAD.",
+      "before stage 2 starts a host, the launcher creates the reservation exclusively (`O_CREAT|O_EXCL`) in this repository",
+      "a second run into any bundle root is refused",
+      "Nothing deletes it",
+      "A stage-1 refusal reserves nothing.",
+      "so the schedule's `codeRevision` records `dirty: true` for that run even on an otherwise clean checkout",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    expect(text).toContain(EVALUATION_RUN.pins.map((pin) => `\`${pin}\``).join(", "))
     for (const phrase of [
       "bun run oauth-prepare --out /scratch/mad-oauth-prepared",
       "--provider-mode oauth",

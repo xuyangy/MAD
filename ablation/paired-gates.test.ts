@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { MEASURED_HOST } from "./managed-host.ts"
-import { EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
+import { EVALUATION_RUN, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
   gates.map((gate) => ({ ...gate, status: "CLOSED", evidence: gate.evidence ?? "a reviewed change" }))
@@ -31,7 +31,7 @@ describe("PAIRED_GATES", () => {
       [1, "host request accounting", "engineering", "evaluation", "story 2-8c2", "CLOSED"],
       [2, "shared gates verified on a real host", "engineering", "evaluation", "story 2-8c", "CLOSED"],
       [3, "accounting-probe spend authorization", "authorization", "accounting-probe", HUMAN_BUDGET_OWNER, "OPEN"],
-      [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
+      [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "CLOSED"],
       [5, "worktree identity", "engineering", "evaluation", "story 2-8b", "CLOSED"],
       [6, "production Tools wiring", "engineering", "evaluation", "story 2-8b", "CLOSED"],
       [7, "OAuth attempt accounting", "engineering", "evaluation", "story 2-8c3b", "CLOSED"],
@@ -109,11 +109,11 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("gate 4 covers the oauth route alone, in admitted attempts, and stays OPEN with the human's authorization in its note", () => {
+  test("gate 4 covers the oauth route alone, in admitted attempts, and is CLOSED on the human's authorization of one guarded evaluation", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 4)!
     expect(gate.routes).toEqual(["oauth"])
-    expect(gate.status).toBe("OPEN")
-    expect(gate.evidence).toBeUndefined()
+    expect(gate.status).toBe("CLOSED")
+    expect(gate.note).toBeUndefined()
     for (const text of ["oauth route in admitted attempts", "100 per block", "300 in total", "admission threshold", "The api-key route's spend is gate 9's"]) {
       expect(gate.requires).toContain(text)
     }
@@ -126,12 +126,20 @@ describe("PAIRED_GATES", () => {
       "at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block)",
       "no upper bound on physical requests, host retries, side requests or subscription quota",
       "and no api-key spend (gate 9)",
-      "This gate stays OPEN until a reviewed change closes it together with a launcher guard that admits exactly that one run",
-      "an exclusive reservation shared across output roots",
-      "on exactly that roster and first pin",
+      `\`EVALUATION_RUN\` (run ${EVALUATION_RUN.run}) holds the pins in --pin order`,
+      "stage 1 of scripts/paired.ts refuses any other pin list",
+      `refuses while the reservation ${EVALUATION_RUN.reservation} exists on disk or at HEAD`,
+      "before a host starts, it creates that reservation exclusively in this repository, so a second run into any --out is refused",
+      "nothing deletes it",
+      "Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts",
     ]) {
-      expect(gate.note).toContain(text)
+      expect(gate.evidence).toContain(text)
     }
+  })
+
+  test("the run proposal gate 4 was authorized against is in the repository, byte for byte at its recorded sha256", async () => {
+    const bytes = await Bun.file(new URL(`../${EVALUATION_RUN_PROPOSAL.path}`, import.meta.url)).arrayBuffer()
+    expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(EVALUATION_RUN_PROPOSAL.sha256)
   })
 
   test("gate 9 holds the api-key route's spend in ledger tokens, OPEN, and gate 4 never stands in for it", () => {
@@ -144,11 +152,11 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("exactly gates 3, 4, 8 and 9 are authorization gates, owned by the human budget owner, and OPEN", () => {
+  test("exactly gates 3, 4, 8 and 9 are authorization gates, owned by the human budget owner; only 4 is CLOSED", () => {
     const authorization = PAIRED_GATES.filter((gate) => gate.kind === "authorization")
     expect(authorization.map((gate) => gate.number)).toEqual([3, 4, 8, 9])
     for (const gate of authorization) expect(gate.owner).toBe(HUMAN_BUDGET_OWNER)
-    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN"])
+    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "OPEN", "OPEN"])
   })
 
   test("the closed engineering gates name the launcher checks and their tests", () => {
@@ -267,7 +275,7 @@ describe("gatePreflight", () => {
     expect(result.lines).toHaveLength(PAIRED_GATES.length)
     expect(result.lines[2]).toContain("(not consulted for evaluation)")
     expect(result.lines[3]).toContain(
-      "gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth (not consulted for route api-key), owner the human budget owner — OPEN",
+      "gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth (not consulted for route api-key), owner the human budget owner — CLOSED",
     )
     expect(result.lines[6]).toContain(
       "gate 7 — OAuth attempt accounting — engineering, required for evaluation on route oauth (not consulted for route api-key)",
@@ -275,18 +283,18 @@ describe("gatePreflight", () => {
     expect(result.lines[0]).toContain("required for evaluation on route api-key, owner story 2-8c2 — CLOSED")
   })
 
-  test("the shipped table refuses the oauth evaluation on gate 4 alone; gates 1 and 9 are not consulted", () => {
+  test("the shipped table passes the oauth evaluation; gates 1 and 9 are not consulted", () => {
     const result = gatePreflight(PAIRED_GATES, "evaluation", "oauth")
-    expect(result.ok).toBe(false)
-    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
+    expect(result.ok).toBe(true)
+    expect(result.problems).toEqual([])
     expect(result.lines[0]).toContain("host request accounting — engineering, required for evaluation on route api-key (not consulted for route oauth)")
-    expect(result.lines[3]).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth, owner the human budget owner — OPEN — note:")
+    expect(result.lines[3]).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth, owner the human budget owner — CLOSED — evidence:")
     expect(result.lines[7]).toContain("gate 8 — OAuth pilot spend authorization — authorization, required for oauth-pilot on route oauth (not consulted for evaluation)")
     expect(result.lines[8]).toContain("gate 9 — api-key evaluation spend authorization — authorization, required for evaluation on route api-key (not consulted for route oauth)")
-    // Gate 4 CLOSED alone opens the oauth evaluation, and leaves the api-key route on gate 9.
-    const closed = PAIRED_GATES.map((gate) => (gate.number === 4 ? { ...gate, status: "CLOSED" as const, evidence: "authorized" } : gate))
-    expect(gatePreflight(closed, "evaluation", "oauth").ok).toBe(true)
-    expect(gatePreflight(closed, "evaluation", "api-key").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 9"])
+    // Gate 4 OPEN again refuses the oauth evaluation on gate 4 alone, and the api-key route stays on gate 9.
+    const reopened = PAIRED_GATES.map((gate) => (gate.number === 4 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    expect(gatePreflight(reopened, "evaluation", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
+    expect(gatePreflight(reopened, "evaluation", "api-key").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 9"])
   })
 
   test("the shipped table refuses the OAuth pilot on gate 8 alone", () => {
@@ -297,7 +305,8 @@ describe("gatePreflight", () => {
   })
 
   test("gate 8 is required only for the pilot: closing it opens no evaluation, and the evaluation gates open no pilot", () => {
-    const pilotOnly = PAIRED_GATES.map((gate) => (gate.number === 8 ? { ...gate, status: "CLOSED" as const, evidence: "authorized" } : gate))
+    const evaluationOpen = PAIRED_GATES.map((gate) => (gate.number === 4 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    const pilotOnly = evaluationOpen.map((gate) => (gate.number === 8 ? { ...gate, status: "CLOSED" as const, evidence: "authorized" } : gate))
     expect(gatePreflight(pilotOnly, "oauth-pilot", "oauth").ok).toBe(true)
     expect(gatePreflight(pilotOnly, "evaluation", "api-key").problems.join("\n")).toContain("gate 9 (api-key evaluation spend authorization) is OPEN")
     expect(gatePreflight(pilotOnly, "evaluation", "oauth").problems.join("\n")).toContain("gate 4 (evaluation spend authorization) is OPEN")

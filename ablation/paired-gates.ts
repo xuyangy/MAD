@@ -102,6 +102,20 @@ export const EVALUATION_RUN_PROPOSAL = {
   sha256: "eab2783a386574f8f8f85d3646efddbdaf35e3c8d244d23580df913f3f6a2c1e",
 } as const
 
+/**
+ * Story 2-8d — the one live OAuth evaluation gate 4 authorizes: its roster as
+ * `provider/model` pins in `--pin` order (the first is also `small_model`), and
+ * the reservation `bun run paired --live --provider-mode oauth` creates
+ * exclusively, in this repository and so across every `--out`, before it starts
+ * a host. Nothing deletes the reservation; a failed or interrupted run uses the
+ * authorization.
+ */
+export const EVALUATION_RUN = {
+  run: 1,
+  pins: ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"],
+  reservation: "ablation/evidence/paired-oauth-evaluation-run-1.reservation",
+} as const
+
 /** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
 export interface OAuthPilotPriorRun {
   run: number
@@ -224,21 +238,24 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
-    note:
+    evidence:
       "the human budget owner authorized, on 2026-10-02, in the session, one live paired evaluation of story 2-8d on the oauth " +
       `route (\`bun run paired --live --provider-mode oauth\`), accepting the exposure stated in ${EVALUATION_RUN_PROPOSAL.path} ` +
       `(sha256 ${EVALUATION_RUN_PROPOSAL.sha256}, recorded as provenance; no launcher checks it): the roster openai/gpt-6-luna, ` +
       "anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini with the security and reliability lens slots, under frozen " +
       "protocol v2, at most 300 admitted attempts as admission thresholds (prefix 10, ON 45 and OFF 45 per block), with no " +
       "upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend (gate 9). " +
-      "This gate stays OPEN until a reviewed change closes it together with a launcher guard that admits exactly that one " +
-      "run (an exclusive reservation shared across output roots) on exactly that roster and first pin",
+      `One run on that roster only: \`EVALUATION_RUN\` (run ${EVALUATION_RUN.run}) holds the pins in --pin order, and stage 1 ` +
+      "of scripts/paired.ts refuses any other pin list, and refuses while the reservation " +
+      `${EVALUATION_RUN.reservation} exists on disk or at HEAD; once every stage-1 check passes, and before a host starts, it ` +
+      "creates that reservation exclusively in this repository, so a second run into any --out is refused, and nothing " +
+      "deletes it. Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts",
   },
   {
     number: 5,

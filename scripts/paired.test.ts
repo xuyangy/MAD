@@ -34,7 +34,7 @@ import {
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
-import { PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
 import { SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
@@ -48,6 +48,7 @@ import { main as materializeMain } from "./materialize-labelled-change.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { fakeStore, ROW_CONTENT_MARKER } from "../ablation/oauth-store.fixture.ts"
 import {
+  evaluationRunProblems,
   GATE_TABLE_FILE,
   gatesIdentity,
   gateTableState,
@@ -60,7 +61,9 @@ import {
   preflightGitEnv,
   preflightSpawn,
   productionTools,
+  reserveEvaluationRun,
   toolsIdentity,
+  type EvaluationReservation,
   type PairedOverrides,
   type SignalSource,
   type ToolsFactory,
@@ -1751,6 +1754,8 @@ function oauthOverrides(env: Awaited<ReturnType<typeof oauthSetup>>, host: Retur
       home: env.home,
       enumerate: async () => [candidate("openai", "gpt-6-luna"), candidate("anthropic", "claude-opus-5-5"), candidate("github-copilot", "gpt-5-mini")],
       backendFor: lensAwareBackend,
+      // Story 2-8d: never this repository's ablation/evidence.
+      evaluationReservation: { root: join(env.parent, "reservation-root"), committed: async () => false },
       ...extra,
     } satisfies PairedOverrides,
   }
@@ -1800,34 +1805,32 @@ describe("the OAuth route: flags", () => {
 })
 
 describe("the OAuth route: stage 1", () => {
-  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN, passes the frozen protocol v2, and starts no host", async () => {
+  test("on the shipped tree stage 1 passes the gates (gate 4 CLOSED, gates 1 and 9 not consulted), the frozen protocol v2 and the authorized run, then reserves", async () => {
     const env = await oauthSetup()
     const host = oauthHost()
-    const { overrides, clientCalls } = oauthOverrides(env, host)
+    const { overrides } = oauthOverrides(env, host)
     expect("gates" in overrides).toBe(false)
     expect("protocolV2File" in overrides).toBe(false)
     const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
-    expect(result.code).toBe(1)
-    const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
-    expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
-    expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
-    expect(diagnostic).not.toContain("gate 9 ")
+    expect(result.text).not.toContain("REFUSED at stage 1 (offline checks).")
+    expect(result.text).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth, owner the human budget owner — CLOSED")
     expect(result.text).toContain("gate 9 — api-key evaluation spend authorization — authorization, required for evaluation on route api-key (not consulted for route oauth)")
-    expect(diagnostic).not.toContain("protocol v2 is not frozen")
+    expect(result.text).not.toContain("protocol v2 is not frozen")
     expect(result.text).toContain("PASS  frozen protocol")
     expect(result.text).toContain("PROTOCOL-mad-evaluation-v2 v2 sha256:")
-    expect(diagnostic).not.toContain("gate 1 ")
     expect(result.text).toContain("PASS  OAuth prepared payloads")
     expect(result.text).toContain("PASS  OAuth data directory")
     expect(result.text).toContain("PASS  OAuth store")
+    expect(result.text).toContain("PASS  authorized evaluation run")
     expect(result.text).toContain("no database yet, so the store is empty")
-    expect(host.started).toEqual([])
-    expect(clientCalls).toEqual([])
+    // The reservation is made in the injected root; the injected stand-in host then starts. No real host or provider is reached.
+    expect(existsSync(join(env.parent, "reservation-root", EVALUATION_RUN.reservation))).toBe(true)
+    expect(existsSync(join(REPO_ROOT, EVALUATION_RUN.reservation))).toBe(false)
+    expect(host.started).toHaveLength(1)
     expect(result.text).not.toContain(AUTH_CONTENT_MARKER)
-    await nothingScheduled(env.out, env.scratchParent)
   })
 
-  test("story 2-8c4 — the spike's leftover sessions refuse at stage 1 beside gate 4, by names and counts only, and no host starts", async () => {
+  test("story 2-8c4 — the spike's leftover sessions refuse at stage 1 on the store alone, by names and counts only, and no host starts", async () => {
     const env = await oauthSetup()
     await fakeStore(env.dataDir, { session: 3, message: 6 })
     const host = oauthHost()
@@ -1837,7 +1840,7 @@ describe("the OAuth route: stage 1", () => {
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
     expect(diagnostic).toContain("session=3, message=6")
     expect(diagnostic).toContain("every named table must be empty")
-    expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
+    expect(diagnostic).not.toContain("gate 4 (evaluation spend authorization) is OPEN")
     expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
     expect(diagnostic).not.toContain("protocol v2 is not frozen")
     expect(result.text).toContain("OAuth store failed")
@@ -1981,5 +1984,149 @@ describe("the OAuth route: a run past stage 1 (injected CLOSED gates, a frozen v
     const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
     expect(result.code).toBe(1)
     expect(result.text).toContain(`POST-STOP CHECK FAILED — ${problem}.`)
+  })
+})
+
+describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster and the reservation", () => {
+  const notCommitted = async () => false
+  const reservationOf = (root: string) => join(root, EVALUATION_RUN.reservation)
+  const reorderedArgv = (env: Awaited<ReturnType<typeof oauthSetup>>, pins: readonly string[]) => {
+    const argv = oauthArgv(env.directory, env.out, env.dataDir, env.prepared)
+    const values = argv.flatMap((arg, index) => (arg === "--pin" ? [index + 1] : []))
+    values.forEach((index, position) => {
+      argv[index] = pins[position]!
+    })
+    return argv
+  }
+
+  test("EVALUATION_RUN is the roster the run proposal names, first pin first, and its reservation lives in ablation/evidence", () => {
+    expect(EVALUATION_RUN.run).toBe(1)
+    expect<string[]>([...EVALUATION_RUN.pins]).toEqual(OAUTH_PINS)
+    expect(EVALUATION_RUN.reservation).toBe("ablation/evidence/paired-oauth-evaluation-run-1.reservation")
+  })
+
+  test("the authorized pins with no reservation anywhere pass", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    expect(await evaluationRunProblems(OAUTH_PINS, { root, committed: notCommitted })).toEqual([])
+  })
+
+  test("any other pin list refuses: another order, another model, one missing, one extra", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    for (const pins of [
+      [OAUTH_PINS[1]!, OAUTH_PINS[0]!, OAUTH_PINS[2]!],
+      ["openai/gpt-5", OAUTH_PINS[1]!, OAUTH_PINS[2]!],
+      OAUTH_PINS.slice(0, 2),
+      [...OAUTH_PINS, "openai/gpt-5"],
+      [],
+    ]) {
+      const problems = await evaluationRunProblems(pins, { root, committed: notCommitted })
+      expect(problems, pins.join(",")).toHaveLength(1)
+      expect(problems[0]).toContain(`is not the roster gate 4 authorizes, in this order: ${OAUTH_PINS.join(", ")}`)
+    }
+  })
+
+  test("a reservation on disk or at HEAD refuses, and an unestablished HEAD refuses", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    await mkdir(dirname(reservationOf(root)), { recursive: true })
+    await writeFile(reservationOf(root), "{}\n")
+    expect((await evaluationRunProblems(OAUTH_PINS, { root, committed: notCommitted })).join("\n")).toContain(
+      `the reservation \`${EVALUATION_RUN.reservation}\` already exists: gate 4's one authorized evaluation (run 1) was already used`,
+    )
+    const empty = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    expect((await evaluationRunProblems(OAUTH_PINS, { root: empty, committed: async () => true })).join("\n")).toContain("is committed at HEAD")
+    const thrown = await evaluationRunProblems(OAUTH_PINS, {
+      root: empty,
+      committed: async () => {
+        throw new Error("git ls-tree exited 128")
+      },
+    })
+    expect(thrown.join("\n")).toContain("whether the reservation")
+    expect(thrown.join("\n")).toContain("could not be established: git ls-tree exited 128")
+  })
+
+  test("reserveEvaluationRun creates the reservation exclusively and refuses a second", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    const reservation: EvaluationReservation = { run: 1, story: "2-8d", createdAt: "2026-10-02T00:00:00.000Z", gateTableBlob: "abc", pins: OAUTH_PINS, out: "/o" }
+    const first = await reserveEvaluationRun(root, reservation)
+    expect(first).toEqual({ ok: true, path: reservationOf(root) })
+    expect(JSON.parse(await readFile(reservationOf(root), "utf8"))).toEqual(reservation)
+    const second = await reserveEvaluationRun(root, { ...reservation, out: "/other" })
+    expect(second.ok).toBe(false)
+    expect(second.ok ? "" : second.why).toContain("another invocation reserved gate 4's one authorized evaluation first")
+    expect(JSON.parse(await readFile(reservationOf(root), "utf8"))).toEqual(reservation)
+  })
+
+  test("a run past stage 1 reserves before the host starts; a second run into a fresh --out is refused at stage 1 and starts no host", async () => {
+    const env = await oauthSetup()
+    const root = join(env.parent, "shared-reservation-root")
+    const host = oauthHost()
+    let reservedAtSpawn = false
+    const startHost = host.startHost
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root, committed: notCommitted },
+      startHost: async (asked) => {
+        reservedAtSpawn = existsSync(reservationOf(root))
+        return startHost(asked)
+      },
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(reservedAtSpawn).toBe(true)
+    expect(result.text).toContain(`reserved gate 4's evaluation run 1: ${EVALUATION_RUN.reservation} (never removed)`)
+    const recorded = JSON.parse(await readFile(reservationOf(root), "utf8")) as EvaluationReservation
+    expect(recorded).toMatchObject({ run: 1, story: "2-8d", gateTableBlob: GATES_BLOB, pins: OAUTH_PINS, out: env.out })
+
+    const again = await oauthSetup()
+    const secondHost = oauthHost()
+    const { overrides: secondOverrides } = oauthOverrides(again, secondHost, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(again.parent),
+      evaluationReservation: { root, committed: notCommitted },
+    })
+    const refused = await captured(() => main(oauthArgv(again.directory, again.out, again.dataDir, again.prepared), secondOverrides))
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain("authorized evaluation run failed")
+    expect(refused.text).toContain("gate 4's one authorized evaluation (run 1) was already used")
+    expect(secondHost.started).toEqual([])
+    await nothingScheduled(again.out, again.scratchParent)
+    expect(JSON.parse(await readFile(reservationOf(root), "utf8"))).toEqual(recorded)
+  })
+
+  test("pins in another order refuse at stage 1, reserve nothing and start no host", async () => {
+    const env = await oauthSetup()
+    const root = join(env.parent, "reservation-root")
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const reordered = [OAUTH_PINS[1]!, OAUTH_PINS[0]!, OAUTH_PINS[2]!]
+    const result = await captured(() => main(reorderedArgv(env, reordered), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`is not the roster gate 4 authorizes, in this order: ${OAUTH_PINS.join(", ")}`)
+    expect(existsSync(reservationOf(root))).toBe(false)
+    expect(host.started).toEqual([])
+  })
+
+  test("any other stage-1 failure reserves nothing, so the authorization is unused", async () => {
+    const env = await oauthSetup()
+    await fakeStore(env.dataDir, { session: 1 })
+    const root = join(env.parent, "reservation-root")
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, protocolV2File: await frozenV2(env.parent) })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("PASS  authorized evaluation run")
+    expect(result.text).toContain("OAuth store failed")
+    expect(existsSync(reservationOf(root))).toBe(false)
+    expect(host.started).toEqual([])
+  })
+
+  test("the api-key route neither checks nor makes the OAuth evaluation's reservation", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides } = overridesFor(env, { gates: closedGates, evaluationReservation: { root, committed: notCommitted } })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.text).not.toContain("authorized evaluation run")
+    expect(existsSync(reservationOf(root))).toBe(false)
   })
 })

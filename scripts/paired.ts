@@ -104,9 +104,9 @@
  */
 
 import { rmSync } from "node:fs"
-import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
@@ -141,7 +141,7 @@ import {
 } from "../ablation/managed-host.ts"
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { storeGuard } from "../ablation/oauth-store.ts"
-import { gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
+import { EVALUATION_RUN, gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -230,6 +230,76 @@ export async function gateTableState(git: RunGit, root: string): Promise<GateTab
   return { ok: true, blob: blob.stdout.trim() }
 }
 
+/**
+ * Story 2-8d — where the OAuth evaluation's reservation lives and whether HEAD
+ * holds it. The shipped values are this repository and `git ls-tree HEAD`.
+ */
+export interface EvaluationReservationSeam {
+  root: string
+  committed: (relative: string) => Promise<boolean>
+}
+
+/** What the OAuth evaluation's reservation records. No secret: the run, the gate table's blob, the pins and `--out`. */
+export interface EvaluationReservation {
+  run: number
+  story: "2-8d"
+  createdAt: string
+  gateTableBlob: string
+  pins: string[]
+  out: string
+}
+
+/**
+ * Story 2-8d — stage 1 on the OAuth route: the pins are exactly
+ * `EVALUATION_RUN.pins`, in order, and its reservation exists neither on disk
+ * (ignored or untracked included) nor at HEAD. Reads only the repository.
+ */
+export async function evaluationRunProblems(pins: readonly string[], seam: EvaluationReservationSeam): Promise<string[]> {
+  const problems: string[] = []
+  const authorized: readonly string[] = EVALUATION_RUN.pins
+  if (pins.length !== authorized.length || pins.some((pin, index) => pin !== authorized[index])) {
+    problems.push(
+      `the --pin list ${pins.length === 0 ? "(none)" : pins.join(", ")} is not the roster gate 4 authorizes, in this order: ` +
+        `${authorized.join(", ")} (the first pin is also small_model)`,
+    )
+  }
+  const relative = EVALUATION_RUN.reservation
+  const used = `gate 4's one authorized evaluation (run ${EVALUATION_RUN.run}) was already used, whether it succeeded, failed or was interrupted`
+  const present = await presence(join(seam.root, relative))
+  if (present === "present") problems.push(`the reservation \`${relative}\` already exists: ${used}`)
+  else if (present !== "absent") problems.push(present)
+  try {
+    if (await seam.committed(relative)) problems.push(`the reservation \`${relative}\` is committed at HEAD: ${used}`)
+  } catch (error) {
+    problems.push(`whether the reservation \`${relative}\` is committed could not be established: ${messageOf(error)}`)
+  }
+  return problems
+}
+
+/**
+ * Creates the OAuth evaluation's reservation exclusively (`wx`: O_CREAT|O_EXCL),
+ * so of two invocations only one can create it; the other is refused. Never
+ * removed.
+ */
+export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
+  const relative = EVALUATION_RUN.reservation
+  const path = join(root, relative)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, `${JSON.stringify(reservation, null, 2)}\n`, { encoding: "utf8", flag: "wx" })
+    return { ok: true, path }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return {
+      ok: false,
+      why:
+        code === "EEXIST"
+          ? `the reservation \`${relative}\` already exists: another invocation reserved gate 4's one authorized evaluation first`
+          : `the reservation \`${relative}\` could not be created (${messageOf(error)})`,
+    }
+  }
+}
+
 /** The api-key route: the relay to one api-key provider, and the launcher's default. */
 export const LAUNCH_ROUTE: GateRoute = "api-key"
 
@@ -315,6 +385,8 @@ export interface PairedOverrides {
   codeRevision?: () => Promise<Maybe<CodeRevision>>
   /** Whether the gate table is committed. Defaults to `gateTableState` over this repository. */
   gateTable?: () => Promise<GateTableState>
+  /** Story 2-8d, test-only: where the OAuth evaluation's reservation is checked and made. Defaults to this repository. */
+  evaluationReservation?: EvaluationReservationSeam
   /** The bounded launcher's spawn, for the preflight's git calls. Defaults to `preflightSpawn`. */
   spawnGit?: SpawnBlame
   /** Test-only: the preflight's git deadlines. The shipped values are the constants above. */
@@ -1274,11 +1346,31 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     const provider = flags.provider
     let oauthRoute: OAuthRoute | undefined
     const home = overrides.home ?? homedir()
+    const reservationSeam: EvaluationReservationSeam = overrides.evaluationReservation ?? {
+      root: REPO_ROOT,
+      committed: async (relative) => {
+        const listed = await git(REPO_ROOT, ["ls-tree", "--name-only", "HEAD", "--", relative])
+        if (listed.exitCode !== 0) throw new Error(`\`git ls-tree\` exited ${listed.exitCode}: ${listed.stderr.trim() || "no detail"}`)
+        return listed.stdout.trim().length > 0
+      },
+    }
+    const pinNames = flags.pins.map((pin) => `${pin.providerId}/${pin.modelId}`)
     if (oauthMode) {
       oauthRoute = await oauthChecks(flags, home, overrides.payloadPins ?? OAUTH_PAYLOAD, checks, [
         { name: "--directory", path: directory },
         { name: "--out", path: out },
       ])
+      checks.push(
+        await guarded("authorized evaluation run", async () => {
+          const problems = await evaluationRunProblems(pinNames, reservationSeam)
+          return problems.length === 0
+            ? pass("authorized evaluation run", [
+                `the pins ${pinNames.join(", ")} are gate 4's authorized roster, in order`,
+                `run ${EVALUATION_RUN.run}'s reservation \`${EVALUATION_RUN.reservation}\` is unused; it is created before the host starts`,
+              ])
+            : fail("authorized evaluation run", problems)
+        }),
+      )
     } else if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
     else {
       const problems = providerBlockProblems(provider)
@@ -1364,6 +1456,27 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           "through a reviewed, committed change to ablation/paired-gates.ts.",
         preexisting,
       )
+    }
+
+    // Story 2-8d: the OAuth route uses gate 4's one authorization here, before any host or network activity.
+    if (oauthMode) {
+      const reserved = await reserveEvaluationRun(reservationSeam.root, {
+        run: EVALUATION_RUN.run,
+        story: "2-8d",
+        createdAt: new Date().toISOString(),
+        gateTableBlob: table.blob,
+        pins: pinNames,
+        out,
+      })
+      if (!reserved.ok) {
+        return refusal(
+          "stage 1 (evaluation reservation)",
+          [reserved.why],
+          "gate 4 authorizes one OAuth evaluation; a further run needs the budget owner's new authorization in a reviewed change.",
+          preexisting,
+        )
+      }
+      console.log(`  reserved gate 4's evaluation run ${EVALUATION_RUN.run}: ${EVALUATION_RUN.reservation} (never removed)`)
     }
 
     // ---- STAGE 2: managed host, client and roster ----
