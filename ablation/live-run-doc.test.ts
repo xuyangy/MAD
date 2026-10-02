@@ -632,10 +632,12 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
     expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
-    expect(text).toContain("lists gate 4 OPEN (runs 1 and 2 are spent), run 2's existing reservation, and any launch-time condition below that fails")
+    expect(text).toContain("lists gate 4 OPEN (runs 1 and 2 are spent) and any launch-time condition below that fails")
     for (const phrase of [
       "**The guarded OAuth evaluation run (story 2-8d).**",
-      "names run 2, the last run gate 4 authorized (on 2026-10-02; it ran and is spent)",
+      "names run 3, prepared and pending the budget owner's authorization (gate 4 is OPEN)",
+      "one model reached through two providers holds one slot (AD-4)",
+      "`ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json`",
       "`ablation/evidence/paired-oauth-evaluation-run-1-diagnosis-2026-10-02.json`",
       "each read is bounded on its own, so the reads in sequence may take several times that before stage 2 refuses",
       `\`${EVALUATION_RUN.reservation}\``,

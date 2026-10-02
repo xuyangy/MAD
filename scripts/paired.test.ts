@@ -1660,7 +1660,7 @@ describe("the managed host (story 2-8c)", () => {
 // test here starts opencode or touches the user's opencode directories.
 // ---------------------------------------------------------------------------
 
-const OAUTH_PINS = ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"]
+const OAUTH_PINS = ["openai/gpt-6-sol", "anthropic/claude-opus-5-5", "github-copilot/gpt-6-luna"]
 
 /** Story 2-8d: a HEAD that holds every earlier OAuth evaluation run's files, and nothing else the guard asks about. */
 const priorRunsOnly = async (relative: string) => EVALUATION_RUN.prior.some((prior) => prior.reservation === relative || prior.evidence === relative)
@@ -1757,7 +1757,7 @@ function oauthOverrides(env: Awaited<ReturnType<typeof oauthSetup>>, host: Retur
       startHost: host.startHost,
       payloadPins: env.pins,
       home: env.home,
-      enumerate: async () => [candidate("openai", "gpt-6-luna"), candidate("anthropic", "claude-opus-5-5"), candidate("github-copilot", "gpt-5-mini")],
+      enumerate: async () => [candidate("openai", "gpt-6-sol"), candidate("anthropic", "claude-opus-5-5"), candidate("github-copilot", "gpt-6-luna")],
       backendFor: lensAwareBackend,
       // Story 2-8d: never this repository's ablation/evidence.
       evaluationReservation: { root: join(env.parent, "reservation-root"), committed: priorRunsOnly },
@@ -1789,7 +1789,7 @@ describe("the OAuth route: flags", () => {
   })
 
   test("pins must be exactly one per OAuth provider, all distinct, and each an OAuth provider's", () => {
-    const missing = parseFlags(oauthArgv("/w", "/o", "/d", "/p").filter((arg) => arg !== "github-copilot/gpt-5-mini" ).filter((arg, index, all) => !(arg === "--pin" && all[index + 1] === "--oauth-data-dir")))
+    const missing = parseFlags(oauthArgv("/w", "/o", "/d", "/p").filter((arg) => arg !== "github-copilot/gpt-6-luna" ).filter((arg, index, all) => !(arg === "--pin" && all[index + 1] === "--oauth-data-dir")))
     expect(missing.problems.join("\n")).toContain("--oauth-provider github-copilot has 0 --pin(s)")
     expect(args(["--pin", "anthropic/claude-opus-5-5"]).problems.join("\n")).toContain("--pin anthropic/claude-opus-5-5 was given twice")
     expect(args(["--pin", "google/gemini"]).problems.join("\n")).toContain("--pin google/gemini names a provider that is not an --oauth-provider")
@@ -2011,11 +2011,12 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
   }
 
   test("EVALUATION_RUN is the roster the run proposal names, first pin first, and its reservation lives in ablation/evidence", () => {
-    expect(EVALUATION_RUN.run).toBe(2)
+    expect(EVALUATION_RUN.run).toBe(3)
     expect<string[]>([...EVALUATION_RUN.pins]).toEqual(OAUTH_PINS)
-    expect(EVALUATION_RUN.reservation).toBe("ablation/evidence/paired-oauth-evaluation-run-2.reservation")
+    expect(EVALUATION_RUN.reservation).toBe("ablation/evidence/paired-oauth-evaluation-run-3.reservation")
     expect(EVALUATION_RUN.prior).toEqual([
       { run: 1, reservation: "ablation/evidence/paired-oauth-evaluation-run-1.reservation", evidence: "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json" },
+      { run: 2, reservation: "ablation/evidence/paired-oauth-evaluation-run-2.reservation", evidence: "ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json" },
     ])
   })
 
@@ -2044,7 +2045,7 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     await mkdir(dirname(reservationOf(root)), { recursive: true })
     await writeFile(reservationOf(root), "{}\n")
     expect((await evaluationRunProblems(OAUTH_PINS, { root, committed: notCommitted })).join("\n")).toContain(
-      `the reservation \`${EVALUATION_RUN.reservation}\` already exists: gate 4's one authorized evaluation (run 2) was already used`,
+      `the reservation \`${EVALUATION_RUN.reservation}\` already exists: gate 4's one authorized evaluation (run 3) was already used`,
     )
     const empty = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
     expect((await evaluationRunProblems(OAUTH_PINS, { root: empty, committed: async () => true })).join("\n")).toContain("is committed at HEAD")
@@ -2076,7 +2077,7 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
 
   test("reserveEvaluationRun creates the reservation exclusively and refuses a second", async () => {
     const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
-    const reservation: EvaluationReservation = { run: 2, story: "2-8d", createdAt: "2026-10-02T00:00:00.000Z", gateTableBlob: "abc", pins: OAUTH_PINS, out: "/o" }
+    const reservation: EvaluationReservation = { run: 3, story: "2-8d", createdAt: "2026-10-02T00:00:00.000Z", gateTableBlob: "abc", pins: OAUTH_PINS, out: "/o" }
     const first = await reserveEvaluationRun(root, reservation)
     expect(first).toEqual({ ok: true, path: reservationOf(root) })
     expect(JSON.parse(await readFile(reservationOf(root), "utf8"))).toEqual(reservation)
@@ -2104,9 +2105,9 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
     expect(result.code, result.text).toBe(0)
     expect(reservedAtSpawn).toBe(true)
-    expect(result.text).toContain(`reserved gate 4's evaluation run 2: ${EVALUATION_RUN.reservation} (never removed)`)
+    expect(result.text).toContain(`reserved gate 4's evaluation run 3: ${EVALUATION_RUN.reservation} (never removed)`)
     const recorded = JSON.parse(await readFile(reservationOf(root), "utf8")) as EvaluationReservation
-    expect(recorded).toMatchObject({ run: 2, story: "2-8d", gateTableBlob: GATES_BLOB, pins: OAUTH_PINS, out: env.out })
+    expect(recorded).toMatchObject({ run: 3, story: "2-8d", gateTableBlob: GATES_BLOB, pins: OAUTH_PINS, out: env.out })
 
     const again = await oauthSetup()
     const secondHost = oauthHost()
@@ -2118,7 +2119,7 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     const refused = await captured(() => main(oauthArgv(again.directory, again.out, again.dataDir, again.prepared), secondOverrides))
     expect(refused.code).toBe(1)
     expect(refused.text).toContain("authorized evaluation run failed")
-    expect(refused.text).toContain("gate 4's one authorized evaluation (run 2) was already used")
+    expect(refused.text).toContain("gate 4's one authorized evaluation (run 3) was already used")
     expect(secondHost.started).toEqual([])
     await nothingScheduled(again.out, again.scratchParent)
     expect(JSON.parse(await readFile(reservationOf(root), "utf8"))).toEqual(recorded)

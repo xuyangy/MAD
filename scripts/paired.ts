@@ -79,7 +79,7 @@
  *
  *   bun run paired --live --provider-mode oauth \
  *     --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot \
- *     --pin openai/gpt-6-luna --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-5-mini \
+ *     --pin openai/gpt-6-sol --pin anthropic/claude-opus-5-5 --pin github-copilot/gpt-6-luna \
  *     --oauth-data-dir ~/.local/share/mad-opencode-oauth --oauth-prepared /scratch/mad-oauth-prepared \
  *     --directory /scratch/mad-labelled-change --out /scratch/mad-paired-oauth
  *

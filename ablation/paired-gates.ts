@@ -123,17 +123,26 @@ export function evaluationReservation(run: number): string {
  * creates exclusively, in this repository and so across every `--out`, before it
  * starts a host, and every earlier run, whose files must be committed. Nothing
  * deletes a reservation; a failed or interrupted run uses its authorization. Run
- * 1 ran on 2026-10-02 and was refused at stage 2 before any model session.
+ * 1 ran on 2026-10-02 and was refused at stage 2 before any model session; run 2
+ * ran the same day on the pins openai/gpt-6-luna, anthropic/claude-opus-5-5 and
+ * github-copilot/gpt-5-mini and halted in block 1. Run 3's roster replaces those
+ * pins: github-copilot/gpt-6-luna, and openai/gpt-6-sol, since one model reached
+ * through two providers holds one slot (AD-4).
  */
 export const EVALUATION_RUN = {
-  run: 2,
-  pins: ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"],
-  reservation: evaluationReservation(2),
+  run: 3,
+  pins: ["openai/gpt-6-sol", "anthropic/claude-opus-5-5", "github-copilot/gpt-6-luna"],
+  reservation: evaluationReservation(3),
   prior: [
     {
       run: 1,
       reservation: evaluationReservation(1),
       evidence: "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json",
+    },
+    {
+      run: 2,
+      reservation: evaluationReservation(2),
+      evidence: "ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json",
     },
   ] as readonly EvaluationPriorRun[],
 } as const
@@ -281,7 +290,8 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "any --out is refused, and nothing deletes it. Each of the host's verification reads may take PAIRED_HOST_REQUEST_MS " +
       "(60000 ms). Run 2 ran on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json " +
       "(HALTED in block 1's ON continuation: a judge attempt on github-copilot/gpt-5-mini timed out at its 600000 ms deadline, " +
-      "after anthropic/claude-opus-5-5 had dropped out on an expired sign-in; 26 attempts admitted, 1 of 3 blocks measured, " +
+      "after anthropic/claude-opus-5-5 had dropped out on an expired sign-in; 26 attempts admitted, block 1 partially " +
+      "observed, 0 of 3 paired blocks completed, " +
       "incomplete), with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-2.reservation. That " +
       "authorization is spent. The budget owner first authorized run 1 of the same evaluation with the same exposure, on " +
       "2026-10-02. Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2: " +

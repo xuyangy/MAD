@@ -1,5 +1,5 @@
 {
-  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 2: HALTED in block 1's ON continuation; 1 of 3 blocks measured, incomplete",
+  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 2: HALTED in block 1's ON continuation; block 1 partially observed, 0 of 3 paired blocks completed, incomplete",
   "story": "2-8d",
   "run": 2,
   "status": "HALTED (attempt-mode stop): attempt `request-26` (block 1 on, judge/discovery-3 attempt 1) timed out at its 600000 ms deadline while in flight; blocks 2 and 3 not attempted; `complete: false`",

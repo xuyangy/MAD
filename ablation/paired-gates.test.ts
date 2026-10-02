@@ -124,7 +124,7 @@ describe("PAIRED_GATES", () => {
       "openai/gpt-6-luna, anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini",
       "`EVALUATION_RUN` (run 2) holds the pins in --pin order",
       "Run 2 ran on 2026-10-02 and is recorded in ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json (HALTED in block 1's ON continuation",
-      "26 attempts admitted, 1 of 3 blocks measured, incomplete",
+      "26 attempts admitted, block 1 partially observed, 0 of 3 paired blocks completed, incomplete",
       "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-2.reservation. That authorization is spent.",
       "Run 1 is recorded in ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2",
       "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-1.reservation",
@@ -158,7 +158,7 @@ describe("PAIRED_GATES", () => {
     const [prior] = EVALUATION_RUN.prior
     expect(prior!.run).toBe(1)
     const reservation = await read<{ run: number; story: string; pins: string[]; gateTableBlob: string }>(prior!.reservation)
-    expect(reservation).toMatchObject({ run: 1, story: "2-8d", pins: [...EVALUATION_RUN.pins] })
+    expect(reservation).toMatchObject({ run: 1, story: "2-8d", pins: ["openai/gpt-6-luna", "anthropic/claude-opus-5-5", "github-copilot/gpt-5-mini"] })
     const evidence = await read<{ run: number; status: string; billing: string; diagnosis: { conclusion: string } }>(
       prior!.evidence,
     )
