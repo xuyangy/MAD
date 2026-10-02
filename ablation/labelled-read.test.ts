@@ -330,7 +330,7 @@ describe("the happy path — three blocks over seeded prefixes", () => {
     expect(text).toContain("It is not a causal run effect")
     expect(text).toContain("say nothing about precision")
     expect(text).toContain("implementation: complete")
-    expect(text).toContain("protocol v2: a DRAFT that pre-registers nothing")
+    expect(text).toContain("protocol v2: FROZEN 2026-10-02")
     // WORDING CHANGED BY A RECORDED DECISION (2026-09-17), not to make a failing
     // assertion pass: the count is over QUANTITIES, so one complete block alone
     // prints `8 of 8`, which read as experiment completeness. The number and the
@@ -340,10 +340,10 @@ describe("the happy path — three blocks over seeded prefixes", () => {
         "(a count of QUANTITIES; one complete block can supply all of them)",
     )
     expect(text).toContain("planned live evaluation: completion is NOT established by this report")
-    expect(text).toContain("matcher: the shipped lexical defect matcher")
+    expect(text).toContain("matcher: the shipped lexical defect matcher, which is the one frozen protocol v2 (A2) specifies")
     expect(text).toContain(`labelled change ${LABELLED_CHANGE_SEAL.version}, ${SEEDED_DEFECTS.length} planted defects`)
     expect(text).toContain(`labels   ${LABELLED_CHANGE_SEAL.labelsHash}`)
-    expect(text).toContain("No number here is v2-preregistered, because v2 is a draft.")
+    expect(text).toContain("This reader does not establish that any number is v2-preregistered")
     expect(text).toContain(`this bundle's schedule was sealed under protocol PROTOCOL-mad-evaluation-v1 v1 (${protocolHash})`)
     expect(text).toContain(`on/0: protocolVersion 1, protocolHash ${protocolHash}`)
   })
@@ -377,6 +377,7 @@ describe("the happy path — three blocks over seeded prefixes", () => {
     expect(text).toContain("planned live evaluation: completion is NOT established by this report")
     // An injected matcher must not pass as the shipped one the draft proposes.
     expect(text).toContain("matcher: INJECTED")
+    expect(text).toContain("so these numbers are not the registered quantity")
   })
 
   test("ONE COMPLETE BLOCK gives every quantity an observation, and the count says so rather than reading as completeness", async () => {
@@ -1483,7 +1484,7 @@ describe("every path the labelled report prints as provenance resolves", () => {
     expect(existsSync(join(import.meta.dir, "..", LABELLED_READER_MODULE))).toBe(true)
   })
 
-  test("the draft protocol that proposes the endpoints", async () => {
+  test("the frozen protocol v2 that registers the endpoints", async () => {
     const { root } = await labelledBundle()
     expect(renderLabelledBundle(await labelled(root))).toContain(PROTOCOL_V2_DRAFT)
     expect(existsSync(join(import.meta.dir, "..", PROTOCOL_V2_DRAFT))).toBe(true)

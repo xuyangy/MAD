@@ -488,14 +488,14 @@ export const PAIRED_ALLOWANCES = {
 
 /**
  * Story 2-8c3a — what the paired journal counts. `tokens` is protocol v1's unit
- * and the default. `attempts` is protocol v2's draft unit for the OAuth route:
+ * and the default. `attempts` is protocol v2's unit for the OAuth route (A7):
  * one admitted attempt is one `runTurn` that passed admission and was issued,
  * retries included. A refused attempt and a `not-issued` settlement count 0.
  */
 export type AccountingMode = "tokens" | "attempts"
 
 /**
- * Story 2-8c3a — protocol v2's draft admission thresholds in admitted attempts.
+ * Story 2-8c3a — protocol v2's admission thresholds in admitted attempts (A7).
  *
  * - `prefix` is 2×(3+L) with L = 2 lens slots: 10.
  * - `continuation` is each of the ON and OFF continuations: 45, so one block is

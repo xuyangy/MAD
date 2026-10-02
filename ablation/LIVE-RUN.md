@@ -509,8 +509,9 @@ below is scored against, and the schedule's fixture is checked on it too.
 
 **Protocol identity and status.** The report prints the protocol the schedule was sealed under
 (id, version, hash) and each bound arm's `protocolVersion` and `protocolHash`. Every number is
-descriptive. `evaluation-protocol-v2.md` proposes both endpoints and is a draft, so no number is
-v2-preregistered.
+descriptive. `evaluation-protocol-v2.md` registers both endpoints and is frozen (2026-10-02), but it
+pre-registers them only for a schedule sealed under the frozen file (A5), and the report does not
+establish that, so it claims no number as v2-preregistered.
 
 The status block states four things separately, and the third and fourth are easy to confuse:
 
@@ -519,9 +520,9 @@ The status block states four things separately, and the third and fourth are eas
 - `planned live evaluation` therefore says, unconditionally, that completion is **not**
   established by this report — bundle observation counts alone establish neither live provenance
   nor completion of the planned three blocks.
-- `matcher` names which matcher produced the numbers. The shipped lexical matcher is the one the
-  draft protocol (A2) proposes; an injected one is labelled `INJECTED` and the report says the
-  numbers are not that proposal's quantity.
+- `matcher` names which matcher produced the numbers. The shipped lexical matcher is the one
+  frozen protocol v2 (A2) specifies; an injected one is labelled `INJECTED` and the report says the
+  numbers are not the registered quantity.
 
 **What it does not own.** The four labelled verdict transitions and the per-arm false positives
 are the adjudication report's, below. Precision and cost contrasts are story 2.8's, printed by
@@ -1051,7 +1052,7 @@ The OAuth providers sign in through opencode, with no relay, so MAD cannot measu
 that route `runPairedBlocks` has a second accounting mode, `config.accounting: "attempts"`, beside the
 unchanged token mode. **`--provider-mode oauth` selects it** (see "The OAuth route" below); the default
 api-key mode passes `route: "api-key"`, counts tokens, and refuses exactly as before. Gate 7 covers this mode on the oauth route; story 2-8c3b's zero-bill probe could not observe OpenAI's OAuth transport, and the OAuth pilot's run 3 covered it. The mode follows protocol
-v2's draft sections A6 onward, which are not frozen.
+v2's sections A6 onward, frozen on 2026-10-02.
 
 - **The unit.** One admitted attempt is one `runTurn` that passed its stage's ledger gate and the
   experiment's admission and was issued, retries included. It is not a debate round and not a
@@ -1127,7 +1128,7 @@ bun run paired --live --provider-mode oauth \
 
 `--provider-mode oauth` runs the managed host on opencode's own sign-ins. MAD holds, copies and
 handles no provider credential, and there is no relay and no meter. **With the shipped tree it always
-refuses at stage 1**, before any host exists, with one aggregated diagnostic that lists gate 4 OPEN and protocol v2 not frozen, and the store guard's refusal while the data directory's
+refuses at stage 1**, before any host exists, with one aggregated diagnostic that lists gate 4 OPEN, and the store guard's refusal while the data directory's
 database holds anything (below).
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
@@ -1222,7 +1223,8 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
 - **The roster and the seal.** Stage 2 resolves the roster with the lenses `security` and
   `reliability`, the two lens slots protocol v2's prefix of 10 attempts is sized for, and refuses unless
   every pin holds a slot. Stage 4 seals `accounting: "attempts"` and `route: "oauth"` under protocol v2
-  (`evaluation-protocol-v2.md`), which must be frozen: until the human freezes it, stage 1 refuses. The
+  (`evaluation-protocol-v2.md`), frozen on 2026-10-02: stage 1 refuses a v2 file that is not frozen or
+  whose `frozen_hash` does not match its bytes. The
   api-key route keeps its lens-free roster.
 - **After the stop.** Once the host's exit is confirmed, the data directory's shape and auth symlink,
   the seeded config lock's sha256, the whole seeded tree's digest and the store guard are checked again. A failure, or an

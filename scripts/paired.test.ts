@@ -1672,7 +1672,7 @@ const oauthArgv = (directory: string, out: string, dataDir: string, prepared: st
   ...extra,
 ]
 
-/** Protocol v2's draft, frozen by its own hash rule into a temporary file, for a run that must get past stage 1. */
+/** Protocol v2, re-frozen by its own hash rule into a temporary file, for a run that must get past stage 1. */
 async function frozenV2(dir: string): Promise<string> {
   const draft = await readFile(PROTOCOL_V2_FILE, "utf8")
   const pending = draft.replace(/^status: .*$/m, "status: frozen").replace(/^frozen_hash: .*$/m, "frozen_hash: PENDING")
@@ -1796,7 +1796,7 @@ describe("the OAuth route: flags", () => {
 })
 
 describe("the OAuth route: stage 1", () => {
-  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN and protocol v2 not frozen, and starts no host", async () => {
+  test("on the shipped tree it exits 1 with one diagnostic listing gate 4 OPEN, passes the frozen protocol v2, and starts no host", async () => {
     const env = await oauthSetup()
     const host = oauthHost()
     const { overrides, clientCalls } = oauthOverrides(env, host)
@@ -1807,7 +1807,9 @@ describe("the OAuth route: stage 1", () => {
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
     expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
     expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
-    expect(diagnostic).toContain("protocol v2 is not frozen")
+    expect(diagnostic).not.toContain("protocol v2 is not frozen")
+    expect(result.text).toContain("PASS  frozen protocol")
+    expect(result.text).toContain("PROTOCOL-mad-evaluation-v2 v2 sha256:")
     expect(diagnostic).not.toContain("gate 1 ")
     expect(result.text).toContain("PASS  OAuth prepared payloads")
     expect(result.text).toContain("PASS  OAuth data directory")
@@ -1831,7 +1833,7 @@ describe("the OAuth route: stage 1", () => {
     expect(diagnostic).toContain("every named table must be empty")
     expect(diagnostic).toContain("gate 4 (evaluation spend authorization) is OPEN")
     expect(diagnostic).not.toContain("gate 7 (OAuth attempt accounting) is OPEN")
-    expect(diagnostic).toContain("protocol v2 is not frozen")
+    expect(diagnostic).not.toContain("protocol v2 is not frozen")
     expect(result.text).toContain("OAuth store failed")
     expect(result.text).not.toContain(ROW_CONTENT_MARKER)
     expect(host.started).toEqual([])

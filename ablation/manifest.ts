@@ -287,7 +287,7 @@ export interface ExperimentBinding {
   failure?: string
   /**
    * Story 2-8c3a — present only when the paired journal counted admitted
-   * attempts (protocol v2's draft unit). Absent means ledger tokens, as every
+   * attempts (protocol v2's unit, A7). Absent means ledger tokens, as every
    * earlier manifest is read.
    */
   accounting?: "attempts"

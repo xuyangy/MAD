@@ -53,7 +53,7 @@
  * ## ATTEMPT MODE (story 2-8c3a)
  *
  * A bundle whose sealed schedule and arm manifests say `accounting: "attempts"`
- * reports protocol v2's draft cost endpoint instead: *newly issued MAD attempts*,
+ * reports protocol v2's cost endpoint (A8) instead: *newly issued MAD attempts*,
  * shared prefix + ON continuation + OFF continuation, with ON − OFF over the
  * continuations, split by stage and slot, the model named from the manifest
  * roster and retries (`attempt > 1`) shown apart. The counts come from the
@@ -1435,7 +1435,7 @@ const ESTIMANDS = [
 
 /** Story 2-8c3a — the COST estimand for an attempt-mode bundle, in place of the token one. */
 const ATTEMPT_COST_ESTIMAND = [
-  "  COST is NEWLY ISSUED MAD ATTEMPTS (protocol v2 draft): shared prefix + ON continuation + OFF continuation, each",
+  "  COST is NEWLY ISSUED MAD ATTEMPTS (protocol v2 A8): shared prefix + ON continuation + OFF continuation, each",
   `  admitted attempt once, retries included and shown apart, read from \`${JOURNAL_FILE}\`. ON − OFF compares the`,
   "  continuations only. It is a WORKFLOW-USE CONTRAST: never token cost, money, subscription quota or a physical request",
   "  count. Host-reported tokens are unverified diagnostics and enter no figure.",

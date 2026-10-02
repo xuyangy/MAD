@@ -1,9 +1,9 @@
 ---
 id: PROTOCOL-mad-evaluation-v2
-status: draft
+status: frozen
 version: 2
-frozen_on: null
-frozen_hash: null
+frozen_on: 2026-10-02
+frozen_hash: sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
 supersedes_on_freeze: PROTOCOL-mad-evaluation-v1
 governs: Epic 2 (live review evaluation)
 companion_of: SPEC.md
@@ -16,17 +16,20 @@ decided_by:
     admitted attempt, the cost endpoint becomes newly issued MAD attempts, the
     physical-request invariant is amended, and the unknown-usage halt is replaced. Freezing
     stays the human's."
+  - "2026-10-02 — human: freeze v2, with the data-exposure statement in A11 current at that
+    date. The freeze authorizes no spend; gate 4 is a separate decision."
 ---
 
-# Evaluation protocol — Epic 2, version 2 (DRAFT)
+# Evaluation protocol — Epic 2, version 2
 
-> **This is a DRAFT. It is not frozen and it pre-registers nothing.** Protocol v1
-> (`evaluation-protocol.md`, frozen 2026-09-10) stays in force, unchanged, and every paired
-> schedule sealed so far hashes v1. This document proposes an amendment. It becomes a
-> pre-registration only when it is frozen: `status`, `frozen_on` and `frozen_hash` filled, and
-> a data-exposure statement current at that date. Freezing is a human decision.
+> **This is a pre-registration, and it is FROZEN at version 2 as of 2026-10-02.** Protocol v1
+> (`evaluation-protocol.md`, frozen 2026-09-10) is preserved, unchanged, and a schedule sealed
+> under v1 stays a v1 schedule. This document amends v1 for a schedule sealed under it. Its
+> `frozen_hash` is reproduced by v1's rule: the `frozen_hash:` line replaced by the literal
+> `frozen_hash: PENDING`, nothing else altered, hashed with SHA-256. Any mismatch means the
+> frozen artefact was edited; amending it means a new version, never an edit in place.
 >
-> This draft numbers its own sections A1–A11 so they never collide with v1's. A citation of
+> This amendment numbers its own sections A1–A11 so they never collide with v1's. A citation of
 > the frozen protocol reads "v1 §n". A1–A5 add the prefix endpoints; A6–A11 add attempt-mode
 > accounting for the OAuth route.
 
@@ -38,7 +41,7 @@ endpoints. It registers **neither CAP-1 pooled recall nor CAP-11 lens gain**, an
 allowance table (v1 §4) and delegation table (v1 §7) give story 2.6 no allowance and no
 delegated scope.
 
-This draft adds **two secondary descriptive endpoints**, both read from data the planned
+This amendment adds **two secondary descriptive endpoints**, both read from data the planned
 paired blocks already produce. It adds no billing, no allowance, no block and no arm.
 v1 §1–§8 carry over unchanged except where A2–A11 say otherwise. A6–A11 bind only a
 schedule sealed for the OAuth route; the api-key route keeps v1's token unit and every v1 rule
@@ -232,3 +235,12 @@ figure does not make a block incomplete.
 - **Data exposure at drafting (2026-09-25).** No paired bundle on the OAuth route exists: no host
   route selects it, and no outcome data was seen for A6–A11. The v1 exposure statement in A5
   stands for everything else.
+- **Data exposure at freezing (2026-10-02).** A search of `/Users/xuyangy`, `/private/tmp` and
+  `/tmp` on 2026-10-02 found no `paired-schedule.json`, `paired-start.json` or
+  `paired-slots.jsonl`, and `MAD_ARTIFACTS` was unset: no paired bundle, on either route, was
+  found in those paths. Since drafting, the only live provider traffic established in this
+  project's evidence was the bounded OpenAI OAuth pilot (runs 1–3,
+  2026-09-28 to 2026-09-30), whose one prompt was "Reply with the word ok." to
+  `openai/gpt-6-luna`. It reviewed no change and produced no outcome for any endpoint here; it
+  was the evidence that closed the OAuth attempt-accounting gate. Beyond that, exposure is
+  **not established**.

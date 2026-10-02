@@ -94,7 +94,7 @@ import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-r
 import { ADJUDICATION_READER_MODULE, EVALUATION_REPORT_MODULE, LABELLED_READER_MODULE } from "./report.ts"
 import { canonicalJson, PAIRED_BLOCKS, type Arm, type ArmPosition, type PairedSchedule } from "./schedule.ts"
 
-/** The draft protocol that proposes the endpoints this reader prints. */
+/** The protocol (v2, frozen 2026-10-02) that registers the endpoints this reader prints. */
 export const PROTOCOL_V2_DRAFT = "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md"
 /**
  * What every false-positive line reads.
@@ -273,7 +273,7 @@ export interface LabelledReadResult {
   protocol: ProtocolIdentity[]
   seal: { version: string; materialHash: string; labelsHash: string; labels: number }
   /**
-   * Which matcher produced every number below. The draft protocol (A2) proposes
+   * Which matcher produced every number below. Protocol v2 (A2) names
    * the shipped lexical matcher, so a report scored with an injected one is not
    * a report of the same quantity and says so rather than passing as one.
    */
@@ -1192,8 +1192,8 @@ function statusLines(
   const lines = [
     "STATUS, STATED SEPARATELY",
     `  implementation: complete (\`${LABELLED_READER_MODULE}\`)`,
-    `  protocol v2: a DRAFT that pre-registers nothing (\`${PROTOCOL_V2_DRAFT}\`); it proposes CAP-1 and CAP-11 as ` +
-      "secondary descriptive endpoints",
+    `  protocol v2: FROZEN 2026-10-02 (\`${PROTOCOL_V2_DRAFT}\`); it registers CAP-1 and CAP-11 as secondary ` +
+      "descriptive endpoints for a schedule sealed under it",
     `  ${bundleObservations}`,
     "  planned live evaluation: completion is NOT established by this report. Bundle observation counts alone",
     "    establish neither live provenance nor completion of the planned three blocks.",
@@ -1201,9 +1201,9 @@ function statusLines(
   if (matcher !== null) {
     lines.push(
       matcher === "shipped-lexical"
-        ? "  matcher: the shipped lexical defect matcher, which is the one the draft protocol (A2) proposes"
-        : "  matcher: INJECTED — not the shipped lexical matcher the draft protocol (A2) proposes, so these numbers" +
-          " are not that proposal's quantity",
+        ? "  matcher: the shipped lexical defect matcher, which is the one frozen protocol v2 (A2) specifies"
+        : "  matcher: INJECTED — not the shipped lexical matcher frozen protocol v2 (A2) specifies, so these numbers" +
+          " are not the registered quantity",
     )
   }
   lines.push("")
@@ -1217,7 +1217,8 @@ function protocolLines(schedule: ScheduleProtocol, protocol: readonly ProtocolId
   ]
   for (const entry of protocol) lines.push(`  ${entry.subject}: protocolVersion ${entry.version}, protocolHash ${entry.hash}`)
   lines.push(
-    "  Every number this reader prints is DESCRIPTIVE. No number here is v2-preregistered, because v2 is a draft.",
+    "  Every number this reader prints is DESCRIPTIVE. This reader does not establish that any number is " +
+      "v2-preregistered: v2 pre-registers only for a schedule sealed under the frozen v2 file (A5).",
     "",
   )
   return lines

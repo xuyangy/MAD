@@ -632,7 +632,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
     expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
-    expect(text).toContain("lists gate 4 OPEN and protocol v2 not frozen")
+    expect(text).toContain("lists gate 4 OPEN, and the store guard's")
     for (const phrase of [
       "bun run oauth-prepare --out /scratch/mad-oauth-prepared",
       "--provider-mode oauth",
@@ -654,7 +654,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "**To recover:**",
       "Never copy a token",
       "the first `--pin` decides it",
-      "which must be frozen: until the human freezes it, stage 1 refuses",
+      "frozen on 2026-10-02: stage 1 refuses a v2 file that is not frozen or whose `frozen_hash` does not match its bytes",
       "not that a build elsewhere or later reproduces it",
       "compares dependency names only, never versions",
       "`stop()` removes only the private root",

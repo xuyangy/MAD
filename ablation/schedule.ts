@@ -89,7 +89,7 @@ export interface PairedConfig {
   gates?: string
   /**
    * Story 2-8c3a — what the journal counts: `tokens` (protocol v1, the default)
-   * or `attempts` (protocol v2's draft unit for the OAuth route). Absent means
+   * or `attempts` (protocol v2's unit for the OAuth route, A7). Absent means
    * tokens.
    */
   accounting?: AccountingMode
