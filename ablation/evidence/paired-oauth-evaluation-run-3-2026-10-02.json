@@ -32,6 +32,7 @@
     "anthropic": "discovery-2 (anthropic/claude-opus-5-5) failed twice with `model-error: APIError: tool_choice: type \"tool\" and \"any\" are not supported for this model.`: the sign-in was usable this time, but the model refuses the forced tool choice the structured-output turn sends, so it is expected to fail on every turn",
     "halt": "the cancellation ended request-6 in flight, which latched the attempt-mode halt as protocol v2 A10 requires"
   },
+  "leftoverSession": "found 2026-10-05, when run 4's first launch refused at stage 1: the data directory's OAuth store held session=1, message=70, part=207, one session in <labelled-change> created 2026-10-02 19:36:34Z and last updated 19:38:20Z, inside run 3's window (started 19:36:31.845Z, cancelled about 19:38:21Z), so the cancellation left that session behind. Only its directory and timestamps were read, from a copy of the database; no row was removed. The directory is kept as it is, and run 4 uses a fresh data directory",
   "billing": "6 admitted attempts, the exact count. Physical requests, host retries, side requests to small_model (openai/gpt-6-sol), host-reported tokens and subscription quota are not measured or bounded; request-6's request may have been held open after the cancellation",
   "wording": [
     "this run measured nothing about debate: no continuation started",
