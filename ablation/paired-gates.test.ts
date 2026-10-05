@@ -31,7 +31,7 @@ describe("PAIRED_GATES", () => {
       [1, "host request accounting", "engineering", "evaluation", "story 2-8c2", "CLOSED"],
       [2, "shared gates verified on a real host", "engineering", "evaluation", "story 2-8c", "CLOSED"],
       [3, "accounting-probe spend authorization", "authorization", "accounting-probe", HUMAN_BUDGET_OWNER, "OPEN"],
-      [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "CLOSED"],
+      [4, "evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
       [5, "worktree identity", "engineering", "evaluation", "story 2-8b", "CLOSED"],
       [6, "production Tools wiring", "engineering", "evaluation", "story 2-8b", "CLOSED"],
       [7, "OAuth attempt accounting", "engineering", "evaluation", "story 2-8c3b", "CLOSED"],
@@ -109,39 +109,42 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("gate 4 covers the oauth route alone, in admitted attempts, and is CLOSED on the human's authorization of run 4, guarded", () => {
+  test("gate 4 covers the oauth route alone, in admitted attempts, and is OPEN again: runs 1 to 4 are spent", () => {
     const gate = PAIRED_GATES.find((entry) => entry.number === 4)!
     expect(gate.routes).toEqual(["oauth"])
-    expect(gate.status).toBe("CLOSED")
+    expect(gate.status).toBe("OPEN")
+    expect(gate.evidence).toBeUndefined()
     for (const text of ["oauth route in admitted attempts", "100 per block", "300 in total", "admission threshold", "The api-key route's spend is gate 9's"]) {
       expect(gate.requires).toContain(text)
     }
     for (const text of [
-      "the human budget owner authorized, on 2026-10-05, in the session, run 4 of story 2-8d's live paired evaluation on the oauth route",
-      "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-4-proposal.md (sha256 19b58092c03761eaa5e1b757862f248fc0a5d8b855f78e8d660a0292ecf24bea, recorded as provenance; no launcher checks it)",
-      "the roster openai/gpt-6-sol, anthropic/claude-sonnet-5 and github-copilot/gpt-6-luna in that --pin order, each served by the provider it names (AD-4, amended 2026-10-02)",
-      "which in-flight attempts may overshoot",
-      "no upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend (gate 9)",
-      "`EVALUATION_RUN` (run 4) holds the pins in --pin order",
-      "refuses while the reservation ablation/evidence/paired-oauth-evaluation-run-4.reservation exists on disk or at HEAD, and refuses unless the reservations and evidence of runs 1 to 3 are committed at HEAD",
-      "Stage 2 refuses a pin whose slot another provider serves",
-      "Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts, core/roster/select.test.ts",
-    ]) {
-      expect(gate.evidence).toContain(text)
-    }
-    expect(gate.evidence).not.toContain("at most 300")
-    for (const text of [
+      "Run 4 was authorized on 2026-10-05 against _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-4-proposal.md (sha256 19b58092c03761eaa5e1b757862f248fc0a5d8b855f78e8d660a0292ecf24bea)",
+      "on the roster openai/gpt-6-sol, anthropic/claude-sonnet-5 and github-copilot/gpt-6-luna, each served by the provider it named",
+      "ablation/evidence/paired-oauth-evaluation-run-4-2026-10-05.json (HALTED in block 1's ON continuation: a debate attempt on anthropic/claude-sonnet-5 timed out at its 600000 ms deadline",
+      "23 attempts admitted, block 1 partially observed, 0 of 3 paired blocks completed, incomplete",
+      "with its committed reservation at ablation/evidence/paired-oauth-evaluation-run-4.reservation",
       "Runs 1 to 3 used earlier authorizations of the same evaluation, all given on 2026-10-02",
-      `against ${EVALUATION_RUN_PROPOSAL.path} (sha256 ${EVALUATION_RUN_PROPOSAL.sha256}) on the roster openai/gpt-6-luna, anthropic/claude-opus-5-5 and github-copilot/gpt-5-mini`,
-      "ablation/evidence/paired-oauth-evaluation-run-1-2026-10-02.json (FAILED at stage 2",
-      "ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json (HALTED in block 1's ON continuation",
-      "Run 3 was authorized against _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-3-proposal.md (sha256 150dfff1df365d2115115aee57c3d3ccede50af13114f52973931cb057f43a40)",
+      `against ${EVALUATION_RUN_PROPOSAL.path} (sha256 ${EVALUATION_RUN_PROPOSAL.sha256})`,
       "ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json (CANCELLED by the human in block 1's shared prefix",
-      "All three authorizations are spent",
+      "All four authorizations are spent; no further live run is authorized",
     ]) {
       expect(gate.note).toContain(text)
     }
     expect(gate.note).not.toContain("refuses")
+  })
+
+  test("run 4's committed reservation and evidence record what gate 4's note says", async () => {
+    const read = async <T,>(path: string) => JSON.parse(await Bun.file(new URL(`../${path}`, import.meta.url)).text()) as T
+    const reservation = await read<{ run: number; story: string; pins: string[] }>("ablation/evidence/paired-oauth-evaluation-run-4.reservation")
+    expect(reservation).toMatchObject({ run: 4, story: "2-8d", pins: ["openai/gpt-6-sol", "anthropic/claude-sonnet-5", "github-copilot/gpt-6-luna"] })
+    const evidence = await read<{ run: number; status: string; roster: { resolved: string[] }; attempts: { admitted: number; settled: { usage: number; unknown: number } } }>(
+      "ablation/evidence/paired-oauth-evaluation-run-4-2026-10-05.json",
+    )
+    expect(evidence.run).toBe(4)
+    expect(evidence.status).toContain("HALTED (attempt-mode stop)")
+    expect(evidence.roster.resolved).toContain("discovery-3 github-copilot/gpt-6-luna")
+    expect(evidence.attempts.admitted).toBe(23)
+    expect(evidence.attempts.settled).toEqual({ usage: 22, unknown: 1 })
   })
 
   test("the run-4 proposal gate 4 was authorized against is in the repository, byte for byte at its recorded sha256", async () => {
@@ -220,11 +223,11 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("exactly gates 3, 4, 8 and 9 are authorization gates, owned by the human budget owner; only 4 is CLOSED", () => {
+  test("exactly gates 3, 4, 8 and 9 are authorization gates, owned by the human budget owner, and OPEN", () => {
     const authorization = PAIRED_GATES.filter((gate) => gate.kind === "authorization")
     expect(authorization.map((gate) => gate.number)).toEqual([3, 4, 8, 9])
     for (const gate of authorization) expect(gate.owner).toBe(HUMAN_BUDGET_OWNER)
-    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "OPEN", "OPEN"])
+    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN"])
   })
 
   test("the closed engineering gates name the launcher checks and their tests", () => {
@@ -343,7 +346,7 @@ describe("gatePreflight", () => {
     expect(result.lines).toHaveLength(PAIRED_GATES.length)
     expect(result.lines[2]).toContain("(not consulted for evaluation)")
     expect(result.lines[3]).toContain(
-      "gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth (not consulted for route api-key), owner the human budget owner — CLOSED",
+      "gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth (not consulted for route api-key), owner the human budget owner — OPEN",
     )
     expect(result.lines[6]).toContain(
       "gate 7 — OAuth attempt accounting — engineering, required for evaluation on route oauth (not consulted for route api-key)",
@@ -351,18 +354,18 @@ describe("gatePreflight", () => {
     expect(result.lines[0]).toContain("required for evaluation on route api-key, owner story 2-8c2 — CLOSED")
   })
 
-  test("the shipped table passes the oauth evaluation; gates 1 and 9 are not consulted", () => {
+  test("the shipped table refuses the oauth evaluation on gate 4 alone; gates 1 and 9 are not consulted", () => {
     const result = gatePreflight(PAIRED_GATES, "evaluation", "oauth")
-    expect(result.ok).toBe(true)
-    expect(result.problems).toEqual([])
+    expect(result.ok).toBe(false)
+    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
     expect(result.lines[0]).toContain("host request accounting — engineering, required for evaluation on route api-key (not consulted for route oauth)")
-    expect(result.lines[3]).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth, owner the human budget owner — CLOSED — evidence:")
+    expect(result.lines[3]).toContain("gate 4 — evaluation spend authorization — authorization, required for evaluation on route oauth, owner the human budget owner — OPEN — note:")
     expect(result.lines[7]).toContain("gate 8 — OAuth pilot spend authorization — authorization, required for oauth-pilot on route oauth (not consulted for evaluation)")
     expect(result.lines[8]).toContain("gate 9 — api-key evaluation spend authorization — authorization, required for evaluation on route api-key (not consulted for route oauth)")
-    // Gate 4 OPEN again refuses the oauth evaluation on gate 4 alone, and the api-key route stays on gate 9.
-    const reopened = PAIRED_GATES.map((gate) => (gate.number === 4 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
-    expect(gatePreflight(reopened, "evaluation", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
-    expect(gatePreflight(reopened, "evaluation", "api-key").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 9"])
+    // Gate 4 CLOSED alone opens the oauth evaluation, and leaves the api-key route on gate 9.
+    const closed = PAIRED_GATES.map((gate) => (gate.number === 4 ? { ...gate, status: "CLOSED" as const, evidence: "authorized" } : gate))
+    expect(gatePreflight(closed, "evaluation", "oauth").ok).toBe(true)
+    expect(gatePreflight(closed, "evaluation", "api-key").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 9"])
   })
 
   test("the shipped table refuses the OAuth pilot on gate 8 alone", () => {

@@ -1,0 +1,43 @@
+{
+  "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 4: HALTED in block 1's ON continuation when a debate attempt timed out; block 1 partially observed, 0 of 3 paired blocks completed, incomplete",
+  "story": "2-8d",
+  "run": 4,
+  "status": "HALTED (attempt-mode stop): attempt `request-20` (block 1 on, debate/discovery-2 on anthropic/claude-sonnet-5) timed out at its 600000 ms deadline while in flight; blocks 2 and 3 not attempted; `complete: false`",
+  "authorization": "gate 4, CLOSED at 1f735dd on the human budget owner's 2026-10-05 authorization of run 4 against _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-4-proposal.md (sha256 19b58092c03761eaa5e1b757862f248fc0a5d8b855f78e8d660a0292ecf24bea); gate table blob a1d788297c6c4d76b5a8608e62ef050e7882147f",
+  "reservation": {
+    "path": "ablation/evidence/paired-oauth-evaluation-run-4.reservation",
+    "createdAt": "2026-10-05T13:45:01.518Z"
+  },
+  "command": "bun run paired --live --provider-mode oauth --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot --pin openai/gpt-6-sol --pin anthropic/claude-sonnet-5 --pin github-copilot/gpt-6-luna --oauth-data-dir <fresh data-dir> --oauth-prepared <prepared> --directory <labelled-change> --out <out>",
+  "bundle": "<out> (outside the repository, not committed): paired-schedule.json (schedule sha256:3e173635541c06a35a23da3662f55e3bb469df611f767620b1605bb4a8d91661, coin tails), paired-start.json (started 2026-10-05T13:45:10.882Z), paired-journal.jsonl, paired-slots.jsonl, unknown-usage-halt.json, prefix/0",
+  "roster": {
+    "resolved": ["discovery-1 openai/gpt-6-sol", "discovery-2 anthropic/claude-sonnet-5", "discovery-3 github-copilot/gpt-6-luna"],
+    "lenses": ["discovery-lens-security openai/gpt-5.6-terra-fast", "discovery-lens-reliability github-copilot/claude-haiku-4.5"],
+    "providers": "each pin served by the provider it names (AD-4, amended 2026-10-02): discovery-3 ran through github-copilot",
+    "lineages": "roster-single-lineage warned: 2 distinct verified lineages (GPT, Claude) over 3 pool slots"
+  },
+  "slots": [
+    { "block": 1, "arm": "off", "status": "completed", "started": "2026-10-05T13:46:31.721Z", "ended": "2026-10-05T13:55:49.071Z" },
+    { "block": 1, "arm": "on", "status": "failed", "started": "2026-10-05T13:55:49.072Z", "ended": "2026-10-05T14:05:49.130Z", "reason": "13 findings left unresolved; 2 admissions refused after the halt" },
+    { "block": 2, "arm": "on", "status": "not-attempted" },
+    { "block": 2, "arm": "off", "status": "not-attempted" },
+    { "block": 3, "arm": "off", "status": "not-attempted" },
+    { "block": 3, "arm": "on", "status": "not-attempted" }
+  ],
+  "timing": "block 1 prefix 13:45:10 to 13:46:31 (5 discovery attempts); OFF 13:46:31 to 13:55:49 (13 judge attempts, one at a time, about 43 s each on average); ON from 13:55:49: 5 debate attempts; 4 settled by 13:56:35 and request-20 timed out at 14:05:49, 600 s after the ON continuation started",
+  "attempts": {
+    "admitted": 23,
+    "settled": { "usage": 22, "unknown": 1 },
+    "byPhaseAndStage": { "prefix discover": 5, "off judge": 13, "on debate": 5 },
+    "unknown": [
+      { "id": "request-20", "where": "on debate/discovery-2 (anthropic/claude-sonnet-5) attempt 1", "why": "timed out at its 600000 ms deadline while in flight; usage never reported" }
+    ]
+  },
+  "anthropic": "anthropic/claude-sonnet-5 answered every discovery attempt with usage: unlike run 3's claude-opus-5-5 it accepted the forced tool choice",
+  "postStop": "the OAuth store of the fresh data directory read session=0 and every other named table 0 after the run; the halt left no session behind",
+  "pattern": "runs 2 and 4 both halted in block 1's ON continuation on one attempt that ran past its 600000 ms deadline (run 2: a judge attempt on github-copilot/gpt-5-mini; run 4: a debate attempt on anthropic/claude-sonnet-5). What the host or provider waited on is not established",
+  "billing": "23 admitted attempts, the exact count. Physical requests, host retries, side requests to small_model (openai/gpt-6-sol), host-reported tokens and subscription quota are not measured or bounded; request-20's request may have been held open past its deadline",
+  "wording": [
+    "this run measured nothing about whether debate earns its cost: the ON arm did not complete"
+  ]
+}
