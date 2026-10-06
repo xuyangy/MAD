@@ -181,6 +181,22 @@ export const PROTOCOL_V2_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orc
 export const PAIRED_HOST_REQUEST_MS = 60_000
 
 /**
+ * Story 2-8d — the host tools every paired turn is offered: read-only exploration
+ * of --directory and the answer tool, as opencode's per-call allowlist. It keeps
+ * every other tool NAME, including one a later host build adds, away from a turn.
+ * A permission ask raised inside Read, Glob or Grep (run 4's waiting
+ * `external_directory` ask was one) is what the managed host's `permission`
+ * block denies, not this list (`ablation/evidence/host-permission-asks-2026-10-05.json`).
+ */
+export const PAIRED_HOST_TOOLS: Readonly<Record<string, boolean>> = {
+  "*": false,
+  read: true,
+  glob: true,
+  grep: true,
+  StructuredOutput: true,
+}
+
+/**
  * The preflight's git deadlines: fixed constants, not flags. Each git call in the
  * reference build and the identity comparison is killed at the first and given
  * the second to confirm it went, the same pair `opencodeTools` gives a blame.
@@ -1732,6 +1748,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
           lateUsage,
           // One journal holds every phase's execution ids, and each phase gets its own backend.
           executionIdPrefix: `block-${context.block}-${context.phase}/`,
+          tools: PAIRED_HOST_TOOLS,
           ...(managed.meter === undefined ? {} : { meter: managed.meter }),
         }))
     const outcome = await runner.runPairedBlocks({

@@ -59,6 +59,7 @@ import {
   oauthRosterProblems,
   parseFlags,
   PAIRED_HOST_REQUEST_MS,
+  PAIRED_HOST_TOOLS,
   PREFLIGHT_GIT_SETTINGS,
   PROTOCOL_V2_FILE,
   preflightGitEnv,
@@ -1492,6 +1493,9 @@ describe("the managed host (story 2-8c)", () => {
       expect(options.directory).toBe(env.directory)
       // Every backend meters its turns through the one relay the launcher started.
       expect(options.meter?.open).toBeDefined()
+      // Story 2-8d: every turn is offered read-only exploration and the answer tool, nothing that could ask, write or fetch.
+      expect(options.tools).toEqual({ "*": false, read: true, glob: true, grep: true, StructuredOutput: true })
+      expect(options.tools).toBe(PAIRED_HOST_TOOLS)
     }
     expect(new Set(built.map((options) => options.meter)).size).toBe(1)
     // One journal holds every phase's execution ids, so no two backends may share a prefix.

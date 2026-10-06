@@ -199,6 +199,23 @@ export const FIXED_HOST_SETTINGS = {
   autoupdate: false,
   share: "disabled",
   plugin: [],
+  permission: {
+    read: "allow",
+    glob: "allow",
+    grep: "allow",
+    list: "allow",
+    edit: "deny",
+    bash: "deny",
+    task: "deny",
+    external_directory: "deny",
+    todowrite: "deny",
+    question: "deny",
+    webfetch: "deny",
+    websearch: "deny",
+    lsp: "deny",
+    doom_loop: "deny",
+    skill: "deny",
+  },
 } as const
 
 /**

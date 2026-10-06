@@ -994,6 +994,27 @@ confirmed; a stop that cannot be confirmed prints the process id and exits 1. Af
 is scheduled and nothing is written under `--out`. An interrupt during stages 1-3 exits 130, not 1; an
 interrupt during stage 4 aborts the run through its signal, keeps its evidence and exits 1.
 
+**A paired turn is kept from waiting on a human ask, on the measured host (story 2-8d).** MAD never
+replies to an `ask`, so a turn that raised one held its request until the 600 s deadline: in runs 2 and 4
+of the OAuth evaluation, the one session open at each ask (a question; an `external_directory` read) was
+the session of the attempt that timed out. Two defences, each enough alone in the probe:
+- the generated config carries `FIXED_HOST_SETTINGS.permission`: `read`, `glob`, `grep` and `list` are
+  allowed, and every permission type opencode 1.18.32 lists that could ask (`edit`, `bash`, `task`,
+  `external_directory`, `todowrite`, `question`, `webfetch`, `websearch`, `lsp`, `doom_loop`, `skill`) is
+  denied; opencode stops offering a denied tool;
+- every paired turn passes `PAIRED_HOST_TOOLS` (`"*": false`, `read`, `glob`, `grep`, `StructuredOutput`), which
+  also keeps away any tool NAME a later build adds. It does not cover a new permission type raised inside
+  an allowed tool: run 4's `external_directory` ask came from inside `Read` and waited, since the block
+  did not exist then; in the probe the permission block denies that ask at once. So permission behavior inside `Read`, `Glob` and `Grep` must be re-verified with the probe on any
+  later host build.
+
+A model can therefore explore `--directory` with `Read`, `Glob` and `Grep` and answer with
+`StructuredOutput`; it can no longer edit, write, run a shell, spawn a task, fetch or ask. `bun run
+permission-probe --prepared <dir> --directory <labelled change>` checks this zero-bill on the measured
+host: a read outside `--directory` is refused with none of its text reaching the model, the question tool
+is not offered, and each turn ends within 20 s; with neither defence both scenarios hang to the deadline
+(`ablation/evidence/host-permission-asks-2026-10-05.json`).
+
 **`MEASURED_HOST` binds the launcher to this one machine's binary.** Another install of the same
 version has another hash, and is refused until it is re-measured (see "Re-measuring" below).
 

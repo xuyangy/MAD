@@ -15,6 +15,7 @@ import {
   configDrift,
   HOST_CONFIG_GITIGNORE,
   identifyBinary,
+  FIXED_HOST_SETTINGS,
   hostConfig,
   oauthConfigDrift,
   oauthHostConfig,
@@ -160,6 +161,30 @@ async function start(host: FakeHost, overrides: Partial<ApiKeyHostOptions> = {})
 }
 
 describe("the generated config and the provider block", () => {
+  test("story 2-8d — the permission block allows read-only exploration and denies every permission that could ask a human", () => {
+    // A turn that hits an `ask` waits for a reply MAD never sends, until its deadline; in runs 2 and 4 of the OAuth
+    // evaluation that latched the attempt-mode halt. `deny` refuses at once, and opencode stops offering a denied tool.
+    expect(FIXED_HOST_SETTINGS.permission).toEqual({
+      read: "allow",
+      glob: "allow",
+      grep: "allow",
+      list: "allow",
+      edit: "deny",
+      bash: "deny",
+      task: "deny",
+      external_directory: "deny",
+      todowrite: "deny",
+      question: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      lsp: "deny",
+      doom_loop: "deny",
+      skill: "deny",
+    })
+    expect(Object.values(FIXED_HOST_SETTINGS.permission)).not.toContain("ask")
+    expect(hostConfig(BLOCK).permission).toEqual(FIXED_HOST_SETTINGS.permission)
+  })
+
   test("the config is the fixed settings plus one openai-compatible block whose credential is an env reference", () => {
     const config = hostConfig(BLOCK)
     expect(config).toEqual({
@@ -167,6 +192,7 @@ describe("the generated config and the provider block", () => {
       autoupdate: false,
       share: "disabled",
       plugin: [],
+      permission: FIXED_HOST_SETTINGS.permission,
       enabled_providers: ["stub"],
       model: "stub/m1",
       small_model: "stub/m1",
@@ -681,6 +707,7 @@ describe("OAuth mode: the config and the route", () => {
       autoupdate: false,
       share: "disabled",
       plugin: ["file:///private/payload/anthropic-auth/node_modules/@ex-machina/opencode-anthropic-auth"],
+      permission: FIXED_HOST_SETTINGS.permission,
       enabled_providers: ["openai", "anthropic", "github-copilot"],
       model: "openai/gpt-6-luna",
       small_model: "openai/gpt-6-luna",

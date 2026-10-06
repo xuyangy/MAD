@@ -1,0 +1,70 @@
+{
+  "kind": "ZERO-BILL DIAGNOSIS AND PROBE — why runs 2 and 4 of story 2-8d's OAuth evaluation halted on one turn past its 600 s deadline, and the two defences that remove that cause on the measured host",
+  "story": "2-8d",
+  "measuredOn": "2026-10-05",
+  "scope": "the measured opencode 1.18.32 host (MEASURED_HOST) and the permission types its SDK's PermissionConfig lists. The per-call allowlist keeps away any tool name a later build adds, but not a new permission type raised inside an allowed tool (Read, Glob, Grep); run 4's external_directory ask came from inside Read and waited, since the permission block did not exist then; in the probe the block denies that ask at once, so permission behavior inside those tools must be re-verified with the probe on any later host build",
+  "fromTheRuns": {
+    "method": "the host logs in each run's data directory, read for event names, permission types, session ids, model ids and timestamps only; never a path, prompt or answer",
+    "run2": "`asking` with `questions=1` (opencode's question tool) at 2026-10-02T18:07:53.042Z. Exactly one session was open then: ses_f0233338a…, github-copilot/gpt-5-mini, created 18:07:32, last streamed 18:07:32.639, removed 18:17:32.471 — the moment request-26 (a judge attempt on github-copilot/gpt-5-mini) timed out",
+    "run4": "`asking` with `permission=external_directory` at 2026-10-05T13:59:04.913Z, right after `resolved path` and `evaluated external_directory`. Exactly one session was open then: ses_ef3a6951…, anthropic/claude-sonnet-5, created 13:55:49 when the ON continuation started, last streamed 13:59:03.409. anthropic/claude-sonnet-5 held one seat, discovery-2, whose debate attempt request-20 timed out at 14:05:49, 600 s after the ON continuation started",
+    "reading": "in each run the one open session at the ask is the session of the attempt that timed out: MAD never replies to an ask, so the turn waited until its deadline and the attempt-mode halt latched (protocol v2 A10)"
+  },
+  "probe": {
+    "command": "bun run permission-probe --prepared <prepared> --directory <labelled change> [--out <file>]",
+    "script": "scripts/permission-probe.ts (its decision logic is tested in scripts/permission-probe.test.ts)",
+    "method": "the measured host in OAuth mode on placeholder sign-ins (scripts/oauth-probe.ts writePlaceholders), config verified by startManagedHost; anthropic pointed at a local scripted Messages server and github-copilot at a dead local port, so no provider is reached; one OpencodeModelBackend turn on anthropic/claude-sonnet-5 over a temporary copy of the labelled change, with a 45000 ms deadline. The scripted model's first answer reads /etc/hosts (outside --directory) or calls the question tool; its next answers with StructuredOutput. A request body is parsed only to choose the answer; the probe keeps tool names and booleans",
+    "checks": [
+      "the turn ended ok within 20000 ms",
+      "only Glob, Grep, Read and StructuredOutput were offered",
+      "read-external: the read came back refused, and no text of /etc/hosts reached the model",
+      "question: the question tool was not offered, so the first call was the answer"
+    ],
+    "shipped": [
+      {
+        "case": "read-external, host permission only",
+        "result": "HOLDS, 2735 ms"
+      },
+      {
+        "case": "read-external, host permission + PAIRED_HOST_TOOLS",
+        "result": "HOLDS, 2654 ms"
+      },
+      {
+        "case": "question, host permission only",
+        "result": "HOLDS, 2218 ms"
+      },
+      {
+        "case": "question, host permission + PAIRED_HOST_TOOLS",
+        "result": "HOLDS, 2284 ms"
+      }
+    ],
+    "control": {
+      "what": "the same probe with FIXED_HOST_SETTINGS.permission removed",
+      "results": [
+        {
+          "case": "read-external, no permission block",
+          "result": "FAILS: the turn hung until its 45000 ms deadline (45042 ms), offered 12 tools including Bash, Edit, Write, Question, Task and Webfetch"
+        },
+        {
+          "case": "read-external, PAIRED_HOST_TOOLS only",
+          "result": "HOLDS, 2721 ms"
+        },
+        {
+          "case": "question, no permission block",
+          "result": "FAILS: the turn hung until its 45000 ms deadline (45038 ms)"
+        },
+        {
+          "case": "question, PAIRED_HOST_TOOLS only",
+          "result": "HOLDS, 2297 ms"
+        }
+      ],
+      "reading": "without either defence the probe reproduces both halts' cause; each defence alone prevents it"
+    }
+  },
+  "defences": {
+    "hostPermission": "FIXED_HOST_SETTINGS.permission in ablation/managed-host.ts: read, glob, grep and list allowed; edit, bash, task, external_directory, todowrite, question, webfetch, websearch, lsp, doom_loop and skill denied. The host's `GET /config` matched the generated config, and opencode stopped offering every denied tool",
+    "perCallAllowlist": "PAIRED_HOST_TOOLS in scripts/paired.ts, passed to every paired turn: { \"*\": false, read, glob, grep, StructuredOutput }",
+    "capability": "a paired turn's model can explore --directory with Read, Glob and Grep and answer with StructuredOutput; it can no longer edit, write, run a shell, spawn a task, fetch from the web or ask a question. That is an intended change of capability"
+  },
+  "alsoSeen": "run 4's host log records `downloading ripgrep` from github.com at 2026-10-05T13:45:17Z, a runtime fetch on an unsandboxed launch (residual risk 1); neither defence addresses it",
+  "billing": "none: no provider was reached; placeholder sign-ins only"
+}

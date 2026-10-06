@@ -23,6 +23,7 @@
     "accounting-probe": "bun run scripts/accounting-probe.ts",
     "oauth-prepare": "bun run scripts/oauth-prepare.ts",
     "oauth-probe": "bun run scripts/oauth-probe.ts",
+    "permission-probe": "bun run scripts/permission-probe.ts",
     "oauth-pilot": "bun run scripts/oauth-pilot.ts"
   },
   "dependencies": {
