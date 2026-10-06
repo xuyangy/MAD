@@ -146,15 +146,17 @@ export function evaluationReservation(run: number): string {
  * ran the same day on the pins openai/gpt-6-luna, anthropic/claude-opus-5-5 and
  * github-copilot/gpt-5-mini and halted in block 1. Run 3 ran on openai/gpt-6-sol,
  * anthropic/claude-opus-5-5 and github-copilot/gpt-6-luna and was stopped when the
- * Copilot pin filled its slot through openai. Run 4 keeps run 3's OpenAI and
+ * Copilot pin filled its slot through openai. Run 4 kept run 3's OpenAI and
  * Copilot pins, which AD-4's 2026-10-02 amendment now serves through the provider
- * each names, and replaces anthropic/claude-opus-5-5, which refuses the forced tool
- * choice, with anthropic/claude-sonnet-5.
+ * each names, replaced anthropic/claude-opus-5-5, which refuses the forced tool
+ * choice, with anthropic/claude-sonnet-5, and halted in block 1 on a turn waiting
+ * on a permission ask. Run 5 keeps run 4's pins; its turns are offered read-only
+ * tools and the host denies every ask.
  */
 export const EVALUATION_RUN = {
-  run: 4,
+  run: 5,
   pins: ["openai/gpt-6-sol", "anthropic/claude-sonnet-5", "github-copilot/gpt-6-luna"],
-  reservation: evaluationReservation(4),
+  reservation: evaluationReservation(5),
   prior: [
     {
       run: 1,
@@ -170,6 +172,11 @@ export const EVALUATION_RUN = {
       run: 3,
       reservation: evaluationReservation(3),
       evidence: "ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json",
+    },
+    {
+      run: 4,
+      reservation: evaluationReservation(4),
+      evidence: "ablation/evidence/paired-oauth-evaluation-run-4-2026-10-05.json",
     },
   ] as readonly EvaluationPriorRun[],
 } as const

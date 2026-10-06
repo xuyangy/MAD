@@ -641,8 +641,10 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     expect(text).toContain("lists gate 4 OPEN (runs 1 to 4 are spent) and any launch-time condition below that fails")
     for (const phrase of [
       "**The guarded OAuth evaluation run (story 2-8d).**",
-      "names run 4, the last run gate 4 authorized (on 2026-10-05; it ran and is spent)",
-      "Run 4 keeps those two pins and replaces `anthropic/claude-opus-5-5`, which refused the forced tool choice in run 3",
+      "names run 5, prepared and pending the budget owner's authorization (gate 4 is OPEN)",
+      "Run 4 kept those two pins and replaced `anthropic/claude-opus-5-5`, which refused the forced tool choice in run 3",
+      "Run 5 keeps run 4's pins.",
+      "run 5's turns are offered `Read`, `Glob`, `Grep` and `StructuredOutput` only, and the host denies every ask",
       "one model reached through two providers holds one slot (AD-4)",
       "`ablation/evidence/paired-oauth-evaluation-run-2-2026-10-02.json`",
       "and unless each pin's slot is served by the provider the pin names",

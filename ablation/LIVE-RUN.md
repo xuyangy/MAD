@@ -1155,14 +1155,17 @@ refuses at stage 1**, before any host exists, with one aggregated diagnostic tha
 the data directory's database holds anything. Stage 1 passes the frozen protocol v2.
 
 **The guarded OAuth evaluation run (story 2-8d).** `EVALUATION_RUN` in `ablation/paired-gates.ts`
-names run 4, the last run gate 4 authorized (on 2026-10-05; it ran and is spent): its pins in
+names run 5, prepared and pending the budget owner's authorization (gate 4 is OPEN): its pins in
 `--pin` order (`openai/gpt-6-sol`, `anthropic/claude-sonnet-5`, `github-copilot/gpt-6-luna`; the first is
-also `small_model`), its reservation, `ablation/evidence/paired-oauth-evaluation-run-4.reservation`, and
+also `small_model`), its reservation, `ablation/evidence/paired-oauth-evaluation-run-5.reservation`, and
 every earlier run. Run 3 had replaced run 2's `github-copilot/gpt-5-mini` with `github-copilot/gpt-6-luna`,
 and so its `openai/gpt-6-luna` with `openai/gpt-6-sol`: one model reached through two providers holds one
-slot (AD-4). Run 4 keeps those two pins and replaces `anthropic/claude-opus-5-5`, which refused the forced
+slot (AD-4). Run 4 kept those two pins and replaced `anthropic/claude-opus-5-5`, which refused the forced
 tool choice in run 3 (`ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json`), with
-`anthropic/claude-sonnet-5`. Stage
+`anthropic/claude-sonnet-5`. Run 5 keeps run 4's pins. Run 4 halted in block 1 on a turn waiting on a
+permission ask (`ablation/evidence/paired-oauth-evaluation-run-4-2026-10-05.json`); run 5's turns are
+offered `Read`, `Glob`, `Grep` and `StructuredOutput` only, and the host denies every ask (see "A paired
+turn is kept from waiting on a human ask" above). Stage
 1's `authorized evaluation run` check refuses any other pin list, refuses while the reservation exists on
 disk (untracked or ignored included) or at HEAD, and refuses unless each earlier run's reservation and
 evidence are committed at HEAD. Run 1 (2026-10-02) was refused at stage 2 when the host's `GET /config`
@@ -1337,7 +1340,7 @@ authorize gate 4.** Each risk below is open on the shipped tree; none is closed 
    over 75 s (R1: 1 attempt → 6 requests, same evidence file). On the OAuth route a host retry is
    neither gated nor counted, so an attempt bounds neither physical requests nor subscription quota.
 4. **`small_model` is the first pin.** The config's `model` and `small_model` are the first `--pin`
-   (`openai/gpt-6-sol` for runs 3 and 4). The zero-bill probe left OpenAI's OAuth transport unprobed (finding O1);
+   (`openai/gpt-6-sol` for runs 3 to 5). The zero-bill probe left OpenAI's OAuth transport unprobed (finding O1);
    the OAuth pilot's run 3 covered attempt accounting on it for `openai/gpt-6-luna` only. opencode's side
    requests, such as session titles and summaries, go to that model outside every attempt count.
 5. **Unverified refresh write-through.** A stored token that has expired may be refreshed by the host
