@@ -324,6 +324,39 @@ interface RefusedTurn {
   failure?: Envelope<unknown>
 }
 
+/** The most characters a drop-out warning spends on a payload's shape. */
+const PAYLOAD_SHAPE_CAP = 600
+
+/**
+ * The shape of a payload that failed its schema, for a drop-out warning: each
+ * top-level field with its type, a string's length, an array's item count, and
+ * one level of a nested object's fields. Field names are the only model text it
+ * keeps: each is cut to 40 characters and passed through `oneLine`, so no line
+ * break of any form reaches the report row the warning is printed on. At most 20
+ * fields are listed per object, and the whole shape is cut at
+ * `PAYLOAD_SHAPE_CAP` characters with a marker saying so. Without it a
+ * `schema-invalid` drop-out says only which field the validator missed, and the
+ * payload itself is gone once the host's store is emptied.
+ */
+export function payloadShape(raw: unknown): string {
+  const shape = shapeOf(raw, 0)
+  return shape.length <= PAYLOAD_SHAPE_CAP ? shape : `${shape.slice(0, PAYLOAD_SHAPE_CAP)}… (shape cut at ${PAYLOAD_SHAPE_CAP} characters)`
+}
+
+function shapeOf(raw: unknown, depth: number): string {
+  if (raw === null) return "null"
+  if (Array.isArray(raw)) return `array(${raw.length})`
+  if (typeof raw === "string") return `string(${raw.length})`
+  if (typeof raw !== "object") return typeof raw
+  const entries = Object.entries(raw as Record<string, unknown>)
+  if (depth > 1) return `object(${entries.length} field(s))`
+  const shown = entries
+    .slice(0, 20)
+    .map(([key, value]) => `${JSON.stringify(oneLine(key.length > 40 ? `${key.slice(0, 40)}…` : key))}: ${shapeOf(value, depth + 1)}`)
+  const more = entries.length > 20 ? `, … ${entries.length - 20} more` : ""
+  return `object {${shown.join(", ")}${more}}`
+}
+
 /**
  * One turn plus, on failure, exactly one retry (AD-6b, AD-12) — `discover.ts`
  * and `debate.ts` have the same shape, and it is repeated rather than shared
@@ -1066,9 +1099,11 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * retried on a later finding — is the trade AD-6b already makes inside one
    * turn, applied at the stage's granularity rather than contradicted at it.
    */
-  const noteDropOut = (slot: string, role: JudgeRole, message: string, retryRefused = false): void => {
+  const noteDropOut = (slot: string, role: JudgeRole, failure: { message: string; raw?: unknown }, retryRefused = false): void => {
     if (droppedOut.includes(slot)) return
     droppedOut.push(slot)
+    const { message } = failure
+    const shape = failure.raw === undefined ? undefined : payloadShape(failure.raw)
     warnings.push({
       code: "model-dropped-out",
       stage: "judge",
@@ -1083,10 +1118,18 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       message:
         `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) ${retryRefused ? "failed once, and its retry was refused," : "failed twice"} on the ${role} step and ` +
         `the run continued without it. Any finding it was asked about is decided on what the other ` +
-        `steps produced, which is less than it should have been. (${message})`,
+        `steps produced, which is less than it should have been. (${message})` +
+        (shape === undefined ? "" : ` The payload it returned: ${shape}.`),
       // `attempts` only when a retry was refused, which only an admission can do:
       // an ordinary run's warning keeps its shape.
-      detail: { slot, model: modelOf(slot), role, message, ...(retryRefused ? { attempts: 1 } : {}) },
+      detail: {
+        slot,
+        model: modelOf(slot),
+        role,
+        message,
+        ...(retryRefused ? { attempts: 1 } : {}),
+        ...(shape === undefined ? {} : { payloadShape: shape }),
+      },
     })
   }
 
@@ -1160,7 +1203,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    */
   const noteRefusedFailure = (outcome: RefusedTurn, slot: string, role: JudgeRole): void => {
     if (outcome.failure !== undefined && !outcome.failure.ok) {
-      noteDropOut(slot, role, outcome.failure.message, true)
+      noteDropOut(slot, role, outcome.failure, true)
     }
   }
 
@@ -1416,7 +1459,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       } else if (stoppedHere(finding, outcome.envelope)) {
         continue
       } else {
-        noteDropOut(slot, "evidence-extract", outcome.envelope.message)
+        noteDropOut(slot, "evidence-extract", outcome.envelope)
       }
     }
 
@@ -1697,7 +1740,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           stoppedHere(finding, logicEnvelope)
           continue
         }
-        noteDropOut(logicSlot, "logic-eval", logicEnvelope.message)
+        noteDropOut(logicSlot, "logic-eval", logicEnvelope)
       }
       refuseTurn(finding, factResult, factSlot, "fact-check")
       continue
@@ -1787,7 +1830,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     } else if (stoppedHere(finding, factOutcome.envelope)) {
       continue
     } else {
-      noteDropOut(factSlot, "fact-check", factOutcome.envelope.message)
+      noteDropOut(factSlot, "fact-check", factOutcome.envelope)
       // COUNTED SEPARATELY (code review 2026-08-28). `verifiedIndependently` is
       // the MODE and still increments below, because the five mode buckets have
       // to sum to `judged` — but the summary used to print it as "N checked
@@ -1834,7 +1877,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       } else if (stoppedHere(finding, logicOutcome.envelope)) {
         continue
       } else {
-        noteDropOut(logicSlot, "logic-eval", logicOutcome.envelope.message)
+        noteDropOut(logicSlot, "logic-eval", logicOutcome.envelope)
       }
     }
 
@@ -1896,7 +1939,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // did go through the aggregator and is counted; only the cancelled branch
       // above returns without one.
       counts.adjudicated += 1
-      noteDropOut(aggregateSlot, "aggregate", aggregateOutcome.envelope.message)
+      noteDropOut(aggregateSlot, "aggregate", aggregateOutcome.envelope)
       // A missing ruling is not a ruling. `not-adjudicated` is the honest value
       // and the warning above names the model that was supposed to produce one.
       recordVerdict(

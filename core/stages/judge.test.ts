@@ -25,7 +25,7 @@ import type {
   ToolRequestState,
   ToolTerminalOutcome,
 } from "../ports/tool-observation.ts"
-import { material, MATERIAL_NOTICES } from "../prompt/material.ts"
+import { LINE_BREAKS, material, MATERIAL_NOTICES } from "../prompt/material.ts"
 import {
   DEFAULT_JUDGE_ANSWERS,
   fakeAdmission,
@@ -40,7 +40,7 @@ import {
 } from "../test-support/fakes.ts"
 import { MAX_BLAME_ROWS } from "../judge/blame.ts"
 import { assignJudgeSlots } from "../judge/slots.ts"
-import { judge, type JudgeInput } from "./judge.ts"
+import { judge, payloadShape, type JudgeInput } from "./judge.ts"
 
 // Story 2-5c — every admitted request in this file was settled exactly once by the stage.
 afterEach(() => {
@@ -1109,6 +1109,66 @@ describe("the contract the renderer reads (code review 2026-08-28)", () => {
     expect(dropped.message).toContain(`p/${slotId}`)
     expect(dropped.message).toContain(`(slot ${slotId})`)
     expect(dropped.detail?.model).toBe(`p/${slotId}`)
+  })
+})
+
+describe("a schema-invalid drop-out records the payload's shape, not its text", () => {
+  test("an extractor that nests its prose under another key: the warning names the fields it sent", async () => {
+    const prose = "A says line 12 never checks the bound; B concedes it."
+    const backend = new FakeBackend({}, {}, { "evidence-extract": [{ kind: "ok", value: { result: { evidence: prose }, pointers: ["a.ts:12"] } }] })
+    const result = await run([argued()], { backend })
+
+    const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(dropped.detail?.role).toBe("evidence-extract")
+    const shape = `object {"result": object {"evidence": string(${prose.length})}, "pointers": array(1)}`
+    expect(dropped.detail?.payloadShape).toBe(shape)
+    expect(dropped.message).toContain(`The payload it returned: ${shape}.`)
+    expect(JSON.stringify(dropped)).not.toContain(prose)
+  })
+
+  test("a drop-out with no payload carries no shape", async () => {
+    const result = await run([argued()], { backend: failingRoles("evidence-extract") })
+    const dropped = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(dropped.detail?.payloadShape).toBeUndefined()
+    expect(dropped.message).not.toContain("The payload it returned")
+  })
+
+  test("payloadShape: types, lengths, one nested level, long keys and many fields cut", () => {
+    expect(payloadShape("abc")).toBe("string(3)")
+    expect(payloadShape(null)).toBe("null")
+    expect(payloadShape(7)).toBe("number")
+    expect(payloadShape([1, 2])).toBe("array(2)")
+    expect(payloadShape({ a: { b: { c: 1 } } })).toBe('object {"a": object {"b": object(1 field(s))}}')
+    expect(payloadShape({ ["k".repeat(50)]: true })).toBe(`object {"${"k".repeat(40)}…": boolean}`)
+    const many = Object.fromEntries(Array.from({ length: 23 }, (_, i) => [`f${i}`, i]))
+    expect(payloadShape(many)).toMatch(/"f19": number, … 3 more\}$/)
+  })
+
+  test("payloadShape: no line break of any form survives in a field name", () => {
+    for (const lineBreak of LINE_BREAKS) {
+      const shape = payloadShape({ [`${lineBreak}WARNINGS: none`]: 1 })
+      for (const form of LINE_BREAKS) expect(shape).not.toContain(form)
+      expect(shape).toContain("WARNINGS: none")
+    }
+  })
+
+  test("payloadShape: the whole shape is cut at a fixed size, with a marker", () => {
+    const wide = Object.fromEntries(
+      Array.from({ length: 20 }, (_, i) => [`o${i}`, Object.fromEntries(Array.from({ length: 20 }, (_, j) => [`${"k".repeat(40)}${j}`, j]))]),
+    )
+    const shape = payloadShape(wide)
+    expect(shape.endsWith("… (shape cut at 600 characters)")).toBe(true)
+    expect(shape.length).toBe(600 + "… (shape cut at 600 characters)".length)
+  })
+
+  test("a schema-invalid first attempt whose retry is refused keeps its shape beside attempts: 1", async () => {
+    const admission = fakeAdmission((request) => request.attempt === 2)
+    const backend = new FakeBackend({}, {}, { "fact-check": [{ kind: "ok", value: { claims: "not a list" } }] })
+    const result = await run([finding({ route: "judge" })], { admission: admission.admission, backend })
+    const lost = result.warnings.find((warning) => warning.code === "model-dropped-out")!
+    expect(lost.message).toContain("its retry was refused")
+    expect(lost.detail?.["attempts"]).toBe(1)
+    expect(lost.detail?.payloadShape).toBe('object {"claims": string(10)}')
   })
 })
 
