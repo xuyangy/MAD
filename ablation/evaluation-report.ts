@@ -343,11 +343,16 @@ export interface BlockCoverage {
   state: "measured" | "withheld" | "duplicate" | "absent"
   reasons: string[]
   arms: { arm: Arm; runId: string; completion: string }[]
+  /** Each continuation `paired-slots.jsonl` does not record as completed; a measured block with any is not completed. */
+  unfinished: string[]
 }
 
 export interface Coverage {
   scheduled: number
+  /** Blocks measured whose two continuations are both recorded completed. */
   completed: number
+  /** Blocks whose two arms were read into a pair, whether or not both continuations completed. */
+  measured: number
   blocks: BlockCoverage[]
   /** Every planned slot that did not complete, with its status and reason. */
   slots: { block: number; arm: Arm; status: string; reason: string }[]
@@ -487,7 +492,7 @@ function compose(
         prefixSeen.set(prefixRunId, number)
       }
     }
-    coverageBlocks.push(coverageOf(number, block, absent, duplicate))
+    coverageBlocks.push(coverageOf(number, block, absent, duplicate, unfinishedContinuations(paired.slots, number)))
 
     const adjudicationBlock = adjudication?.blocks.find((entry) => entry.block === number)?.result
     const truthWhy = adjudicationWhy ?? (adjudicationBlock === undefined ? `the adjudication reader returned no block ${number}` : null)
@@ -536,7 +541,8 @@ function compose(
     provenance: provenanceOf(paired),
     coverage: {
       scheduled: PAIRED_BLOCKS.length,
-      completed: coverageBlocks.filter((entry) => entry.state === "measured").length,
+      completed: coverageBlocks.filter((entry) => entry.state === "measured" && entry.unfinished.length === 0).length,
+      measured: coverageBlocks.filter((entry) => entry.state === "measured").length,
       blocks: coverageBlocks,
       slots,
       excluded: allExcluded(paired).map((entry) => ({ armId: entry.armId, repeatId: entry.repeatId, reason: entry.reason })),
@@ -662,16 +668,34 @@ function provenanceOf(paired: Extract<PairedReadOutcome, { root: string }>): Pro
   }
 }
 
-function coverageOf(number: number, block: PairedBlock | undefined, absent: string, duplicate: string | null): BlockCoverage {
-  if (block === undefined) return { block: number, state: "absent", reasons: [absent], arms: [] }
+function coverageOf(
+  number: number,
+  block: PairedBlock | undefined,
+  absent: string,
+  duplicate: string | null,
+  unfinished: string[],
+): BlockCoverage {
+  if (block === undefined) return { block: number, state: "absent", reasons: [absent], arms: [], unfinished }
   const arms = block.arms.map((arm) => ({
     arm: arm.arm,
     runId: arm.row.manifest.run.runId,
     completion: arm.row.manifest.status.completion,
   }))
-  if (block.result.kind === "withheld") return { block: number, state: "withheld", reasons: block.result.reasons, arms }
-  if (duplicate !== null) return { block: number, state: "duplicate", reasons: [duplicate], arms }
-  return { block: number, state: "measured", reasons: [], arms }
+  if (block.result.kind === "withheld") return { block: number, state: "withheld", reasons: block.result.reasons, arms, unfinished }
+  if (duplicate !== null) return { block: number, state: "duplicate", reasons: [duplicate], arms, unfinished }
+  return { block: number, state: "measured", reasons: [], arms, unfinished }
+}
+
+/**
+ * Each of block `number`'s two continuations that `paired-slots.jsonl` does not
+ * record as completed: a missing status row is not a completed continuation.
+ */
+function unfinishedContinuations(slots: readonly { block: number; arm: Arm; status: string; reason: string }[], number: number): string[] {
+  return (["on", "off"] as const).flatMap((arm) => {
+    const row = slots.find((slot) => slot.block === number && slot.arm === arm)
+    if (row === undefined) return [`the ${arm.toUpperCase()} slot has no recorded status`]
+    return row.status === "completed" ? [] : [`the ${arm.toUpperCase()} slot is ${row.status}: ${row.reason}`]
+  })
 }
 
 /**
@@ -1304,12 +1328,7 @@ export function blockAttempts(
     (a, b) => order.indexOf(a.phase) - order.indexOf(b.phase) || a.stage.localeCompare(b.stage) || a.slot.localeCompare(b.slot),
   )
 
-  // Both continuations must be recorded completed: a missing status row is not a completed continuation.
-  const unfinished = (["on", "off"] as const).flatMap((arm) => {
-    const row = slots.find((slot) => slot.block === number && slot.arm === arm)
-    if (row === undefined) return [`the ${arm.toUpperCase()} slot has no recorded status`]
-    return row.status === "completed" ? [] : [`the ${arm.toUpperCase()} slot is ${row.status}: ${row.reason}`]
-  })
+  const unfinished = unfinishedContinuations(slots, number)
   const overshot = (["on", "off"] as const).filter((arm) => thresholds[arm].overshoot > 0)
   const contrast: Extract<BlockAttempts, { kind: "read" }>["contrast"] =
     unfinished.length > 0
@@ -1564,12 +1583,18 @@ function coverageLines(coverage: Coverage): string[] {
         : `  THE EXPERIMENT HALT is ${coverage.halt.kind} (\`${coverage.halt.file}\`): ${coverage.halt.reason}`,
     )
   }
-  lines.push(`  scheduled blocks: ${coverage.scheduled}; completed: ${countText(coverage.completed, coverage.scheduled)}`)
+  lines.push(
+    `  scheduled blocks: ${coverage.scheduled}; completed: ${countText(coverage.completed, coverage.scheduled)}, both ` +
+      `continuations recorded completed in \`${SLOT_STATUS_FILE}\`; measured: ${countText(coverage.measured, coverage.scheduled)}, ` +
+      "both arms read into a pair",
+  )
   for (const block of coverage.blocks) {
     const arms = block.arms.map((arm) => `${arm.arm} \`${arm.runId}\` (${arm.completion})`).join(", ")
     const state =
       block.state === "measured"
-        ? "completed and measured"
+        ? block.unfinished.length === 0
+          ? "completed and measured"
+          : "measured, NOT COMPLETED"
         : block.state === "withheld"
           ? "WITHHELD"
           : block.state === "duplicate"
@@ -1577,6 +1602,7 @@ function coverageLines(coverage: Coverage): string[] {
             : "NOT READ"
     lines.push(`  block ${block.block}: ${state}${arms === "" ? "" : ` — arms ${arms}`}`)
     for (const reason of block.reasons) lines.push(`    ${reason}`)
+    if (block.state === "measured") for (const reason of block.unfinished) lines.push(`    ${reason}`)
   }
   if (coverage.slots.length > 0) {
     lines.push(`  SLOTS THAT DID NOT COMPLETE, from \`${SLOT_STATUS_FILE}\``)

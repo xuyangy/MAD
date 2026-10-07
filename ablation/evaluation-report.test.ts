@@ -1033,6 +1033,27 @@ describe("a repeated prefix, coverage lists and missing manifests", () => {
     expect(block2).toContain(`the prefix FAILED (discovery threw); what it spent is recorded in \`${JOURNAL_FILE}\``)
   })
 
+  test("a measured block whose ON continuation failed is measured, not completed", async () => {
+    const { root, schedule } = await bundleAt({ paired: { slots: "absent" } })
+    for (const slot of schedule.slots) {
+      await appendSlotStatus(root, { ...slot, status: "started", reason: "the slot was started", at: "2026-09-14T00:00:01.000Z" })
+      const failed = slot.block === 2 && slot.arm === "on"
+      await appendSlotStatus(root, {
+        ...slot,
+        status: failed ? "failed" : "completed",
+        reason: failed ? "the continuation allowance is exhausted" : "the continuation returned a record",
+        at: "2026-09-14T00:00:02.000Z",
+        runId: `run-${slot.arm}-${slot.block - 1}`,
+      })
+    }
+    const coverage = section(await textOf(root), "EXECUTION COVERAGE — ")
+    expect(coverage).toContain("completed: 2 of 3, both continuations recorded completed in `paired-slots.jsonl`; measured: 3 of 3, both arms read into a pair")
+    expect(coverage).toMatch(/block 1: completed and measured/)
+    expect(coverage).toMatch(/block 2: measured, NOT COMPLETED/)
+    expect(coverage).toContain("the ON slot is failed: the continuation allowance is exhausted")
+    expect(coverage).not.toMatch(/block 2: completed and measured/)
+  })
+
   test("coverage lists unfinished slots, an excluded arm, a withheld block's reasons and the halt marker", async () => {
     const { root } = await bundleAt({
       written: (fakes) => fakes.filter((fake) => !(fake.repeatId === 2 && fake.armId === "off")),
