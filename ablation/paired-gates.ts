@@ -312,32 +312,21 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "evaluation",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       "the budget owner authorizes the three paired blocks' spend on the oauth route in admitted attempts, 100 per block " +
       "and 300 in total, each an admission threshold. An admitted attempt bounds neither the physical requests the host " +
       "sends nor subscription quota: in story 2-8c3b's probe one attempt became 6 provider requests over 75 s (finding R1). " +
       "The api-key route's spend is gate 9's",
-    evidence:
-      "the human budget owner authorized, on 2026-10-06, in the session, run 5 of story 2-8d's live paired evaluation on the " +
-      `oauth route (\`bun run paired --live --provider-mode oauth\`), accepting the exposure stated in ` +
-      `${EVALUATION_RUN_5_PROPOSAL.path} (sha256 ${EVALUATION_RUN_5_PROPOSAL.sha256}, recorded as provenance; no launcher checks ` +
-      "it): the roster openai/gpt-6-sol, anthropic/claude-sonnet-5 and github-copilot/gpt-6-luna in that --pin order, each " +
-      "served by the provider it names (AD-4, amended 2026-10-02), with the security and reliability lens slots whose models " +
-      "roster selection chooses from the catalogue, each paired turn offered Read, Glob, Grep and StructuredOutput only and " +
-      "the host denying every ask, under frozen protocol v2, under admission thresholds of 100 admitted " +
-      "attempts per block and 300 in total (prefix 10, ON 45 and OFF 45 per block), which in-flight attempts may overshoot, " +
-      "with no upper bound on physical requests, host retries, side requests or subscription quota, and no api-key spend " +
-      "(gate 9). One run on that roster only: `EVALUATION_RUN` (run 5) holds the pins in --pin order, and stage 1 of " +
-      "scripts/paired.ts refuses any other pin list, refuses while the reservation " +
-      "ablation/evidence/paired-oauth-evaluation-run-5.reservation exists on disk or at HEAD, and refuses unless the " +
-      "reservations and evidence of runs 1 to 4 are committed at HEAD; once every stage-1 check passes, and before a host " +
-      "starts, it creates that reservation exclusively in this repository, so a second run into any --out is refused, and " +
-      "nothing deletes it. Stage 2 refuses a pin whose slot another provider serves. Each of the host's verification reads " +
-      "may take PAIRED_HOST_REQUEST_MS (60000 ms). Tests: ablation/paired-gates.test.ts, scripts/paired.test.ts, " +
-      "core/roster/select.test.ts",
     note:
-      "Runs 1 to 4 used earlier authorizations of the same evaluation. Run 4 was authorized on 2026-10-05 against " +
+      `Run 5 was authorized on 2026-10-06 against ${EVALUATION_RUN_5_PROPOSAL.path} (sha256 ` +
+      `${EVALUATION_RUN_5_PROPOSAL.sha256}) on the roster openai/gpt-6-sol, anthropic/claude-sonnet-5 and ` +
+      "github-copilot/gpt-6-luna, each served by the provider it named, each paired turn offered Read, Glob, Grep and " +
+      "StructuredOutput only, and is recorded in ablation/evidence/paired-oauth-evaluation-run-5-2026-10-07.json (INCOMPLETE: " +
+      "no halt; block 2's ON continuation reached its 45-attempt allowance and failed with 2 findings unresolved, the other " +
+      "five slots completed; 153 attempts admitted, all settled with usage; 2 of 3 paired blocks completed), with its " +
+      "committed reservation at ablation/evidence/paired-oauth-evaluation-run-5.reservation. " +
+      "Run 4 was authorized on 2026-10-05 against " +
       "_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-4-proposal.md (sha256 " +
       "19b58092c03761eaa5e1b757862f248fc0a5d8b855f78e8d660a0292ecf24bea) on the roster openai/gpt-6-sol, " +
       "anthropic/claude-sonnet-5 and github-copilot/gpt-6-luna, each served by the provider it named, and is recorded in " +
@@ -362,7 +351,8 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "ablation/evidence/paired-oauth-evaluation-run-3-2026-10-02.json (CANCELLED by the human in block 1's shared prefix: the " +
       "pin github-copilot/gpt-6-luna had filled its slot through openai; anthropic/claude-opus-5-5 refused the forced tool " +
       "choice; 6 attempts admitted, no continuation started, incomplete), with its committed reservation at " +
-      "ablation/evidence/paired-oauth-evaluation-run-3.reservation. All four authorizations are spent"
+      "ablation/evidence/paired-oauth-evaluation-run-3.reservation. All five authorizations are spent; no further live run is " +
+      "authorized"
   },
   {
     number: 5,

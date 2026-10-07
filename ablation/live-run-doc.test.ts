@@ -548,18 +548,18 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     }
   })
 
-  test("the opening summary names gate 9 as the api-key refusal, no oauth gate refusal, and gates 3, 4, 7 and 8 as not consulted", async () => {
+  test("the opening summary names gate 9 as the api-key refusal, gate 4 as the oauth refusal, and gates 3, 7 and 8 as not consulted", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("**With the shipped gate table the api-key route always refuses:** gate 9 below is OPEN and is required for the evaluation on that route")
     expect(text).toContain("Gate 3 is OPEN too; it is printed and not consulted for the evaluation.")
     expect(text).toContain(
-      "Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) every gate the evaluation requires is CLOSED: gate 4 records the human budget owner's authorization of run 5, which stage 1 enforces through the authorized roster and the one-run reservation",
+      "Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see \"The OAuth route\" below) gate 4 refuses: runs 1 to 5 of its evaluation were used",
     )
     const onRoute = (route: "api-key" | "oauth") => (gate: (typeof PAIRED_GATES)[number]) => gate.routes === undefined || gate.routes.includes(route)
     const open = (route: "api-key" | "oauth") =>
       PAIRED_GATES.filter((gate) => gate.phase === "evaluation" && gate.status === "OPEN" && onRoute(route)(gate)).map((gate) => gate.number)
     expect(open("api-key")).toEqual([9])
-    expect(open("oauth")).toEqual([])
+    expect(open("oauth")).toEqual([4])
     expect(text).toContain(
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
@@ -637,13 +637,11 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
 
   test("the OAuth route is documented: flags, payload digests, the symlink, the host, the seal, the post-stop check, what is not controlled", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth route (story 2-8c3b)", " ### ", "the OAuth route section")
-    expect(text).toContain("**With the shipped tree stage 1 passes the gates and the frozen protocol v2**")
-    expect(text).toContain("gate 4, CLOSED, authorizes run 5 on this route")
-    expect(text).toContain("and on any run but the one authorized")
-    expect(text).not.toContain("always refuses at stage 1")
+    expect(text).toContain("**With the shipped tree it always refuses at stage 1**")
+    expect(text).toContain("lists gate 4 OPEN (runs 1 to 5 are spent) and any launch-time condition below that fails")
     for (const phrase of [
       "**The guarded OAuth evaluation run (story 2-8d).**",
-      "names run 5, the run gate 4 authorizes (the budget owner authorized it on 2026-10-06)",
+      "names run 5, the last run gate 4 authorized (on 2026-10-06; it ran and is spent)",
       "Run 4 kept those two pins and replaced `anthropic/claude-opus-5-5`, which refused the forced tool choice in run 3",
       "Run 5 keeps run 4's pins.",
       "run 5's turns are offered `Read`, `Glob`, `Grep` and `StructuredOutput` only, and the host denies every ask",

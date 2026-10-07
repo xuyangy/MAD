@@ -1,0 +1,129 @@
+{
+ "kind": "MEASURED RUNTIME CASE — story 2-8d's live paired evaluation on the oauth route, run 5: every slot reached a terminal status with no halt; block 2's ON continuation reached its 45-attempt allowance and failed; 2 of 3 paired blocks completed, incomplete",
+ "story": "2-8d",
+ "run": 5,
+ "status": "INCOMPLETE (no halt, no stop): block 2's ON continuation reached its 45 of 45 admitted-attempt allowance, an admission (on judge/discovery-2 attempt 1) was refused on budget and 2 findings were left unresolved, so that slot failed; the other five slots completed; `complete: false`",
+ "authorization": "gate 4, CLOSED at ba99766 on the human budget owner's 2026-10-06 authorization of run 5 against _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-run-5-proposal.md (sha256 613bc2fb489b37ae36258687b6de46f9b9615b6dd77876ad6905059cdd119589); gate table blob 2f5db8bfa6da438b27383bb3e195bf33eed6b7c4",
+ "reservation": {
+  "path": "ablation/evidence/paired-oauth-evaluation-run-5.reservation",
+  "createdAt": "2026-10-07T08:24:10.429Z"
+ },
+ "command": "bun run paired --live --provider-mode oauth --oauth-provider openai --oauth-provider anthropic --oauth-provider github-copilot --pin openai/gpt-6-sol --pin anthropic/claude-sonnet-5 --pin github-copilot/gpt-6-luna --oauth-data-dir <fresh data-dir> --oauth-prepared <prepared> --directory <labelled-change> --out <out>",
+ "bundle": "<out> (outside the repository, not committed): paired-schedule.json (schedule sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16, coin tails, first arms off, on, off), paired-start.json (started 2026-10-07T08:24:19.794Z), paired-journal.jsonl, paired-slots.jsonl, bundle.json, prefix/, on/, off/",
+ "host": "opencode 1.18.32, binary sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e; each paired turn offered Read, Glob, Grep and StructuredOutput only, with the host permission block of 67811a0",
+ "roster": {
+  "resolved": [
+   "discovery-1 openai/gpt-6-sol",
+   "discovery-2 anthropic/claude-sonnet-5",
+   "discovery-3 github-copilot/gpt-6-luna"
+  ],
+  "lenses": [
+   "discovery-lens-security openai/gpt-5.6-terra-fast",
+   "discovery-lens-reliability github-copilot/claude-haiku-4.5"
+  ],
+  "providers": "each pin served by the provider it names (AD-4, amended 2026-10-02): discovery-3 ran through github-copilot",
+  "lineages": "roster-single-lineage warned: 2 distinct verified lineages (GPT, Claude) over 3 pool slots"
+ },
+ "slots": [
+  {
+   "block": 1,
+   "arm": "off",
+   "position": "first",
+   "status": "completed",
+   "started": "2026-10-07T08:26:22.542Z",
+   "ended": "2026-10-07T08:29:22.458Z"
+  },
+  {
+   "block": 1,
+   "arm": "on",
+   "position": "second",
+   "status": "completed",
+   "started": "2026-10-07T08:29:22.459Z",
+   "ended": "2026-10-07T08:34:22.653Z"
+  },
+  {
+   "block": 2,
+   "arm": "on",
+   "position": "first",
+   "status": "failed",
+   "started": "2026-10-07T08:35:30.086Z",
+   "reason": "2 findings left unresolved; 1 admission refused (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts",
+   "ended": "2026-10-07T08:42:46.851Z"
+  },
+  {
+   "block": 2,
+   "arm": "off",
+   "position": "second",
+   "status": "completed",
+   "started": "2026-10-07T08:42:46.854Z",
+   "ended": "2026-10-07T08:47:44.845Z"
+  },
+  {
+   "block": 3,
+   "arm": "off",
+   "position": "first",
+   "status": "completed",
+   "started": "2026-10-07T08:49:43.766Z",
+   "ended": "2026-10-07T08:53:03.623Z"
+  },
+  {
+   "block": 3,
+   "arm": "on",
+   "position": "second",
+   "status": "completed",
+   "started": "2026-10-07T08:53:03.628Z",
+   "ended": "2026-10-07T08:57:52.958Z"
+  }
+ ],
+ "attempts": {
+  "admitted": 153,
+  "settled": {
+   "usage": 153,
+   "unknown": 0
+  },
+  "retries": 2,
+  "byBlock": {
+   "1": {
+    "prefix": 5,
+    "on": 35,
+    "off": 9,
+    "block": 49,
+    "onMinusOff": 26
+   },
+   "2": {
+    "prefix": 5,
+    "on": 45,
+    "off": 14,
+    "block": 64,
+    "onMinusOff": "unavailable: the ON slot failed"
+   },
+   "3": {
+    "prefix": 5,
+    "on": 26,
+    "off": 9,
+    "block": 40,
+    "onMinusOff": 17
+   }
+  },
+  "thresholds": "no block reached its 100-attempt threshold and the total stayed under 300; block 2's ON continuation reached its 45-attempt allowance exactly"
+ },
+ "pairedRead": {
+  "source": "bun run eval-read --bundle <out>",
+  "block1": "9 paired candidates; 1 of 9 verdict-state difference (finding-0muxufnb4-0008: on not-adjudicated, off upheld); 0 only-in-on, 0 only-in-off; upheld on 7 of 9, off 8 of 9",
+  "block2": "14 paired candidates; 0 of 12 verdict-state differences where both arms decided; 2 of 14 undecided transitions (the ON arm's 2 unresolved findings); 0 only-in-on, 0 only-in-off; upheld on 12 of 14, off 14 of 14",
+  "block3": "9 paired candidates; 1 of 9 verdict-state difference (finding-0muxv9oi3-002j: on upheld, off not-adjudicated); 0 only-in-on, 0 only-in-off; upheld on 9 of 9, off 8 of 9",
+  "recall": "ON − OFF matcher recall change: 0 of 13 planted defects in each block",
+  "treatment": "the OFF arm sent 6 of 9, 11 of 14 and 4 of 9 candidates that the shipped policy would have debated; the ON arm debated 6, 11 and 4",
+  "definitions": "verdict-state differences count not-adjudicated as a settled state (ablation/compare.ts, ablation/paired-read.ts); the directional report (ablation/adjudication-read.ts) treats not-adjudicated as non-decisive, so block 1 reads undecided 0 of 9 in the paired section and 1 of 9 in the directional section, and block 3 the same. The block 1 and block 3 differences above are raw state differences, not decided-direction changes"
+ },
+ "anthropic": "anthropic/claude-sonnet-5 answered with usage throughout. In block 1's ON continuation its judge evidence-extract step failed twice on output validation (`evidence: Invalid input: expected string, received undefined`), and that judge run continued without it (model-dropped-out, on/0)",
+ "asks": "no attempt was held to its deadline; no halt latched. The read-only tool set and the host permission block were in force",
+ "postStop": "the OAuth store of the fresh data directory read session=0 and every other named table 0 after the run; the auth link and the seeded config lock were unchanged; the host exited with status 143 after SIGTERM",
+ "billing": "153 admitted attempts, the exact count. Physical requests, host retries, side requests to small_model (openai/gpt-6-sol), host-reported tokens and subscription quota are not measured or bounded",
+ "wording": [
+  "Two of three pairs completed according to paired-slots.jsonl; the roster has two verified lineages. These are descriptive observations of the revised read-only configuration. Precision differences, precision bounds and lost true candidates are unavailable because no adjudication.json truth sheet exists. Product value is not assessed, by design",
+  "block 2's ON − OFF continuation-attempt cost contrast is unavailable, not zero (protocol v2 A8 withholds it for the failed ON continuation); its observed counts ON 45 and OFF 14 are recorded, and their difference is not an available contrast. Block 2's matcher recall difference (0 of 13) and its 0 of 12 verdict-state differences among candidates both arms decided are observed"
+ ],
+ "readerCaveat": "eval-read's EXECUTION COVERAGE heading prints `completed: 3 of 3` and calls block 2 `completed and measured`: it counts blocks whose arm artifacts were measured (ablation/evaluation-report.ts, coverage.completed from state === \"measured\"). The slot ledger (paired-slots.jsonl) and the same report's slot listing record block 2's ON continuation as failed, so 2 of 3 paired blocks completed execution. The heading is not a count of successful executed pairs",
+ "warnings": "all six arms are degraded: roster-single-lineage and blame-unavailable on every arm, model-dropped-out on on/0, unresolved-findings on on/1"
+}
