@@ -548,7 +548,10 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     return fail(`has a \`spend.source\` this reader does not know: ${JSON.stringify(spend.source)} (it knows host-reported-unverified)`)
   }
   const unverified = spend.usageCompleteness === "unverified"
-  const attempts = isRecord(value.experiment) && value.experiment.accounting === "attempts"
+  // Story 2-7e — an adversarial run of an attempt-mode suite makes the same claim.
+  const attempts =
+    (isRecord(value.experiment) && value.experiment.accounting === "attempts") ||
+    (isRecord(value.adversarial) && value.adversarial.accounting === "attempts")
   if (marked !== unverified) {
     return fail(
       marked
@@ -559,7 +562,7 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   if (marked !== attempts) {
     return fail(
       marked
-        ? "has host-reported, unverified `spend`, but it is not an attempt-mode arm (`experiment.accounting` is not `attempts`)"
+        ? "has host-reported, unverified `spend`, but it is not an attempt-mode arm (neither `experiment.accounting` nor `adversarial.accounting` is `attempts`)"
         : `is an attempt-mode arm whose \`spend\` claims ${JSON.stringify(spend.usageCompleteness)}; an attempt-mode arm's figures are host-reported and \`unverified\``,
     )
   }
@@ -684,7 +687,8 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
       !isText(adversarial.caseId) ||
       (adversarial.side !== "clean" && adversarial.side !== "attack") ||
       !isCount(adversarial.position) ||
-      adversarial.position < 1
+      adversarial.position < 1 ||
+      ("accounting" in adversarial && adversarial.accounting !== "attempts")
     ) {
       return fail("has a malformed `adversarial`")
     }

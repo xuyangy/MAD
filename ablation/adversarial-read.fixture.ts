@@ -9,7 +9,7 @@
  */
 
 import { $ } from "bun"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -25,10 +25,37 @@ import { candidate, DEFAULT_JUDGE_ANSWERS, fakeClock, judgeRoleOf } from "../cor
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import type { AdversarialRunContext, RunAdversarialSuiteInput } from "./adversarial.ts"
 import { createAdversarialSchedule, type AdversarialConfig, type AdversarialSchedule } from "./adversarial-schedule.ts"
-import type { CoinFace } from "./schedule.ts"
+import { sha256, type CoinFace } from "./schedule.ts"
 import { known } from "./manifest.ts"
 
 export const PROTOCOL_FILE = new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md", import.meta.url).pathname
+
+export const PROTOCOL_V3_FILE = new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v3.md", import.meta.url).pathname
+
+/**
+ * A temporary copy of protocol v3, frozen by its own hash rule: `status: frozen`,
+ * a `frozen_on` date, and the `frozen_hash` computed with the `frozen_hash:` line
+ * replaced by `frozen_hash: PENDING`. The protocol file itself is never written.
+ * A test's stand-in for the human's freeze, and evidence of nothing else.
+ */
+export async function frozenV3Copy(scratch: string[]): Promise<{ file: string; hash: string }> {
+  let pending = await readFile(PROTOCOL_V3_FILE, "utf8")
+  for (const [field, pattern, value] of [
+    ["status", /^status: .*$/m, "status: frozen"],
+    ["frozen_on", /^frozen_on: .*$/m, "frozen_on: 2026-10-08"],
+    ["frozen_hash", /^frozen_hash: .*$/gm, "frozen_hash: PENDING"],
+  ] as const) {
+    // A front-matter field this copy could not rewrite would leave a copy that is not frozen by the rule.
+    if ((pending.match(pattern) ?? []).length !== 1) throw new Error(`protocol v3 carries no single \`${field}:\` line to rewrite`)
+    pending = pending.replace(pattern, value)
+  }
+  const hash = sha256(pending)
+  const dir = await mkdtemp(join(tmpdir(), "mad-protocol-v3-"))
+  scratch.push(dir)
+  const file = join(dir, "evaluation-protocol-v3.md")
+  await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`))
+  return { file, hash }
+}
 
 export type RuledVerdict = "upheld" | "judge-ruled-invalid" | "not-adjudicated"
 
@@ -41,6 +68,19 @@ export interface ScriptedAdversarial {
   usage?: (context: AdversarialRunContext, stage: "discover" | "judge" | "debate") => TokenUsage | { unknown: string }
   /** A discovery answer that replaces the scripted one. */
   discovery?: (context: AdversarialRunContext) => unknown
+  /**
+   * What one call does instead of answering: throw; return a transport error
+   * marked abandoned (an attempt past its deadline); return the envelope of a
+   * turn cancelled before it was issued; or return a billed model error.
+   * `index` counts this run's calls from 0. Default: answer.
+   */
+  fault?: (
+    context: AdversarialRunContext,
+    stage: "discover" | "judge" | "debate",
+    index: number,
+  ) => "throw" | "abandoned" | "cancelled" | "error" | undefined
+  /** Called as each call starts, before it answers or faults. */
+  onCall?: (context: AdversarialRunContext, stage: "discover" | "judge" | "debate", index: number) => void | Promise<void>
 }
 
 export interface ScriptedCall extends AdversarialRunContext {
@@ -84,7 +124,24 @@ export function scriptedAdversarialBackend(script: ScriptedAdversarial = {}) {
       if (signal?.aborted) return cancelledTurn<T>(slot)
       const role = judgeRoleOf(instructions)
       const stage = role !== undefined ? "judge" : instructions === CODING_DISCOVERY_GENERALIST.text ? "discover" : "debate"
+      const index = calls.filter((call) => call.position === context.position).length
       calls.push({ ...context, stage, input })
+      await script.onCall?.(context, stage, index)
+      const fault = script.fault?.(context, stage, index)
+      if (fault === "throw") throw new Error("the scripted backend threw")
+      if (fault === "cancelled") return cancelledTurn<T>(slot)
+      if (fault === "error") {
+        return { ok: false, slot, failure: "model-error", message: "the scripted model failed", tokens: { ...emptyTokenUsage(), input: 10 } }
+      }
+      if (fault === "abandoned") {
+        return {
+          ok: false,
+          slot,
+          failure: "transport-error",
+          message: "the scripted turn passed its deadline",
+          usageUnknown: { executionId: `exec-${(executions += 1)}`, why: "the scripted turn passed its deadline", abandoned: true },
+        }
+      }
       const verdict = script.verdict?.(context) ?? "upheld"
       let payload: unknown
       if (role === "fact-check") payload = { ...(DEFAULT_JUDGE_ANSWERS["fact-check"] as object), verdict }
@@ -116,6 +173,9 @@ export function oneSlotRoster() {
 
 export const SCRIPTED_CONFIG: AdversarialConfig = { provenance: "scripted", tools: "opencodeTools over each side's materialized worktree" }
 
+/** The same settings in attempt mode on the OAuth route (story 2-7e). Still scripted: no host and no sign-in is involved. */
+export const ATTEMPT_CONFIG: AdversarialConfig = { ...SCRIPTED_CONFIG, accounting: "attempts", route: "oauth" }
+
 export async function experimentRoot(scratch: string[]): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "mad-adversarial-"))
   scratch.push(dir)
@@ -132,17 +192,24 @@ export interface SealedSuite {
 /** Publish a schedule under a fresh experiment root and build the runner's input. */
 export async function sealedSuite(
   scratch: string[],
-  options: { coins?: CoinFace[]; script?: ScriptedAdversarial; clock?: Clock; root?: string } = {},
+  options: {
+    coins?: CoinFace[]
+    script?: ScriptedAdversarial
+    clock?: Clock
+    root?: string
+    /** Seal an attempt-mode schedule against a frozen copy of protocol v3. Default: the token-mode schedule over v1. */
+    attempts?: boolean
+  } = {},
 ): Promise<SealedSuite> {
   const root = options.root ?? (await experimentRoot(scratch))
   const resolved = oneSlotRoster()
   const coins = [...(options.coins ?? ["heads", "tails", "heads", "tails"])]
   const base = {
     experimentRoot: root,
-    protocolFile: PROTOCOL_FILE,
+    protocolFile: options.attempts === true ? (await frozenV3Copy(scratch)).file : PROTOCOL_FILE,
     codeRevision: known({ commit: "abc123", dirty: false }),
     roster: resolved.roster,
-    config: SCRIPTED_CONFIG,
+    config: options.attempts === true ? ATTEMPT_CONFIG : SCRIPTED_CONFIG,
   }
   const created = await createAdversarialSchedule({ ...base, createdAt: "2026-09-18T00:00:00.000Z", coin: () => coins.shift()! })
   if (!created.ok) throw new Error(created.reason)

@@ -10,6 +10,10 @@ import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-supp
 import { runAblation, type ArmRun } from "./arms.ts"
 import { EvaluationBundleError } from "./bundle.ts"
 import {
+  ADVERSARIAL_ALLOWANCES,
+  ADVERSARIAL_ATTEMPT_ALLOWANCES,
+  adversarialAttemptGate,
+  adversarialRequestGate,
   ATTEMPT_ALLOWANCES,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
@@ -779,5 +783,104 @@ describe("requestGate in admitted attempts (story 2-8c3a)", () => {
     expect(after.unknownUsage.map((entry) => entry.entry.why)).toEqual(["issued by an interrupted invocation and never settled"])
     expect(after.unknownDiagnostics).toHaveLength(1)
     await reopened.journal.close()
+  })
+})
+
+/**
+ * Story 2-7e — protocol v3 B2/B3: the adversarial suite's gate in admitted
+ * attempts, as a pure function of a view.
+ */
+describe("the adversarial attempt gate (protocol v3 B3)", () => {
+  function view(over: { global?: number; suite?: number; runs?: Record<string, number>; halt?: string; stop?: string } = {}): RequestGateView {
+    return {
+      stop: over.stop ?? null,
+      halt: over.halt ?? null,
+      globalSpent: over.global ?? over.suite ?? 0,
+      categorySpent: (category) => (category === "adversarial" ? (over.suite ?? 0) : 0),
+      phaseSpent: () => 0,
+      mode: "attempts",
+      scope: "adversarial",
+      runSpent: (runId) => over.runs?.[runId] ?? 0,
+    }
+  }
+  const target = { runId: "run-1", label: "adv-01 clean" }
+
+  test("the allowances: 30 per run, and 480 for the suite and for its root, which is 16 runs of 30", () => {
+    expect(ADVERSARIAL_ATTEMPT_ALLOWANCES).toEqual({ run: 30, suite: 480, global: 480, runs: 16 })
+    // Protocol v1's token allowances are a separate table with their own figures.
+    expect(ADVERSARIAL_ALLOWANCES).toEqual({ global: 2_000_000, adversarial: 400_000, runCap: 25_000, runs: 16 })
+  })
+
+  test("each cap admits while spent + this request stays within it, and refuses AT its value", () => {
+    expect(adversarialAttemptGate(view({ suite: 479, runs: { "run-1": 29 } }), target)).toEqual({ ok: true })
+    expect(adversarialAttemptGate(view({ suite: 100, runs: { "run-1": 30 } }), target)).toEqual({
+      ok: false,
+      cause: "budget",
+      reason: "the adv-01 clean run's allowance is exhausted: 30 of 30 admitted attempts",
+    })
+    // Another run is not refused by this run's exhaustion.
+    expect(adversarialAttemptGate(view({ suite: 100, runs: { "run-1": 30 } }), { runId: "run-2", label: "adv-01 attack" }).ok).toBe(true)
+  })
+
+  test("a refusal on the run is `budget` and latches nothing; on the suite or the root it is a runner stop that latches", () => {
+    const run = adversarialAttemptGate(view({ runs: { "run-1": 31 } }), target)
+    expect(run).toMatchObject({ ok: false, cause: "budget" })
+    expect(run.ok ? undefined : run.latch).toBeUndefined()
+
+    const global = adversarialAttemptGate(view({ global: 480, suite: 400 }), target)
+    expect(global).toEqual({
+      ok: false,
+      cause: "runner-stop",
+      reason: "the adversarial runner stopped admitting: the suite root's global allowance is exhausted: 480 of 480 admitted attempts. No model failed.",
+      latch: "the suite root's global allowance is exhausted: 480 of 480 admitted attempts",
+    })
+    const suite = adversarialAttemptGate(view({ global: 400, suite: 480 }), target)
+    expect(suite).toMatchObject({
+      ok: false,
+      cause: "runner-stop",
+      latch: "the adversarial suite's allowance is exhausted: 480 of 480 admitted attempts",
+    })
+    // The root is reported before the run when both are exhausted: the stop outranks the run's failure.
+    expect(adversarialAttemptGate(view({ suite: 480, runs: { "run-1": 30 } }), target)).toMatchObject({ cause: "runner-stop" })
+  })
+
+  test("a stop and a halt refuse first, and the halt never claims token exposure", () => {
+    expect(adversarialAttemptGate(view({ stop: "disk full" }), target)).toEqual({
+      ok: false,
+      cause: "runner-stop",
+      reason: "the adversarial runner stopped admitting: disk full. No model failed.",
+    })
+    const halted = adversarialAttemptGate(view({ halt: "ATTEMPT-MODE STOP (…): an attempt did not end within its bound", suite: 480 }), target)
+    expect(halted).toMatchObject({ ok: false, cause: "halted" })
+    if (!halted.ok) {
+      expect(halted.reason).not.toContain("Token exposure")
+      expect(halted.reason).toContain("does not resume automatically")
+    }
+  })
+
+  test("a view that is not the suite's attempt view is a runner stop, never an admission and never a budget refusal", () => {
+    const base = view()
+    for (const broken of [
+      { ...base, scope: undefined },
+      { ...base, mode: undefined },
+      { ...base, runSpent: undefined },
+    ] as RequestGateView[]) {
+      const result = adversarialAttemptGate(broken, target)
+      expect(result).toMatchObject({ ok: false, cause: "runner-stop" })
+      if (!result.ok) expect(result.reason).toContain("is not an attempt-mode view of the adversarial suite's own root")
+    }
+  })
+
+  test("the Blocks gate refuses a view of the suite's root, and the token Adversarial gate counts tokens", () => {
+    const blocks = requestGate(view(), { block: 1, phase: "prefix" })
+    expect(blocks).toMatchObject({ ok: false, cause: "runner-stop" })
+    if (!blocks.ok) expect(blocks.reason).toContain("admits no Blocks work")
+    const tokens: RequestGateView = { stop: null, halt: null, globalSpent: 0, categorySpent: () => 400_000, phaseSpent: () => 0 }
+    expect(adversarialRequestGate(tokens)).toEqual({
+      ok: false,
+      cause: "budget",
+      reason: "the Adversarial allowance is exhausted: 400000 of 400000 tokens",
+    })
+    expect(adversarialRequestGate({ ...tokens, categorySpent: () => 399_999 })).toEqual({ ok: true })
   })
 })

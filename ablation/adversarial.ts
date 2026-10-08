@@ -5,30 +5,53 @@
  * supplies the backend, and the live execution is a separate, unticked task
  * (`ablation/LIVE-RUN.md`).
  *
- * ## One experiment, one ledger
+ * ## Two accounting modes
  *
- * The journal (`paired-journal.jsonl`), the lock (`paired.lock`) and the halt
- * marker are the EXPERIMENT ROOT's, shared with every category, so Blocks spend
- * already recorded there counts toward the global cap and a halt written there
- * refuses the next adversarial request. The suite's own files live under
- * `<root>/adversarial/`: the schedule, start marker, slot status,
- * `tool-trace.jsonl`, the bundle index, the dumps, the worktrees and, when the
- * runner ends, the bill summary the reader prints. It never
- * touches the paired schedule, start marker or `bundle.json`. A root nested
- * inside another experiment root, or an adversarial subtree holding a journal of
- * its own, is refused: a fresh journal there would see none of the experiment's
- * spend and enforce no global cap.
+ * `config.accounting` selects one, and a schedule is sealed for exactly one:
+ *
+ * - **Tokens** (absent; protocol v1 §4). The suite shares its experiment root's
+ *   ledger, and every billable request passes the run's 25,000 `tokenCap` and
+ *   the journal's gate of stop, halt, global 2,000,000 and adversarial 400,000.
+ * - **Attempts** (`"attempts"`, with `route: "oauth"`; protocol v3 B2 to B6).
+ *   The suite has a root of its own, and every request passes the journal's gate
+ *   of stop, halt, 480 for the root, 480 for the suite and 30 for the run, in
+ *   admitted attempts. No token figure gates anything.
+ *
+ * The sections below describe both; where they differ, each says which.
+ *
+ * ## The root and its ledger
+ *
+ * **Token mode: one experiment, one ledger.** The journal
+ * (`paired-journal.jsonl`), the lock (`paired.lock`) and the halt marker are the
+ * EXPERIMENT ROOT's, shared with every category, so Blocks spend already
+ * recorded there counts toward the global cap and a halt written there refuses
+ * the next adversarial request. A root nested inside another experiment root,
+ * or an adversarial subtree holding a journal of its own, is refused: a fresh
+ * journal there would see none of the experiment's spend and enforce no global
+ * cap (`sharedLedgerProblem`).
+ *
+ * **Attempt mode: a root of the suite's own.** The journal, lock and halt marker
+ * are shared with no v1 or v2 experiment. The root must carry the suite's root
+ * marker and no other experiment's file at it, above it or below it
+ * (`isolatedRootProblem`), and its journal is an attempt-mode journal with the
+ * adversarial scope.
+ *
+ * In both modes the suite's own files live under `<root>/adversarial/`: the
+ * schedule, start marker, slot status, `tool-trace.jsonl`, the bundle index, the
+ * dumps, the worktrees and, when the runner ends, the bill summary the reader
+ * prints. It never touches the paired schedule, start marker or `bundle.json`.
  *
  * ## Preflight, then the start marker
  *
  * In the order `runPairedBlocks` uses: take the root's lock; refuse a started
- * schedule; refuse a nested root or an adversarial ledger; refuse a blank Tools
- * identity, a `maxConcurrency` above 1, or a roster that is not one slot; check
- * the seal (the refusal names the hash); verify the schedule against this
- * runner's inputs; open the journal and refuse when it is halted or stopped;
- * check every planned worktree against the bundle root with the shared AD-16
- * checks. Only then is anything written under `adversarial/`: the bundle index,
- * then the start marker. A refused preflight never spends an unstarted
+ * schedule; refuse an accounting and route that disagree; refuse a root that
+ * fails its mode's rule above; refuse a blank Tools identity, a
+ * `maxConcurrency` above 1, or a roster that is not one slot; check the seal
+ * (the refusal names the hash); verify the schedule against this runner's
+ * inputs; open the journal and refuse when it is halted or stopped; check every
+ * planned worktree against the bundle root with the shared AD-16 checks. Only
+ * then is anything written under `adversarial/`: the bundle index, then the
+ * start marker. A refused preflight never spends an unstarted
  * schedule, and a started schedule is never executed again.
  *
  * ## One run
@@ -36,13 +59,26 @@
  * Sequential, in schedule order. For each slot: write the side's worktree
  * (`ablation/adversarial-materialize.ts`), check its containment again on the
  * real paths, build ONE trace sink and hand that same value to `opencodeTools`
- * and to `review()`, run `review()` on the one-slot roster with the ordinary
- * 25,000 `tokenCap` and the adversarial admission, write the dump and manifest,
+ * and to `review()`, run `review()` on the one-slot roster with its mode's dials
+ * (token mode: the 25,000 `tokenCap` and the stop on unknown usage; attempt
+ * mode: neither) and the adversarial admission, write the dump and manifest,
  * and record the slot's terminal status with an attack run's delivery evidence.
  * No run is retried, re-run or replaced.
  *
- * Every billable request passes the run's own ledger gate and the journal's
- * adversarial gate: stop, halt, global 2,000,000, adversarial 400,000.
+ * ## Attempt mode: failures, halts and completion (protocol v3 B6)
+ *
+ * - **A run refused on its own allowance fails**, and later runs proceed. A
+ *   refusal on the suite or the root allowance stops the runner.
+ * - **A missing host token figure** is a diagnostic and never halts.
+ * - **Halts.** An integrity failure, an attempt that threw or passed its
+ *   deadline (settled `abandoned`), a cancellation that arrived while an attempt
+ *   was in flight, and issued work left unsettled each latch the halt and write
+ *   its marker. Nothing is retried and nothing resumes: every remaining slot is
+ *   recorded `not-attempted` with the reason.
+ * - **Complete** means all sixteen runs completed with no halt, no stop and
+ *   nothing uncertain or in flight. Token mode also requires that no request
+ *   settled with unknown usage.
+ * - **Each manifest's** adversarial binding records `accounting: "attempts"`.
  *
  * Verified with a scripted backend over real git; see `ablation/LIVE-RUN.md` for
  * what that does not establish about a real host.
@@ -71,9 +107,12 @@ import {
   ADVERSARIAL_DIRECTORY,
   ADVERSARIAL_SCHEDULE_FILE,
   ADVERSARIAL_START_MARKER_FILE,
+  adversarialAccountingProblem,
+  adversarialAttemptMode,
   adversarialDirectory,
   appendAdversarialSlotStatus,
   concurrencyProblem,
+  isolatedRootProblem,
   oneSlotProblem,
   verifyAdversarialSchedule,
   writeAdversarialBill,
@@ -177,7 +216,11 @@ export type AdversarialSuiteOutcome =
       bill: UniqueExecutionBill
       overshoot: OvershootReport
       governor: ExperimentGovernorState & { runnerStop: string | null }
-      /** True only when all sixteen completed and nothing is halted, stopped, unknown or in flight. */
+      /**
+       * True only when all sixteen completed and nothing is halted, stopped,
+       * unknown, uncertain or in flight. In attempt mode an attempt settled with no
+       * host token figure does not make the suite incomplete.
+       */
       complete: boolean
       reconciliation: ReconciliationHandle
       warnings: string[]
@@ -403,7 +446,12 @@ export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Prom
     if (started.kind === "error") return await refuse(started.reason)
     if (started.kind === "present") return await refuse(`the adversarial schedule was already started (\`${marker}\` exists); a started schedule is never executed again`)
 
-    const nested = await sharedLedgerProblem(root)
+    const accounting = adversarialAccountingProblem(input.config)
+    if (accounting !== null) return await refuse(accounting)
+    const attempts = adversarialAttemptMode(input.config)
+    // Token mode shares its root's ledger (protocol v1 §4). Attempt mode must
+    // not (protocol v3 B5), and its check fails closed where this one does not.
+    const nested = attempts ? await isolatedRootProblem(root, { marker: "required" }) : await sharedLedgerProblem(root)
     if (nested !== null) return await refuse(nested)
 
     if (input.config.tools.trim().length === 0) {
@@ -431,7 +479,9 @@ export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Prom
 
     // The journal first: a halted or stopped experiment refuses before anything
     // is written under `adversarial/`.
-    const opened = await openJournal(root, lock, () => input.clock.now())
+    const opened = attempts
+      ? await openJournal(root, lock, () => input.clock.now(), undefined, "attempts", "adversarial")
+      : await openJournal(root, lock, () => input.clock.now())
     if (!opened.ok) return await refuse(opened.reason)
     journal = opened.journal
     const before = journal.bill()
@@ -470,6 +520,7 @@ async function execute(
 ): Promise<AdversarialSuiteOutcome> {
   const directory = adversarialDirectory(root)
   const traceFile = join(directory, TOOL_TRACE_FILE)
+  const attempts = adversarialAttemptMode(input.config)
   const warnings: string[] = []
   const reports = new Map<number, AdversarialSlotReport>()
   let ended: string | null = null
@@ -631,18 +682,22 @@ async function execute(
     const sink = createLateUsageSink()
     const recorder = createTurnRecorder()
     const probe = deliveryProbe(slot.side === "attack" ? material.payload : null)
+    const flight = cancellationWatch(input.signal)
     let result: ReviewResult | undefined
     let failure: string | undefined
     try {
-      const backend = probe.wrap(recorder.wrap(input.backendFor({ caseId: slot.caseId, side: slot.side, position: slot.position }, journal.reporter(sink))))
+      const issued = input.backendFor({ caseId: slot.caseId, side: slot.side, position: slot.position }, journal.reporter(sink))
+      const backend = probe.wrap(recorder.wrap(attempts ? flight.wrap(issued) : issued))
       result = await review({
         roster: input.roster,
         backend,
         clock: runClock,
         change: material[slot.side],
         priorWarnings: (input.priorWarnings ?? []).map((warning) => ({ ...warning })),
-        tokenCap: ADVERSARIAL_ALLOWANCES.runCap,
-        stopOnUnknownUsage: true,
+        // Attempt mode gives the run no token cap and does not turn the ledger's
+        // unknown-usage stop on: host-reported tokens gate nothing there.
+        ...(attempts ? {} : { tokenCap: ADVERSARIAL_ALLOWANCES.runCap }),
+        stopOnUnknownUsage: !attempts,
         ...(input.config.maxConcurrency === undefined ? {} : { maxConcurrency: input.config.maxConcurrency }),
         tools,
         toolObservation: observer,
@@ -672,6 +727,7 @@ async function execute(
         caseId: slot.caseId,
         side: slot.side,
         position: slot.position,
+        ...(attempts ? { accounting: "attempts" as const } : {}),
       }
       const manifest = await writeArmDump({
         bundleRoot: directory,
@@ -703,6 +759,26 @@ async function execute(
       )
     }
 
+    if (attempts) {
+      // Protocol v3 B6: an attempt that may still be open halts the whole suite,
+      // not only its run. A thrown `runTurn` and a deadline are settled
+      // `abandoned` and latch inside the journal; these two are seen only here.
+      const cancelled = flight.cancelledInFlight()
+      if (cancelled !== null) {
+        journal.haltAttempts(
+          cancelled === "open"
+            ? `the run was cancelled while an attempt of ${label} was in flight, and that attempt did not end with an answer, so its request may still be held open`
+            : `the run was cancelled while an attempt of ${label} was in flight; that attempt returned, and a cancellation after issue ends the suite`,
+        )
+      }
+      const open = journal.bill().inFlight.filter((request) => request.runId === runId).length
+      if (open > 0) {
+        journal.haltAttempts(
+          `${label} left ${open} attempt(s) issued and unsettled; each is counted, and whether it ended is not established`,
+        )
+      }
+      await journal.settled()
+    }
     const bill = journal.bill()
     if (bill.halt !== null) endWith(`the experiment halted: ${bill.halt}`)
     else if (bill.stop !== null) endWith(`the runner stopped: ${bill.stop}`)
@@ -748,7 +824,7 @@ async function execute(
     slots.every((slot) => slot.status === "completed") &&
     bill.halt === null &&
     bill.stop === null &&
-    bill.unknown.length === 0 &&
+    (attempts || bill.unknown.length === 0) &&
     bill.uncertain.length === 0 &&
     bill.inFlight.length === 0
   return {
@@ -788,8 +864,89 @@ export function deniedAdversarialWork(record: RunRecord, refused: readonly Adver
   return parts.length === 0 ? null : parts.join("; ")
 }
 
-/** The durable summary of the journal's bill for the reader. */
+/**
+ * Whether a cancellation arrived while an issued attempt was in flight, and how
+ * that attempt ended. Used in attempt mode only.
+ *
+ * A stage admits an attempt and then calls `runTurn` with nothing awaited
+ * between, so a `runTurn` entered with a clear signal is an issued attempt, and
+ * a refused admission never reaches this wrapper. The cancellation is in flight
+ * when the signal is set by the time that call returns or throws:
+ *
+ * - `open`: the call threw, or returned an envelope that is not an answer. The
+ *   request may still be held open.
+ * - `returned`: the call returned an answer, so the request ended.
+ * - not recorded at all: the envelope says the turn was cancelled before it was
+ *   issued (`failure: "cancelled"` with no usage of either kind), so nothing went
+ *   out; and a call entered with the signal already set.
+ *
+ * `open` outranks `returned` when a run sees both.
+ */
+function cancellationWatch(signal: AbortSignal | undefined) {
+  let seen: "open" | "returned" | null = null
+  return {
+    wrap(inner: ModelBackend): ModelBackend {
+      return {
+        capabilities: (slot) => inner.capabilities(slot),
+        async runTurn(slot, instructions, input, schema, turnSignal) {
+          // Read through a function: the signal can change across the `await`.
+          const aborted = (): boolean => signal?.aborted === true || turnSignal?.aborted === true
+          const before = aborted()
+          let envelope: Awaited<ReturnType<ModelBackend["runTurn"]>>
+          try {
+            envelope = await inner.runTurn(slot, instructions, input, schema, turnSignal)
+          } catch (error) {
+            if (!before && aborted()) seen = "open"
+            throw error
+          }
+          if (!before && aborted()) {
+            const usage = envelope as { tokens?: unknown; usageUnknown?: unknown }
+            const neverIssued = !envelope.ok && envelope.failure === "cancelled" && usage.tokens === undefined && usage.usageUnknown === undefined
+            if (envelope.ok) seen ??= "returned"
+            else if (!neverIssued) seen = "open"
+          }
+          return envelope as never
+        },
+      }
+    },
+    cancelledInFlight: (): "open" | "returned" | null => seen,
+  }
+}
+
+/**
+ * The durable summary of the journal's bill for the reader.
+ *
+ * For the suite's attempt-mode journal the summary says
+ * `accounting: "attempts"`: its counts are admitted attempts, each run's row is
+ * kept, and each refusal keeps its attempt number.
+ */
 export function billSummaryOf(scheduleHash: string, bill: UniqueExecutionBill, at: string): AdversarialBillSummary {
+  if (bill.scope === "adversarial") {
+    const mine = bill.requests.filter((request) => request.category === "adversarial")
+    return {
+      scheduleHash,
+      at,
+      adversarialKnown: bill.overshoot.adversarial.spent,
+      globalKnown: bill.overshoot.global.spent,
+      overshoot: { global: { ...bill.overshoot.global }, adversarial: { ...bill.overshoot.adversarial } },
+      unknown: mine.filter((request) => request.state === "unknown").length,
+      uncertain: mine.filter((request) => request.state === "uncertain").length,
+      inFlight: mine.filter((request) => request.state === "in-flight").length,
+      refused: bill.refusedAdversarial.map((refusal) => ({
+        label: refusal.label,
+        stage: refusal.stage,
+        cause: refusal.cause,
+        reason: refusal.reason,
+        attempt: refusal.attempt,
+      })),
+      halt: bill.halt,
+      stop: bill.stop,
+      operational: [...bill.operational],
+      accounting: "attempts",
+      runs: (bill.overshoot.runTotals ?? []).map((row) => ({ ...row })),
+      notIssued: mine.filter((request) => request.state === "not-issued").length,
+    }
+  }
   return {
     scheduleHash,
     at,

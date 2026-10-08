@@ -5,18 +5,18 @@
 import { describe, expect, test } from "bun:test"
 
 import { MEASURED_HOST } from "./managed-host.ts"
-import { EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type PairedGate } from "./paired-gates.ts"
+import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateRecordProblems, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
   gates.map((gate) => ({ ...gate, status: "CLOSED", evidence: gate.evidence ?? "a reviewed change" }))
 
 describe("PAIRED_GATES", () => {
-  test("nine gates numbered 1-9, each with a name, kind, phase, owner, status and requirement", () => {
-    expect(PAIRED_GATES.map((gate) => gate.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+  test("twelve gates numbered 1-12, each with a name, kind, phase, owner, status and requirement", () => {
+    expect(PAIRED_GATES.map((gate) => gate.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     for (const gate of PAIRED_GATES) {
       expect(gate.name.trim().length).toBeGreaterThan(0)
       expect(["engineering", "authorization"]).toContain(gate.kind)
-      expect(["accounting-probe", "oauth-pilot", "evaluation"]).toContain(gate.phase)
+      expect(["accounting-probe", "oauth-pilot", "evaluation", "adversarial"]).toContain(gate.phase)
       expect(gate.owner.trim().length).toBeGreaterThan(0)
       expect(["OPEN", "CLOSED"]).toContain(gate.status)
       expect(gate.requires.trim().length).toBeGreaterThan(0)
@@ -37,8 +37,11 @@ describe("PAIRED_GATES", () => {
       [7, "OAuth attempt accounting", "engineering", "evaluation", "story 2-8c3b", "CLOSED"],
       [8, "OAuth pilot spend authorization", "authorization", "oauth-pilot", HUMAN_BUDGET_OWNER, "OPEN"],
       [9, "api-key evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
+      [10, "adversarial spend authorization", "authorization", "adversarial", HUMAN_BUDGET_OWNER, "OPEN"],
+      [11, "adversarial attempt accounting", "engineering", "adversarial", "story 2-7f", "OPEN"],
+      [12, "bounded materializer termination", "engineering", "adversarial", "story 2-7e2", "OPEN"],
     ])
-    // Routes: gates 1 and 9 cover the api-key route, gates 4, 7 and 8 the oauth route, and every other gate both.
+    // Routes: gates 1 and 9 cover the api-key route, gates 4, 7, 8 and 10 to 12 the oauth route, and every other gate both.
     expect(PAIRED_GATES.map((gate) => [gate.number, gate.routes ?? "every route"])).toEqual([
       [1, ["api-key"]],
       [2, "every route"],
@@ -49,6 +52,9 @@ describe("PAIRED_GATES", () => {
       [7, ["oauth"]],
       [8, ["oauth"]],
       [9, ["api-key"]],
+      [10, ["oauth"]],
+      [11, ["oauth"]],
+      [12, ["oauth"]],
     ])
   })
 
@@ -248,11 +254,11 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("exactly gates 3, 4, 8 and 9 are authorization gates, owned by the human budget owner, and OPEN", () => {
+  test("exactly gates 3, 4, 8, 9 and 10 are authorization gates, owned by the human budget owner, and OPEN", () => {
     const authorization = PAIRED_GATES.filter((gate) => gate.kind === "authorization")
-    expect(authorization.map((gate) => gate.number)).toEqual([3, 4, 8, 9])
+    expect(authorization.map((gate) => gate.number)).toEqual([3, 4, 8, 9, 10])
     for (const gate of authorization) expect(gate.owner).toBe(HUMAN_BUDGET_OWNER)
-    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN"])
+    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN", "OPEN"])
   })
 
   test("the closed engineering gates name the launcher checks and their tests", () => {
@@ -566,5 +572,238 @@ describe("gatePreflight refuses a malformed row (story 2-8b review)", () => {
     const status = bad({ status: "closed" })
     expect(status.ok).toBe(false)
     expect(status.problems.join("\n")).toContain('gate 5 (worktree identity) has status "closed"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7e — the adversarial phase: gates 10 to 12, the run pin and the candidate record
+// ---------------------------------------------------------------------------
+
+describe("the adversarial phase of the gate table", () => {
+  const adversarial = PAIRED_GATES.filter((gate) => gate.phase === "adversarial")
+
+  test("`adversarial` is a phase, and gates 10, 11 and 12 are its gates: oauth-routed, OPEN, with no evidence", () => {
+    expect(GATE_PHASES).toEqual(["accounting-probe", "oauth-pilot", "evaluation", "adversarial"])
+    expect(adversarial.map((gate) => gate.number)).toEqual([10, 11, 12])
+    for (const gate of adversarial) {
+      expect(gate.routes).toEqual(["oauth"])
+      expect(gate.status).toBe("OPEN")
+      expect(gate.evidence).toBeUndefined()
+    }
+  })
+
+  test("gate 10 is the human-owned spend authorization in admitted attempts, and names the run it covers", () => {
+    const gate = PAIRED_GATES.find((entry) => entry.number === 10)!
+    expect(gate.kind).toBe("authorization")
+    expect(gate.owner).toBe(HUMAN_BUDGET_OWNER)
+    for (const text of ["`ADVERSARIAL_RUN`", "in admitted attempts", "frozen protocol v3", "30 per run", "480 for the suite", "480 for the suite's own root", "bounds neither the physical requests"]) {
+      expect(gate.requires, text).toContain(text)
+    }
+  })
+
+  test("gate 11 is 2-7f's real-host probe on the adversarial path, and gate 12 is 2-7e2's materializer termination", () => {
+    const eleven = PAIRED_GATES.find((entry) => entry.number === 11)!
+    expect(eleven.owner).toBe("story 2-7f")
+    for (const text of ["zero-bill probe", "real host", "adversarial path", "reaches no backend"]) expect(eleven.requires, text).toContain(text)
+    const twelve = PAIRED_GATES.find((entry) => entry.number === 12)!
+    expect(twelve.owner).toBe("story 2-7e2")
+    expect(twelve.requires).toContain("ablation/adversarial-materialize.ts")
+  })
+
+  test("no gate text mentions the token allowance of the api-key design", () => {
+    const text = JSON.stringify([PAIRED_GATES, ADVERSARIAL_RUN, ADVERSARIAL_CANDIDATE_NON_GATES])
+    expect(text).not.toContain("400,000")
+    expect(text).not.toContain("400000")
+  })
+
+  test("ADVERSARIAL_RUN is run 1 with no prior run, its reservation, and pins not yet chosen; a consumer refuses it", () => {
+    expect(ADVERSARIAL_RUN).toEqual({ run: 1, pins: null, reservation: "ablation/evidence/adversarial-oauth-run-1.reservation", prior: [] })
+    expect(ADVERSARIAL_RUN.reservation).toBe(adversarialReservation(1))
+    expect(adversarialRunProblem()).toContain("`ADVERSARIAL_RUN.pins` is null, which means not yet chosen")
+    // A chosen pin is accepted; anything that is not one provider/model pin is not.
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["anthropic/claude-sonnet-5"] })).toBeNull()
+    for (const pins of [[], ["anthropic/claude-sonnet-5", "openai/gpt-6-sol"], ["no-slash"], [""]]) {
+      expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins }), JSON.stringify(pins)).toContain("are not exactly one `provider/model` pin")
+    }
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], reservation: "elsewhere" })).toContain("is not `ablation/evidence/adversarial-oauth-run-1.reservation`")
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, run: 0, pins: ["a/b"] })).toContain("is not a whole number from 1")
+  })
+
+  test("run N lists exactly runs 1 to N-1 in `prior`, in order, each with its own reservation and an evidence file", () => {
+    const earlier = (run: number) => ({ run, reservation: adversarialReservation(run), evidence: `ablation/evidence/adversarial-oauth-run-${run}-2026-10-20.json` })
+    const three = { run: 3, pins: ["anthropic/claude-sonnet-5"], reservation: adversarialReservation(3), prior: [earlier(1), earlier(2)] }
+    expect(adversarialRunProblem(three)).toBeNull()
+    const cases: [string, typeof three.prior, string][] = [
+      ["none listed", [], "must list exactly its 2 earlier run(s) in `prior`, and it lists 0"],
+      ["one missing", [earlier(1)], "must list exactly its 2 earlier run(s) in `prior`, and it lists 1"],
+      ["one too many", [earlier(1), earlier(2), earlier(3)], "must list exactly its 2 earlier run(s) in `prior`, and it lists 3"],
+      ["out of order", [earlier(2), earlier(1)], "`prior` entry 1 is not run 1"],
+      ["a run repeated", [earlier(1), earlier(1)], "`prior` entry 2 is not run 2"],
+      ["another run's reservation", [earlier(1), { ...earlier(2), reservation: adversarialReservation(1) }], "`prior` run 2 names the reservation"],
+      ["no evidence", [earlier(1), { ...earlier(2), evidence: " " }], "`prior` run 2 names no evidence file"],
+    ]
+    for (const [name, prior, why] of cases) expect(adversarialRunProblem({ ...three, prior }), name).toContain(why)
+    // Run 1 has no earlier run, and listing one is refused.
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], prior: [earlier(1)] })).toContain("must list exactly its 0 earlier run(s)")
+  })
+})
+
+describe("the item-7 candidate non-gate record", () => {
+  const seven = ADVERSARIAL_CANDIDATE_NON_GATES.find((entry) => entry.item === 7)!
+  const resolved = (over: Partial<CandidateNonGate> = {}): CandidateNonGate => ({
+    ...seven,
+    status: "NON-GATING",
+    evidence: "story 2-7f walked the launcher's import closure and call path; tests: scripts/adversarial.test.ts",
+    ...over,
+  })
+
+  test("it holds item 7, OPEN, to be validated by story 2-7f, worded as reach and nothing more", () => {
+    expect(ADVERSARIAL_CANDIDATE_ITEMS).toEqual([7])
+    expect(ADVERSARIAL_CANDIDATE_NON_GATES).toHaveLength(1)
+    expect(seven.status).toBe("OPEN")
+    expect(seven.validatedBy).toBe("story 2-7f")
+    expect(seven.evidence).toBeUndefined()
+    expect(CANDIDATE_CLAIM_WORDING).toBe("not reached by this launcher and configuration")
+    expect(seven.claim).toContain(CANDIDATE_CLAIM_WORDING)
+    // It never says "bounded", "fixed" or "checked": none of those is what the record could establish.
+    expect(JSON.stringify(seven)).not.toMatch(/bounded|fixed|checked/i)
+  })
+
+  test("the shipped record is unresolved, so it blocks", () => {
+    expect(candidateRecordProblems(ADVERSARIAL_CANDIDATE_NON_GATES)).toEqual([
+      "candidate non-gate 7 (review-path reads (`adapters/opencode/repo.ts`)) is OPEN: story 2-7f has not validated that it is not reached by this launcher and configuration, so it blocks",
+    ])
+  })
+
+  test("only a well-formed record resolved NON-GATING with evidence passes", () => {
+    expect(candidateRecordProblems([resolved()])).toEqual([])
+  })
+
+  test("an absent, empty or duplicated record, and one for the wrong item, are each unresolved", () => {
+    expect(candidateRecordProblems(undefined)).toEqual(["the candidate non-gate record is absent, so prerequisite 7 is unresolved"])
+    expect(candidateRecordProblems(null)).toEqual(["the candidate non-gate record is absent, so prerequisite 7 is unresolved"])
+    expect(candidateRecordProblems([])).toEqual(["the candidate non-gate record holds no entry for prerequisite 7, so it is unresolved"])
+    expect(candidateRecordProblems([resolved(), resolved()])).toContain("the candidate non-gate record holds 2 entries for prerequisite 7")
+    const wrong = candidateRecordProblems([resolved({ item: 6 })])
+    expect(wrong).toContain("the candidate non-gate record holds no entry for prerequisite 7, so it is unresolved")
+    expect(wrong.join("\n")).toContain("names a prerequisite the adversarial phase has no candidate for")
+  })
+
+  test("a malformed record is refused: resolved without evidence, OPEN with evidence, an unknown status, a missing field, the wrong wording", () => {
+    const cases: [string, CandidateNonGate, string][] = [
+      ["resolved without evidence", resolved({ evidence: undefined }), "is NON-GATING with no evidence recorded, so it is not resolved"],
+      ["resolved with blank evidence", resolved({ evidence: "   " }), "is NON-GATING with no evidence recorded, so it is not resolved"],
+      ["OPEN with evidence", resolved({ status: "OPEN" }), "is OPEN but carries evidence"],
+      ["an unknown status", resolved({ status: "CLOSED" as never }), 'has status "CLOSED", which is neither OPEN nor NON-GATING'],
+      ["no validating story", resolved({ validatedBy: "" }), "is malformed: it needs a name, a validating story, a claim, a basis and a reopening condition"],
+      ["no reopening condition", resolved({ reopensWhen: undefined as never }), "is malformed: it needs a name"],
+      ["another claim", resolved({ claim: "the reads are safe" }), `its claim does not say "${CANDIDATE_CLAIM_WORDING}"`],
+      ["says bounded", resolved({ evidence: "the reads are bounded" }), 'it says "bounded"'],
+      ["says fixed", resolved({ basis: "the reads were fixed" }), 'it says "fixed"'],
+      ["says checked", resolved({ evidence: "checked by hand" }), 'it says "checked"'],
+    ]
+    for (const [name, record, why] of cases) {
+      expect(candidateRecordProblems([record]).join("\n"), name).toContain(why)
+    }
+    expect(candidateRecordProblems([null as never]).join("\n")).toContain("holds an entry that is not an object")
+  })
+})
+
+describe("gatePreflight for the adversarial phase", () => {
+  const allClosed = closedAll(PAIRED_GATES)
+  const seven = ADVERSARIAL_CANDIDATE_NON_GATES[0]!
+  const resolved: CandidateNonGate = { ...seven, status: "NON-GATING", evidence: "validated on the launcher path; tests: scripts/adversarial.test.ts" }
+  const candidateProblem =
+    "candidate non-gate 7 (review-path reads (`adapters/opencode/repo.ts`)) is OPEN: story 2-7f has not validated that it is not reached by this launcher and configuration, so it blocks"
+  // `ADVERSARIAL_RUN` is the table's own, so its problem is reported whatever gates a caller supplies.
+  const runProblem = adversarialRunProblem()!
+
+  test("the shipped table refuses on gates 10, 11 and 12, on the run whose pins are not chosen and on the unresolved candidate, and consults no other gate", () => {
+    const result = gatePreflight(PAIRED_GATES, "adversarial", "oauth")
+    expect(result.ok).toBe(false)
+    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10", "gate 11", "gate 12", "adversarial run", "candidate non-gate"])
+    expect(result.problems.at(-1)).toBe(candidateProblem)
+    expect(runProblem).toContain("`ADVERSARIAL_RUN.pins` is null")
+    expect(result.problems).toContain(runProblem)
+    expect(result.lines).toContain("adversarial run 1 — pins not yet chosen")
+    for (const index of [0, 1, 2, 3, 4, 5, 6, 7, 8]) expect(result.lines[index]).toContain("(not consulted for adversarial)")
+    expect(result.lines[9]).toContain("gate 10 — adversarial spend authorization — authorization, required for adversarial on route oauth, owner the human budget owner — OPEN")
+    expect(result.lines.at(-1)).toBe("candidate non-gate 7 — review-path reads (`adapters/opencode/repo.ts`) — validated by story 2-7f — OPEN")
+  })
+
+  test("with gates 10 to 12 CLOSED the candidate refuses: record omitted, empty, null, or resolved without evidence", () => {
+    // Omitted: the canonical record is consulted, and it is OPEN.
+    expect(gatePreflight(allClosed, "adversarial", "oauth")).toMatchObject({ ok: false, problems: [runProblem, candidateProblem] })
+    const supplied: [string, readonly CandidateNonGate[] | null, string][] = [
+      ["empty", [], "the candidate non-gate record holds no entry for prerequisite 7, so it is unresolved"],
+      ["null", null, "the candidate non-gate record is absent, so prerequisite 7 is unresolved"],
+      ["resolved without evidence", [{ ...resolved, evidence: undefined }], "is NON-GATING with no evidence recorded, so it is not resolved"],
+      ["still open", [seven], candidateProblem],
+    ]
+    for (const [name, record, why] of supplied) {
+      const result = gatePreflight(allClosed, "adversarial", "oauth", record)
+      expect(result.ok, name).toBe(false)
+      expect(result.problems.join("\n"), name).toContain(why)
+      // Whatever is supplied, the canonical record's own refusal is still listed.
+      expect(result.problems, name).toContain(candidateProblem)
+    }
+  })
+
+  test("a supplied record cannot bypass the canonical one: a resolved list does not open the phase", () => {
+    const result = gatePreflight(allClosed, "adversarial", "oauth", [resolved])
+    expect(result.ok).toBe(false)
+    expect(result.problems).toEqual([runProblem, candidateProblem])
+  })
+
+  test("with every gate CLOSED the phase cannot pass while `ADVERSARIAL_RUN.pins` is null", () => {
+    expect(ADVERSARIAL_RUN.pins).toBeNull()
+    const result = gatePreflight(allClosed, "adversarial", "oauth")
+    expect(result.ok).toBe(false)
+    expect(result.problems[0]).toBe(runProblem)
+    // No supplied candidate record removes it either.
+    for (const record of [undefined, [], null] as const) expect(gatePreflight(allClosed, "adversarial", "oauth", record).problems).toContain(runProblem)
+  })
+
+  test("the api-key route has no authorization gate for the phase, so it refuses whatever is closed", () => {
+    const result = gatePreflight(allClosed, "adversarial", "api-key")
+    expect(result.ok).toBe(false)
+    expect(result.problems).toContain("the table holds no authorization gate for adversarial on route api-key, so nothing authorizes its spend")
+  })
+
+  test("closing a paired or pilot gate never stands in for an adversarial one, and the reverse", () => {
+    const pairedClosed = PAIRED_GATES.map((gate) => (gate.phase === "adversarial" ? gate : { ...gate, status: "CLOSED" as const, evidence: gate.evidence ?? "a reviewed change" }))
+    expect(gatePreflight(pairedClosed, "adversarial", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual([
+      "gate 10",
+      "gate 11",
+      "gate 12",
+      "adversarial run",
+      "candidate non-gate",
+    ])
+    const adversarialClosed = PAIRED_GATES.map((gate) => (gate.phase === "adversarial" ? { ...gate, status: "CLOSED" as const, evidence: "a reviewed change" } : gate))
+    expect(gatePreflight(adversarialClosed, "evaluation", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 4"])
+    expect(gatePreflight(adversarialClosed, "oauth-pilot", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 8"])
+  })
+
+  test("a paired phase refuses on its own gates only: no candidate line, and a supplied record changes nothing", () => {
+    for (const [phase, route, numbers] of [
+      ["evaluation", "api-key", ["gate 9"]],
+      ["evaluation", "oauth", ["gate 4"]],
+      ["oauth-pilot", "oauth", ["gate 8"]],
+      ["accounting-probe", "api-key", ["gate 3"]],
+    ] as const) {
+      const plain = gatePreflight(PAIRED_GATES, phase, route)
+      expect(plain.problems.map((problem) => problem.split(" ").slice(0, 2).join(" ")), `${phase} ${route}`).toEqual([...numbers])
+      expect(plain.lines).toHaveLength(PAIRED_GATES.length)
+      expect(plain.lines.some((line) => line.startsWith("candidate non-gate") || line.startsWith("adversarial run"))).toBe(false)
+      expect(plain.problems.some((problem) => problem.includes("ADVERSARIAL_RUN"))).toBe(false)
+      for (const index of [9, 10, 11]) expect(plain.lines[index]).toContain(`(not consulted for ${phase})`)
+      for (const record of [[], null, [resolved]] as const) expect(gatePreflight(PAIRED_GATES, phase, route, record)).toEqual(plain)
+    }
+    // The adversarial gates add nothing to a paired phase: with them removed from the table, its problems and its lines for gates 1 to 9 are the same.
+    const before = PAIRED_GATES.filter((gate) => gate.phase !== "adversarial")
+    for (const [phase, route] of [["evaluation", "api-key"], ["evaluation", "oauth"], ["oauth-pilot", "oauth"], ["accounting-probe", "api-key"]] as const) {
+      expect(gatePreflight(PAIRED_GATES, phase, route).problems).toEqual(gatePreflight(before, phase, route).problems)
+      expect(gatePreflight(PAIRED_GATES, phase, route).lines.slice(0, before.length)).toEqual(gatePreflight(before, phase, route).lines)
+    }
   })
 })

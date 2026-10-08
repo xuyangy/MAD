@@ -6,7 +6,7 @@
  */
 
 import { $ } from "bun"
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { writeFileSync } from "node:fs"
 import { chmod, mkdir, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -18,7 +18,10 @@ import { deliveryOf, deliveryProbe, furthestStage, runAdversarialSuite, sharedLe
 import { spawnGit, type RunGit } from "./adversarial-materialize.ts"
 import { ADVERSARIAL_ALLOWANCES } from "./governor.ts"
 import { concurrencyProblem } from "./adversarial-schedule.ts"
-import { experimentRoot, sealedSuite } from "./adversarial-read.fixture.ts"
+import { ATTEMPT_CONFIG, experimentRoot, frozenV3Copy, sealedSuite, targetFinding } from "./adversarial-read.fixture.ts"
+import { ADVERSARIAL_ROOT_MARKER_FILE, isolatedRootProblem } from "./adversarial-schedule.ts"
+import { ATTEMPT_MODE_STOP_PREFIX } from "./journal.ts"
+import * as journalModule from "./journal.ts"
 import {
   ADVERSARIAL_BILL_FILE,
   ADVERSARIAL_DIRECTORY,
@@ -648,5 +651,464 @@ describe("the quarantine, end to end (story 2-7c)", () => {
     expect(outcome.bill.halt).toBeNull()
     expect(await exists(join(root, LOCK_FILE))).toBe(false)
     expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7e — the suite in attempt mode (protocol v3 B2 to B6), scripted
+// ---------------------------------------------------------------------------
+
+const PROTOCOL_V2_FILE = new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md", import.meta.url).pathname
+
+/** Settled attempts an earlier part of the suite would have left in its own journal. */
+function settledAttempts(runId: string, count: number, from: number): string {
+  let text = ""
+  for (let index = 0; index < count; index += 1) {
+    const physicalId = `seed-${from + index}`
+    text += `${JSON.stringify({ type: "issued", physicalId, category: "adversarial", block: null, phase: null, stage: "discover", slot: "discovery-1", attempt: 1, runId, mode: "attempts", scope: "adversarial" })}\n`
+    text += `${JSON.stringify({ type: "settled", physicalId, settlement: { kind: "usage", tokens: { ...emptyTokenUsage(), input: 1 } } })}\n`
+  }
+  return text
+}
+
+async function journalRows(root: string): Promise<Record<string, unknown>[]> {
+  return (await readFile(join(root, JOURNAL_FILE), "utf8"))
+    .split("\n")
+    .filter((row) => row.length > 0)
+    .map((row) => JSON.parse(row) as Record<string, unknown>)
+}
+
+describe("runAdversarialSuite in attempt mode", () => {
+  test("the token-mode suite writes token lines and a token bill, and no root marker", async () => {
+    const suite = await sealedSuite(scratch)
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.complete).toBe(true)
+    expect(outcome.bill.mode).toBeUndefined()
+    expect(outcome.bill.scope).toBeUndefined()
+    expect(outcome.overshoot.adversarial.limit).toBe(ADVERSARIAL_ALLOWANCES.adversarial)
+    expect(outcome.overshoot.global.limit).toBe(ADVERSARIAL_ALLOWANCES.global)
+    expect(outcome.overshoot.runTotals).toBeUndefined()
+    for (const row of await journalRows(suite.root)) {
+      expect("mode" in row || "scope" in row).toBe(false)
+    }
+    const bill = await readAdversarialBill(suite.root)
+    if (bill.kind !== "read") throw new Error("no bill")
+    expect(Object.keys(bill.bill).sort()).toEqual(
+      ["adversarialKnown", "at", "globalKnown", "halt", "inFlight", "operational", "overshoot", "refused", "scheduleHash", "stop", "uncertain", "unknown"].sort(),
+    )
+    expect(await exists(join(suite.root, ADVERSARIAL_ROOT_MARKER_FILE))).toBe(false)
+  })
+
+  test("a healthy suite completes all sixteen, and the bill shows actual issued attempts against 30/480/480", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true })
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array.from({ length: 16 }, () => "completed"))
+    expect(outcome.complete).toBe(true)
+    expect(outcome.bill.mode).toBe("attempts")
+    expect(outcome.bill.scope).toBe("adversarial")
+    // Every backend call is one issued attempt, journaled with the mode and the scope.
+    const issued = (await journalRows(suite.root)).filter((row) => row.type === "issued")
+    expect(issued).toHaveLength(suite.calls.length)
+    expect(issued.every((row) => row.mode === "attempts" && row.scope === "adversarial" && row.category === "adversarial")).toBe(true)
+    expect(outcome.overshoot.global).toEqual({ limit: 480, spent: suite.calls.length, overshoot: 0 })
+    expect(outcome.overshoot.adversarial).toEqual({ limit: 480, spent: suite.calls.length, overshoot: 0 })
+    expect(outcome.overshoot.runTotals).toHaveLength(16)
+    for (const slot of outcome.slots) {
+      const row = outcome.overshoot.runTotals!.find((entry) => entry.runId === slot.runId)!
+      expect(row).toEqual({ runId: slot.runId!, limit: 30, spent: suite.calls.filter((call) => call.position === slot.position).length, overshoot: 0 })
+    }
+    expect(outcome.governor).toMatchObject({ accounting: "attempts", admittedAttempts: suite.calls.length, halted: false, runnerStop: null })
+
+    const bill = await readAdversarialBill(suite.root)
+    if (bill.kind !== "read") throw new Error("no bill")
+    expect(bill.bill).toMatchObject({ accounting: "attempts", adversarialKnown: suite.calls.length, notIssued: 0, refused: [], halt: null, stop: null })
+    expect(bill.bill.runs).toHaveLength(16)
+
+    // Each manifest's adversarial binding records the accounting, and its spend is labelled unverified.
+    const first = outcome.slots[0]!
+    const leaf = join(adversarialDirectory(suite.root), first.side, String(first.caseIndex), first.runId!)
+    const manifest = parseManifest(JSON.parse(await readFile(join(leaf, MANIFEST_FILE), "utf8")))
+    if (!manifest.ok) throw new Error(manifest.reason)
+    expect(manifest.value.adversarial).toMatchObject({ accounting: "attempts", caseId: first.caseId, side: first.side })
+    expect(manifest.value.spend).toMatchObject({ source: "host-reported-unverified", usageCompleteness: "unverified", exposure: "unquantified" })
+    expect(manifest.value.dials.cap).toBeNull()
+  })
+
+  test("unknown host usage is one attempt and a diagnostic: the suite still completes and nothing halts", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, script: { usage: () => ({ unknown: "the host reported no usage" }) } })
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.complete).toBe(true)
+    expect(outcome.bill.halt).toBeNull()
+    expect(outcome.bill.stop).toBeNull()
+    expect(outcome.bill.unknown).toHaveLength(suite.calls.length)
+    expect(outcome.overshoot.adversarial.spent).toBe(suite.calls.length)
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
+  })
+
+  test("a run refused on its own 30 fails for budget, and every later run proceeds", async () => {
+    // One discovery turn and one judge turn per finding: 31 findings ask for 32 attempts.
+    const many = (caseId: string) => ({
+      findings: Array.from({ length: 31 }, (_unused, index) => ({
+        ...targetFinding(caseId),
+        claim: `Distinct defect number ${index} in module ${index}`,
+        file: `src/module-${index}.ts`,
+        startLine: 10 + index * 50,
+        endLine: 12 + index * 50,
+      })),
+    })
+    const suite = await sealedSuite(scratch, {
+      attempts: true,
+      script: { discovery: (context) => (context.position === 1 ? many(context.caseId) : undefined) },
+    })
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const [first, ...rest] = outcome.slots
+    expect(first!.status).toBe("failed")
+    expect(first!.reason).toContain("a gate denied it planned work")
+    expect(first!.reason).toContain("(budget)")
+    expect(first!.reason).toContain("run's allowance is exhausted: 30 of 30 admitted attempts")
+    expect(rest.map((slot) => slot.status)).toEqual(Array.from({ length: 15 }, () => "completed"))
+    // Exactly thirty were issued for it; a refusal reached no backend and wrote no line.
+    expect(suite.calls.filter((call) => call.position === 1)).toHaveLength(30)
+    expect(outcome.overshoot.runTotals![0]).toEqual({ runId: first!.runId!, limit: 30, spent: 30, overshoot: 0 })
+    expect(outcome.bill.refusedAdversarial.length).toBeGreaterThan(0)
+    expect(outcome.bill.refusedAdversarial.every((refusal) => refusal.cause === "budget" && refusal.runId === first!.runId)).toBe(true)
+    expect(outcome.bill.stop).toBeNull()
+    expect(outcome.bill.halt).toBeNull()
+    expect(outcome.complete).toBe(false)
+    const bill = await readAdversarialBill(suite.root)
+    if (bill.kind !== "read") throw new Error("no bill")
+    expect(bill.bill.refused.length).toBe(outcome.bill.refusedAdversarial.length)
+    expect(bill.bill.refused[0]).toMatchObject({ label: `${first!.caseId} ${first!.side}`, cause: "budget" })
+  }, 60_000)
+
+  test("a refusal on the root's 480 is a runner stop: nothing is issued, and every remaining slot is recorded with the reason", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true })
+    let seed = ""
+    for (let run = 1; run <= 16; run += 1) seed += settledAttempts(`earlier-${run}`, 30, run * 100)
+    await writeFile(join(suite.root, JOURNAL_FILE), seed)
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(suite.calls).toHaveLength(0)
+    expect(outcome.bill.stop).toBe("the suite root's global allowance is exhausted: 480 of 480 admitted attempts")
+    expect(outcome.slots[0]!.status).toBe("failed")
+    expect(outcome.slots.slice(1).map((slot) => slot.status)).toEqual(Array.from({ length: 15 }, () => "not-attempted"))
+    for (const slot of outcome.slots.slice(1)) expect(slot.reason).toContain("the suite root's global allowance is exhausted: 480 of 480 admitted attempts")
+    expect(outcome.overshoot.global).toEqual({ limit: 480, spent: 480, overshoot: 0 })
+    expect(outcome.complete).toBe(false)
+    expect(outcome.governor.runnerStop).not.toBeNull()
+    // A runner stop is not a halt: no marker is written.
+    expect(outcome.bill.halt).toBeNull()
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
+  })
+
+  for (const [name, fault, why] of [
+    ["a thrown runTurn", "throw", "did not end within its bound"],
+    ["an attempt past its deadline", "abandoned", "did not end within its bound"],
+  ] as const) {
+    test(`${name} halts the suite: no retry, the marker written, every later slot never attempted`, async () => {
+      const suite = await sealedSuite(scratch, {
+        attempts: true,
+        script: { fault: (context, _stage, index) => (context.position === 3 && index === 0 ? fault : undefined) },
+      })
+      const outcome = await runAdversarialSuite(suite.input)
+      if (!outcome.ok) throw new Error(outcome.reason)
+      // The faulted turn was issued once and never again.
+      expect(suite.calls.filter((call) => call.position === 3)).toHaveLength(1)
+      expect(outcome.bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+      expect(outcome.bill.halt).toContain(why)
+      expect(outcome.bill.requests.filter((request) => request.abandoned === true)).toHaveLength(1)
+      expect(outcome.slots.slice(0, 2).map((slot) => slot.status)).toEqual(["completed", "completed"])
+      expect(outcome.slots[2]!.status).not.toBe("completed")
+      expect(outcome.slots.slice(3).map((slot) => slot.status)).toEqual(Array.from({ length: 13 }, () => "not-attempted"))
+      for (const slot of outcome.slots.slice(3)) expect(slot.reason).toContain("the experiment halted")
+      expect(suite.calls.some((call) => call.position > 3)).toBe(false)
+      expect(outcome.complete).toBe(false)
+      expect(JSON.parse(await readFile(join(suite.root, HALT_MARKER_FILE), "utf8"))).toMatchObject({ halted: true, accounting: "attempts", scope: "adversarial" })
+      // The halt is operational: the marker's reason makes no claim about spend.
+      expect(outcome.governor.haltReason).toContain("token spend is not measured in this mode")
+    })
+  }
+
+  test("a cancellation that arrives while an attempt is in flight halts the whole suite", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, {
+      attempts: true,
+      script: {
+        onCall: (context, _stage, index) => {
+          if (context.position === 2 && index === 0) controller.abort()
+        },
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+    expect(outcome.bill.halt).toContain("was cancelled while an attempt of")
+    // The turn answered, so the halt does not say its request is open.
+    expect(outcome.bill.halt).toContain("that attempt returned, and a cancellation after issue ends the suite")
+    expect(outcome.bill.halt).not.toContain("held open")
+    expect(outcome.slots[0]!.status).toBe("completed")
+    expect(outcome.slots[1]!.status).not.toBe("completed")
+    expect(outcome.slots.slice(2).map((slot) => slot.status)).toEqual(Array.from({ length: 14 }, () => "not-attempted"))
+    expect(suite.calls.some((call) => call.position > 2)).toBe(false)
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(true)
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("a cancelled attempt that did not answer may still be open, and the halt says so", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, {
+      attempts: true,
+      script: {
+        onCall: (context, _stage, index) => {
+          if (context.position === 2 && index === 0) controller.abort()
+        },
+        fault: (context, _stage, index) => (context.position === 2 && index === 0 ? "error" : undefined),
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+    expect(outcome.bill.halt).toContain("that attempt did not end with an answer, so its request may still be held open")
+    expect(outcome.slots.slice(2).map((slot) => slot.status)).toEqual(Array.from({ length: 14 }, () => "not-attempted"))
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(true)
+  })
+
+  test("a turn the backend reports as cancelled before issue is not an attempt in flight: the suite stops and halts nothing", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, {
+      attempts: true,
+      script: {
+        onCall: (context, _stage, index) => {
+          if (context.position === 2 && index === 0) controller.abort()
+        },
+        fault: (context, _stage, index) => (context.position === 2 && index === 0 ? "cancelled" : undefined),
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.bill.halt).toBeNull()
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
+    // The suite still ends: a cancellation is a runner stop, and nothing later runs.
+    expect(outcome.slots[1]!.status).not.toBe("completed")
+    expect(outcome.slots.slice(2).map((slot) => slot.status)).toEqual(Array.from({ length: 14 }, () => "not-attempted"))
+    expect(suite.calls.some((call) => call.position > 2)).toBe(false)
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("an admission refused for budget calls no backend, so a cancellation in that run records no attempt in flight", async () => {
+    // The root is full: the run's first admission is refused inside the journal and `runTurn` is never entered.
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, { attempts: true })
+    let seed = ""
+    for (let run = 1; run <= 16; run += 1) seed += settledAttempts(`earlier-${run}`, 30, run * 100)
+    await writeFile(join(suite.root, JOURNAL_FILE), seed)
+    const real = journalModule.openJournal
+    const stop = spyOn(journalModule, "openJournal")
+    stop.mockImplementation(async (...args: Parameters<typeof journalModule.openJournal>) => {
+      const opened = await real(...args)
+      if (!opened.ok) return opened
+      const journal = opened.journal
+      return {
+        ok: true,
+        journal: {
+          ...journal,
+          adversarialAdmission: (binding) => {
+            const admission = journal.adversarialAdmission(binding)
+            return {
+              admit: async (request) => {
+                const decision = await admission.admit(request)
+                // The cancellation lands once the refusal has been decided.
+                if (!decision.ok) controller.abort()
+                return decision
+              },
+            }
+          },
+        },
+      }
+    })
+    try {
+      const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      expect(controller.signal.aborted).toBe(true)
+      expect(suite.calls).toHaveLength(0)
+      expect(outcome.bill.halt).toBeNull()
+      expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
+    } finally {
+      stop.mockRestore()
+    }
+  })
+
+  test("an attempt left issued and unsettled when its run returns halts the suite, writes the marker, and strands every later slot", async () => {
+    const real = journalModule.openJournal
+    const spy = spyOn(journalModule, "openJournal")
+    let dropped = 0
+    spy.mockImplementation(async (...args: Parameters<typeof journalModule.openJournal>) => {
+      const opened = await real(...args)
+      if (!opened.ok) return opened
+      const journal = opened.journal
+      return {
+        ok: true,
+        journal: {
+          ...journal,
+          adversarialAdmission: (binding) => {
+            const admission = journal.adversarialAdmission(binding)
+            return {
+              admit: async (request) => {
+                const decision = await admission.admit(request)
+                // The second run's first attempt is admitted and its settlement never reaches the journal.
+                if (!decision.ok || !binding.label.startsWith("adv-01") || dropped > 0 || journal.bill().requests.length <= 2) return decision
+                dropped += 1
+                return { ...decision, settle: async () => undefined }
+              },
+            }
+          },
+        },
+      }
+    })
+    try {
+      const suite = await sealedSuite(scratch, { attempts: true })
+      const outcome = await runAdversarialSuite(suite.input)
+      if (!outcome.ok) throw new Error(outcome.reason)
+      expect(dropped).toBe(1)
+      expect(outcome.slots[0]!.status).toBe("completed")
+      expect(outcome.bill.halt).toStartWith(ATTEMPT_MODE_STOP_PREFIX)
+      expect(outcome.bill.halt).toContain("left 1 attempt(s) issued and unsettled; each is counted, and whether it ended is not established")
+      expect(outcome.bill.inFlight).toHaveLength(1)
+      expect(outcome.slots.slice(2).map((slot) => slot.status)).toEqual(Array.from({ length: 14 }, () => "not-attempted"))
+      for (const slot of outcome.slots.slice(2)) expect(slot.reason).toContain("the experiment halted")
+      expect(suite.calls.some((call) => call.position > 2)).toBe(false)
+      expect(JSON.parse(await readFile(join(suite.root, HALT_MARKER_FILE), "utf8"))).toMatchObject({ halted: true, scope: "adversarial" })
+      expect(outcome.complete).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("a cancellation before any attempt is issued stops the suite and halts nothing", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const suite = await sealedSuite(scratch, { attempts: true })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(suite.calls).toHaveLength(0)
+    expect(outcome.bill.halt).toBeNull()
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array.from({ length: 16 }, () => "not-attempted"))
+    expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
+  })
+
+  test("work found unsettled on reopen refuses the suite as halted, and the schedule is not spent", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true })
+    const dangling = { type: "issued", physicalId: "seed-open", category: "adversarial", block: null, phase: null, stage: "discover", slot: "discovery-1", attempt: 1, runId: "earlier", mode: "attempts", scope: "adversarial" }
+    await writeFile(join(suite.root, JOURNAL_FILE), `${JSON.stringify(dangling)}\n`)
+    const outcome = await runAdversarialSuite(suite.input)
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain("the experiment is already halted, so the adversarial schedule was not started")
+      expect(outcome.reason).toContain("issued by an earlier invocation and never settled")
+    }
+    expect(suite.calls).toHaveLength(0)
+    expect(await exists(join(adversarialDirectory(suite.root), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
+    expect(await exists(join(suite.root, LOCK_FILE))).toBe(false)
+  })
+
+  test("a valid own root reopened after a start, a stop or a halt passes isolation, and nothing resumes", async () => {
+    // After a completed start.
+    const done = await sealedSuite(scratch, { attempts: true })
+    expect((await runAdversarialSuite(done.input)).ok).toBe(true)
+    expect(await isolatedRootProblem(done.root, { marker: "required" })).toBeNull()
+    const calls = done.calls.length
+    const again = await runAdversarialSuite(done.input)
+    expect(again.ok).toBe(false)
+    if (!again.ok) expect(again.reason).toContain("a started schedule is never executed again")
+    expect(done.calls).toHaveLength(calls)
+
+    // After a halt.
+    const halted = await sealedSuite(scratch, {
+      attempts: true,
+      script: { fault: (context, _stage, index) => (context.position === 1 && index === 0 ? "throw" : undefined) },
+    })
+    const first = await runAdversarialSuite(halted.input)
+    if (!first.ok) throw new Error(first.reason)
+    expect(first.bill.halt).not.toBeNull()
+    expect(await isolatedRootProblem(halted.root, { marker: "required" })).toBeNull()
+    const issued = halted.calls.length
+    const second = await runAdversarialSuite(halted.input)
+    expect(second.ok).toBe(false)
+    expect(halted.calls).toHaveLength(issued)
+    // The halt marker is still there: clearing it is a human's act, and it starts nothing.
+    expect(await exists(join(halted.root, HALT_MARKER_FILE))).toBe(true)
+
+    // After a runner stop.
+    const stopped = await sealedSuite(scratch, { attempts: true })
+    let seed = ""
+    for (let run = 1; run <= 16; run += 1) seed += settledAttempts(`earlier-${run}`, 30, run * 100)
+    await writeFile(join(stopped.root, JOURNAL_FILE), seed)
+    expect((await runAdversarialSuite(stopped.input)).ok).toBe(true)
+    expect(await isolatedRootProblem(stopped.root, { marker: "required" })).toBeNull()
+    expect((await runAdversarialSuite(stopped.input)).ok).toBe(false)
+    expect(stopped.calls).toHaveLength(0)
+  }, 60_000)
+
+  test("the root must be the suite's own: a missing marker, or another experiment at, above or below it, refuses before anything is written", async () => {
+    const mutations: [string, (root: string) => Promise<void>, string][] = [
+      ["no root marker", (root) => unlink(join(root, ADVERSARIAL_ROOT_MARKER_FILE)), `it carries no \`${ADVERSARIAL_ROOT_MARKER_FILE}\``],
+      ["a paired schedule at the root", (root) => writeFile(join(root, SCHEDULE_FILE), "{}\n"), "this is a paired experiment's root"],
+      ["a journal above the root", (root) => writeFile(join(root, "..", JOURNAL_FILE), ""), "exists above it"],
+      [
+        "a ledger below the root",
+        async (root) => {
+          await mkdir(join(root, "adversarial", "inner"), { recursive: true })
+          await writeFile(join(root, "adversarial", "inner", JOURNAL_FILE), "")
+        },
+        "exists below it",
+      ],
+    ]
+    for (const [name, mutate, why] of mutations) {
+      const suite = await sealedSuite(scratch, { attempts: true })
+      await mutate(suite.root)
+      const outcome = await runAdversarialSuite(suite.input)
+      expect(outcome.ok, name).toBe(false)
+      if (!outcome.ok) {
+        expect(outcome.reason, name).toContain("cannot be the adversarial suite's own root (protocol v3 B5)")
+        expect(outcome.reason, name).toContain(why)
+      }
+      expect(suite.calls, name).toHaveLength(0)
+      expect(await exists(join(adversarialDirectory(suite.root), ADVERSARIAL_START_MARKER_FILE)), name).toBe(false)
+      expect(await exists(join(suite.root, LOCK_FILE)), name).toBe(false)
+    }
+  })
+
+  test("the suite's root does not open a paired journal, and the config and the protocol must agree with the schedule", async () => {
+    // A v2 paired attempt journal sitting at a marked root is not the suite's.
+    const suite = await sealedSuite(scratch, { attempts: true })
+    const paired = { type: "issued", physicalId: "p-1", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, runId: "run-p", mode: "attempts" }
+    await writeFile(join(suite.root, JOURNAL_FILE), `${JSON.stringify(paired)}\n${JSON.stringify({ type: "settled", physicalId: "p-1", settlement: { kind: "not-issued" } })}\n`)
+    const crossed = await runAdversarialSuite(suite.input)
+    expect(crossed.ok).toBe(false)
+    if (!crossed.ok) expect(crossed.reason).toContain("records the paired scope, and it was opened in the adversarial scope")
+
+    const other = await sealedSuite(scratch, { attempts: true })
+    const oauthOnly = await runAdversarialSuite({ ...other.input, config: { ...ATTEMPT_CONFIG, accounting: undefined } })
+    expect(oauthOnly.ok).toBe(false)
+    if (!oauthOnly.ok) expect(oauthOnly.reason).toContain("runs only with accounting `attempts`")
+    const unknown = await runAdversarialSuite({ ...other.input, config: { ...ATTEMPT_CONFIG, accounting: "requests" as never } })
+    expect(unknown.ok).toBe(false)
+    if (!unknown.ok) expect(unknown.reason).toContain('accounting "requests" is not `attempts`')
+    // A protocol that is not version 3, and a copy of v3 edited after its hash was recorded, are each refused.
+    const v2 = await runAdversarialSuite({ ...other.input, protocolFile: PROTOCOL_V2_FILE })
+    expect(v2.ok).toBe(false)
+    if (!v2.ok) expect(v2.reason).toContain("needs a frozen version-3 protocol, and the protocol handed in is PROTOCOL-mad-evaluation-v2 version 2")
+    const refrozen = await frozenV3Copy(scratch)
+    await writeFile(refrozen.file, (await readFile(refrozen.file, "utf8")).replace("frozen_on: 2026-10-08", "frozen_on: 2026-10-09"))
+    const drifted = await runAdversarialSuite({ ...other.input, protocolFile: refrozen.file })
+    expect(drifted.ok).toBe(false)
+    if (!drifted.ok) expect(drifted.reason).toContain("the frozen artefact was edited")
+    // None of those refusals spent the schedule.
+    const ran = await runAdversarialSuite(other.input)
+    expect(ran.ok).toBe(true)
   })
 })

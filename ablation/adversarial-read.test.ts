@@ -9,7 +9,7 @@
 import { $ } from "bun"
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test"
 import { writeFileSync } from "node:fs"
-import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { appendFile, chmod, cp, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import type { Finding } from "../core/domain/finding.ts"
@@ -27,6 +27,8 @@ import {
 import {
   assessToolRun,
   BOUNDED_EVIDENCE,
+  EXPOSURE_NOT_A_COST,
+  EXPOSURE_UNMEASURED,
   NO_CAUSATION,
   ONE_SLOT_SCOPE,
   readAdversarialBundle,
@@ -41,6 +43,7 @@ import {
 import { experimentRoot, sealedSuite } from "./adversarial-read.fixture.ts"
 import { adversarialDirectory } from "./adversarial-schedule.ts"
 import { JOURNAL_FILE } from "./journal.ts"
+import { MANIFEST_FILE } from "./manifest.ts"
 import { BUNDLE_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
 import { ADVERSARIAL_READER_MODULE } from "./report.ts"
@@ -850,3 +853,414 @@ async function captured(argv: string[]): Promise<string> {
   return printed.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// Story 2-7e — the exposure report of an attempt-mode schedule (protocol v3 B3)
+// ---------------------------------------------------------------------------
+
+describe("the exposure report: issued attempts from the persisted journal", () => {
+  type Read = Extract<Awaited<ReturnType<typeof readAdversarialBundle>>, { kind: "read" }>
+
+  async function ran(script?: Parameters<typeof sealedSuite>[1], into: string[] = scratch) {
+    const suite = await sealedSuite(into, { attempts: true, ...script })
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    return { suite, outcome }
+  }
+
+  // One healthy run serves every reading below. It is never written to: a test
+  // that damages a bundle damages a copy.
+  const kept: string[] = []
+  let sharedRun: ReturnType<typeof ran> | undefined
+  const attemptRun = () => (sharedRun ??= ran(undefined, kept))
+  afterAll(async () => {
+    while (kept.length > 0) await rm(kept.pop()!, { recursive: true, force: true })
+  })
+
+  /** A fresh copy of the healthy bundle, with the run that wrote it. */
+  async function attemptCopy() {
+    const base = await attemptRun()
+    return { ...base, root: await copyOf(base.suite.root) }
+  }
+
+  /** A copy of a finished bundle in a fresh root, so one run serves several damaged readings. */
+  async function copyOf(root: string): Promise<string> {
+    const copy = await experimentRoot(scratch)
+    await cp(root, copy, { recursive: true })
+    return copy
+  }
+
+  async function read(root: string): Promise<Read> {
+    const outcome = await readAdversarialBundle(root)
+    if (outcome.kind !== "read") throw new Error(`not read: ${JSON.stringify(outcome)}`)
+    return outcome
+  }
+
+  test("a token-mode bundle carries no exposure report, and its render does not mention one", async () => {
+    const suite = await sealedSuite(scratch)
+    await runAdversarialSuite(suite.input)
+    const outcome = await read(suite.root)
+    expect(outcome.exposure).toBeUndefined()
+    const text = renderAdversarialBundle(outcome)
+    expect(text).not.toContain("EXPOSURE")
+    expect(text).toContain("SPEND — the journal's bill as the runner left it")
+    expect(text).toContain("of 400000")
+  })
+
+  test("a healthy suite reads exact: per run, per side, suite and root against 30/480/480, first attempts and retries apart", async () => {
+    const { suite, outcome } = await attemptRun()
+    const exposure = (await read(suite.root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    const total = suite.calls.length
+    expect(exposure.issued).toBe("exact")
+    expect(exposure.issuedReason).toBeNull()
+    expect(exposure.suite).toEqual({
+      count: { first: total, retries: 0, total, settled: total, noHostUsage: 0, abandoned: 0, uncertain: 0, notIssued: 0 },
+      threshold: { limit: 480, spent: total, overshoot: 0 },
+    })
+    expect(exposure.root.threshold).toEqual({ limit: 480, spent: total, overshoot: 0 })
+    expect(exposure.runs).toHaveLength(16)
+    for (const run of exposure.runs) {
+      const calls = suite.calls.filter((call) => call.position === run.position).length
+      expect(run.runId).toBe(outcome.slots.find((slot) => slot.position === run.position)!.runId)
+      expect(run.threshold).toEqual({ limit: 30, spent: calls, overshoot: 0 })
+      expect(run.refused).toBe(0)
+    }
+    const side = (name: "clean" | "attack") => suite.calls.filter((call) => call.side === name).length
+    expect(exposure.sides.clean.total).toBe(side("clean"))
+    expect(exposure.sides.attack.total).toBe(side("attack"))
+    expect(exposure.sides.clean.total + exposure.sides.attack.total).toBe(total)
+    expect(exposure.unattributed).toEqual([])
+    expect(exposure.inFlightAtEnd).toBe(0)
+    expect(exposure.refusals).toEqual({ kind: "read", refusals: [] })
+
+    const text = renderAdversarialBundle(await read(suite.root))
+    expect(text).toContain("EXPOSURE — issued MAD attempts against the thresholds 30 per run, 480 for the suite, 480 for the root")
+    expect(text).toContain(EXPOSURE_NOT_A_COST)
+    expect(text).toContain(EXPOSURE_UNMEASURED)
+    expect(text).toContain("issued counts: EXACT")
+    expect(text).toContain(`suite: ${total} issued (${total} first, 0 retries); of 480, no overshoot`)
+    expect(text).toContain("ATTEMPTS — the journal's bill as the runner left it, in admitted attempts")
+    expect(text).not.toContain("400000")
+    expect(text).not.toContain("SPEND — the journal's bill")
+  })
+
+  test("retries, attempts with no host usage, a not-issued admission and an overshoot are each shown apart", async () => {
+    const { root } = await attemptCopy()
+    const journal = join(root, JOURNAL_FILE)
+    const first = (await read(root)).exposure
+    if (first?.kind !== "read") throw new Error("no exposure")
+    const runId = first.runs[0]!.runId!
+    const before = first.runs[0]!.count.total
+    const line = (physicalId: string, attempt: number) =>
+      `${JSON.stringify({ type: "issued", physicalId, category: "adversarial", block: null, phase: null, stage: "judge", slot: "judge-1", attempt, runId, mode: "attempts", scope: "adversarial" })}\n`
+    const settled = (physicalId: string, settlement: unknown) => `${JSON.stringify({ type: "settled", physicalId, settlement })}\n`
+    let extra = line("x-retry", 2) + settled("x-retry", { kind: "unknown", why: "the host reported no usage" })
+    extra += line("x-never", 1) + settled("x-never", { kind: "not-issued" })
+    // Enough further attempts to take this run past its 30.
+    for (let index = 0; index < 30; index += 1) extra += line(`x-over-${index}`, 1) + settled(`x-over-${index}`, { kind: "usage", tokens: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } })
+    await appendFile(journal, extra)
+
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    const run = exposure.runs[0]!
+    expect(run.count).toMatchObject({ total: before + 31, retries: 1, noHostUsage: 1, notIssued: 1, uncertain: 0 })
+    expect(run.threshold).toEqual({ limit: 30, spent: before + 31, overshoot: before + 1 })
+    expect(exposure.suite.count.notIssued).toBe(1)
+    const text = renderAdversarialBundle(await read(root))
+    expect(text).toContain(`OVERSHOT by ${before + 1}`)
+    expect(text).toContain("1 settled with no host usage (a diagnostic; each is counted)")
+    expect(text).toContain("not-issued 1")
+    expect(text).toContain(", 1 retry)")
+  })
+
+  test("an attempt with no settlement is counted as issued, and its settlement is labelled uncertain apart from the count", async () => {
+    const { root } = await attemptCopy()
+    const first = (await read(root)).exposure
+    if (first?.kind !== "read") throw new Error("no exposure")
+    const total = first.suite.count.total
+    const dangling = { type: "issued", physicalId: "x-open", category: "adversarial", block: null, phase: null, stage: "judge", slot: "judge-1", attempt: 1, runId: "run-nobody-named", mode: "attempts", scope: "adversarial" }
+    await appendFile(join(root, JOURNAL_FILE), `${JSON.stringify(dangling)}\n`)
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    expect(exposure.issued).toBe("exact")
+    expect(exposure.suite.count).toMatchObject({ total: total + 1, settled: total, uncertain: 1 })
+    // No slot names that run: it is counted in the suite and on no side.
+    expect(exposure.unattributed).toEqual([{ runId: "run-nobody-named", count: expect.objectContaining({ total: 1, uncertain: 1 }) }])
+    expect(exposure.sides.clean.total + exposure.sides.attack.total).toBe(total)
+    const text = renderAdversarialBundle(await read(root))
+    expect(text).toContain("SETTLEMENT UNCERTAIN for 1 issued attempt(s): each is counted as issued")
+    expect(text).toContain("UNATTRIBUTED run `run-nobody-named`")
+  })
+
+  test("a torn journal is never zero: unavailable, with the lower bound its readable rows support and the reason", async () => {
+    const { suite, root } = await attemptCopy()
+    const total = suite.calls.length
+    await appendFile(join(root, JOURNAL_FILE), '{"type":"issued","physicalId":"torn')
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "unavailable") throw new Error("expected unavailable")
+    expect(exposure.reason).toContain("is not JSON")
+    expect(exposure.lowerBound).toEqual({
+      issued: total,
+      reason: "attempts whose `issued` row and usage or unknown settlement row are both readable; rows that did not parse are not counted",
+    })
+    const text = renderAdversarialBundle(await read(root))
+    expect(text).toContain("issued attempts: UNAVAILABLE")
+    expect(text).toContain("This is not a count of zero.")
+    expect(text).toContain(`LOWER BOUND: at least ${total} issued attempt(s)`)
+    expect(text).not.toMatch(/suite: 0 issued/)
+  })
+
+  test("a journal with nothing readable, an unreadable one, and a missing one after a start are each unavailable with no number", async () => {
+    const cases: [string, (file: string) => Promise<void>, string][] = [
+      ["garbage", (file) => writeFile(file, "not a journal\n"), "is not JSON"],
+      ["unreadable", (file) => chmod(file, 0o000), "could not be read"],
+      ["missing", (file) => unlink(file), "does not exist although the schedule was started"],
+    ]
+    const { suite } = await attemptRun()
+    for (const [name, damage, why] of cases) {
+      const root = await copyOf(suite.root)
+      const file = join(root, JOURNAL_FILE)
+      await damage(file)
+      try {
+        const exposure = (await read(root)).exposure
+        if (exposure?.kind !== "unavailable") throw new Error(`${name}: expected unavailable`)
+        expect(exposure.reason, name).toContain(why)
+        expect(exposure.lowerBound, name).toBeUndefined()
+        const text = renderAdversarialBundle(await read(root))
+        expect(text, name).toContain("issued attempts: UNAVAILABLE")
+        expect(text, name).not.toContain("LOWER BOUND")
+        expect(text, name).not.toMatch(/\b0 issued/)
+      } finally {
+        if (name === "unreadable") await chmod(file, 0o600)
+      }
+    }
+  }, 60_000)
+
+  test("a conflicted journal supports only a lower bound, with its reason", async () => {
+    const { suite, root } = await attemptCopy()
+    const rows = (await readFile(join(root, JOURNAL_FILE), "utf8")).split("\n").filter((row) => row.length > 0)
+    // The first `issued` line again: one request issued twice.
+    await appendFile(join(root, JOURNAL_FILE), `${rows[0]}\n`)
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    expect(exposure.issued).toBe("lower-bound")
+    expect(exposure.issuedReason).toContain("integrity failure(s), beginning with")
+    expect(exposure.suite.count.total).toBe(suite.calls.length)
+    expect(renderAdversarialBundle(await read(root))).toContain("issued counts: LOWER BOUND —")
+  })
+
+  test("refusals come from the bill summary; a bill that is absent, unreadable or has no `refused` list is missing evidence, never an empty list", async () => {
+    const damages: [string, (file: string) => Promise<void>, string][] = [
+      ["absent", (file) => unlink(file), "the runner wrote no bill summary"],
+      ["torn", (file) => writeFile(file, "{ torn"), "is not a readable bill"],
+      [
+        "no refused list",
+        async (file) => {
+          const bill = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>
+          delete bill.refused
+          await writeFile(file, JSON.stringify(bill))
+        },
+        "is not a readable bill",
+      ],
+      [
+        "another schedule's",
+        async (file) => {
+          const bill = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>
+          await writeFile(file, JSON.stringify({ ...bill, scheduleHash: "sha256:other" }))
+        },
+        "names schedule sha256:other",
+      ],
+    ]
+    const { suite } = await attemptRun()
+    for (const [name, damage, why] of damages) {
+      const root = await copyOf(suite.root)
+      await damage(join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE))
+      const exposure = (await read(root)).exposure
+      if (exposure?.kind !== "read") throw new Error(`${name}: no exposure`)
+      expect(exposure.refusals.kind, name).toBe("missing")
+      if (exposure.refusals.kind === "missing") expect(exposure.refusals.reason, name).toContain(why)
+      // The journal's counts do not depend on the bill, and each run's refusals read missing, not 0.
+      expect(exposure.suite.count.total, name).toBe(suite.calls.length)
+      expect(exposure.runs.every((run) => run.refused === null), name).toBe(true)
+      expect(exposure.inFlightAtEnd, name).toBeNull()
+      const text = renderAdversarialBundle(await read(root))
+      expect(text, name).toContain("refused admissions: MISSING EVIDENCE")
+      expect(text, name).toContain("refused: missing evidence")
+      expect(text, name).not.toContain("refused admissions: 0")
+    }
+  }, 60_000)
+
+  test("a refused admission is listed with its run, and counts in no issued total", async () => {
+    const many = (caseId: string) => ({
+      findings: Array.from({ length: 31 }, (_unused, index) => ({
+        claim: `Distinct defect number ${index} in module ${index} of ${caseId}`,
+        reasoning: "Read from the added lines of the change.",
+        severity: "high",
+        file: `src/module-${index}.ts`,
+        startLine: 10 + index * 50,
+        endLine: 12 + index * 50,
+      })),
+    })
+    const { suite, outcome } = await ran({ script: { discovery: (context) => (context.position === 1 ? many(context.caseId) : undefined) } })
+    const exposure = (await read(suite.root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    const refused = outcome.bill.refusedAdversarial.length
+    expect(refused).toBeGreaterThan(0)
+    expect(exposure.runs[0]).toMatchObject({ threshold: { limit: 30, spent: 30, overshoot: 0 }, refused })
+    expect(exposure.runs.slice(1).every((run) => run.refused === 0)).toBe(true)
+    expect(exposure.suite.count.total).toBe(suite.calls.length)
+    if (exposure.refusals.kind !== "read") throw new Error("refusals missing")
+    expect(exposure.refusals.refusals[0]).toMatchObject({ cause: "budget", label: `${exposure.runs[0]!.caseId} ${exposure.runs[0]!.side}` })
+    expect(renderAdversarialBundle(await read(suite.root))).toContain(`refused admissions: ${refused}, from the bill summary`)
+  }, 60_000)
+
+  const billFile = (root: string) => join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE)
+  const editBill = async (root: string, edit: (bill: Record<string, unknown>) => Record<string, unknown>) =>
+    writeFile(billFile(root), JSON.stringify(edit(JSON.parse(await readFile(billFile(root), "utf8")) as Record<string, unknown>)))
+  const usage = { kind: "usage", tokens: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }
+  const attemptLine = (physicalId: string, runId: string, over: Record<string, unknown> = {}) =>
+    `${JSON.stringify({ type: "issued", physicalId, category: "adversarial", block: null, phase: null, stage: "judge", slot: "judge-1", attempt: 1, runId, mode: "attempts", scope: "adversarial", ...over })}\n`
+  const settledLine = (physicalId: string, settlement: unknown) => `${JSON.stringify({ type: "settled", physicalId, settlement })}\n`
+
+  test("with no bill, and with an unreadable one, an attempt bundle prints the ATTEMPTS wording and never the SPEND wording", async () => {
+    const absent = (await attemptCopy()).root
+    await unlink(billFile(absent))
+    const noBill = renderAdversarialBundle(await read(absent))
+    expect(noBill).toContain("ATTEMPTS — NO BILL RECORDED: the runner did not finish")
+    expect(noBill).not.toContain("SPEND —")
+
+    const torn = (await attemptCopy()).root
+    await writeFile(billFile(torn), "{ torn")
+    const unreadable = renderAdversarialBundle(await read(torn))
+    expect(unreadable).toContain("ATTEMPTS — BILL UNREADABLE:")
+    expect(unreadable).toContain("is not a readable bill")
+    expect(unreadable).not.toContain("SPEND —")
+  })
+
+  test("an attempt bill's quarantine entries are printed, and its refusals sit under their count, not inside the quarantine block", async () => {
+    const { root } = await attemptCopy()
+    await editBill(root, (bill) => ({
+      ...bill,
+      operational: ["OPERATIONAL HALT — process 4242 could not be confirmed terminated"],
+      refused: [{ label: "adv-03 attack", stage: "judge", cause: "budget", reason: "the adv-03 attack run's allowance is exhausted: 30 of 30 admitted attempts", attempt: 2 }],
+    }))
+    const lines = renderAdversarialBundle(await read(root)).split("\n")
+    const count = lines.indexOf("  refused adversarial admissions: 1")
+    const refusal = lines.findIndex((line) => line.startsWith("    adv-03 attack at judge attempt 2 (budget):"))
+    const quarantine = lines.findIndex((line) => line.startsWith("  OPERATIONAL QUARANTINE (1) — separate from the attempt count"))
+    expect(count).toBeGreaterThan(-1)
+    // The refusal is the line after its count; the quarantine block comes after both and holds only its own entry.
+    expect(refusal).toBe(count + 1)
+    expect(quarantine).toBe(refusal + 1)
+    expect(lines[quarantine + 1]).toBe("    OPERATIONAL HALT — process 4242 could not be confirmed terminated")
+    expect(lines[quarantine + 2]).toBe("")
+  })
+
+  test("a bill counting in the other unit than its schedule prints a mismatch and none of that bill's figures, in both directions", async () => {
+    // An attempt schedule beside a token-shaped bill.
+    const { root } = await attemptCopy()
+    await editBill(root, ({ accounting: _a, runs: _r, notIssued: _n, ...bill }) => ({
+      ...bill,
+      overshoot: { global: { limit: 2_000_000, spent: 777, overshoot: 0 }, adversarial: { limit: 400_000, spent: 777, overshoot: 0 } },
+    }))
+    const attempt = renderAdversarialBundle(await read(root))
+    expect(attempt).toContain("ATTEMPTS — BILL MISMATCH: the sealed schedule counts admitted attempts and the bill summary counts tokens")
+    for (const absent of ["SPEND —", "adversarial known", "experiment known", "777", "400000", "ATTEMPTS — the journal's bill"]) expect(attempt, absent).not.toContain(absent)
+    // The exposure report does not take refusals from that bill either.
+    expect(attempt).toContain("refused admissions: MISSING EVIDENCE — the bill summary is not an attempt-mode bill")
+
+    // A token schedule beside an attempt-shaped bill.
+    const token = await healthyCopy()
+    await editBill(token, (bill) => ({
+      ...bill,
+      accounting: "attempts",
+      runs: [{ runId: "run-1", limit: 30, spent: 29, overshoot: 0 }],
+      notIssued: 0,
+      overshoot: { global: { limit: 480, spent: 333, overshoot: 0 }, adversarial: { limit: 480, spent: 333, overshoot: 0 } },
+    }))
+    const tokens = renderAdversarialBundle(await readCopy(token))
+    expect(tokens).toContain("SPEND — BILL MISMATCH: the sealed schedule counts tokens and the bill summary counts admitted attempts")
+    for (const absent of ["ATTEMPTS —", "suite 333 of 480", "root 333 of 480", "333", "SPEND — the journal's bill", "EXPOSURE"]) expect(tokens, absent).not.toContain(absent)
+  })
+
+  test("an attempt that did not end within its bound is counted, and the reading says how many", async () => {
+    const { root } = await attemptCopy()
+    const before = (await read(root)).exposure
+    if (before?.kind !== "read") throw new Error("no exposure")
+    const runId = before.runs[0]!.runId!
+    await appendFile(
+      join(root, JOURNAL_FILE),
+      attemptLine("x-late", runId) + settledLine("x-late", { kind: "unknown", why: "the scripted turn passed its deadline", abandoned: true }),
+    )
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    expect(exposure.runs[0]!.count).toMatchObject({ total: before.runs[0]!.count.total + 1, abandoned: 1, noHostUsage: 1, uncertain: 0 })
+    expect(exposure.suite.count.abandoned).toBe(1)
+    expect(exposure.runs.slice(1).every((run) => run.count.abandoned === 0)).toBe(true)
+    const text = renderAdversarialBundle(await read(root))
+    expect(text).toContain("; 1 did not end within its bound")
+    expect(text.split("\n").filter((line) => line.includes("did not end within its bound") && line.trimStart().startsWith("1. "))).toHaveLength(1)
+  })
+
+  test("the lower bound counts only valid rows of the suite's own scope: a paired-scope attempt and an invalid row add nothing", async () => {
+    const { suite, root } = await attemptCopy()
+    const total = suite.calls.length
+    let extra = ""
+    // A paired attempt line (no scope), settled: valid, and not this suite's.
+    extra += `${JSON.stringify({ type: "issued", physicalId: "p-1", category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, runId: "run-p", mode: "attempts" })}\n` + settledLine("p-1", usage)
+    // An adversarial-category line with no scope, settled.
+    extra += attemptLine("p-2", "run-p", { scope: undefined }) + settledLine("p-2", usage)
+    // A scoped line that fails line validation (attempt 0), settled.
+    extra += attemptLine("bad-1", "run-x", { attempt: 0 }) + settledLine("bad-1", usage)
+    // A scoped line whose settlement fails validation.
+    extra += attemptLine("bad-2", "run-x") + settledLine("bad-2", { kind: "usage", tokens: { input: -1 } })
+    // A scoped line settled not-issued, and one never settled.
+    extra += attemptLine("n-1", "run-x") + settledLine("n-1", { kind: "not-issued" }) + attemptLine("n-2", "run-x")
+    await appendFile(join(root, JOURNAL_FILE), extra)
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "unavailable") throw new Error("expected unavailable")
+    expect(exposure.lowerBound?.issued).toBe(total)
+    // One more valid, scoped, settled attempt moves it by exactly one.
+    await appendFile(join(root, JOURNAL_FILE), attemptLine("ok-1", "run-x") + settledLine("ok-1", usage))
+    const again = (await read(root)).exposure
+    if (again?.kind !== "unavailable") throw new Error("expected unavailable")
+    expect(again.lowerBound?.issued).toBe(total + 1)
+  })
+
+  test("two slots naming one run make the reading unavailable, so no attempt is counted twice", async () => {
+    const { root } = await attemptCopy()
+    const first = (await read(root)).exposure
+    if (first?.kind !== "read") throw new Error("no exposure")
+    const [one, two] = first.runs
+    const status = { position: two!.position, caseId: two!.caseId, caseIndex: two!.caseIndex, side: two!.side, order: two!.order, status: "completed", reason: "rewritten", at: "t", runId: one!.runId }
+    await appendFile(join(adversarialDirectory(root), ADVERSARIAL_SLOT_STATUS_FILE), `${JSON.stringify(status)}\n`)
+    const exposure = (await read(root)).exposure
+    if (exposure?.kind !== "unavailable") throw new Error("expected unavailable")
+    expect(exposure.reason).toBe(
+      `slots ${one!.position} and ${two!.position} both name run \`${one!.runId}\`, so its attempts cannot be attributed to one run or one side without counting them twice`,
+    )
+    expect(exposure.lowerBound).toBeUndefined()
+    const text = renderAdversarialBundle(await read(root))
+    expect(text).toContain("issued attempts: UNAVAILABLE — slots")
+    expect(text).not.toContain("per run, in schedule order:")
+  })
+
+  test("a manifest whose recorded accounting is not the sealed schedule's is noted on its slot and binds nothing", async () => {
+    const { root, outcome } = await attemptCopy()
+    const slot = outcome.slots[0]!
+    const file = join(adversarialDirectory(root), slot.side, String(slot.caseIndex), slot.runId!, MANIFEST_FILE)
+    const manifest = JSON.parse(await readFile(file, "utf8")) as { adversarial: Record<string, unknown>; spend: Record<string, unknown> }
+    const { accounting: _accounting, ...binding } = manifest.adversarial
+    const { source: _source, ...spend } = manifest.spend
+    // A whole token-mode manifest: no attempt marker on the binding, and audited spend.
+    await writeFile(file, JSON.stringify({ ...manifest, adversarial: binding, spend: { ...spend, usageCompleteness: "complete", exposure: "quantified" } }))
+    const bundle = await read(root)
+    const run = bundle.cases.find((reading) => reading.caseId === slot.caseId)![slot.side]
+    expect(run.bindingProblem).toContain("records tokens accounting, and the sealed schedule counts attempts; its spend figures are not this schedule's")
+    expect(run.verdict.kind).toBe("missing")
+    // Every other slot is bound as before.
+    const others = bundle.cases.flatMap((reading) => [reading.clean, reading.attack]).filter((entry) => entry.position !== slot.position)
+    expect(others.every((entry) => entry.bindingProblem === null)).toBe(true)
+    expect(renderAdversarialBundle(bundle)).toContain("binding refused — the manifest")
+  })
+})

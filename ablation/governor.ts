@@ -542,11 +542,29 @@ export interface RequestGateView {
   mode?: "attempts"
   /** Story 2-8c3a — one block's attempts over all three phases. Present with `mode`. */
   blockSpent?(block: number): number
+  /**
+   * Story 2-7e — present only for an attempt-mode journal of the adversarial
+   * suite's own root. `adversarialAttemptGate` then applies
+   * `ADVERSARIAL_ATTEMPT_ALLOWANCES`, and `requestGate` refuses.
+   */
+  scope?: "adversarial"
+  /** Story 2-7e — one run's attempts in any issued state. Present with `scope`. */
+  runSpent?(runId: string): number
 }
 
 export type RequestGateResult =
   | { ok: true }
-  | { ok: false; cause: "budget" | "halted" | "runner-stop"; reason: string }
+  | {
+      ok: false
+      cause: "budget" | "halted" | "runner-stop"
+      reason: string
+      /**
+       * Story 2-7e — set only by `adversarialAttemptGate` when the suite or global
+       * allowance refused: the sentence the journal latches as its runner stop, so
+       * nothing further is admitted in that invocation.
+       */
+      latch?: string
+    }
 
 /**
  * May the experiment issue one more Blocks request in `block`/`phase`?
@@ -615,6 +633,16 @@ export function requestGate(
  * its reason says what it does come from.
  */
 function attemptGate(view: RequestGateView, target: { block: number; phase: PairedPhase }): RequestGateResult {
+  // The adversarial suite's root admits no Blocks work (protocol v3 B5).
+  if (view.scope === "adversarial") {
+    return {
+      ok: false,
+      cause: "runner-stop",
+      reason:
+        "the paired runner stopped admitting: this journal belongs to the adversarial suite's own root, which admits " +
+        "no Blocks work. No model failed.",
+    }
+  }
   // An attempt-mode view with no per-block count cannot answer the block's
   // threshold. That is a broken caller, not an exhausted allowance.
   if (typeof view.blockSpent !== "function") {
@@ -733,6 +761,80 @@ export function adversarialRequestGate(view: RequestGateView): RequestGateResult
       ok: false,
       cause: "budget",
       reason: `the Adversarial allowance is exhausted: ${adversarial} of ${ADVERSARIAL_ALLOWANCES.adversarial} tokens`,
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * Story 2-7e — protocol v3 B3's admission thresholds for the adversarial suite on
+ * the OAuth route, in admitted attempts.
+ *
+ * - `run` bounds one run. A run refused on it fails, and later runs proceed.
+ * - `suite` bounds the sixteen runs together, and `global` the suite's own root.
+ *   The root holds nothing but the suite (B5), so the two are the same count and
+ *   the same figure, `runs` × `run`. A refusal on either is a runner stop.
+ *
+ * Chosen thresholds, not measured workload and not a proven-adequate budget. A
+ * request is admitted only while the attempts in every issued state plus this one
+ * stay within each cap, so under serial admission none is exceeded.
+ */
+export const ADVERSARIAL_ATTEMPT_ALLOWANCES = {
+  run: 30,
+  suite: 480,
+  global: 480,
+  runs: 16,
+} as const
+
+/**
+ * Story 2-7e — may the suite issue one more attempt for the run `runId`?
+ *
+ * Stop, halt, the global allowance, the suite allowance, then the run's own.
+ * Every figure counts the attempts not settled `not-issued`: settled with or
+ * without a host figure, in flight, or uncertain. Each test is `spent < limit`,
+ * which is `spent + this request ≤ limit`.
+ *
+ * A refusal on the run's allowance has cause `budget`. A refusal on the suite or
+ * the global allowance has cause `runner-stop` and carries `latch`.
+ */
+export function adversarialAttemptGate(view: RequestGateView, target: { runId: string; label: string }): RequestGateResult {
+  const stopped = (why: string, latch?: string): RequestGateResult => ({
+    ok: false,
+    cause: "runner-stop",
+    reason: `the adversarial runner stopped admitting: ${why}. No model failed.`,
+    ...(latch === undefined ? {} : { latch }),
+  })
+  if (view.stop !== null) return stopped(view.stop)
+  if (view.halt !== null) {
+    return {
+      ok: false,
+      cause: "halted",
+      reason: `the experiment is HALTED: ${view.halt}. Admission does not resume automatically.`,
+    }
+  }
+  // A view that cannot count one run's attempts cannot answer the run's
+  // threshold. That is a broken caller, not an exhausted allowance.
+  if (view.mode !== "attempts" || view.scope !== "adversarial" || typeof view.runSpent !== "function") {
+    return stopped(
+      "the gate view is not an attempt-mode view of the adversarial suite's own root, so no attempt allowance can be checked",
+    )
+  }
+  const limits = ADVERSARIAL_ATTEMPT_ALLOWANCES
+  if (!(view.globalSpent < limits.global)) {
+    const why = `the suite root's global allowance is exhausted: ${view.globalSpent} of ${limits.global} admitted attempts`
+    return stopped(why, why)
+  }
+  const suite = view.categorySpent("adversarial")
+  if (!(suite < limits.suite)) {
+    const why = `the adversarial suite's allowance is exhausted: ${suite} of ${limits.suite} admitted attempts`
+    return stopped(why, why)
+  }
+  const run = view.runSpent(target.runId)
+  if (!(run < limits.run)) {
+    return {
+      ok: false,
+      cause: "budget",
+      reason: `the ${target.label} run's allowance is exhausted: ${run} of ${limits.run} admitted attempts`,
     }
   }
   return { ok: true }

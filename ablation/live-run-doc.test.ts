@@ -21,7 +21,7 @@ import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
 import { CROSS_ARM_PAIRS_SEAL } from "../fixtures/cross-arm-pairs/seal.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
 import { PREFIX_FILE } from "./bundle.ts"
-import { ADVERSARIAL_ALLOWANCES, ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
+import { ADVERSARIAL_ALLOWANCES, ADVERSARIAL_ATTEMPT_ALLOWANCES, ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import {
   ADJUDICATION_QUANTITIES,
   ADJUDICATION_SHEET_FILE,
@@ -32,6 +32,7 @@ import {
 import { PAIRED_QUANTITIES } from "./paired-read.ts"
 import { ADVERSARIAL_QUANTITIES, BOUNDED_EVIDENCE } from "./adversarial-read.ts"
 import {
+  ADVERSARIAL_ROOT_MARKER_FILE,
   ADVERSARIAL_SCHEDULE_FILE,
   ADVERSARIAL_SLOT_STATUS_FILE,
   ADVERSARIAL_START_MARKER_FILE,
@@ -53,7 +54,14 @@ import {
   REPORTING_MILESTONE,
 } from "./evaluation-report.ts"
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
-import { EVALUATION_RUN, PAIRED_GATES, PAIRED_NON_GATES } from "./paired-gates.ts"
+import {
+  ADVERSARIAL_CANDIDATE_NON_GATES,
+  ADVERSARIAL_RUN,
+  CANDIDATE_CLAIM_WORDING,
+  EVALUATION_RUN,
+  PAIRED_GATES,
+  PAIRED_NON_GATES,
+} from "./paired-gates.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
 import { STORE_TABLES } from "./oauth-store.ts"
 import { PERSISTENT_HOST_STATE_LIMITATION } from "./evaluation-report.ts"
@@ -380,27 +388,116 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // one and half of another, and a list that only checked the five headings
     // would read the same whether they were all open or all closed — which is
     // the one thing a readiness document must not be ambiguous about.
-    for (const [prerequisite, status] of [
-      ["Host accounting", "OPEN"],
+    const prerequisites = [
+      ["Host accounting", "NOT APPLICABLE ON THE OAUTH ROUTE"],
       ["Billing authorization", "OPEN"],
       ["Verified shared gates", "OPEN"],
       ["Bounded tool termination", "PARTLY CLOSED"],
       ["Bounded observer writes", "CLOSED"],
-      // Promoted out of the prose (review of 2-7c): a blocker a reader counting
-      // the numbered list does not count is one nobody schedules.
+      // A blocker a reader counting the numbered list does not count is one
+      // nobody schedules, so the materializer is an entry of its own.
       ["Bounded materializer termination", "OPEN"],
       ["Bounded review-path reads", "OPEN"],
-    ] as const) {
-      expect(text, prerequisite).toContain(`${prerequisite} — ${status}`)
+    ] as const
+    const list = between(text, "### Before the sixteen live runs", "**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**", "the prerequisite list")
+    const items = [...list.matchAll(/(?:^| )(\d)\. \*\*(.+?) — (.+?)\.\*\*/g)].map((item) => [Number(item[1]), item[2], item[3]])
+    expect(items.map((item) => [item[0], item[1]])).toEqual(prerequisites.map(([name], index) => [index + 1, name]))
+    for (const [index, [prerequisite, status]] of prerequisites.entries()) {
+      expect(text, prerequisite).toContain(`${index + 1}. **${prerequisite} — ${status}`)
     }
-    // The list is the whole list — the property that makes counting it safe.
+    // The list is the whole list — the property that makes counting it safe —
+    // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
+    const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value === status ? [index + 1] : []))
+    expect([numbers("OPEN"), numbers("PARTLY CLOSED"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE")]).toEqual([[2, 3, 6, 7], [4], [5], [1]])
+    expect(text).toContain(
+      "On the planned OAuth route four of the seven are open (2, 3, 6 and 7), one is half done (4), one is closed (5) and one does not apply (1).",
+    )
+    expect(text).toContain("**The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half done")
     // And the honest headline: this patch did not close every hang.
     expect(text).toContain("The live execution is still blocked")
     expect(text).toContain("materializer termination remains unverified")
     expect(text).toContain("This patch does not close every hang")
     // Billing authorization is a decision with a named owner, not a task.
     expect(text).toContain("Owner: the human who owns the budget")
+  })
+
+  test("each prerequisite names what would satisfy it on the OAuth route: gates 10, 11 and 12, and the item-7 candidate", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const list = between(text, "### Before the sixteen live runs", "**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**", "the prerequisite list")
+    const item = (number: number): string => between(list, ` ${number}. **`, number === 7 ? " — with `status: \"OPEN\"`." : ` ${number + 1}. **`, `prerequisite ${number}`)
+    const gate = (number: number) => PAIRED_GATES.find((entry) => entry.number === number)!
+
+    // Item 1 does not apply on OAuth; on the api-key route it is open.
+    expect(item(1)).toContain("It is retained for api-key execution, where it is OPEN.")
+    expect(item(1)).toContain("The OAuth route has no relay and counts no physical requests")
+
+    // Items 2, 3 and 6 are gates 10, 11 and 12, with the owners the table records.
+    expect([gate(10).name, gate(11).name, gate(12).name]).toEqual(["adversarial spend authorization", "adversarial attempt accounting", "bounded materializer termination"])
+    expect(item(2)).toContain("Gate 10.")
+    expect(item(2)).toContain("in admitted attempts")
+    const figure = ADVERSARIAL_ATTEMPT_ALLOWANCES
+    expect(item(2)).toContain(`${figure.run} per run, ${figure.suite} for the suite and ${figure.global} for the suite's root`)
+    expect(item(2)).toContain("`pins: null`")
+    expect(ADVERSARIAL_RUN.pins).toBeNull()
+    // The api-key allowance is named only to say it authorizes nothing here.
+    expect(item(2)).toContain("authorizes no OAuth work")
+    expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
+    expect(item(3)).toContain("No real host has exercised that gate.")
+    expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
+    // Item 6 stays route-neutral: it makes no claim that api-key materialization is safe.
+    expect(item(6)).toContain("The prerequisite is route-neutral")
+    expect(item(6)).toContain("nothing here says api-key materialization is safe")
+    expect(item(6)).toContain("Gate 12 is its gate on the oauth route.")
+    expect(gate(12).routes).toEqual(["oauth"])
+    expect(item(6)).toContain("The api-key route has no gate that opens the adversarial phase at all")
+    expect(PAIRED_GATES.some((entry) => entry.phase === "adversarial" && (entry.routes === undefined || entry.routes.includes("api-key")))).toBe(false)
+
+    // Item 7 is the candidate, unresolved, in the record's own wording.
+    const candidate = ADVERSARIAL_CANDIDATE_NON_GATES.find((entry) => entry.item === 7)!
+    expect(candidate.status).toBe("OPEN")
+    expect(item(7)).toContain(`A candidate non-gate, unresolved, to be validated by ${candidate.validatedBy}.`)
+    expect(item(7)).toContain(CANDIDATE_CLAIM_WORDING)
+    expect(list).toContain("`ADVERSARIAL_CANDIDATE_NON_GATES`")
+    expect(list).toContain("It stays a blocker until story 2-7f validates the complete launcher path and records its evidence")
+    expect(list).toContain("`gatePreflight` refuses that phase while any of them is OPEN and while item 7's record is unresolved")
+  })
+
+  test("attempt mode is documented: the opt-in, the figures, the root, the scope, the halts and the exposure report", async () => {
+    const text = between((await section()).replace(/\s+/g, " "), "### Attempt mode on the OAuth route (story 2-7e)", " ### ", "the attempt-mode section")
+    expect(text).toContain("`accounting: \"attempts\"` and `route: \"oauth\"`")
+    expect(text).toContain("**It bills nothing by itself, no command runs it, and protocol v3 is a draft.**")
+    expect(text).toContain("The v3 draft, v1 and v2 are each refused by name")
+    expect(text).toContain("`tokenCap: null`, `stopOnUnknownUsage: false`")
+    const figure = ADVERSARIAL_ATTEMPT_ALLOWANCES
+    expect(text).toContain(`${figure.run} per run, ${figure.suite} for the suite and ${figure.global} for the suite's root (\`ADVERSARIAL_ATTEMPT_ALLOWANCES\`)`)
+    expect(text).toContain("Physical provider requests, host retries and subscription quota are never attempts.")
+    expect(text).toContain(ADVERSARIAL_ROOT_MARKER_FILE)
+    expect(text).toContain("`isolatedRootProblem`")
+    expect(text).toContain("canonical (`realpath`) path")
+    expect(text).toContain("the walk goes through every ancestor up to the filesystem root")
+    expect(text).toContain("refuses the root, and the refusal names that file")
+    expect(text).toContain("A symlink is ambiguous evidence and refuses too")
+    expect(text).toContain("with the scope `adversarial`")
+    // The paired journal's own figures are named beside the suite's.
+    for (const paired of [ATTEMPT_ALLOWANCES.prefix, ATTEMPT_ALLOWANCES.continuation, ATTEMPT_ALLOWANCES.block, ATTEMPT_ALLOWANCES.global]) {
+      expect(text).toContain(String(paired))
+    }
+    for (const sentence of [
+      "A refused admission writes no journal line and reaches no backend.",
+      "**A run refused on its own 30 fails**, and later runs proceed.",
+      "A refusal on the suite's or the root's 480 is a runner stop.",
+      "None is retried.",
+      "A failed append of an admission or a settlement is a runner stop, not a halt.",
+      "**Unknown host token usage alone never halts.**",
+      "A journal that cannot be read is never printed as zero attempts.",
+      "it never prints an empty list",
+    ]) {
+      expect(text, sentence).toContain(sentence)
+    }
+    expect(text).toContain("`EXPOSURE` section")
+    // No 400,000 figure is offered as an OAuth allowance.
+    expect(text).not.toContain("400,000")
   })
 
   test("the preflight checks are listed in the order the runner makes them", async () => {
@@ -563,7 +660,11 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
     expect(text).toContain(
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
-    expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8])
+    expect(text).toContain(
+      "Gates 10, 11 and 12 are OPEN and are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
+    )
+    expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12])
+    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").every((gate) => gate.status === "OPEN")).toBe(true)
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {

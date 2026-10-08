@@ -25,12 +25,23 @@
  * with every category (`ablation/journal.ts`). Nothing here touches the paired
  * schedule, start marker or `bundle.json` at the root.
  *
+ * ## Attempt mode (story 2-7e)
+ *
+ * `AdversarialConfig.accounting: "attempts"` with `route: "oauth"` seals a
+ * schedule for protocol v3: it binds a frozen version-3 protocol, its config
+ * carries no token cap, no stop on unknown usage and
+ * `ADVERSARIAL_ATTEMPT_ALLOWANCES`, and the suite then has a root of its own
+ * (v3 B5). That root carries `adversarial-root.json`, written before the coins
+ * are tossed, and `isolatedRootProblem` refuses it while any v1 or v2 experiment
+ * file sits at it, above it or below it. A config naming neither field is the
+ * token-mode config, and its digest does not depend on them.
+ *
  * AD-1: this tree may import from `core/` and `fixtures/`. Nothing under `core/`
  * imports it.
  */
 
-import { mkdir, readFile } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { lstat, mkdir, readdir, readFile, realpath, stat } from "node:fs/promises"
+import { basename, dirname, join, resolve, sep } from "node:path"
 
 import { CUMULATIVE_SHARE } from "../core/budget/presets.ts"
 import type { Roster } from "../core/domain/roster.ts"
@@ -38,9 +49,10 @@ import { ADVERSARIAL_ASSERTIONS, type AdversarialAssertion } from "../fixtures/a
 import { ADVERSARIAL_CASES, type AdversarialMaterial, type AdversarialSurface, type PayloadCarrier } from "../fixtures/adversarial/material.ts"
 import { ADVERSARIAL_SEAL, adversarialSealProblem, type AdversarialSeal } from "../fixtures/adversarial/seal.ts"
 import type { Provenance } from "./arms.ts"
-import { ADVERSARIAL_ALLOWANCES } from "./governor.ts"
-import { acquireLock } from "./journal.ts"
+import { ADVERSARIAL_ALLOWANCES, ADVERSARIAL_ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
+import { acquireLock, JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
 import type { CodeRevision, Maybe } from "./manifest.ts"
+import type { GateRoute } from "./paired-gates.ts"
 import {
   appendStatusLine,
   canonicalJson,
@@ -49,7 +61,9 @@ import {
   publishExclusive,
   readFrozenProtocol,
   readStatusLines,
+  SCHEDULE_FILE,
   sha256,
+  START_MARKER_FILE,
   writeStartMarker,
   type CoinFace,
   type SlotStatus,
@@ -113,10 +127,84 @@ export interface AdversarialConfig {
   maxConcurrency?: number
   /** The identity of the `Tools` configuration every run gets (the adapter and how its worktree is chosen). */
   tools: string
+  /**
+   * What the suite's journal counts. Absent means ledger tokens (protocol v1).
+   * `attempts` is protocol v3's unit for the OAuth route.
+   */
+  accounting?: "attempts"
+  /** How the host reaches its providers. Absent means `api-key`. */
+  route?: GateRoute
 }
 
-/** Every setting the runs receive, as the schedule binds it. The run cap and shares are fixed here. */
+/** Whether the config selects attempt accounting. */
+export function adversarialAttemptMode(config: Pick<AdversarialConfig, "accounting">): boolean {
+  return config.accounting === "attempts"
+}
+
+/**
+ * Why the config's accounting and route cannot run together, or `null`. They
+ * are one choice: the OAuth route measures no tokens and runs only in attempt
+ * mode, and attempt mode belongs to the OAuth route alone. Any other value of
+ * either field refuses.
+ */
+export function adversarialAccountingProblem(config: Pick<AdversarialConfig, "accounting" | "route">): string | null {
+  const { accounting, route } = config as { accounting?: unknown; route?: unknown }
+  if (accounting !== undefined && accounting !== "attempts") {
+    return `the config's accounting ${JSON.stringify(accounting)} is not \`attempts\`; the token mode is selected by leaving it absent`
+  }
+  if (route !== undefined && route !== "api-key" && route !== "oauth") {
+    return `the config's route ${JSON.stringify(route)} is neither api-key nor oauth`
+  }
+  if (route === "oauth" && accounting !== "attempts") {
+    return "the oauth route measures no tokens, so it runs only with accounting `attempts`"
+  }
+  if (accounting === "attempts" && route !== "oauth") {
+    return "accounting `attempts` belongs to the oauth route; the api-key route is measured in tokens"
+  }
+  return null
+}
+
+/**
+ * Why an attempt-mode schedule may not bind this protocol, or `null`:
+ * adversarial attempt accounting is defined only by a frozen version-3
+ * protocol (its sections B2 to B6). `readFrozenProtocol` has already verified
+ * status and hash, so a draft never reaches this check.
+ */
+export function adversarialProtocolProblem(
+  config: Pick<AdversarialConfig, "accounting">,
+  protocol: { id: string; version: number },
+): string | null {
+  if (!adversarialAttemptMode(config) || protocol.version === 3) return null
+  return (
+    `accounting \`attempts\` needs a frozen version-3 protocol, and the protocol handed in is ` +
+    `${protocol.id} version ${protocol.version}`
+  )
+}
+
+/**
+ * Every setting the runs receive, as the schedule binds it. The run cap and
+ * shares are fixed here.
+ *
+ * In attempt mode the dials say what the runs receive: no `tokenCap` (`null`),
+ * no stop on unknown usage, and the attempt allowances in place of the token
+ * ones. A token-mode config carries none of the attempt fields, so its digest
+ * does not depend on them.
+ */
 export function adversarialRunConfig(config: AdversarialConfig, roster: Roster): Record<string, unknown> {
+  if (adversarialAttemptMode(config)) {
+    return {
+      provenance: config.provenance,
+      tokenCap: null,
+      spendShares: { ...CUMULATIVE_SHARE },
+      stopOnUnknownUsage: false,
+      maxConcurrency: config.maxConcurrency,
+      accounting: "attempts",
+      attemptAllowances: { ...ADVERSARIAL_ATTEMPT_ALLOWANCES },
+      route: config.route,
+      instructionsDigest: instructionsDigestOf(roster),
+      tools: config.tools,
+    }
+  }
   return {
     provenance: config.provenance,
     tokenCap: ADVERSARIAL_ALLOWANCES.runCap,
@@ -208,6 +296,11 @@ export type AdversarialScheduleCreated =
  * lock. Refuses, and tosses nothing, when a schedule exists, the seal does not
  * verify, the roster is not one slot, `maxConcurrency` is not absent or 1, the
  * Tools identity is blank or the protocol does not verify. Bills nothing.
+ *
+ * An attempt-mode config is refused too when its accounting and route disagree,
+ * when the protocol is not a frozen version 3, and when the root is not
+ * isolated (`isolatedRootProblem`). The root marker is written before the first
+ * coin.
  */
 export async function createAdversarialSchedule(input: CreateAdversarialScheduleInput): Promise<AdversarialScheduleCreated> {
   const root = resolve(input.experimentRoot)
@@ -246,8 +339,18 @@ async function publishAdversarialSchedule(input: CreateAdversarialScheduleInput,
   if (input.config.tools.trim().length === 0) {
     return { ok: false, reason: "the config's Tools identity is blank, so the schedule would bind no identifiable Tools configuration" }
   }
+  const accounting = adversarialAccountingProblem(input.config)
+  if (accounting !== null) return { ok: false, reason: `${accounting}; nothing was tossed` }
   const protocol = await readFrozenProtocol(input.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
+  const protocolProblem = adversarialProtocolProblem(input.config, protocol)
+  if (protocolProblem !== null) return { ok: false, reason: `${protocolProblem}; nothing was tossed` }
+  if (adversarialAttemptMode(input.config)) {
+    const isolation = await isolatedRootProblem(root, { marker: "optional" })
+    if (isolation !== null) return { ok: false, reason: `${isolation}; nothing was tossed` }
+    const marked = await ensureAdversarialRootMarker(root, input.createdAt)
+    if (marked !== null) return { ok: false, reason: `${marked}; nothing was tossed` }
+  }
 
   const coins: CoinFace[] = []
   for (let pair = 0; pair < Math.ceil(cases.length / 2); pair += 1) {
@@ -374,8 +477,12 @@ export async function verifyAdversarialSchedule(
   if (!read.ok) return read
   const { schedule, file } = read
   const refuse = (why: string): AdversarialScheduleRead => ({ ok: false, reason: `the adversarial schedule at \`${file}\` ${why}` })
+  const accounting = adversarialAccountingProblem(binding.config)
+  if (accounting !== null) return { ok: false, reason: accounting }
   const protocol = await readFrozenProtocol(binding.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
+  const protocolProblem = adversarialProtocolProblem(binding.config, protocol)
+  if (protocolProblem !== null) return { ok: false, reason: protocolProblem }
   if (canonicalJson(schedule.protocol) !== canonicalJson({ id: protocol.id, version: protocol.version, hash: protocol.hash })) {
     return refuse(`is bound to protocol ${canonicalJson(schedule.protocol)}, not to the frozen protocol this runner read`)
   }
@@ -405,6 +512,253 @@ export async function hasAdversarialSchedule(experimentRoot: string): Promise<bo
     const code = (error as NodeJS.ErrnoException).code
     return code !== "ENOENT" && code !== "ENOTDIR"
   }
+}
+
+// ---------------------------------------------------------------------------
+// Story 2-7e — the suite's own root (protocol v3 B5), attempt mode only
+// ---------------------------------------------------------------------------
+
+export const ADVERSARIAL_ROOT_MARKER_FILE = "adversarial-root.json"
+export const ADVERSARIAL_ROOT_MARKER_KIND = "mad-adversarial-suite-root"
+/** Bumped by hand when the root marker's shape changes. */
+export const ADVERSARIAL_ROOT_MARKER_VERSION = 1
+
+/**
+ * The file at an attempt-mode suite's root that says the root is the suite's
+ * own. With it, the journal, the lock, the halt marker and everything under
+ * `adversarial/` at that root are the suite's files. Without it they are read as
+ * another experiment's.
+ */
+export interface AdversarialRootMarker {
+  kind: typeof ADVERSARIAL_ROOT_MARKER_KIND
+  version: number
+  accounting: "attempts"
+  scope: "adversarial"
+  createdAt: string
+}
+
+type RootMarkerRead = { kind: "absent" } | { kind: "valid" } | { kind: "problem"; reason: string }
+
+async function readAdversarialRootMarker(root: string): Promise<RootMarkerRead> {
+  const file = join(root, ADVERSARIAL_ROOT_MARKER_FILE)
+  let text: string
+  try {
+    text = await readFile(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" }
+    return { kind: "problem", reason: `the adversarial root marker \`${file}\` could not be read (${messageOf(error)}), so whose files this root holds is not established` }
+  }
+  try {
+    const marker = JSON.parse(text) as Record<string, unknown> | null
+    if (
+      marker !== null &&
+      typeof marker === "object" &&
+      marker.kind === ADVERSARIAL_ROOT_MARKER_KIND &&
+      marker.version === ADVERSARIAL_ROOT_MARKER_VERSION &&
+      marker.accounting === "attempts" &&
+      marker.scope === "adversarial" &&
+      typeof marker.createdAt === "string"
+    ) {
+      return { kind: "valid" }
+    }
+  } catch {
+    // Reported below with the same reason as a marker of the wrong shape.
+  }
+  return { kind: "problem", reason: `the adversarial root marker \`${file}\` is not a version-${ADVERSARIAL_ROOT_MARKER_VERSION} suite root marker, so whose files this root holds is not established` }
+}
+
+/** Write the root marker unless a valid one is already there. Returns why it could not, or `null`. */
+async function ensureAdversarialRootMarker(root: string, createdAt: string): Promise<string | null> {
+  const existing = await readAdversarialRootMarker(root)
+  if (existing.kind === "valid") return null
+  if (existing.kind === "problem") return existing.reason
+  const marker: AdversarialRootMarker = {
+    kind: ADVERSARIAL_ROOT_MARKER_KIND,
+    version: ADVERSARIAL_ROOT_MARKER_VERSION,
+    accounting: "attempts",
+    scope: "adversarial",
+    createdAt,
+  }
+  const published = await publishExclusive(root, ADVERSARIAL_ROOT_MARKER_FILE, `${JSON.stringify(marker, undefined, 2)}\n`, "the adversarial root marker")
+  return published.ok ? null : published.reason
+}
+
+/** The files whose presence in a directory marks it as an experiment root of some protocol. */
+const DIRECT_ROOT_MARKERS = [JOURNAL_FILE, LOCK_FILE, HALT_MARKER_FILE, SCHEDULE_FILE, START_MARKER_FILE, ADVERSARIAL_ROOT_MARKER_FILE] as const
+
+/**
+ * Why `experimentRoot` cannot be the attempt-mode suite's own root, or `null`
+ * (protocol v3 B5): the suite's journal, lock and halt marker must be neither
+ * above nor below any v1 or v2 experiment root, nor shared with one.
+ *
+ * Refused, naming the file found:
+ *
+ * - **At the root.** A paired schedule or start marker always. Without a valid
+ *   root marker, also a journal, a halt marker or anything of the suite's under
+ *   `adversarial/`: nothing says those are this suite's. The lock is not
+ *   evidence either way, because the caller holds it. `marker: "required"`
+ *   refuses a root that carries no marker at all.
+ * - **Above it.** Any experiment file, or another suite's root marker, in any
+ *   ancestor directory of the root's path as given and of its canonical
+ *   (`realpath`) path, so a symlinked alias of a nested root is refused.
+ * - **Below it.** Any of those in any descendant directory.
+ *
+ * FAIL CLOSED. A path that cannot be resolved, a directory that cannot be
+ * listed and a file whose presence cannot be established each refuse. Unlike
+ * the token-mode rule (`sharedLedgerProblem`), an ancestor this process may not
+ * search refuses too: what it holds is not established.
+ *
+ * SYMLINKS ARE AMBIGUOUS EVIDENCE, AND REFUSE. A write through one lands
+ * somewhere this check did not look, so:
+ *
+ * - the root's own marker, journal, halt marker and `adversarial/` entry may not
+ *   be symlinks;
+ * - a marker-named path at or above the root that is a symlink which does not
+ *   resolve is neither present nor absent, and refuses;
+ * - a symlink below the root that resolves to a directory outside the root
+ *   refuses, whatever that directory holds. One that resolves inside the root
+ *   is reached by its real path, and one that resolves to nothing reaches
+ *   nothing.
+ */
+export async function isolatedRootProblem(experimentRoot: string, options: { marker: "required" | "optional" }): Promise<string | null> {
+  const lexical = resolve(experimentRoot)
+  const refuse = (why: string): string => `\`${lexical}\` cannot be the adversarial suite's own root (protocol v3 B5): ${why}`
+  let real: string
+  try {
+    real = await realpath(lexical)
+  } catch (error) {
+    return refuse(`its canonical path could not be resolved (${messageOf(error)}), so its isolation is not established`)
+  }
+  const gone = (error: unknown): boolean => {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === "ENOENT" || code === "ENOTDIR"
+  }
+  /** `symlink`, `other`, `absent`, or the reason the entry's kind could not be established. */
+  const kindOf = async (file: string): Promise<"symlink" | "other" | "absent" | { reason: string }> => {
+    try {
+      return (await lstat(file)).isSymbolicLink() ? "symlink" : "other"
+    } catch (error) {
+      if (gone(error)) return "absent"
+      return { reason: `whether \`${file}\` exists could not be established (${messageOf(error)}), so isolation is not established` }
+    }
+  }
+  /** `present`, `absent`, or the reason neither is established. A symlink that does not resolve is neither. */
+  const probe = async (file: string): Promise<"present" | "absent" | string> => {
+    const kind = await kindOf(file)
+    if (typeof kind === "object") return kind.reason
+    if (kind !== "symlink") return kind === "absent" ? "absent" : "present"
+    try {
+      await stat(file)
+      return "present"
+    } catch (error) {
+      return `\`${file}\` is a symlink that does not resolve (${messageOf(error)}), so whether an experiment file stands there is not established`
+    }
+  }
+
+  // At the root. Its own entries are never symlinks: a file reached through one
+  // is not shown to be this root's.
+  for (const name of [ADVERSARIAL_ROOT_MARKER_FILE, JOURNAL_FILE, HALT_MARKER_FILE, ADVERSARIAL_DIRECTORY]) {
+    const kind = await kindOf(join(real, name))
+    if (typeof kind === "object") return refuse(kind.reason)
+    if (kind === "symlink") return refuse(`\`${join(real, name)}\` is a symlink, so whose file it reaches is not established`)
+  }
+  const marker = await readAdversarialRootMarker(real)
+  if (marker.kind === "problem") return refuse(marker.reason)
+  if (marker.kind === "absent" && options.marker === "required") {
+    return refuse(
+      `it carries no \`${ADVERSARIAL_ROOT_MARKER_FILE}\`, so its journal, lock and halt marker cannot be told apart from ` +
+        "another experiment's",
+    )
+  }
+  const suiteFiles = [
+    JOURNAL_FILE,
+    HALT_MARKER_FILE,
+    join(ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE),
+    join(ADVERSARIAL_DIRECTORY, ADVERSARIAL_START_MARKER_FILE),
+  ]
+  for (const name of [SCHEDULE_FILE, START_MARKER_FILE, ...(marker.kind === "valid" ? [] : suiteFiles)]) {
+    const file = join(real, name)
+    const found = await probe(file)
+    if (found === "absent") continue
+    if (found !== "present") return refuse(found)
+    return refuse(
+      name === SCHEDULE_FILE || name === START_MARKER_FILE
+        ? `\`${file}\` exists, so this is a paired experiment's root`
+        : `\`${file}\` exists and the root carries no \`${ADVERSARIAL_ROOT_MARKER_FILE}\`, so that file belongs to another experiment`,
+    )
+  }
+
+  // Above it, on the path as given and on the canonical path.
+  const ancestorNames = [...DIRECT_ROOT_MARKERS, join(ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE)]
+  const checked = new Set<string>()
+  for (const start of new Set([lexical, real])) {
+    let directory = dirname(start)
+    for (;;) {
+      if (!checked.has(directory)) {
+        checked.add(directory)
+        for (const name of ancestorNames) {
+          const file = join(directory, name)
+          const found = await probe(file)
+          if (found === "absent") continue
+          if (found !== "present") return refuse(found)
+          return refuse(`\`${file}\` exists above it, so it is nested inside another experiment root`)
+        }
+      }
+      const parent = dirname(directory)
+      if (parent === directory) break
+      directory = parent
+    }
+  }
+
+  // Below it.
+  const ownAdversarial = join(real, ADVERSARIAL_DIRECTORY)
+  const foreignIn = (directory: string, names: readonly string[]): string | null => {
+    const direct = DIRECT_ROOT_MARKERS.find((name) => names.includes(name))
+    if (direct !== undefined) return join(directory, direct)
+    if (basename(directory) === ADVERSARIAL_DIRECTORY && directory !== ownAdversarial && names.includes(ADVERSARIAL_SCHEDULE_FILE)) {
+      return join(directory, ADVERSARIAL_SCHEDULE_FILE)
+    }
+    return null
+  }
+  const pending: string[] = [real]
+  while (pending.length > 0) {
+    const directory = pending.pop()!
+    let entries: Awaited<ReturnType<typeof listDirectory>>
+    try {
+      entries = await listDirectory(directory)
+    } catch (error) {
+      return refuse(`\`${directory}\` below it could not be listed (${messageOf(error)}), so what it holds is not established`)
+    }
+    if (directory !== real) {
+      const foreign = foreignIn(directory, entries.map((entry) => entry.name))
+      if (foreign !== null) return refuse(`\`${foreign}\` exists below it, so another experiment root is nested inside it`)
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        pending.push(path)
+        continue
+      }
+      if (!entry.isSymbolicLink()) continue
+      let target: string
+      try {
+        target = await realpath(path)
+        if (!(await stat(target)).isDirectory()) continue
+      } catch (error) {
+        if (gone(error)) continue
+        return refuse(`the symlink \`${path}\` below it could not be resolved (${messageOf(error)}), so what it reaches is not established`)
+      }
+      if (target === real || target.startsWith(`${real}${sep}`)) continue
+      return refuse(
+        `the symlink \`${path}\` below it reaches the directory \`${target}\` outside the root, so what the root holds is not established`,
+      )
+    }
+  }
+  return null
+}
+
+function listDirectory(directory: string) {
+  return readdir(directory, { withFileTypes: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +805,11 @@ export const ADVERSARIAL_BILL_FILE = "adversarial-bill.json"
 export interface AdversarialBillSummary {
   scheduleHash: string
   at: string
-  /** Known Adversarial and whole-experiment spend, in tokens. */
+  /**
+   * Known Adversarial and whole-experiment spend, in tokens. In an attempt-mode
+   * bill (`accounting`), the suite's and the root's admitted attempts in every
+   * issued state, as `overshoot` counts them.
+   */
   adversarialKnown: number
   globalKnown: number
   overshoot: { global: { limit: number; spent: number; overshoot: number }; adversarial: { limit: number; spent: number; overshoot: number } }
@@ -459,8 +817,12 @@ export interface AdversarialBillSummary {
   unknown: number
   uncertain: number
   inFlight: number
-  /** Refused Adversarial admissions, each with its run label and reason. */
-  refused: { label: string; stage: string; cause: string; reason: string }[]
+  /**
+   * Refused Adversarial admissions, each with its run label and reason. A refused
+   * admission writes no journal line, so this list is the only durable record of
+   * one. `attempt` is written in an attempt-mode bill.
+   */
+  refused: { label: string; stage: string; cause: string; reason: string; attempt?: number }[]
   halt: string | null
   stop: string | null
   /**
@@ -474,6 +836,16 @@ export interface AdversarialBillSummary {
    * other. Empty on every ordinary run.
    */
   operational: string[]
+  /**
+   * Story 2-7e — present exactly in an attempt-mode bill. Every count above is
+   * then in admitted attempts, `unknown` counts attempts settled with no host
+   * figure (a diagnostic, each counted in full), and `runs` is present.
+   */
+  accounting?: "attempts"
+  /** Story 2-7e — attempt mode only: each run's attempts against the per-run allowance, as the runner left them. */
+  runs?: { runId: string; limit: number; spent: number; overshoot: number }[]
+  /** Story 2-7e — attempt mode only: admissions settled `not-issued`, which count 0 attempts. */
+  notIssued?: number
 }
 
 /** Write the bill summary with `wx`: a runner ends once. Returns why it failed, or `null`. */
@@ -485,6 +857,32 @@ export async function writeAdversarialBill(experimentRoot: string, summary: Adve
     "the adversarial bill summary",
   )
   return published.ok ? null : published.reason
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value)
+
+/** One refused admission of an attempt-mode bill: its four strings, and a whole-number attempt when it carries one. */
+function billRefusalOk(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    typeof entry.label === "string" &&
+    typeof entry.stage === "string" &&
+    typeof entry.cause === "string" &&
+    typeof entry.reason === "string" &&
+    (entry.attempt === undefined || (typeof entry.attempt === "number" && Number.isInteger(entry.attempt)))
+  )
+}
+
+/** One per-run row of an attempt-mode bill. */
+function billRunOk(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    typeof entry.runId === "string" &&
+    entry.runId.length > 0 &&
+    typeof entry.limit === "number" &&
+    typeof entry.spent === "number" &&
+    typeof entry.overshoot === "number"
+  )
 }
 
 export type BillRead = { kind: "absent" } | { kind: "read"; bill: AdversarialBillSummary } | { kind: "unreadable"; reason: string }
@@ -518,7 +916,15 @@ export async function readAdversarialBill(experimentRoot: string): Promise<BillR
       // `string[]` that is `undefined`. A bill written before this story is still
       // readable — it simply recorded no operational quarantine, which is what an
       // empty list says.
-      (bill.operational === undefined || Array.isArray(bill.operational))
+      (bill.operational === undefined || Array.isArray(bill.operational)) &&
+      // An attempt-mode bill says so and carries its per-run rows, each a whole
+      // entry; a bill naming any other accounting is not one this reader knows.
+      (bill.accounting === undefined ||
+        (bill.accounting === "attempts" &&
+          Array.isArray(bill.runs) &&
+          bill.runs.every(billRunOk) &&
+          bill.refused.every(billRefusalOk) &&
+          typeof bill.notIssued === "number"))
     ) {
       return { kind: "read", bill: { ...bill, operational: bill.operational ?? [] } }
     }

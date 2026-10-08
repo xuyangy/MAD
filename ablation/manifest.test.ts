@@ -839,6 +839,30 @@ describe("the optional adversarial binding (story 2-7b)", () => {
     }
   })
 
+  test("an `accounting` that is present and not `attempts` is refused as malformed", () => {
+    for (const accounting of ["tokens", "requests", "", null, 1, true]) {
+      const parsed = withBinding({ ...good, accounting })
+      expect(parsed.ok, JSON.stringify(accounting)).toBe(false)
+      if (!parsed.ok) expect(parsed.reason, JSON.stringify(accounting)).toContain("has a malformed `adversarial`")
+    }
+  })
+
+  test("`accounting: attempts` goes with host-reported, unverified spend, and with nothing else", () => {
+    // This manifest's spend is audited token spend, so the attempt marker on its binding contradicts it.
+    const mismatched = withBinding({ ...good, accounting: "attempts" })
+    expect(mismatched.ok).toBe(false)
+    if (!mismatched.ok) expect(mismatched.reason).toContain("an attempt-mode arm's figures are host-reported and `unverified`")
+    const base = manifestFor({ armId: "attack", repeatId: 0 }) as unknown as { spend: Record<string, unknown> }
+    const unverified = { source: "host-reported-unverified", ...base.spend, usageCompleteness: "unverified", exposure: "unquantified" }
+    const matched = withBinding({ ...good, accounting: "attempts" }, { spend: unverified })
+    expect(matched.ok).toBe(true)
+    if (matched.ok) expect(matched.value.adversarial).toEqual({ ...good, accounting: "attempts" } as never)
+    // The same spend on a binding that names no accounting is refused the other way.
+    const unmarked = withBinding(good, { spend: unverified })
+    expect(unmarked.ok).toBe(false)
+    if (!unmarked.ok) expect(unmarked.reason).toContain("neither `experiment.accounting` nor `adversarial.accounting` is `attempts`")
+  })
+
   test("a manifest carrying both a paired and an adversarial binding is refused", () => {
     const experiment = { scheduleHash: `sha256:${"c".repeat(64)}`, block: 1, arm: "on", position: "first", prefixRunId: "run-prefix" }
     const parsed = withBinding(good, { experiment })

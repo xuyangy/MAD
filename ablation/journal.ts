@@ -48,6 +48,24 @@
  * open in the other, and a file mixing the two does not open at all. A
  * token-mode line carries no `mode` field and no `abandoned` flag.
  *
+ * ## Scope (story 2-7e)
+ *
+ * The mode says what a line counts; it does not say whose allowances apply. An
+ * attempt-mode journal also has a scope, `paired` by default or `adversarial`:
+ *
+ * - `paired` is protocol v2's journal: the Blocks gate and `ATTEMPT_ALLOWANCES`.
+ *   Its lines carry no `scope` field, and it refuses Adversarial work.
+ * - `adversarial` is the journal of the adversarial suite's own root (protocol
+ *   v3 B5): the gate is `adversarialAttemptGate` over
+ *   `ADVERSARIAL_ATTEMPT_ALLOWANCES`, every `issued` line says
+ *   `scope: "adversarial"` and belongs to the Adversarial category, and Blocks
+ *   work is refused before anything is appended.
+ *
+ * The scope is durable on every `issued` line and validated on replay: a file
+ * mixing scopes, a scoped line that is not an Adversarial attempt, and a file
+ * opened in a scope other than its own are each refused. A token-mode journal
+ * has no scope.
+ *
  * AD-1: this tree may import from `core/`. Nothing under `core/` imports it.
  */
 
@@ -67,8 +85,10 @@ import type {
 } from "../core/ports/admission.ts"
 import type { LateUsageReport, LateUsageReporter } from "../core/ports/late-usage.ts"
 import {
+  adversarialAttemptGate,
   adversarialRequestGate,
   ADVERSARIAL_ALLOWANCES,
+  ADVERSARIAL_ATTEMPT_ALLOWANCES,
   ATTEMPT_ALLOWANCES,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
@@ -82,6 +102,9 @@ import {
 
 export const JOURNAL_FILE = "paired-journal.jsonl"
 export const LOCK_FILE = "paired.lock"
+
+/** Story 2-7e — whose allowances an attempt-mode journal applies. See the module header. */
+export type JournalScope = "paired" | "adversarial"
 
 // ---------------------------------------------------------------------------
 // The lock
@@ -187,6 +210,8 @@ export interface IssuedLine {
   runId: string
   /** Story 2-8c3a — present exactly in an attempt-mode journal: this line is an admitted attempt. */
   mode?: "attempts"
+  /** Story 2-7e — present exactly in the adversarial suite's journal. */
+  scope?: "adversarial"
 }
 
 export interface SettledLine {
@@ -219,6 +244,8 @@ export interface BilledRequest {
   runId: string
   /** Story 2-8c3a — carried from the `issued` line of an attempt-mode journal. */
   mode?: "attempts"
+  /** Story 2-7e — carried from the `issued` line of the adversarial suite's journal. */
+  scope?: "adversarial"
   state: RequestState
   /** The settled figure (`usage`). In an attempt-mode journal, a host-reported diagnostic. */
   tokens?: TokenUsage
@@ -307,6 +334,8 @@ export interface UniqueExecutionBill {
    * host-reported diagnostics, never a bill.
    */
   mode?: "attempts"
+  /** Story 2-7e — present only for the adversarial suite's journal. `overshoot` then reads against its allowances. */
+  scope?: "adversarial"
 }
 
 /** One refused admission: where it would have been spent, and why it was not. */
@@ -346,6 +375,12 @@ export interface OvershootReport {
   unit?: "attempts"
   /** Story 2-8c3a — attempt mode only: one row per block that holds any attempt, against its 100. */
   blockTotals?: { block: number; limit: number; spent: number; overshoot: number }[]
+  /**
+   * Story 2-7e — the adversarial suite's journal only: one row per run that holds
+   * any request, in first-admission order, against the per-run allowance. `global`
+   * and `adversarial` are then the root and the suite against theirs.
+   */
+  runTotals?: { runId: string; limit: number; spent: number; overshoot: number }[]
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -436,7 +471,10 @@ function requestProblem(request: AdmissionRequest): string | null {
  * what the invocation held in memory.
  */
 class JournalState {
-  constructor(readonly mode: AccountingMode = "tokens") {}
+  constructor(
+    readonly mode: AccountingMode = "tokens",
+    readonly scope: JournalScope = "paired",
+  ) {}
 
   readonly requests = new Map<string, BilledRequest>()
   readonly byExecution = new Map<string, string>()
@@ -619,6 +657,14 @@ class JournalState {
         this.spentWhere((request) => request.category === "blocks" && request.block === block && request.phase === phase),
     }
     if (this.mode !== "attempts") return view
+    if (this.scope === "adversarial") {
+      return {
+        ...view,
+        mode: "attempts",
+        scope: "adversarial",
+        runSpent: (runId) => this.spentWhere((request) => request.category === "adversarial" && request.runId === runId),
+      }
+    }
     return {
       ...view,
       mode: "attempts",
@@ -693,12 +739,15 @@ class JournalState {
       refused: refused.map((refusal) => ({ ...refusal })),
       refusedAdversarial: refusedAdversarial.map((refusal) => ({ ...refusal })),
       overshoot:
-        this.mode === "attempts"
-          ? attemptOvershootOf([...phases.values()])
-          : overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()]),
+        this.mode !== "attempts"
+          ? overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()])
+          : this.scope === "adversarial"
+            ? adversarialAttemptOvershootOf(requests)
+            : attemptOvershootOf([...phases.values()]),
       haltMarker: { ...this.haltMarker },
       operational: [...this.operational],
       ...(this.mode === "attempts" ? { mode: "attempts" as const } : {}),
+      ...(this.mode === "attempts" && this.scope === "adversarial" ? { scope: "adversarial" as const } : {}),
     }
   }
 }
@@ -728,8 +777,9 @@ function overshootOf(
 }
 
 /**
- * Story 2-8c3a — the same report in admitted attempts, from each phase's count.
- * The Adversarial row is 0 of 0: an attempt-mode journal admits nothing there.
+ * Story 2-8c3a — the same report in admitted attempts, from each phase's count,
+ * for a paired attempt-mode journal. The Adversarial row is 0 of 0: that journal
+ * admits nothing there.
  */
 function attemptOvershootOf(phases: readonly PhaseBill[]): OvershootReport {
   const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
@@ -754,6 +804,30 @@ function attemptOvershootOf(phases: readonly PhaseBill[]): OvershootReport {
   }
 }
 
+/**
+ * Story 2-7e — the report for the adversarial suite's journal, in admitted
+ * attempts: the root and the suite against `ADVERSARIAL_ATTEMPT_ALLOWANCES`, and
+ * one row per run. An attempt counts in every state but `not-issued`. The Blocks
+ * row is 0 of 0: this journal admits nothing there.
+ */
+function adversarialAttemptOvershootOf(requests: readonly BilledRequest[]): OvershootReport {
+  const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
+  const issued = requests.filter((request) => request.state !== "not-issued")
+  const runs = new Map<string, number>()
+  for (const request of requests) {
+    if (request.category !== "adversarial") continue
+    runs.set(request.runId, (runs.get(request.runId) ?? 0) + (request.state === "not-issued" ? 0 : 1))
+  }
+  return {
+    global: row(ADVERSARIAL_ATTEMPT_ALLOWANCES.global, issued.length),
+    blocks: row(0, issued.filter((request) => request.category === "blocks").length),
+    adversarial: row(ADVERSARIAL_ATTEMPT_ALLOWANCES.suite, issued.filter((request) => request.category === "adversarial").length),
+    phases: [],
+    unit: "attempts",
+    runTotals: [...runs].map(([runId, spent]) => ({ runId, ...row(ADVERSARIAL_ATTEMPT_ALLOWANCES.run, spent) })),
+  }
+}
+
 function isWhole(value: unknown, least: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= least
 }
@@ -763,6 +837,10 @@ function isWhole(value: unknown, least: number): value is number {
  * and the journal refuses to open: a journal MAD cannot read is not evidence
  * that nothing was spent.
  */
+export function isJournalLine(value: unknown): value is JournalLine {
+  return isLine(value)
+}
+
 function isLine(value: unknown): value is JournalLine {
   if (value === null || typeof value !== "object") return false
   const line = value as Record<string, unknown>
@@ -784,7 +862,8 @@ function isLine(value: unknown): value is JournalLine {
       (line.step === undefined || isWhole(line.step, 2)) &&
       typeof line.runId === "string" &&
       line.runId.length > 0 &&
-      (line.mode === undefined || line.mode === "attempts")
+      (line.mode === undefined || line.mode === "attempts") &&
+      (line.scope === undefined || line.scope === "adversarial")
     )
   }
   if (line.type === "settled") {
@@ -816,13 +895,30 @@ type Replayed = { ok: true; state: JournalState; existed: boolean } | { ok: fals
  * `mode` is given. With `mode` absent the file's own mode is used (tokens for a
  * file with no `issued` line). An attempt-mode file holds no step line, and a
  * token-mode file no `abandoned` settlement.
+ *
+ * Story 2-7e — the file's scope is read the same way: all `issued` lines
+ * declaring `scope: "adversarial"` is the adversarial suite's journal, none
+ * declaring it a paired one: a paired line carries no `scope` field at all. A file mixing the two is refused, and so are a scoped file that is
+ * not attempt-mode, a scoped line outside the Adversarial category, and a file
+ * whose scope is not `scope` when `scope` is given. With `scope` absent the
+ * file's own is used (paired for a file with no `issued` line).
  */
-async function replayFile(file: string, mode?: AccountingMode): Promise<Replayed> {
+async function replayFile(file: string, mode?: AccountingMode, scope?: JournalScope): Promise<Replayed> {
   let text: string
   try {
     text = await readFile(file, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, state: new JournalState(mode), existed: false }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // An absent file has no lines to say what it counts, so the adversarial
+      // scope is held to the same rule `openJournal` applies: attempts only.
+      if (scope === "adversarial" && (mode ?? "tokens") !== "attempts") {
+        return {
+          ok: false,
+          reason: `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${mode ?? "tokens"} mode`,
+        }
+      }
+      return { ok: true, state: new JournalState(mode, scope), existed: false }
+    }
     return { ok: false, reason: `the journal \`${file}\` could not be read: ${messageOf(error)}` }
   }
   const rows = text.split("\n").filter((row) => row.length > 0)
@@ -855,6 +951,40 @@ async function replayFile(file: string, mode?: AccountingMode): Promise<Replayed
     }
   }
   const replayMode = mode ?? fileMode ?? "tokens"
+  const scoped = issued.filter((line) => line.scope === "adversarial").length
+  if (scoped > 0 && scoped < issued.length) {
+    return {
+      ok: false,
+      reason:
+        `integrity failure: the journal \`${file}\` mixes scopes (${scoped} issued line(s) declare the adversarial ` +
+        `suite and ${issued.length - scoped} declare none), so it is read in neither`,
+    }
+  }
+  const fileScope: JournalScope | null = issued.length === 0 ? null : scoped > 0 ? "adversarial" : "paired"
+  if (scope !== undefined && fileScope !== null && fileScope !== scope) {
+    return {
+      ok: false,
+      reason: `integrity failure: the journal \`${file}\` records the ${fileScope} scope, and it was opened in the ${scope} scope`,
+    }
+  }
+  const replayScope = scope ?? fileScope ?? "paired"
+  if (replayScope === "adversarial") {
+    if (replayMode !== "attempts") {
+      return {
+        ok: false,
+        reason: `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${replayMode} mode`,
+      }
+    }
+    const foreign = lines.findIndex((line) => line.type === "issued" && line.category !== "adversarial")
+    if (foreign >= 0) {
+      return {
+        ok: false,
+        reason:
+          `integrity failure: line ${foreign + 1} of the journal \`${file}\` is a ` +
+          `${(lines[foreign] as IssuedLine).category} request, which the adversarial suite's journal never holds`,
+      }
+    }
+  }
   for (const [position, line] of lines.entries()) {
     if (replayMode === "attempts" && line.type === "issued" && line.step !== undefined) {
       return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` is a step line, which an attempt-mode journal never holds` }
@@ -863,26 +993,32 @@ async function replayFile(file: string, mode?: AccountingMode): Promise<Replayed
       return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` carries \`abandoned\`, which a token-mode journal never holds` }
     }
   }
-  const state = new JournalState(replayMode)
+  const state = new JournalState(replayMode, replayScope)
   for (const line of lines) state.apply(line)
   return { ok: true, state, existed: true }
 }
 
 export type PersistedReplay =
-  | { ok: true; mode: AccountingMode; existed: boolean; bill: UniqueExecutionBill }
+  | { ok: true; mode: AccountingMode; scope: JournalScope; existed: boolean; bill: UniqueExecutionBill }
   | { ok: false; reason: string }
 
 /**
  * Story 2-8c3a — a persisted journal, replayed by the rules `openJournal` uses,
  * for a reader. Nothing is appended and no lock is taken. An `issued` line with
- * no settlement reads UNCERTAIN, exactly as on reopen. `mode`, when given, must
- * be the file's own.
+ * no settlement reads UNCERTAIN, exactly as on reopen. `mode` and `scope`, when
+ * given, must be the file's own.
  */
-export async function replayPersistedJournal(file: string, mode?: AccountingMode): Promise<PersistedReplay> {
-  const replayed = await replayFile(file, mode)
+export async function replayPersistedJournal(file: string, mode?: AccountingMode, scope?: JournalScope): Promise<PersistedReplay> {
+  const replayed = await replayFile(file, mode, scope)
   if (!replayed.ok) return replayed
   replayed.state.interrupt()
-  return { ok: true, mode: replayed.state.mode, existed: replayed.existed, bill: replayed.state.bill([]) }
+  return {
+    ok: true,
+    mode: replayed.state.mode,
+    scope: replayed.state.scope,
+    existed: replayed.existed,
+    bill: replayed.state.bill([]),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1101,14 @@ export interface PairedJournal {
    * cap over every category, then the Adversarial allowance. The halt marker at
    * the root is read again before each request, so a halt written there by
    * another writer refuses the next request.
+   *
+   * Story 2-7e — in the adversarial suite's attempt-mode journal the gate is
+   * `adversarialAttemptGate`. The run id is read once inside the queue, before the
+   * gate, counted against that run's allowance and written on the `issued` line;
+   * an id that is missing, empty, unreadable or different when read again stops
+   * the runner and appends nothing. A refusal on the suite or global allowance
+   * latches the runner stop. A paired attempt-mode journal refuses every
+   * Adversarial admission as a runner stop.
    */
   adversarialAdmission(binding: AdversarialAdmissionBinding): RequestAdmission
   /**
@@ -1000,6 +1144,17 @@ export interface PairedJournal {
    * there.
    */
   haltOperationally(reason: string): void
+  /**
+   * Story 2-7e — latch a halt for an attempt that may still be held open, from
+   * outside a settlement: a cancellation that arrived while an attempt was in
+   * flight, or issued work the runner found unsettled.
+   *
+   * Worded with `ATTEMPT_MODE_STOP_PREFIX` in attempt mode and with
+   * `OPERATIONAL_HALT_PREFIX` otherwise, so it is never read as unknown spend. It
+   * writes the halt marker, touches no request, and releases the lock on
+   * `close()` as an ordinary halt does.
+   */
+  haltAttempts(reason: string): void
   bill(): UniqueExecutionBill
   /** Wait for every queued append. */
   settled(): Promise<void>
@@ -1097,6 +1252,12 @@ export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; 
  *
  * `mode` is the accounting mode (story 2-8c3a), `tokens` when absent. A file
  * whose lines declare another mode, or mix the two, refuses to open.
+ *
+ * ## The scope
+ *
+ * `scope` is whose allowances apply (story 2-7e), `paired` when absent. The
+ * adversarial scope exists only in attempt mode. A file whose lines declare
+ * another scope, or mix the two, refuses to open.
  */
 export async function openJournal(
   bundleRoot: string,
@@ -1104,11 +1265,18 @@ export async function openJournal(
   now: () => string,
   io: JournalIo = FILE_IO,
   mode: AccountingMode = "tokens",
+  scope: JournalScope = "paired",
 ): Promise<JournalOpened> {
   const root = resolve(bundleRoot)
   const file = join(root, JOURNAL_FILE)
   const markerPath = join(root, HALT_MARKER_FILE)
-  const replayed = await replayFile(file, mode)
+  if (scope !== "paired" && scope !== "adversarial") {
+    return { ok: false, reason: `the journal scope ${JSON.stringify(scope)} is neither paired nor adversarial` }
+  }
+  if (scope === "adversarial" && mode !== "attempts") {
+    return { ok: false, reason: `the adversarial suite's journal counts attempts, and it was opened in ${mode} mode` }
+  }
+  const replayed = await replayFile(file, mode, scope)
   if (!replayed.ok) return { ok: false, reason: replayed.reason }
   const state = replayed.state
   state.interrupt()
@@ -1277,7 +1445,8 @@ export async function openJournal(
 
   /** One category's admission: what it gates on, what it journals, where a refusal is kept. */
   interface AdmitSpec {
-    gate: () => RequestGateResult
+    /** `runId` is the identity read before the gate when `identityFirst` is set, else `undefined`. */
+    gate: (runId: string | undefined) => RequestGateResult
     line: Pick<IssuedLine, "category" | "block" | "phase">
     /** Names the requester in a stop reason. */
     who: string
@@ -1287,6 +1456,23 @@ export async function openJournal(
     record(decision: AdmissionDecision & { ok: false }, request: AdmissionRequest): void
     /** Runs inside the queue before the gate. */
     before?: () => Promise<void>
+    /**
+     * Story 2-7e — read and validate the run id inside the queue BEFORE the gate,
+     * hand it to the gate, and write that same value on the `issued` line. Absent
+     * for every other category, which reads it after the gate.
+     */
+    identityFirst?: true
+  }
+
+  /** One read of a requester's run id: a non-empty string, or why there is none. */
+  const identityOf = (read: () => string | undefined): { ok: true; id: string } | { ok: false; why: string } => {
+    let id: unknown
+    try {
+      id = read()
+    } catch (error) {
+      return { ok: false, why: `its run id could not be read (${messageOf(error)})` }
+    }
+    return typeof id === "string" && id.length > 0 ? { ok: true, id } : { ok: false, why: "its run id did not exist" }
   }
 
   const admitWith = (
@@ -1314,14 +1500,43 @@ export async function openJournal(
         // Only a category with a pre-check awaits here: an extra await would let
         // settlements land between two queued admissions and move the gate.
         if (spec.before !== undefined) await spec.before()
-        const gate = spec.gate()
-        if (!gate.ok) return refuse(gate)
+        let identity: string | undefined
+        if (spec.identityFirst === true) {
+          const read = identityOf(spec.runId)
+          if (!read.ok) {
+            state.stop ??= `${spec.who} asked to admit a request, and ${read.why}`
+            return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+          }
+          identity = read.id
+        }
+        const gate = spec.gate(identity)
+        if (!gate.ok) {
+          if (gate.latch === undefined) return refuse(gate)
+          // A suite or global refusal ends admission for the invocation.
+          state.stop ??= gate.latch
+          return refuse({ ok: false, cause: gate.cause, reason: gate.reason })
+        }
         const problem = requestProblem(request)
         if (problem !== null) {
           state.stop ??= `${spec.who} asked to admit a malformed request: ${problem}`
           return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
         }
-        const runId = spec.runId()
+        let runId: string | undefined
+        if (identity !== undefined) {
+          // The line carries the identity the gate counted. A requester whose id
+          // reads differently on a second read would be journaled under a run the
+          // gate never checked, so nothing is appended.
+          const again = identityOf(spec.runId)
+          if (!again.ok || again.id !== identity) {
+            state.stop ??=
+              `${spec.who} asked to admit a request whose run id changed between the gate and the journal line ` +
+              `(\`${identity}\`, then ${again.ok ? `\`${again.id}\`` : "none"})`
+            return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
+          }
+          runId = identity
+        } else {
+          runId = spec.runId()
+        }
         if (typeof runId !== "string" || runId.length === 0) {
           state.stop ??= `${spec.who} asked to admit a request before its run id existed`
           return refuse(refuseAsStop(spec.runner) as AdmissionDecision & { ok: false })
@@ -1336,6 +1551,7 @@ export async function openJournal(
           ...(request.step === undefined ? {} : { step: request.step }),
           runId,
           ...(mode === "attempts" ? { mode: "attempts" as const } : {}),
+          ...(scope === "adversarial" ? { scope: "adversarial" as const } : {}),
         }
         try {
           await writeLine(line)
@@ -1367,6 +1583,25 @@ export async function openJournal(
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
           if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
+          if (scope === "adversarial") {
+            // The suite's own root holds no other category's work (protocol v3
+            // B5). Asking for it is a caller on the wrong journal, so it stops the
+            // runner before anything is appended.
+            state.stop ??=
+              `a Blocks admission (block ${binding.block}'s ${binding.phase}) was asked of the adversarial suite's ` +
+              "journal, which admits only Adversarial attempts"
+            const refusal = refuseAsStop() as AdmissionDecision & { ok: false }
+            const runId = runIdOf(binding.runId)
+            refused.push({
+              block: binding.block,
+              phase: binding.phase,
+              ...(runId === undefined ? {} : { runId }),
+              ...whereOf(request),
+              cause: refusal.cause,
+              reason: refusal.reason,
+            })
+            return Promise.resolve(refusal)
+          }
           return admitWith(request, {
             gate: () => requestGate(state.view(), { block: binding.block, phase: binding.phase }),
             line: { category: "blocks", block: binding.block, phase: binding.phase },
@@ -1396,57 +1631,62 @@ export async function openJournal(
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
           if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
-          if (mode === "attempts") {
-            // Protocol v2's attempt unit has no Adversarial allowance. Asking for
-            // one is a caller on the wrong journal, so it stops the runner, as a
-            // step asked for in attempt mode does.
-            state.stop ??= "an Adversarial admission was asked of an attempt-mode journal, which has no Adversarial allowance"
-            const refusal = refuseAsStop("adversarial runner") as AdmissionDecision & { ok: false }
+          const record = (decision: AdmissionDecision & { ok: false }, asked: AdmissionRequest): void => {
             const runId = runIdOf(binding.runId)
             refusedAdversarial.push({
               label: binding.label,
               ...(runId === undefined ? {} : { runId }),
-              ...whereOf(request),
-              cause: refusal.cause,
-              reason: refusal.reason,
+              ...whereOf(asked),
+              cause: decision.cause,
+              reason: decision.reason,
             })
+          }
+          if (mode === "attempts" && scope !== "adversarial") {
+            // Protocol v2's attempt unit has no Adversarial allowance. Asking for
+            // one is a caller on the wrong journal, so it stops the runner, as a
+            // step asked for in attempt mode does.
+            state.stop ??=
+              "an Adversarial admission was asked of a paired attempt-mode journal, which has no Adversarial allowance"
+            const refusal = refuseAsStop("adversarial runner") as AdmissionDecision & { ok: false }
+            record(refusal, request)
             return Promise.resolve(refusal)
           }
-          return admitWith(request, {
-            // A halt marker written at the root after this journal opened (by
-            // the arm governor, or by hand) latches the halt before the gate reads
-            // it. Only this path re-reads it: Blocks admission is kept exactly as
-            // 2-5c shipped it, which reads the marker once, at open.
-            before: async () => {
-              if (state.halt !== null) return
-              try {
-                await readFile(markerPath)
-                state.latch(`the halt marker \`${markerPath}\` exists`)
-                state.haltMarker = { file: markerPath, error: null }
-                markerQueued = true
-              } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                  state.latch(`whether the halt marker \`${markerPath}\` exists could not be established (${messageOf(error)})`)
-                  watchHalt()
-                }
+          // A halt marker written at the root after this journal opened (by
+          // the arm governor, or by hand) latches the halt before the gate reads
+          // it. Only this path re-reads it: Blocks admission is kept exactly as
+          // 2-5c shipped it, which reads the marker once, at open.
+          const before = async (): Promise<void> => {
+            if (state.halt !== null) return
+            try {
+              await readFile(markerPath)
+              state.latch(`the halt marker \`${markerPath}\` exists`)
+              state.haltMarker = { file: markerPath, error: null }
+              markerQueued = true
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                state.latch(`whether the halt marker \`${markerPath}\` exists could not be established (${messageOf(error)})`)
+                watchHalt()
               }
-            },
-            gate: () => adversarialRequestGate(state.view()),
-            line: { category: "adversarial", block: null, phase: null },
+            }
+          }
+          const common = {
+            before,
+            line: { category: "adversarial" as const, block: null, phase: null },
             who: `adversarial run ${binding.label}`,
             runner: "adversarial runner",
             runId: binding.runId,
-            record(decision, asked) {
-              const runId = runIdOf(binding.runId)
-              refusedAdversarial.push({
-                label: binding.label,
-                ...(runId === undefined ? {} : { runId }),
-                ...whereOf(asked),
-                cause: decision.cause,
-                reason: decision.reason,
-              })
-            },
-          })
+            record,
+          }
+          if (scope === "adversarial") {
+            return admitWith(request, {
+              ...common,
+              identityFirst: true,
+              // `identityFirst` hands the gate the validated id; the fallback only
+              // satisfies the type.
+              gate: (runId) => adversarialAttemptGate(state.view(), { runId: runId ?? "", label: binding.label }),
+            })
+          }
+          return admitWith(request, { ...common, gate: () => adversarialRequestGate(state.view()) })
         },
       }
     },
@@ -1487,6 +1727,11 @@ export async function openJournal(
       // says a cleanup is unresolved.
       state.latch(worded)
       state.operational.push(worded)
+      watchHalt()
+    },
+
+    haltAttempts(reason) {
+      state.latch(mode === "attempts" ? attemptModeStopReason(reason) : operationalHaltReason(reason))
       watchHalt()
     },
 
@@ -1649,7 +1894,7 @@ export async function openJournal(
           return outcome
         }
         try {
-          const disk = await replayFile(file, mode)
+          const disk = await replayFile(file, mode, scope)
           if (!disk.ok) return fail(disk.reason)
           const persist = async (line: JournalLine): Promise<boolean> => {
             try {
@@ -1746,6 +1991,7 @@ async function writeHaltMarker(markerPath: string, state: JournalState): Promise
     // for. The two need different recovery steps.
     operational: [...state.operational],
     ...(state.mode === "attempts" ? { accounting: "attempts" } : {}),
+    ...(state.mode === "attempts" && state.scope === "adversarial" ? { scope: "adversarial" } : {}),
   }
   try {
     const handle = await open(markerPath, "wx", 0o600)

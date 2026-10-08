@@ -10,16 +10,27 @@
  * nothing else about readiness, refuses while this file differs from HEAD, and
  * records its committed blob and every gate's status in the sealed schedule.
  *
- * ## Three phases, and no probe or pilot exception
+ * ## Four phases, and no probe or pilot exception
  *
  * Each gate names the phase it is required for: `accounting-probe` (story 2-8c's
  * bounded, authorized probe), `oauth-pilot` (story 2-8c5's bounded OpenAI OAuth
- * pilot, `bun run oauth-pilot --live`) or `evaluation` (the three blocks). The
+ * pilot, `bun run oauth-pilot --live`), `evaluation` (the three blocks) or
+ * `adversarial` (story 2.7's sixteen adversarial runs on the OAuth route). The
  * launcher asks `gatePreflight(PAIRED_GATES, "evaluation", route)` for the route
  * its `--provider-mode` selects, `api-key` by default; the pilot asks
  * `gatePreflight(PAIRED_GATES, "oauth-pilot", "oauth")`. A gate required only for
  * the probe or the pilot is printed and never consulted for the evaluation, so
  * closing it can never stand in for an evaluation gate.
+ *
+ * ## The adversarial phase (story 2-7e)
+ *
+ * Gates 10, 11 and 12 are required for `adversarial` on the oauth route, and all
+ * three are OPEN. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
+ * pins are `null` until they are chosen, and `adversarialRunProblem` refuses a
+ * run with none. For this phase `gatePreflight` reports that problem, and consults
+ * `ADVERSARIAL_CANDIDATE_NON_GATES`, the record of the one prerequisite that may
+ * turn out not to be a gate: while that record is unresolved, absent or
+ * malformed the preflight refuses, and no list a caller supplies replaces it.
  *
  * ## Routes (story 2-8c3a)
  *
@@ -50,8 +61,8 @@
  */
 
 export type GateKind = "engineering" | "authorization"
-export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation"
-export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation"]
+export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation" | "adversarial"
+export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation", "adversarial"]
 export type GateStatus = "OPEN" | "CLOSED"
 /** Story 2-8c3a — how the managed host reaches its providers. */
 export type GateRoute = "api-key" | "oauth"
@@ -248,6 +259,86 @@ export const OAUTH_PILOT_RUN: OAuthPilotRun = {
       proposalSha256: "8bd4b660bbe0881a989a8ac75a973f4486ba06e77a3ccddb76598476dfa4dcc5",
     },
   ],
+}
+
+/** Story 2-7e — an OAuth adversarial run that already happened, and the committed files it left. */
+export interface AdversarialPriorRun {
+  run: number
+  /** Its reservation, relative to the repository. */
+  reservation: string
+  /** Its committed evidence, relative to the repository. */
+  evidence: string
+}
+
+/** Story 2-7e — the adversarial run gate 10 covers. */
+export interface AdversarialRun {
+  run: number
+  /** The one-slot roster's `provider/model` pin; the first is also `small_model`. `null` until it is chosen. */
+  pins: readonly string[] | null
+  /** The reservation the launcher creates exclusively before it starts a host, relative to the repository. */
+  reservation: string
+  prior: readonly AdversarialPriorRun[]
+}
+
+/** Run N's reservation, relative to the repository. */
+export function adversarialReservation(run: number): string {
+  return `ablation/evidence/adversarial-oauth-run-${run}.reservation`
+}
+
+/**
+ * Story 2-7e — the one OAuth adversarial run gate 10 will authorize: its run, its
+ * roster pin and its reservation, with every earlier run. No run has happened.
+ *
+ * `pins` is `null`: protocol v3 B1 fixes the pin, and the `small_model` it
+ * implies, at freeze or seal, and neither has happened. A launcher asks
+ * `adversarialRunProblem` and refuses while it is `null`.
+ */
+export const ADVERSARIAL_RUN: AdversarialRun = {
+  run: 1,
+  pins: null,
+  reservation: adversarialReservation(1),
+  prior: [],
+}
+
+/**
+ * Why `run` names no usable adversarial run, or `null`. Refused: a run whose
+ * pins are not chosen, a reservation that is not the run's own, and a `prior`
+ * list that is not exactly runs 1 to N-1 in order, each with its own
+ * reservation and a named evidence file.
+ */
+export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): string | null {
+  if (!Number.isInteger(run.run) || run.run < 1) return `the adversarial run number ${JSON.stringify(run.run)} is not a whole number from 1`
+  if (run.pins === null) {
+    return (
+      `adversarial run ${run.run} has no roster pin: \`ADVERSARIAL_RUN.pins\` is null, which means not yet chosen. The ` +
+      "pin is fixed when protocol v3 is frozen or the schedule is sealed, by a reviewed change to this table"
+    )
+  }
+  if (!Array.isArray(run.pins) || run.pins.length !== 1 || !run.pins.every((pin) => typeof pin === "string" && /^[^/\s]+\/\S+$/.test(pin))) {
+    return `adversarial run ${run.run}'s pins ${JSON.stringify(run.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`
+  }
+  if (run.reservation !== adversarialReservation(run.run)) {
+    return `adversarial run ${run.run}'s reservation \`${run.reservation}\` is not \`${adversarialReservation(run.run)}\``
+  }
+  if (!Array.isArray(run.prior) || run.prior.length !== run.run - 1) {
+    return (
+      `adversarial run ${run.run} must list exactly its ${run.run - 1} earlier run(s) in \`prior\`, and it lists ` +
+      `${Array.isArray(run.prior) ? run.prior.length : "no list"}`
+    )
+  }
+  for (const [index, earlier] of run.prior.entries()) {
+    const expected = index + 1
+    if (earlier === null || typeof earlier !== "object" || earlier.run !== expected) {
+      return `adversarial run ${run.run}'s \`prior\` entry ${expected} is not run ${expected}; the earlier runs are listed 1 to ${run.run - 1}, in order`
+    }
+    if (earlier.reservation !== adversarialReservation(expected)) {
+      return `adversarial run ${run.run}'s \`prior\` run ${expected} names the reservation \`${earlier.reservation}\`, not \`${adversarialReservation(expected)}\``
+    }
+    if (typeof earlier.evidence !== "string" || earlier.evidence.trim().length === 0) {
+      return `adversarial run ${run.run}'s \`prior\` run ${expected} names no evidence file`
+    }
+  }
+  return null
 }
 
 export const PAIRED_GATES: readonly PairedGate[] = [
@@ -464,7 +555,143 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "the budget owner authorizes the three paired blocks' spend on the api-key route in ledger tokens: the three blocks' " +
       "token spend under PAIRED_ALLOWANCES, unchanged. Closing gate 4, which covers only the oauth route, never stands in for it",
   },
+  {
+    number: 10,
+    name: "adversarial spend authorization",
+    kind: "authorization",
+    phase: "adversarial",
+    routes: ["oauth"],
+    owner: HUMAN_BUDGET_OWNER,
+    status: "OPEN",
+    requires:
+      `the budget owner authorizes run ${ADVERSARIAL_RUN.run} (\`ADVERSARIAL_RUN\`) of the sixteen adversarial runs on the oauth ` +
+      "route in admitted attempts under a frozen protocol v3: 30 per run, 480 for the suite and 480 for the suite's own root, " +
+      "each an admission threshold and not a proven-adequate budget. An admitted attempt bounds neither the physical requests " +
+      "the host sends nor subscription quota. Closing gate 4 or gate 8 never stands in for it",
+  },
+  {
+    number: 11,
+    name: "adversarial attempt accounting",
+    kind: "engineering",
+    phase: "adversarial",
+    routes: ["oauth"],
+    owner: "story 2-7f",
+    status: "OPEN",
+    requires:
+      "story 2-7f's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the " +
+      "suite's own root before it is issued and counted once, an admission refused on the run, suite or root allowance " +
+      "reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity " +
+      "failure halts. Paired and pilot evidence is reused only within its measured scope",
+  },
+  {
+    number: 12,
+    name: "bounded materializer termination",
+    kind: "engineering",
+    phase: "adversarial",
+    routes: ["oauth"],
+    owner: "story 2-7e2",
+    status: "OPEN",
+    requires:
+      "the git calls that write each adversarial worktree (ablation/adversarial-materialize.ts) end within a bound: a call " +
+      "past its deadline is escalated, its termination is confirmed or reported as unconfirmed, a descendant holding a pipe " +
+      "cannot stop the call returning, and a synthesized status is told apart from one git returned",
+  },
 ]
+
+/**
+ * Story 2-7e — a prerequisite of the sixteen adversarial runs that may turn out
+ * not to be a gate, recorded before anyone has shown that it is not.
+ *
+ * `OPEN` means unresolved: it blocks. `NON-GATING` means the named story
+ * validated the claim on the complete launcher path and recorded its evidence.
+ * The claim is only ever that a code path is not reached by one launcher and one
+ * configuration. It is never a statement about that code path's own behaviour.
+ */
+export interface CandidateNonGate {
+  /** The prerequisite's number in `LIVE-RUN.md`, "Before the sixteen live runs". */
+  item: number
+  name: string
+  status: "OPEN" | "NON-GATING"
+  /** The story that must validate the claim before the status may change. */
+  validatedBy: string
+  /** What would be recorded, worded as reach and nothing more. */
+  claim: string
+  /** What is known today, and what is not. */
+  basis: string
+  /** Present exactly when the status is `NON-GATING`: the validation, and the tests that check it. */
+  evidence?: string
+  reopensWhen: string
+}
+
+/** The wording every candidate claim carries. */
+export const CANDIDATE_CLAIM_WORDING = "not reached by this launcher and configuration"
+
+/** The prerequisite items the adversarial phase needs a candidate record for. */
+export const ADVERSARIAL_CANDIDATE_ITEMS: readonly number[] = [7]
+
+export const ADVERSARIAL_CANDIDATE_NON_GATES: readonly CandidateNonGate[] = [
+  {
+    item: 7,
+    name: "review-path reads (`adapters/opencode/repo.ts`)",
+    status: "OPEN",
+    validatedBy: "story 2-7f",
+    claim: `the reads of the change through the host shell in \`adapters/opencode/repo.ts\` are ${CANDIDATE_CLAIM_WORDING}`,
+    basis:
+      "`runAdversarialSuite` hands `review()` the sealed material of each case and side and never calls `opencodeRepo`. No " +
+      "adversarial launcher exists yet, so its preflight, its backend and Tools factories, its directory verification and " +
+      "its callbacks have not been examined, and nothing is established about them",
+    reopensWhen:
+      "the launcher, its factories or `runAdversarialSuite` ever read the reviewed change through `opencodeRepo` or `repo.change()`",
+  },
+]
+
+/** The words a candidate record never uses: each would claim something about the code path itself. */
+const CANDIDATE_FORBIDDEN_WORDS = /\b(?:un)?bounded\b|\bfixed\b|\bchecked\b/i
+
+/**
+ * Why a candidate record does not let the adversarial phase proceed; empty when
+ * it does. Every required item must be present exactly once, well formed, and
+ * resolved `NON-GATING` with evidence.
+ */
+export function candidateRecordProblems(record: readonly CandidateNonGate[] | undefined | null): string[] {
+  if (!Array.isArray(record)) return ["the candidate non-gate record is absent, so prerequisite 7 is unresolved"]
+  const problems: string[] = []
+  for (const item of ADVERSARIAL_CANDIDATE_ITEMS) {
+    const found = record.filter((entry) => entry !== null && typeof entry === "object" && entry.item === item)
+    if (found.length === 0) problems.push(`the candidate non-gate record holds no entry for prerequisite ${item}, so it is unresolved`)
+    if (found.length > 1) problems.push(`the candidate non-gate record holds ${found.length} entries for prerequisite ${item}`)
+  }
+  for (const entry of record) {
+    if (entry === null || typeof entry !== "object") {
+      problems.push("the candidate non-gate record holds an entry that is not an object")
+      continue
+    }
+    const label = `candidate non-gate ${JSON.stringify(entry.item)} (${typeof entry.name === "string" ? entry.name : "unnamed"})`
+    const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0
+    if (!ADVERSARIAL_CANDIDATE_ITEMS.includes(entry.item)) problems.push(`${label} names a prerequisite the adversarial phase has no candidate for`)
+    if (!text(entry.name) || !text(entry.validatedBy) || !text(entry.claim) || !text(entry.basis) || !text(entry.reopensWhen)) {
+      problems.push(`${label} is malformed: it needs a name, a validating story, a claim, a basis and a reopening condition`)
+      continue
+    }
+    if (!entry.claim.includes(CANDIDATE_CLAIM_WORDING)) problems.push(`${label} is malformed: its claim does not say "${CANDIDATE_CLAIM_WORDING}"`)
+    const said = [entry.name, entry.claim, entry.basis, entry.reopensWhen, entry.evidence ?? ""].join(" ")
+    const forbidden = CANDIDATE_FORBIDDEN_WORDS.exec(said)
+    if (forbidden !== null) {
+      problems.push(`${label} is malformed: it says "${forbidden[0]}", which claims something about the code path rather than its reach`)
+    }
+    if (entry.status !== "OPEN" && entry.status !== "NON-GATING") {
+      problems.push(`${label} has status ${JSON.stringify(entry.status)}, which is neither OPEN nor NON-GATING`)
+      continue
+    }
+    if (entry.status === "OPEN") {
+      if (entry.evidence !== undefined) problems.push(`${label} is OPEN but carries evidence; a record with evidence must say NON-GATING, and one without it OPEN`)
+      problems.push(`${label} is OPEN: ${entry.validatedBy} has not validated that it is ${CANDIDATE_CLAIM_WORDING}, so it blocks`)
+    } else if (!text(entry.evidence)) {
+      problems.push(`${label} is NON-GATING with no evidence recorded, so it is not resolved`)
+    }
+  }
+  return problems
+}
 
 export const PAIRED_NON_GATES: readonly CheckedNonGate[] = [
   {
@@ -502,8 +729,21 @@ export interface GatePreflight {
  * problem, and then every route-scoped gate is consulted rather than skipped. A
  * gate's `routes` that is not a non-empty list of known routes is a problem too,
  * and that gate is consulted: a malformed value never decides coverage.
+ *
+ * THE ADVERSARIAL PHASE ALSO NEEDS ITS RUN NAMED AND ITS CANDIDATE RECORD
+ * RESOLVED (story 2-7e). `adversarialRunProblem()` is reported for
+ * `ADVERSARIAL_RUN`, so the phase cannot pass while its pins are not chosen.
+ * `ADVERSARIAL_CANDIDATE_NON_GATES` is consulted on every call for that phase,
+ * and `candidates`, when a caller supplies one, is checked as well: it can add a
+ * refusal and can never remove the canonical record's. Every other phase ignores
+ * both, and its result does not depend on them.
  */
-export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase, route: GateRoute): GatePreflight {
+export function gatePreflight(
+  gates: readonly PairedGate[],
+  phase: GatePhase,
+  route: GateRoute,
+  candidates?: readonly CandidateNonGate[] | null,
+): GatePreflight {
   const lines: string[] = []
   const problems: string[] = []
   const seen = new Set<number>()
@@ -534,7 +774,7 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase, ro
       problems.push(`gate ${gate.number} (${gate.name}) has kind ${JSON.stringify(gate.kind)}, which is neither engineering nor authorization`)
     }
     if (!GATE_PHASES.includes(gate.phase)) {
-      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is not accounting-probe, oauth-pilot or evaluation`)
+      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is not accounting-probe, oauth-pilot, evaluation or adversarial`)
     }
     if (!wellFormedRoutes(gate)) {
       problems.push(`gate ${gate.number} (${gate.name}) has routes ${JSON.stringify(gate.routes)}, which are not a non-empty list of api-key and oauth`)
@@ -564,6 +804,20 @@ export function gatePreflight(gates: readonly PairedGate[], phase: GatePhase, ro
   }
   if (!gates.some((gate) => gate.phase === phase && gate.kind === "authorization" && covers(gate))) {
     problems.push(`the table holds no authorization gate for ${phase} on route ${route}, so nothing authorizes its spend`)
+  }
+  if (phase === "adversarial") {
+    const run = adversarialRunProblem()
+    lines.push(`adversarial run ${ADVERSARIAL_RUN.run} — pins ${ADVERSARIAL_RUN.pins === null ? "not yet chosen" : ADVERSARIAL_RUN.pins.join(", ")}`)
+    if (run !== null) problems.push(run)
+    const records: (readonly CandidateNonGate[] | null | undefined)[] = [ADVERSARIAL_CANDIDATE_NON_GATES]
+    // `undefined` is "none supplied". A supplied `null` or empty list is a record, and an unresolved one.
+    if (candidates !== undefined && candidates !== ADVERSARIAL_CANDIDATE_NON_GATES) records.push(candidates)
+    for (const entry of ADVERSARIAL_CANDIDATE_NON_GATES) {
+      lines.push(`candidate non-gate ${entry.item} — ${entry.name} — validated by ${entry.validatedBy} — ${entry.status}`)
+    }
+    for (const problem of records.flatMap((record) => candidateRecordProblems(record))) {
+      if (!problems.includes(problem)) problems.push(problem)
+    }
   }
   return { ok: problems.length === 0, lines, problems }
 }

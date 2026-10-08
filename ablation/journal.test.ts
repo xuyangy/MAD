@@ -1245,10 +1245,10 @@ describe("physical requests inside an admitted attempt (story 2-8c2)", () => {
 })
 
 describe("attempt mode (story 2-8c3a)", () => {
-  async function attemptJournal(root: string): Promise<PairedJournal> {
+  async function attemptJournal(root: string, scope?: "paired"): Promise<PairedJournal> {
     const lock = await acquireLock(root, now())
     if (!lock.ok) throw new Error(lock.reason)
-    const journal = await openJournal(root, lock.lock, now, undefined, "attempts")
+    const journal = scope === undefined ? await openJournal(root, lock.lock, now, undefined, "attempts") : await openJournal(root, lock.lock, now, undefined, "attempts", scope)
     if (!journal.ok) throw new Error(journal.reason)
     return journal.journal
   }
@@ -1501,16 +1501,23 @@ describe("attempt mode (story 2-8c3a)", () => {
     await journal.close()
   })
 
-  test("the Adversarial admission refuses in attempt mode, latches the stop it names, and writes nothing", async () => {
+  test("a PAIRED attempt journal refuses the Adversarial admission, latches the stop it names, and writes nothing", async () => {
     const root = await tempDir()
-    const journal = await attemptJournal(root)
-    const decision = await journal.adversarialAdmission({ label: "case-1 clean", runId: () => "run" }).admit(discover())
-    expect(decision).toMatchObject({ ok: false, cause: "runner-stop" })
-    if (!decision.ok) expect(decision.reason).toContain("has no Adversarial allowance")
-    expect(journal.bill().stop).toContain("has no Adversarial allowance")
-    expect(existsSync(join(root, JOURNAL_FILE))).toBe(false)
-    expect(journal.bill().refusedAdversarial).toHaveLength(1)
-    await journal.close()
+    // Opened with the scope spelled out; an attempt journal opened with none is the same paired journal.
+    for (const open of [() => attemptJournal(root), () => attemptJournal(root, "paired")]) {
+      const journal = await open()
+      const decision = await journal.adversarialAdmission({ label: "case-1 clean", runId: () => "run" }).admit(discover())
+      expect(decision).toMatchObject({ ok: false, cause: "runner-stop" })
+      if (!decision.ok) expect(decision.reason).toContain("a paired attempt-mode journal, which has no Adversarial allowance")
+      expect(journal.bill().stop).toContain("a paired attempt-mode journal, which has no Adversarial allowance")
+      expect(existsSync(join(root, JOURNAL_FILE))).toBe(false)
+      expect(journal.bill().refusedAdversarial).toHaveLength(1)
+      // The paired figures stand, and the bill names no adversarial scope.
+      expect(journal.bill().scope).toBeUndefined()
+      expect(journal.bill().overshoot.global.limit).toBe(300)
+      expect(journal.bill().overshoot.adversarial).toEqual({ limit: 0, spent: 0, overshoot: 0 })
+      await journal.close()
+    }
   })
 
   test("100 settled attempts in block 1 refuse its next continuation on the block total; block 2 is still admitted", async () => {

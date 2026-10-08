@@ -45,6 +45,17 @@
  * furthest stage reached, and whether a recorded model request carried the
  * payload bytes. Sealed material existing is not delivery; delivery is not
  * attention.
+ *
+ * ## Realized exposure, for an attempt-mode schedule (story 2-7e, protocol v3 B3)
+ *
+ * When the sealed schedule counts admitted attempts, the report adds the issued
+ * attempts per run, per side, for the suite and for the root, each against its
+ * allowance. The source is the suite's persisted journal, replayed and validated
+ * by the journal's own rules; the bill summary supplies only the refusals, which
+ * no journal line records. Every figure says what supports it: exact, a lower
+ * bound with its reason, or unavailable. A journal that cannot be replayed is
+ * never read as zero attempts. It is exposure accounting, not a cost endpoint
+ * and not a clean/attack contrast.
  */
 
 import { readdir, readFile } from "node:fs/promises"
@@ -73,6 +84,9 @@ import {
   type StartMarkerRead,
 } from "./adversarial-schedule.ts"
 import { verdictState } from "./compare.ts"
+import type { AttemptCount, AttemptThreshold } from "./evaluation-report.ts"
+import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "./governor.ts"
+import { isJournalLine, JOURNAL_FILE, replayPersistedJournal, type BilledRequest } from "./journal.ts"
 import { MANIFEST_FILE, type RunManifest } from "./manifest.ts"
 import { parseManifest } from "./read-bundle.ts"
 import { isBlameArgs, readToolTrace, slotKey, TOOL_TRACE_FILE, type TornRow, type TraceLine, type TraceRead } from "./tool-trace.ts"
@@ -364,6 +378,8 @@ export type AdversarialReadOutcome =
       bill: BillRead
       /** Cases whose predicate path lies outside the worktree: git refuses that blame, so its execution count cannot be observed. */
       outsideWorktree: { caseId: string; path: string }[]
+      /** Present exactly when the sealed schedule counts admitted attempts. */
+      exposure?: AttemptExposure
     }
 
 export interface AdversarialReadOptions {
@@ -455,6 +471,15 @@ async function bindRuns(directory: string, schedule: AdversarialSchedule): Promi
         }
         if (side !== slot.side || String(slot.caseIndex) !== index) {
           note(slot.position, `a manifest at \`${leaf}\` binds ${slot.caseId} ${slot.side}, but sits under ${side}/${index}`)
+          continue
+        }
+        const sealed = (schedule.config as { accounting?: unknown } | null)?.accounting === "attempts" ? "attempts" : "tokens"
+        const recorded = binding.accounting === "attempts" ? "attempts" : "tokens"
+        if (recorded !== sealed) {
+          note(
+            slot.position,
+            `the manifest \`${file}\` records ${recorded} accounting, and the sealed schedule counts ${sealed}; its spend figures are not this schedule's`,
+          )
           continue
         }
         if (bound.has(slot.position) || conflict.has(slot.position)) {
@@ -586,6 +611,15 @@ export async function readAdversarialBundle(root: string, options: AdversarialRe
       }
     }
 
+    const attemptMode = (schedule.config as { accounting?: unknown } | null)?.accounting === "attempts"
+    const runIds = new Map<number, string>()
+    for (const slot of schedule.slots) {
+      const named = [...statuses].reverse().find((line) => line.position === slot.position && typeof line.runId === "string")?.runId
+      const runId = named ?? bound.get(slot.position)?.record.runId
+      if (runId !== undefined) runIds.set(slot.position, runId)
+    }
+    const exposure = attemptMode ? await readAttemptExposure(root, schedule, runIds, started, bill) : undefined
+
     const cases: AdversarialCaseReading[] = schedule.cases.caseIds.map((caseId) => {
       const clean = runOf(schedule.slots.find((slot) => slot.caseId === caseId && slot.side === "clean")!)
       const attack = runOf(schedule.slots.find((slot) => slot.caseId === caseId && slot.side === "attack")!)
@@ -612,10 +646,314 @@ export async function readAdversarialBundle(root: string, options: AdversarialRe
       outsideWorktree: assertions
         .filter((entry) => posix.normalize(entry.blame.path).startsWith("../"))
         .map((entry) => ({ caseId: entry.caseId, path: entry.blame.path })),
+      ...(exposure === undefined ? {} : { exposure }),
     }
   } catch (error) {
     return { kind: "refused", reason: `the adversarial bundle could not be read: ${error instanceof Error ? error.message : String(error)}` }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Realized exposure, in admitted attempts (protocol v3 B3)
+// ---------------------------------------------------------------------------
+
+/** Issued attempts and their dispositions, for one run, one side, the suite or the root. */
+export interface ExposureCount extends AttemptCount {
+  /** Issued attempts with a recorded settlement: host usage, or none. */
+  settled: number
+  /** Of `settled`, attempts with no host-reported usage. A diagnostic; each is counted in `total`. */
+  noHostUsage: number
+  /** Of `settled`, attempts that did not end within their bound. */
+  abandoned: number
+  /** Issued attempts with no settlement on disk. Counted in `total`; whether each ended is not established. */
+  uncertain: number
+  /** Admissions settled `not-issued`. Never counted in `total`. */
+  notIssued: number
+}
+
+export interface ExposureRun extends AdversarialSlot {
+  /** The run's id, from its slot status or manifest. Absent when neither names one. */
+  runId?: string
+  count: ExposureCount
+  threshold: AttemptThreshold
+  /** Refused admissions the bill summary lists for this run, or `null` when that evidence is missing. */
+  refused: number | null
+}
+
+/** Refused admissions: read from the bill summary, or missing. A missing list is never an empty one. */
+export type RefusalEvidence =
+  | { kind: "read"; refusals: { label: string; stage: string; cause: string; reason: string; attempt?: number }[] }
+  | { kind: "missing"; reason: string }
+
+export type AttemptExposure =
+  | {
+      kind: "unavailable"
+      reason: string
+      /** A count the readable part of the journal still supports, with what it counts. Never the whole. */
+      lowerBound?: { issued: number; reason: string }
+      refusals: RefusalEvidence
+    }
+  | {
+      kind: "read"
+      /** The journal the counts were replayed from. */
+      source: string
+      /** `exact` when the admission evidence is complete and consistent; else a lower bound, with `issuedReason`. */
+      issued: "exact" | "lower-bound"
+      issuedReason: string | null
+      runs: ExposureRun[]
+      sides: Record<Side, ExposureCount>
+      suite: { count: ExposureCount; threshold: AttemptThreshold }
+      root: { count: ExposureCount; threshold: AttemptThreshold }
+      /** Journal runs no slot status or manifest names. Counted in the suite and the root, in no run and on no side. */
+      unattributed: { runId: string; count: ExposureCount }[]
+      /** Attempts in flight as the runner left them, from the bill summary; `null` when that evidence is missing. */
+      inFlightAtEnd: number | null
+      refusals: RefusalEvidence
+    }
+
+export const EXPOSURE_NOT_A_COST =
+  "Exposure accounting only: newly issued MAD attempts against chosen admission thresholds. It is not a cost endpoint and not a clean/attack contrast."
+export const EXPOSURE_UNMEASURED =
+  "Host-reported tokens are UNVERIFIED diagnostics. Physical provider requests, host retries, money and subscription quota are UNMEASURED: " +
+  "one attempt can become several physical requests."
+
+function exposureCount(requests: readonly BilledRequest[]): ExposureCount {
+  const issued = requests.filter((request) => request.state !== "not-issued")
+  const first = issued.filter((request) => request.attempt === 1).length
+  const settled = issued.filter((request) => request.state === "usage" || request.state === "unknown")
+  return {
+    first,
+    retries: issued.length - first,
+    total: issued.length,
+    settled: settled.length,
+    noHostUsage: settled.filter((request) => request.state === "unknown").length,
+    abandoned: settled.filter((request) => request.abandoned === true).length,
+    uncertain: issued.filter((request) => request.state === "uncertain" || request.state === "in-flight").length,
+    notIssued: requests.length - issued.length,
+  }
+}
+
+function refusalEvidence(bill: BillRead, scheduleHash: string): RefusalEvidence {
+  if (bill.kind === "absent") {
+    return { kind: "missing", reason: "the runner wrote no bill summary, and a refused admission leaves no journal line" }
+  }
+  if (bill.kind === "unreadable") return { kind: "missing", reason: bill.reason }
+  if (bill.bill.scheduleHash !== scheduleHash) {
+    return { kind: "missing", reason: `the bill summary names schedule ${bill.bill.scheduleHash}, not the sealed schedule` }
+  }
+  if (bill.bill.accounting !== "attempts") {
+    return { kind: "missing", reason: "the bill summary is not an attempt-mode bill, so its refusals are not this suite's" }
+  }
+  return { kind: "read", refusals: bill.bill.refused.map((refusal) => ({ ...refusal })) }
+}
+
+/**
+ * What the readable rows of a journal that could not be replayed still support:
+ * the attempts that carry both a valid `issued` row declaring the adversarial
+ * scope and a valid usage or unknown settlement row. Every row passes the
+ * journal's own line validation or is not counted, and a row of another scope,
+ * mode or category is not this suite's attempt. An attempt with no readable
+ * settlement is left out, because its settlement may be the row that was lost
+ * and may have said `not-issued`.
+ */
+async function supportedLowerBound(file: string): Promise<number | null> {
+  let text: string
+  try {
+    text = await readFile(file, "utf8")
+  } catch {
+    return null
+  }
+  const issued = new Set<string>()
+  const settled = new Set<string>()
+  for (const row of text.split("\n")) {
+    let line: unknown
+    try {
+      line = JSON.parse(row)
+    } catch {
+      continue
+    }
+    if (!isJournalLine(line)) continue
+    if (line.type === "issued" && line.category === "adversarial" && line.mode === "attempts" && line.scope === "adversarial" && line.step === undefined) {
+      issued.add(line.physicalId)
+    }
+    if (line.type === "settled" && (line.settlement.kind === "usage" || line.settlement.kind === "unknown")) settled.add(line.physicalId)
+  }
+  return [...issued].filter((id) => settled.has(id)).length
+}
+
+/** The exposure report of an attempt-mode schedule. Never throws. */
+async function readAttemptExposure(
+  root: string,
+  schedule: AdversarialSchedule,
+  runIds: ReadonlyMap<number, string>,
+  started: StartMarkerRead,
+  bill: BillRead,
+): Promise<AttemptExposure> {
+  const refusals = refusalEvidence(bill, schedule.scheduleHash)
+  const file = join(root, JOURNAL_FILE)
+  const unavailable = async (reason: string): Promise<AttemptExposure> => {
+    const supported = await supportedLowerBound(file)
+    return {
+      kind: "unavailable",
+      reason,
+      ...(supported === null || supported === 0
+        ? {}
+        : {
+            lowerBound: {
+              issued: supported,
+              reason: "attempts whose `issued` row and usage or unknown settlement row are both readable; rows that did not parse are not counted",
+            },
+          }),
+      refusals,
+    }
+  }
+  let replayed: Awaited<ReturnType<typeof replayPersistedJournal>>
+  try {
+    replayed = await replayPersistedJournal(file, "attempts", "adversarial")
+  } catch (error) {
+    return unavailable(`the journal \`${file}\` could not be replayed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!replayed.ok) return unavailable(replayed.reason)
+  if (!replayed.existed && started.kind !== "absent") {
+    return unavailable(
+      `the journal \`${file}\` does not exist although the schedule ${started.kind === "present" ? "was started" : "has a start marker"}, ` +
+        "so what was admitted is not established",
+    )
+  }
+  const slotsOf = new Map<string, number[]>()
+  for (const [position, runId] of runIds) slotsOf.set(runId, [...(slotsOf.get(runId) ?? []), position])
+  const shared = [...slotsOf].find(([, positions]) => positions.length > 1)
+  if (shared !== undefined) {
+    // One run's attempts cannot be two slots'. Counting them under each would
+    // double them, and choosing one would be a guess.
+    return {
+      kind: "unavailable",
+      reason:
+        `slots ${shared[1].join(" and ")} both name run \`${shared[0]}\`, so its attempts cannot be attributed to one run or one side ` +
+        "without counting them twice",
+      refusals,
+    }
+  }
+  const journal = replayed.bill
+  const mine = journal.requests.filter((request) => request.category === "adversarial")
+  const limits = ADVERSARIAL_ATTEMPT_ALLOWANCES
+  const threshold = (limit: number, spent: number): AttemptThreshold => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
+  const byRun = (runId: string | undefined): BilledRequest[] => (runId === undefined ? [] : mine.filter((request) => request.runId === runId))
+  const labelOf = (slot: AdversarialSlot): string => `${slot.caseId} ${slot.side}`
+  const runs: ExposureRun[] = schedule.slots.map((slot) => {
+    const runId = runIds.get(slot.position)
+    const count = exposureCount(byRun(runId))
+    return {
+      ...slot,
+      ...(runId === undefined ? {} : { runId }),
+      count,
+      threshold: threshold(limits.run, count.total),
+      refused: refusals.kind === "read" ? refusals.refusals.filter((refusal) => refusal.label === labelOf(slot)).length : null,
+    }
+  })
+  const attributed = new Set(runIds.values())
+  const strayIds = [...new Set(mine.map((request) => request.runId))].filter((runId) => !attributed.has(runId))
+  const sideOf = (side: Side): ExposureCount =>
+    exposureCount(runs.filter((run) => run.side === side).flatMap((run) => byRun(run.runId)))
+  const suite = exposureCount(mine)
+  const whole = exposureCount(journal.requests)
+  const integrity = journal.integrity.length
+  return {
+    kind: "read",
+    source: replayed.existed ? `\`${file}\`, replayed` : `no journal exists at \`${file}\`, and the schedule was not started`,
+    issued: integrity === 0 ? "exact" : "lower-bound",
+    issuedReason:
+      integrity === 0
+        ? null
+        : `the journal holds ${integrity} integrity failure(s), beginning with: ${journal.integrity[0]!.reason}; a conflicted journal supports ` +
+          "only the attempts it shows, not that there were no others",
+    runs,
+    sides: { clean: sideOf("clean"), attack: sideOf("attack") },
+    suite: { count: suite, threshold: threshold(limits.suite, suite.total) },
+    root: { count: whole, threshold: threshold(limits.global, whole.total) },
+    unattributed: strayIds.map((runId) => ({ runId, count: exposureCount(byRun(runId)) })),
+    inFlightAtEnd: bill.kind === "read" && bill.bill.accounting === "attempts" && bill.bill.scheduleHash === schedule.scheduleHash ? bill.bill.inFlight : null,
+    refusals,
+  }
+}
+
+function exposureCountText(count: ExposureCount, threshold?: AttemptThreshold): string {
+  const parts = [
+    `${count.total} issued (${count.first} first, ${count.retries} retr${count.retries === 1 ? "y" : "ies"})`,
+    ...(threshold === undefined
+      ? []
+      : [`of ${threshold.limit}${threshold.overshoot > 0 ? `, OVERSHOT by ${threshold.overshoot}` : ", no overshoot"}`]),
+    `settled ${count.settled}`,
+    `uncertain ${count.uncertain}`,
+    `not-issued ${count.notIssued}`,
+  ]
+  if (count.noHostUsage > 0) parts.push(`${count.noHostUsage} settled with no host usage (a diagnostic; each is counted)`)
+  if (count.abandoned > 0) parts.push(`${count.abandoned} did not end within its bound`)
+  return parts.join("; ")
+}
+
+function refusalLines(refusals: RefusalEvidence): string[] {
+  if (refusals.kind === "missing") {
+    return [`  refused admissions: MISSING EVIDENCE — ${refusals.reason}. This is not a count of zero.`]
+  }
+  const lines = [`  refused admissions: ${refusals.refusals.length}, from the bill summary (a refusal writes no journal line and reaches no backend)`]
+  for (const refusal of refusals.refusals) {
+    lines.push(
+      `    ${refusal.label} at ${refusal.stage}${refusal.attempt === undefined ? "" : ` attempt ${refusal.attempt}`} (${refusal.cause}): ${refusal.reason}`,
+    )
+  }
+  return lines
+}
+
+function exposureLines(exposure: AttemptExposure): string[] {
+  const limits = ADVERSARIAL_ATTEMPT_ALLOWANCES
+  const lines = [
+    `EXPOSURE — issued MAD attempts against the thresholds ${limits.run} per run, ${limits.suite} for the suite, ${limits.global} for the root`,
+    `  ${EXPOSURE_NOT_A_COST}`,
+    `  ${EXPOSURE_UNMEASURED}`,
+  ]
+  if (exposure.kind === "unavailable") {
+    lines.push(`  issued attempts: UNAVAILABLE — ${exposure.reason}. This is not a count of zero.`)
+    if (exposure.lowerBound !== undefined) {
+      lines.push(`  LOWER BOUND: at least ${exposure.lowerBound.issued} issued attempt(s) — ${exposure.lowerBound.reason}`)
+    }
+    lines.push(...refusalLines(exposure.refusals))
+    return lines
+  }
+  lines.push(`  source: ${exposure.source}`)
+  lines.push(
+    exposure.issued === "exact"
+      ? "  issued counts: EXACT — every count below is read from durable admission lines"
+      : `  issued counts: LOWER BOUND — ${exposure.issuedReason}`,
+  )
+  const uncertain = exposure.root.count.uncertain
+  if (uncertain > 0) {
+    lines.push(
+      `  SETTLEMENT UNCERTAIN for ${uncertain} issued attempt(s): each is counted as issued, and whether it ended is not established; ` +
+        "the settled figures below are not the whole",
+    )
+  }
+  lines.push(
+    exposure.inFlightAtEnd === null
+      ? "  in flight when the runner ended: MISSING EVIDENCE — no attempt-mode bill summary for this schedule"
+      : `  in flight when the runner ended: ${exposure.inFlightAtEnd}, from the bill summary`,
+  )
+  lines.push(`  root: ${exposureCountText(exposure.root.count, exposure.root.threshold)}`)
+  lines.push(`  suite: ${exposureCountText(exposure.suite.count, exposure.suite.threshold)}`)
+  for (const side of ["clean", "attack"] as const) lines.push(`  ${side} side: ${exposureCountText(exposure.sides[side])}`)
+  lines.push("  per run, in schedule order:")
+  for (const run of exposure.runs) {
+    const refused = run.refused === null ? "refused: missing evidence" : `refused ${run.refused}`
+    lines.push(
+      `    ${run.position}. ${run.caseId} ${run.side}${run.runId === undefined ? " (no run id recorded)" : ` (run \`${run.runId}\`)`}: ` +
+        `${exposureCountText(run.count, run.threshold)}; ${refused}`,
+    )
+  }
+  for (const stray of exposure.unattributed) {
+    lines.push(`    UNATTRIBUTED run \`${stray.runId}\` (no slot status or manifest names it): ${exposureCountText(stray.count)}`)
+  }
+  lines.push(...refusalLines(exposure.refusals))
+  return lines
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +1078,14 @@ function startedLine(started: StartMarkerRead): string {
   return `START MARKER UNREADABLE — ${started.reason}`
 }
 
-function billLines(read: BillRead): string[] {
+function billLines(read: BillRead, attempts = false): string[] {
+  if (read.kind === "absent" && attempts) {
+    return [
+      "ATTEMPTS — NO BILL RECORDED: the runner did not finish, so its own summary and its refused admissions are not " +
+        "shown here; the issued attempts are read from the journal below",
+    ]
+  }
+  if (read.kind === "unreadable" && attempts) return [`ATTEMPTS — BILL UNREADABLE: ${read.reason}`]
   if (read.kind === "absent") {
     return [
       "SPEND — NO BILL RECORDED: the runner did not finish, so spend, overshoot and unknown usage are not shown here; " +
@@ -749,6 +1094,39 @@ function billLines(read: BillRead): string[] {
   }
   if (read.kind === "unreadable") return [`SPEND — BILL UNREADABLE: ${read.reason}`]
   const bill = read.bill
+  if ((bill.accounting === "attempts") !== attempts) {
+    // The bill counts in one unit and the schedule in the other. Neither unit's
+    // figures are printed: they would be read as the schedule's.
+    const [prefix, sealed, recorded] = attempts ? ["ATTEMPTS", "admitted attempts", "tokens"] : ["SPEND", "tokens", "admitted attempts"]
+    return [
+      `${prefix} — BILL MISMATCH: the sealed schedule counts ${sealed} and the bill summary counts ${recorded}, so the bill is ` +
+        "not this schedule's and none of its figures are shown",
+    ]
+  }
+  if (bill.accounting === "attempts") {
+    // An attempt-mode bill counts admitted attempts. No figure in it is a
+    // token, and none is printed as one.
+    const lines = [
+      "ATTEMPTS — the journal's bill as the runner left it, in admitted attempts (no token spend is measured in this mode)",
+      `  suite ${bill.overshoot.adversarial.spent} of ${bill.overshoot.adversarial.limit}, overshoot ${bill.overshoot.adversarial.overshoot}`,
+      `  root ${bill.overshoot.global.spent} of ${bill.overshoot.global.limit}, overshoot ${bill.overshoot.global.overshoot}`,
+      `  attempts settled with no host usage ${bill.unknown} (a diagnostic; each is counted), never settled ${bill.uncertain}, ` +
+        `in flight ${bill.inFlight}, not-issued ${bill.notIssued}`,
+      `  halt: ${bill.halt ?? "none"}; runner stop: ${bill.stop ?? "none"}`,
+      `  refused adversarial admissions: ${bill.refused.length}`,
+    ]
+    // Each refusal directly under its count, before the quarantine block, so
+    // none reads as a quarantine entry.
+    for (const refusal of bill.refused) {
+      lines.push(`    ${refusal.label} at ${refusal.stage}${refusal.attempt === undefined ? "" : ` attempt ${refusal.attempt}`} (${refusal.cause}): ${refusal.reason}`)
+    }
+    const quarantined = bill.operational ?? []
+    if (quarantined.length > 0) {
+      lines.push(`  OPERATIONAL QUARANTINE (${quarantined.length}) — separate from the attempt count, and its recovery is manual:`)
+      for (const reason of quarantined) lines.push(`    ${reason}`)
+    }
+    return lines
+  }
   const lines = [
     "SPEND — the journal's bill as the runner left it",
     `  adversarial known ${bill.overshoot.adversarial.spent} of ${bill.overshoot.adversarial.limit}, overshoot ${bill.overshoot.adversarial.overshoot}`,
@@ -810,7 +1188,8 @@ export function renderAdversarialBundle(outcome: AdversarialReadOutcome): string
     "",
   ]
   lines.push(startedLine(outcome.started), "")
-  lines.push(...billLines(outcome.bill), "")
+  lines.push(...billLines(outcome.bill, outcome.exposure !== undefined), "")
+  if (outcome.exposure !== undefined) lines.push(...exposureLines(outcome.exposure), "")
   if (outcome.unattributedTorn > 0) {
     lines.push(`  ${outcome.unattributedTorn} torn trace row(s) name no run, so every run's tool counts below are incomplete.`, "")
   }

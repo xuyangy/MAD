@@ -153,10 +153,12 @@ export function unknownValue(why: string): UnknownValue {
  *   JavaScript caller that omitted the collection, would otherwise read
  *   `complete` on the strength of a field nobody wrote.
  * - `unverified` (story 2-8c4) — an attempt-mode arm (`experiment.accounting:
- *   "attempts"`). Its token figures are the host's own reports on the OAuth route,
- *   where nothing measures them and a failed turn's missing usage reads as zero, so
- *   no audit can call them complete. It is written only beside
- *   `spend.source: "host-reported-unverified"` and `exposure: "unquantified"`.
+ *   "attempts"`, or `adversarial.accounting: "attempts"` for a run of the
+ *   attempt-mode adversarial suite). Its token figures are the host's own
+ *   reports on the OAuth route, where nothing measures them and a failed turn's
+ *   missing usage reads as zero, so no audit can call them complete. It is
+ *   written only beside `spend.source: "host-reported-unverified"` and
+ *   `exposure: "unquantified"`.
  *
  * `MANIFEST_SCHEMA_VERSION` does NOT bump for this widening; see its own comment.
  *
@@ -309,6 +311,12 @@ export interface AdversarialBinding {
   side: "clean" | "attack"
   /** The slot's 1-based schedule position. */
   position: number
+  /**
+   * Present exactly when the suite counted admitted attempts (protocol v3). The
+   * run's token figures are then the host's own unverified reports, as for an
+   * attempt-mode paired arm. Absent means ledger tokens.
+   */
+  accounting?: "attempts"
 }
 
 export interface RunManifest {
@@ -463,7 +471,7 @@ export interface BuildManifestInput {
 export function buildManifest(input: BuildManifestInput): RunManifest {
   const { record, change, identity } = input
   const warnings = record.warnings.map(toManifestWarning)
-  const attempts = input.experiment?.accounting === "attempts"
+  const attempts = input.experiment?.accounting === "attempts" || input.adversarial?.accounting === "attempts"
   return {
     schemaVersion: MANIFEST_SCHEMA_VERSION,
     identity: { ...identity, changeId: changeIdFor(change) },

@@ -7,10 +7,11 @@
  * shape, and it also pins that v3 is refused while it is a draft, that v3's hash
  * rule reproduces, and that v1 and v2 are unchanged.
  *
- * EVIDENCE OF THE CURRENT PIPELINE STRUCTURE, NOT VERIFICATION OF THE FUTURE
- * ATTEMPT-MODE GOVERNOR. The suite runs today's token-mode journal; story 2-7e
- * owns the attempt-mode adversarial gate. Every answer here is scripted by this
- * file, so nothing here says what a live model would do or how often.
+ * EVIDENCE OF THE PIPELINE'S STRUCTURE, NOT VERIFICATION OF THE ATTEMPT-MODE
+ * GOVERNOR. The suite here runs the token-mode journal; the attempt-mode
+ * adversarial gate is covered by `journal-adversarial.test.ts` and
+ * `adversarial.test.ts`. Every answer here is scripted by this file, so nothing
+ * here says what a live model would do or how often.
  *
  * NOT EXERCISED HERE: v3 B8's `StructuredOutput`-only host-tool offer. This
  * backend reports `tools: true` and no host is involved; story 2-7f verifies the
@@ -24,7 +25,7 @@
 
 import { $ } from "bun"
 import { afterEach, describe, expect, test } from "bun:test"
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 
 import type { ZodType } from "zod"
@@ -36,7 +37,7 @@ import type { LateUsageReporter } from "../core/ports/late-usage.ts"
 import { cancelledTurn, type BackendCapabilities, type Envelope, type ModelBackend } from "../core/ports/model-backend.ts"
 import { DEFAULT_JUDGE_ANSWERS, judgeRoleOf, type JudgeRoleTag } from "../core/test-support/fakes.ts"
 import { runAdversarialSuite, type AdversarialRunContext, type AdversarialSuiteOutcome } from "./adversarial.ts"
-import { experimentRoot, PROTOCOL_FILE as PROTOCOL_V1, payloadFinding, sealedSuite, targetFinding } from "./adversarial-read.fixture.ts"
+import { frozenV3Copy, PROTOCOL_FILE as PROTOCOL_V1, payloadFinding, sealedSuite, targetFinding } from "./adversarial-read.fixture.ts"
 import { readFrozenProtocol, sha256 } from "./schedule.ts"
 
 const SPECS = new URL("../_bmad-output/specs/spec-mad-orchestrator/", import.meta.url).pathname
@@ -371,18 +372,13 @@ describe("protocol v3's state, and v1 and v2 unchanged", () => {
   })
 
   test("v3's hash rule reproduces: a temporary copy frozen by v2's rule verifies", async () => {
-    const pending = (await readFile(PROTOCOL_V3, "utf8"))
-      .replace(/^status: .*$/m, "status: frozen")
-      .replace(/^frozen_on: .*$/m, "frozen_on: 2026-10-08")
-      .replace(/^frozen_hash: .*$/gm, "frozen_hash: PENDING")
     // The banner's own mention of `frozen_hash:` sits inside a blockquote and is not a line the rule rewrites.
-    expect(pending).toContain("`frozen_hash:`")
-    const hash = sha256(pending)
-    const dir = await experimentRoot(scratch)
-    const copy = `${dir}-protocol-v3.md`
-    scratch.push(copy)
-    await writeFile(copy, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`))
-    expect(await readFrozenProtocol(copy)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v3", version: 3, hash })
+    expect(await readFile(PROTOCOL_V3, "utf8")).toContain("`frozen_hash:`")
+    const copy = await frozenV3Copy(scratch)
+    const text = await readFile(copy.file, "utf8")
+    expect(text).toContain("`frozen_hash:`")
+    expect(sha256(text.replace(/^frozen_hash: .*$/gm, "frozen_hash: PENDING"))).toBe(copy.hash)
+    expect(await readFrozenProtocol(copy.file)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v3", version: 3, hash: copy.hash })
   })
 
   test("v1 still verifies at its pinned hash", async () => {
