@@ -1,0 +1,175 @@
+{
+  "scheduleVersion": 1,
+  "createdAt": "2026-10-07T08:24:19.776Z",
+  "coin": "tails",
+  "firstArms": [
+    "off",
+    "on",
+    "off"
+  ],
+  "slots": [
+    {
+      "block": 1,
+      "arm": "off",
+      "position": "first"
+    },
+    {
+      "block": 1,
+      "arm": "on",
+      "position": "second"
+    },
+    {
+      "block": 2,
+      "arm": "on",
+      "position": "first"
+    },
+    {
+      "block": 2,
+      "arm": "off",
+      "position": "second"
+    },
+    {
+      "block": 3,
+      "arm": "off",
+      "position": "first"
+    },
+    {
+      "block": 3,
+      "arm": "on",
+      "position": "second"
+    }
+  ],
+  "protocol": {
+    "id": "PROTOCOL-mad-evaluation-v2",
+    "version": 2,
+    "hash": "sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2"
+  },
+  "fixture": {
+    "version": "labelled-change-1",
+    "materialHash": "sha256:76523deb36aee41eb6ce9aaf1f9a51efbde5b404f839b1b20483016968fd848d",
+    "labelsHash": "sha256:8e95a53afd7ef9216715f90e9a6f28b34c6b60ecca3bff1882eefb83b8a75105"
+  },
+  "codeRevision": {
+    "kind": "known",
+    "value": {
+      "commit": "ba9976676e56fc131b9ee62a65f54526d150d212",
+      "dirty": true
+    }
+  },
+  "roster": {
+    "slots": [
+      {
+        "slot": "discovery-1",
+        "providerId": "openai",
+        "modelId": "gpt-6-sol",
+        "identity": "gpt-6-sol",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      },
+      {
+        "slot": "discovery-2",
+        "providerId": "anthropic",
+        "modelId": "claude-sonnet-5",
+        "identity": "claude-sonnet-5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": [
+          "github-copilot"
+        ]
+      },
+      {
+        "slot": "discovery-3",
+        "providerId": "github-copilot",
+        "modelId": "gpt-6-luna",
+        "identity": "gpt-6-luna",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": [
+          "openai"
+        ]
+      }
+    ],
+    "lensSlots": [
+      {
+        "slot": "discovery-lens-security",
+        "lens": "security",
+        "providerId": "openai",
+        "modelId": "gpt-5.6-terra-fast",
+        "identity": "gpt-5.6-terra-fast",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      },
+      {
+        "slot": "discovery-lens-reliability",
+        "lens": "reliability",
+        "providerId": "github-copilot",
+        "modelId": "claude-haiku-4.5",
+        "identity": "claude-haiku-4.5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      }
+    ],
+    "requested": 3,
+    "distinctLineages": 2,
+    "providers": [
+      "openai",
+      "anthropic",
+      "github-copilot"
+    ]
+  },
+  "config": {
+    "provenance": "live",
+    "changeDiffHash": "sha256:cea5679939f5cb4ccd90230a4eddde861119f375ced04cad474fc2b0ec57e213",
+    "tokenCap": null,
+    "spendShares": {
+      "discover": 0.3,
+      "debate": 0.65,
+      "judge": 1
+    },
+    "stopOnUnknownUsage": false,
+    "allowances": {
+      "global": 2000000,
+      "blocks": 1400000,
+      "prefix": 60000,
+      "continuation": 195000,
+      "runCap": 255000
+    },
+    "instructionsDigest": "sha256:6ab994f33af24da4aec66a0a59f83a066f5e5238a8c55ffd526cba06e87217ba",
+    "tools": "opencodeTools (adapters/opencode/tools.ts); blame deadline 60000 ms; blame cleanup budget 5000 ms",
+    "gates": "ablation/paired-gates.ts blob 2f5db8bfa6da438b27383bb3e195bf33eed6b7c4; route oauth; gate 1 CLOSED, gate 2 CLOSED, gate 3 OPEN, gate 4 CLOSED, gate 5 CLOSED, gate 6 CLOSED, gate 7 CLOSED, gate 8 OPEN, gate 9 OPEN",
+    "accounting": "attempts",
+    "attemptAllowances": {
+      "global": 300,
+      "blocks": 300,
+      "block": 100,
+      "prefix": 10,
+      "continuation": 45
+    },
+    "route": "oauth"
+  },
+  "configDigest": "sha256:9a805d99dffda3b30cb9298fc19c0f4e11aca4252909f96b50a9756ce50b4f12",
+  "scheduleHash": "sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16"
+}

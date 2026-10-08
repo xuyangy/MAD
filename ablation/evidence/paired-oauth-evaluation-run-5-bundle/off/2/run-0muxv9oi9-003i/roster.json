@@ -1,0 +1,84 @@
+{
+  "slots": [
+    {
+      "slot": "discovery-1",
+      "providerId": "openai",
+      "modelId": "gpt-6-sol",
+      "identity": "gpt-6-sol",
+      "lineage": {
+        "lineage": "gpt",
+        "label": "GPT (OpenAI)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": []
+    },
+    {
+      "slot": "discovery-2",
+      "providerId": "anthropic",
+      "modelId": "claude-sonnet-5",
+      "identity": "claude-sonnet-5",
+      "lineage": {
+        "lineage": "claude",
+        "label": "Claude (Anthropic)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": [
+        "github-copilot"
+      ]
+    },
+    {
+      "slot": "discovery-3",
+      "providerId": "github-copilot",
+      "modelId": "gpt-6-luna",
+      "identity": "gpt-6-luna",
+      "lineage": {
+        "lineage": "gpt",
+        "label": "GPT (OpenAI)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": [
+        "openai"
+      ]
+    }
+  ],
+  "lensSlots": [
+    {
+      "slot": "discovery-lens-security",
+      "lens": "security",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-terra-fast",
+      "identity": "gpt-5.6-terra-fast",
+      "lineage": {
+        "lineage": "gpt",
+        "label": "GPT (OpenAI)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": []
+    },
+    {
+      "slot": "discovery-lens-reliability",
+      "lens": "reliability",
+      "providerId": "github-copilot",
+      "modelId": "claude-haiku-4.5",
+      "identity": "claude-haiku-4.5",
+      "lineage": {
+        "lineage": "claude",
+        "label": "Claude (Anthropic)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": []
+    }
+  ],
+  "requested": 3,
+  "distinctLineages": 2,
+  "providers": [
+    "openai",
+    "anthropic",
+    "github-copilot"
+  ]
+}

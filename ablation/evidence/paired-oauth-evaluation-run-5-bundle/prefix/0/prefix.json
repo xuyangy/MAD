@@ -1,0 +1,12 @@
+{
+  "prefixEvidenceVersion": 1,
+  "scheduleHash": "sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16",
+  "block": 1,
+  "prefixRunId": {
+    "kind": "known",
+    "value": "run-0muxud0ly-0001"
+  },
+  "forked": true,
+  "reason": "forked into the scheduled ON and OFF continuations",
+  "dump": "/Users/xuyangy/trash/mad-runs/bundle-run5/prefix/0/run-0muxud0ly-0001"
+}

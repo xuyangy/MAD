@@ -1,0 +1,720 @@
+eval-read at commit c66b06988785edc7ef6bd97b46713980c07e603e; every line after this one is its stdout, verbatim
+MAD evaluation bundle — ablation/evidence/paired-oauth-evaluation-run-5-bundle
+declared 6 arm-repeat(s), created 2026-10-07T08:24:19.789Z
+
+COMPARABLE ARMS
+  largest cohort, 6 arm(s), agreeing on:
+    protocolHash = "sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2"
+    fixtureHash = "sha256:76523deb36aee41eb6ce9aaf1f9a51efbde5b404f839b1b20483016968fd848d"
+    changeId = "sha256:cea5679939f5cb4ccd90230a4eddde861119f375ced04cad474fc2b0ec57e213"
+    codeRevision = {"commit":"ba9976676e56fc131b9ee62a65f54526d150d212","dirty":true}
+
+  arm            repeat  slots  answered  pooled  canonical  status      tokens (attributed, observed)  newly executed (observed)
+  off            0       3      3         39      9          degraded    110518                         64901
+  on             0       3      3         39      9          degraded    276334                         230717
+  on             1       3      3         38      14         degraded    367824                         322400
+  off            1       3      3         38      14         degraded    151839                         106415
+  off            2       3      3         41      9          degraded    128471                         77733
+  on             2       3      3         41      9          degraded    240288                         189550
+  EACH ARM'S PREFIX:
+    off/0: forked from `run-0muxud0ly-0001`
+    on/0: forked from `run-0muxud0ly-0001`
+    on/1: forked from `run-0muxupxrz-0017`
+    off/1: forked from `run-0muxupxrz-0017`
+    off/2: forked from `run-0muxv74r6-002c`
+    on/2: forked from `run-0muxv74r6-002c`
+  THE INHERITED-SUM RULE IS WITHHELD: these arms inherited from 3 DIFFERENT prefixes
+  (run-0muxud0ly-0001, run-0muxupxrz-0017, run-0muxv74r6-002c). An inherited part cancels only between runs that inherited the SAME
+  prefix, so no rule for adding these figures across arms is offered here. Add each prefix once, on
+  its own, and treat none of them as shared.
+
+  PER-STAGE SPEND AGAINST CEILING (ATTRIBUTED)
+    off repeat 0 — discover: 45617 spent, run total 45617, ceiling none
+    off repeat 0 — debate: 0 spent, run total 45617, ceiling none
+    off repeat 0 — judge: 64901 spent, run total 110518, ceiling none
+    on repeat 0 — discover: 45617 spent, run total 45617, ceiling none
+    on repeat 0 — debate: 56608 spent, run total 102225, ceiling none
+    on repeat 0 — judge: 174109 spent, run total 276334, ceiling none
+    on repeat 1 — discover: 45424 spent, run total 45424, ceiling none
+    on repeat 1 — debate: 48178 spent, run total 93602, ceiling none
+    on repeat 1 — judge: 274222 spent, run total 367824, ceiling none
+    off repeat 1 — discover: 45424 spent, run total 45424, ceiling none
+    off repeat 1 — debate: 0 spent, run total 45424, ceiling none
+    off repeat 1 — judge: 106415 spent, run total 151839, ceiling none
+    off repeat 2 — discover: 50738 spent, run total 50738, ceiling none
+    off repeat 2 — debate: 0 spent, run total 50738, ceiling none
+    off repeat 2 — judge: 77733 spent, run total 128471, ceiling none
+    on repeat 2 — discover: 50738 spent, run total 50738, ceiling none
+    on repeat 2 — debate: 36341 spent, run total 87079, ceiling none
+    on repeat 2 — judge: 153209 spent, run total 240288, ceiling none
+
+  DISCLOSURES
+    ROUTING POLICY DIFFERS, and that is the intervention (SPEC.md evaluation exception):
+      off/0, off/1, off/2: routing policy debate-off
+      on/0, on/1, on/2: routing policy shipped
+    every other dial is the same on every comparable arm (threshold 0.8; round cap 3; token cap none; peak 4; shares 0.3/0.65/1).
+    OBSERVATIONS PER ARM: off 3, on 3.
+    NOISE FLOOR: for off, on, compare the spread between repeats of the SAME
+    arm against the difference between arms.
+    off/0 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+    off/0 disclosures: provider-fan-out
+    on/0 DEGRADED — 3 warning(s): roster-single-lineage, model-dropped-out, blame-unavailable
+    on/0 disclosures: provider-fan-out
+    on/1 DEGRADED — 3 warning(s): roster-single-lineage, blame-unavailable, unresolved-findings
+    on/1 disclosures: provider-fan-out
+    off/1 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+    off/1 disclosures: provider-fan-out
+    off/2 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+    off/2 disclosures: provider-fan-out
+    on/2 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+    on/2 disclosures: provider-fan-out
+
+USAGE COMPLETENESS, PER ARM — a fact about MAD's INSTRUMENTATION, not about the change
+under review, which is why it labels these rows and does not segregate them:
+  off repeat 0 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+  on repeat 0 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+  on repeat 1 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+  off repeat 1 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+  off repeat 2 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+  on repeat 2 — UNVERIFIED: an attempt-mode arm. Its token figure is the host's own report, which nothing measured, never a cost or a complete bill. Exposure is unquantified.
+Read every token figure in this report as OBSERVED spend: a missing tag is not evidence of
+complete usage (`evaluation-protocol.md:511-517`).
+NO FINDING WAS COMPARED ACROSS ARMS IN THIS TABLE. This bundle carries a sealed paired schedule,
+so its arms ARE paired — by `Finding.id`, within each block, by `ablation/paired-read.ts`, which
+`bun run eval-read` prints below this report. This table establishes only that the arms are
+comparable; the paired contrast and its confounds are that report's.
+
+MAD PAIRED CONTRAST — ablation/evidence/paired-oauth-evaluation-run-5-bundle
+sealed schedule sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16, coin tails, first arms off, on, off, sealed 2026-10-07T08:24:19.776Z
+protocol PROTOCOL-mad-evaluation-v2 v2 (sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2)
+
+SLOT COVERAGE — all six planned slots, one terminal status each
+  block 1 off (first): completed — the OFF continuation of block 1 finished
+  block 1 on (second): completed — the ON continuation of block 1 finished
+  block 2 on (first): failed — the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts
+  block 2 off (second): completed — the OFF continuation of block 2 finished
+  block 3 off (first): completed — the OFF continuation of block 3 finished
+  block 3 on (second): completed — the ON continuation of block 3 finished
+
+PREFIX EVIDENCE — the one forked prefix each block's two arms continue
+  block 1: prefix run `run-0muxud0ly-0001`, forked — forked into the scheduled ON and OFF continuations
+  block 2: prefix run `run-0muxupxrz-0017`, forked — forked into the scheduled ON and OFF continuations
+  block 3: prefix run `run-0muxv74r6-002c`, forked — forked into the scheduled ON and OFF continuations
+
+ARMS
+  `bundle.json` declares 6 arm-repeat(s), created 2026-10-07T08:24:19.789Z; the bundle reader admitted 6 to its cohort
+  off/0 → block 1 off (first), run `run-0muxufnbb-0015`, prefix `run-0muxud0ly-0001`
+  on/0 → block 1 on (second), run `run-0muxufnbb-0016`, prefix `run-0muxud0ly-0001`
+  on/1 → block 2 on (first), run `run-0muxurdsx-002a`, prefix `run-0muxupxrz-0017`
+  off/1 → block 2 off (second), run `run-0muxurdsx-002b`, prefix `run-0muxupxrz-0017`
+  off/2 → block 3 off (first), run `run-0muxv9oi9-003i`, prefix `run-0muxv74r6-002c`
+  on/2 → block 3 on (second), run `run-0muxv9oi9-003j`, prefix `run-0muxv74r6-002c`
+
+AVAILABILITY — separately per quantity, and never one figure for all of them
+  paired candidates: 3/3
+  verdict-state differences: 3/3
+  undecided transitions: 3/3
+  only-in counts: 3/3
+  treatment opportunity: 3/3
+
+BLOCK 1 — planned order: off first, on second
+  both arms forked from `run-0muxud0ly-0001`; candidates paired by `Finding.id`, no aligner
+  paired candidates, of the distinct candidate id(s) across the two arms: 9 of 9
+  verdict-state differences, over the paired candidates where BOTH arms decided: 1 of 9
+  undecided transitions, over the paired candidates (counted here and in NEITHER half of the line above): 0 of 9
+  only in on, of the distinct candidate id(s): 0 of 9
+  only in off, of the distinct candidate id(s): 0 of 9
+    `finding-0muxufnb4-0008`: on not-adjudicated → off upheld
+  treatment opportunity, of the candidate(s) the OFF arm sent to the judge: 6 of 9 would have been DEBATED by the shipped policy (read from the OFF arm's `status.routeCounts.intervention`, never re-derived)
+  arm on (second), run `run-0muxufnbb-0016`, completion `degraded`: 9 canonical finding(s), upheld 7 of 9, unresolved 0 of 9, unjudged 0 of 9
+  arm off (first), run `run-0muxufnbb-0015`, completion `degraded`: 9 canonical finding(s), upheld 8 of 9, unresolved 0 of 9, unjudged 0 of 9
+  UNRESOLVED CANDIDATES STAY VISIBLE. A candidate the budget refused or a cancellation cut short is
+  NOT successful noise removal: it was never decided, and it is counted above rather than removed.
+  CONFOUNDS, BESIDE THIS RESULT — block 1
+    RUN ID / JUDGE ANONYMIZER. The fork gives each arm a NEW run of its own with its own run id
+    (`forkPreparedReview` in `core/run/review.ts`), and the judge's anonymizer seeds its permutation
+    from that run id together with each finding's id (the `runId` passed to `judge` in the same
+    file's `review`). The two arms of this block can therefore put the SAME exchange in front of the
+    judge under DIFFERENT anonymized orders. That difference is inside every number above, the
+    checkpoint fork does NOT remove it, and nothing here corrects for it.
+      run ids: on `run-0muxufnbb-0016`, off `run-0muxufnbb-0015`
+    POSITION ORDER, WITHIN THIS BLOCK. The two arms did not run at the same time:
+      first: off, second: on.
+    The coin counterbalances first-arm order ACROSS the three blocks; it does not remove the order
+    inside one. Anything that drifts between the two continuations — a provider's model version, its
+    load, its sampling — is confounded with whichever arm ran second HERE.
+    IDENTIFICATION. These are observed differences in the DEPLOYED debate pathway: the shipped
+    debate-plus-adjudication route against direct fact-checking of the same candidates, as deployed.
+    They do NOT measure the benefit of conversation with the judge pipeline held fixed, and they do
+    not say whether the pathway earns its cost.
+    A DEGRADED ARM IS IN THIS RESULT, NAMED RATHER THAN DISCARDED. It ran to the end and something
+    reduced it, so its findings are a real arm's and the block is measured; a withheld block would
+    have discarded PLANNED data instead. Every number above is the degraded arm's:
+      off `run-0muxufnbb-0015`: completion `degraded`; 3 warning(s): provider-fan-out, roster-single-lineage, blame-unavailable
+      on `run-0muxufnbb-0016`: completion `degraded`; 4 warning(s): provider-fan-out, roster-single-lineage, model-dropped-out, blame-unavailable
+    DISCLOSURES
+      ROUTING POLICY DIFFERS, and that is the intervention (SPEC.md evaluation exception):
+        off/0: routing policy debate-off
+        on/0: routing policy shipped
+      every other dial is the same on every comparable arm (threshold 0.8; round cap 3; token cap none; peak 4; shares 0.3/0.65/1).
+      OBSERVATIONS PER ARM: off 1, on 1.
+      NOISE FLOOR: NOT MEASURED for off, on — one run of an arm cannot tell a
+      real arm difference from run-to-run variation.
+      off/0 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+      off/0 disclosures: provider-fan-out
+      on/0 DEGRADED — 3 warning(s): roster-single-lineage, model-dropped-out, blame-unavailable
+      on/0 disclosures: provider-fan-out
+
+  EACH ARM'S PREFIX:
+    off → `run-0muxud0ly-0001`
+    on → `run-0muxud0ly-0001`
+  both arms were forked from `run-0muxud0ly-0001`, so its inherited part is one prefix, counted once.
+  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then
+  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.
+
+BLOCK 2 — planned order: on first, off second
+  both arms forked from `run-0muxupxrz-0017`; candidates paired by `Finding.id`, no aligner
+  paired candidates, of the distinct candidate id(s) across the two arms: 14 of 14
+  verdict-state differences, over the paired candidates where BOTH arms decided: 0 of 12
+  undecided transitions, over the paired candidates (counted here and in NEITHER half of the line above): 2 of 14
+  only in on, of the distinct candidate id(s): 0 of 14
+  only in off, of the distinct candidate id(s): 0 of 14
+  treatment opportunity, of the candidate(s) the OFF arm sent to the judge: 11 of 14 would have been DEBATED by the shipped policy (read from the OFF arm's `status.routeCounts.intervention`, never re-derived)
+  arm on (first), run `run-0muxurdsx-002a`, completion `degraded`: 14 canonical finding(s), upheld 12 of 14, unresolved 2 of 14, unjudged 0 of 14
+  arm off (second), run `run-0muxurdsx-002b`, completion `degraded`: 14 canonical finding(s), upheld 14 of 14, unresolved 0 of 14, unjudged 0 of 14
+  UNRESOLVED CANDIDATES STAY VISIBLE. A candidate the budget refused or a cancellation cut short is
+  NOT successful noise removal: it was never decided, and it is counted above rather than removed.
+  CONFOUNDS, BESIDE THIS RESULT — block 2
+    RUN ID / JUDGE ANONYMIZER. The fork gives each arm a NEW run of its own with its own run id
+    (`forkPreparedReview` in `core/run/review.ts`), and the judge's anonymizer seeds its permutation
+    from that run id together with each finding's id (the `runId` passed to `judge` in the same
+    file's `review`). The two arms of this block can therefore put the SAME exchange in front of the
+    judge under DIFFERENT anonymized orders. That difference is inside every number above, the
+    checkpoint fork does NOT remove it, and nothing here corrects for it.
+      run ids: on `run-0muxurdsx-002a`, off `run-0muxurdsx-002b`
+    POSITION ORDER, WITHIN THIS BLOCK. The two arms did not run at the same time:
+      first: on, second: off.
+    The coin counterbalances first-arm order ACROSS the three blocks; it does not remove the order
+    inside one. Anything that drifts between the two continuations — a provider's model version, its
+    load, its sampling — is confounded with whichever arm ran second HERE.
+    IDENTIFICATION. These are observed differences in the DEPLOYED debate pathway: the shipped
+    debate-plus-adjudication route against direct fact-checking of the same candidates, as deployed.
+    They do NOT measure the benefit of conversation with the judge pipeline held fixed, and they do
+    not say whether the pathway earns its cost.
+    A DEGRADED ARM IS IN THIS RESULT, NAMED RATHER THAN DISCARDED. It ran to the end and something
+    reduced it, so its findings are a real arm's and the block is measured; a withheld block would
+    have discarded PLANNED data instead. Every number above is the degraded arm's:
+      on `run-0muxurdsx-002a`: completion `degraded`; 4 warning(s): provider-fan-out, roster-single-lineage, blame-unavailable, unresolved-findings
+      off `run-0muxurdsx-002b`: completion `degraded`; 3 warning(s): provider-fan-out, roster-single-lineage, blame-unavailable
+    DISCLOSURES
+      ROUTING POLICY DIFFERS, and that is the intervention (SPEC.md evaluation exception):
+        on/1: routing policy shipped
+        off/1: routing policy debate-off
+      every other dial is the same on every comparable arm (threshold 0.8; round cap 3; token cap none; peak 4; shares 0.3/0.65/1).
+      OBSERVATIONS PER ARM: on 1, off 1.
+      NOISE FLOOR: NOT MEASURED for on, off — one run of an arm cannot tell a
+      real arm difference from run-to-run variation.
+      on/1 DEGRADED — 3 warning(s): roster-single-lineage, blame-unavailable, unresolved-findings
+      on/1 disclosures: provider-fan-out
+      off/1 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+      off/1 disclosures: provider-fan-out
+
+  EACH ARM'S PREFIX:
+    on → `run-0muxupxrz-0017`
+    off → `run-0muxupxrz-0017`
+  both arms were forked from `run-0muxupxrz-0017`, so its inherited part is one prefix, counted once.
+  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then
+  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.
+
+BLOCK 3 — planned order: off first, on second
+  both arms forked from `run-0muxv74r6-002c`; candidates paired by `Finding.id`, no aligner
+  paired candidates, of the distinct candidate id(s) across the two arms: 9 of 9
+  verdict-state differences, over the paired candidates where BOTH arms decided: 1 of 9
+  undecided transitions, over the paired candidates (counted here and in NEITHER half of the line above): 0 of 9
+  only in on, of the distinct candidate id(s): 0 of 9
+  only in off, of the distinct candidate id(s): 0 of 9
+    `finding-0muxv9oi3-002j`: on upheld → off not-adjudicated
+  treatment opportunity, of the candidate(s) the OFF arm sent to the judge: 4 of 9 would have been DEBATED by the shipped policy (read from the OFF arm's `status.routeCounts.intervention`, never re-derived)
+  arm on (second), run `run-0muxv9oi9-003j`, completion `degraded`: 9 canonical finding(s), upheld 9 of 9, unresolved 0 of 9, unjudged 0 of 9
+  arm off (first), run `run-0muxv9oi9-003i`, completion `degraded`: 9 canonical finding(s), upheld 8 of 9, unresolved 0 of 9, unjudged 0 of 9
+  UNRESOLVED CANDIDATES STAY VISIBLE. A candidate the budget refused or a cancellation cut short is
+  NOT successful noise removal: it was never decided, and it is counted above rather than removed.
+  CONFOUNDS, BESIDE THIS RESULT — block 3
+    RUN ID / JUDGE ANONYMIZER. The fork gives each arm a NEW run of its own with its own run id
+    (`forkPreparedReview` in `core/run/review.ts`), and the judge's anonymizer seeds its permutation
+    from that run id together with each finding's id (the `runId` passed to `judge` in the same
+    file's `review`). The two arms of this block can therefore put the SAME exchange in front of the
+    judge under DIFFERENT anonymized orders. That difference is inside every number above, the
+    checkpoint fork does NOT remove it, and nothing here corrects for it.
+      run ids: on `run-0muxv9oi9-003j`, off `run-0muxv9oi9-003i`
+    POSITION ORDER, WITHIN THIS BLOCK. The two arms did not run at the same time:
+      first: off, second: on.
+    The coin counterbalances first-arm order ACROSS the three blocks; it does not remove the order
+    inside one. Anything that drifts between the two continuations — a provider's model version, its
+    load, its sampling — is confounded with whichever arm ran second HERE.
+    IDENTIFICATION. These are observed differences in the DEPLOYED debate pathway: the shipped
+    debate-plus-adjudication route against direct fact-checking of the same candidates, as deployed.
+    They do NOT measure the benefit of conversation with the judge pipeline held fixed, and they do
+    not say whether the pathway earns its cost.
+    A DEGRADED ARM IS IN THIS RESULT, NAMED RATHER THAN DISCARDED. It ran to the end and something
+    reduced it, so its findings are a real arm's and the block is measured; a withheld block would
+    have discarded PLANNED data instead. Every number above is the degraded arm's:
+      off `run-0muxv9oi9-003i`: completion `degraded`; 3 warning(s): provider-fan-out, roster-single-lineage, blame-unavailable
+      on `run-0muxv9oi9-003j`: completion `degraded`; 3 warning(s): provider-fan-out, roster-single-lineage, blame-unavailable
+    DISCLOSURES
+      ROUTING POLICY DIFFERS, and that is the intervention (SPEC.md evaluation exception):
+        off/2: routing policy debate-off
+        on/2: routing policy shipped
+      every other dial is the same on every comparable arm (threshold 0.8; round cap 3; token cap none; peak 4; shares 0.3/0.65/1).
+      OBSERVATIONS PER ARM: off 1, on 1.
+      NOISE FLOOR: NOT MEASURED for off, on — one run of an arm cannot tell a
+      real arm difference from run-to-run variation.
+      off/2 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+      off/2 disclosures: provider-fan-out
+      on/2 DEGRADED — 2 warning(s): roster-single-lineage, blame-unavailable
+      on/2 disclosures: provider-fan-out
+
+  EACH ARM'S PREFIX:
+    off → `run-0muxv74r6-002c`
+    on → `run-0muxv74r6-002c`
+  both arms were forked from `run-0muxv74r6-002c`, so its inherited part is one prefix, counted once.
+  An ATTRIBUTED figure counts an inherited prefix. Add NEWLY EXECUTED figures across arms, then
+  add each distinct INHERITED prefix once. Adding ATTRIBUTED figures counts a shared prefix twice.
+
+WHAT THIS REPORT DOES NOT MEASURE. No truth label enters it, so it states no precision, no false
+positives, no final recall, none of the four labelled verdict transitions, and no earned /
+did-not-earn reading. CAP-1 recall and CAP-11 lens gain are the labelled report's
+(`ablation/labelled-read.ts`), printed after this one. The four labelled verdict transitions and the
+per-arm false positives are the adjudication report's (`ablation/adjudication-read.ts`), printed after that
+one, from a human truth sheet. Precision, final recall and cost contrasts belong to story 2.8, and the
+evaluation report (`ablation/evaluation-report.ts`) prints them last.
+Nothing here is a product-value claim, and three blocks were bought as DESCRIPTIVE evidence with no significance
+claim available from them (`evaluation-protocol.md` §4).
+
+MAD LABELLED RECALL — ablation/evidence/paired-oauth-evaluation-run-5-bundle
+labelled change labelled-change-1, 13 planted defects
+  material sha256:76523deb36aee41eb6ce9aaf1f9a51efbde5b404f839b1b20483016968fd848d
+  labels   sha256:8e95a53afd7ef9216715f90e9a6f28b34c6b60ecca3bff1882eefb83b8a75105
+  The schedule's fixture and every bound arm's `identity.fixtureHash` match the material hash. The labels hash is
+  what every number below is scored against, and the schedule's fixture is checked on it too.
+
+STATUS, STATED SEPARATELY
+  implementation: complete (`ablation/labelled-read.ts`)
+  protocol v2: FROZEN 2026-10-02 (`_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md`); it registers CAP-1 and CAP-11 as secondary descriptive endpoints for a schedule sealed under it
+  bundle observations: 8 of 8 quantities have at least one complete observation in this bundle (a count of QUANTITIES; one complete block can supply all of them)
+  planned live evaluation: completion is NOT established by this report. Bundle observation counts alone
+    establish neither live provenance nor completion of the planned three blocks.
+  matcher: the shipped lexical defect matcher, which is the one frozen protocol v2 (A2) specifies
+
+PROTOCOL IDENTITY, AS EACH FILE RECORDS IT
+  this bundle's schedule was sealed under protocol PROTOCOL-mad-evaluation-v2 v2 (sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2)
+  schedule: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  off/0: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  on/0: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  on/1: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  off/1: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  off/2: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  on/2: protocolVersion 2, protocolHash sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2
+  Every number this reader prints is DESCRIPTIVE. This reader does not establish that any number is v2-preregistered: v2 pre-registers only for a schedule sealed under the frozen v2 file (A5).
+
+ESTIMANDS — beside every number below
+  CAP-1 is WITHIN-PREFIX ATTRIBUTION: the union of the answered pool slots' findings against the best single
+  answered pool slot of the SAME discovery pass. It is not an independently executed single-model run.
+  CAP-11 is the planted defects answered lens slots raised that NO answered pool slot raised in that pass.
+  It is not a causal run effect. Both are nonnegative by construction and say nothing about precision.
+
+SUMMARY — separately per quantity, over complete observations only
+  CAP-1 pool union: observed 3/3
+    mean 8, min 7, max 9 — descriptive over 3 available observations, not the planned three-block result
+  CAP-1 best answered pool slot: observed 3/3
+    mean 22/3, min 7, max 8 — descriptive over 3 available observations, not the planned three-block result
+  CAP-1 union minus best: observed 3/3
+    mean 2/3, min 0, max 1 — descriptive over 3 available observations, not the planned three-block result
+  CAP-11 lens-only defects: observed 3/3
+    mean 2, min 2, max 2 — descriptive over 3 available observations, not the planned three-block result
+  on upheld planted-label matches: observed 3/3
+    mean 7, min 6, max 9 — descriptive over 3 available observations, not the planned three-block result
+  on upheld unlabelled (U): observed 3/3
+    mean 7/3, min 1, max 3 — descriptive over 3 available observations, not the planned three-block result
+  off upheld planted-label matches: observed 3/3
+    mean 7, min 6, max 9 — descriptive over 3 available observations, not the planned three-block result
+  off upheld unlabelled (U): observed 3/3
+    mean 3, min 2, max 5 — descriptive over 3 available observations, not the planned three-block result
+
+BLOCK 1
+  prefix run `run-0muxud0ly-0001`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/0/run-0muxud0ly-0001/record.json`
+  pool slot `discovery-1`: answered, 9 finding(s)
+  pool slot `discovery-2`: answered, 8 finding(s)
+  pool slot `discovery-3`: answered, 7 finding(s)
+  lens slot `discovery-lens-security` lens `security`: answered, 8 finding(s)
+  lens slot `discovery-lens-reliability` lens `reliability`: answered, 7 finding(s)
+  CAP-1 (within-prefix attribution), pool coverage 3 of 3 answered
+    pool union: 9 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`, `inaccessible-notice-markup`)
+    answered pool slot `discovery-1`: 8 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-2`: 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`, `inaccessible-notice-markup`)
+    answered pool slot `discovery-3`: 6 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`)
+    best answered pool slot: `discovery-1` with 8 of 13
+    union minus best: 1
+  CAP-11 (lens-only defects), over 2 of 2 lens slots answered, pool coverage 3 of 3
+    lens-only defects: 2 of 13 (`money-as-float`, `n-plus-one-notice-queries`)
+    lens slot `discovery-lens-security` (`security`): 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `money-as-float`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`); lens-only 1 (`money-as-float`)
+    lens slot `discovery-lens-reliability` (`reliability`): 6 of 13 (`sql-injection`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`); lens-only 1 (`n-plus-one-notice-queries`)
+  UPHELD FINDINGS PER ARM — planted-label matches and U, separately, never a truth labelling
+    arm off (first), run `run-0muxufnbb-0015`, protocolVersion 2: 8 upheld finding(s)
+      planted-label matches: 6 of 8 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 2 of 8 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+    arm on (second), run `run-0muxufnbb-0016`, protocolVersion 2: 7 upheld finding(s)
+      planted-label matches: 6 of 7 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 1 of 7 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+
+BLOCK 2
+  prefix run `run-0muxupxrz-0017`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/1/run-0muxupxrz-0017/record.json`
+  pool slot `discovery-1`: answered, 8 finding(s)
+  pool slot `discovery-2`: answered, 8 finding(s)
+  pool slot `discovery-3`: answered, 8 finding(s)
+  lens slot `discovery-lens-security` lens `security`: answered, 8 finding(s)
+  lens slot `discovery-lens-reliability` lens `reliability`: answered, 6 finding(s)
+  CAP-1 (within-prefix attribution), pool coverage 3 of 3 answered
+    pool union: 8 of 13 (`sql-injection`, `unchecked-idempotency-key`, `money-as-float`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-1`: 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-2`: 5 of 13 (`sql-injection`, `unchecked-idempotency-key`, `money-as-float`, `swallowed-refund-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-3`: 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    best answered pool slot: `discovery-1`, `discovery-3` with 7 of 13 (tied)
+    union minus best: 1
+  CAP-11 (lens-only defects), over 2 of 2 lens slots answered, pool coverage 3 of 3
+    lens-only defects: 2 of 13 (`unvalidated-refund-amount`, `n-plus-one-notice-queries`)
+    lens slot `discovery-lens-security` (`security`): 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`); lens-only 1 (`unvalidated-refund-amount`)
+    lens slot `discovery-lens-reliability` (`reliability`): 6 of 13 (`sql-injection`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`); lens-only 1 (`n-plus-one-notice-queries`)
+  UPHELD FINDINGS PER ARM — planted-label matches and U, separately, never a truth labelling
+    arm on (first), run `run-0muxurdsx-002a`, protocolVersion 2: 12 upheld finding(s)
+      planted-label matches: 9 of 12 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 3 of 12 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+    arm off (second), run `run-0muxurdsx-002b`, protocolVersion 2: 14 upheld finding(s)
+      planted-label matches: 9 of 14 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 5 of 14 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+
+BLOCK 3
+  prefix run `run-0muxv74r6-002c`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/2/run-0muxv74r6-002c/record.json`
+  pool slot `discovery-1`: answered, 8 finding(s)
+  pool slot `discovery-2`: answered, 8 finding(s)
+  pool slot `discovery-3`: answered, 7 finding(s)
+  lens slot `discovery-lens-security` lens `security`: answered, 8 finding(s)
+  lens slot `discovery-lens-reliability` lens `reliability`: answered, 10 finding(s)
+  CAP-1 (within-prefix attribution), pool coverage 3 of 3 answered
+    pool union: 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-1`: 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-2`: 5 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`)
+    answered pool slot `discovery-3`: 6 of 13 (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`)
+    best answered pool slot: `discovery-1` with 7 of 13
+    union minus best: 0
+  CAP-11 (lens-only defects), over 2 of 2 lens slots answered, pool coverage 3 of 3
+    lens-only defects: 2 of 13 (`unvalidated-refund-amount`, `money-as-float`)
+    lens slot `discovery-lens-security` (`security`): 7 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `card-number-in-notice-log`); lens-only 1 (`unvalidated-refund-amount`)
+    lens slot `discovery-lens-reliability` (`reliability`): 8 of 13 (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`); lens-only 1 (`unvalidated-refund-amount`)
+  UPHELD FINDINGS PER ARM — planted-label matches and U, separately, never a truth labelling
+    arm off (first), run `run-0muxv9oi9-003i`, protocolVersion 2: 8 upheld finding(s)
+      planted-label matches: 6 of 8 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 2 of 8 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+    arm on (second), run `run-0muxv9oi9-003j`, protocolVersion 2: 9 upheld finding(s)
+      planted-label matches: 6 of 9 upheld finding(s) (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+      U (no planted label claimed it, unmatched duplicates included): 3 of 9 upheld finding(s)
+      false positives: not counted here — the adjudication report below counts them per arm from the human truth sheet, or names why it could not
+
+WHAT THIS REPORT DOES NOT MEASURE. U is not a truth label: an upheld finding no planted label claimed is
+unlabelled, never a false positive. False positives and the four labelled verdict transitions are the
+adjudication report's (`ablation/adjudication-read.ts`), printed after this one, and they come from a human
+truth sheet rather than from any number above. Precision and cost contrasts belong to story 2.8, and the
+evaluation report (`ablation/evaluation-report.ts`) prints them last. Nothing here is a product-value claim.
+
+MAD ADJUDICATION — ablation/evidence/paired-oauth-evaluation-run-5-bundle
+sealed schedule sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16
+NO TRUTH SHEET — every truth-dependent quantity below is unavailable. The verdict-only counts still read.
+  no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+ESTIMANDS — beside every number below
+  DIRECTION READS OFF → ON, because the protocol defines the pair difference as ON minus OFF
+  (`evaluation-protocol.md:123-126`). The randomized first-arm order does not change it.
+  A TRUTH LABEL IS A HUMAN'S, from the sheet. The planted-label matcher only SUGGESTS; a suggestion
+  enters no count, and a human label that contradicts one is kept with the contradiction printed.
+  `not-adjudicated` is NEVER rejected. It is the judge saying the evidence does not settle the claim,
+  and the aggregator also writes it on drop-out, so `upheld → not-adjudicated` is not noise removal.
+  TRUTH-`unresolved` AND VERDICT-`unresolved` ARE DIFFERENT FACTS and are printed apart.
+  Nothing here is a precision, a recall, a cost or a product-value claim.
+
+MATCHER — for the SUGGESTION column only, and no count moves with it
+  the shipped lexical defect matcher
+
+SUMMARY — separately per quantity, over complete observations only
+  false upheld → rejected: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  true rejected → upheld: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  true upheld → rejected: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  false rejected → upheld: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  label missing: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  truth unresolved: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  unclassified label: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  on false positives: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  off false positives: observed 0/3
+    block 1 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 missing — no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    unavailable — no complete observation
+  undecided transitions: observed 3/3
+    mean 4/3, min 1, max 2 — descriptive over 3 available observations, not the planned three-block result
+  candidates missing from an arm: observed 3/3
+    mean 0, min 0, max 0 — descriptive over 3 available observations, not the planned three-block result
+  unchanged (decided both sides, same way): observed 3/3
+    mean 28/3, min 8, max 12 — descriptive over 3 available observations, not the planned three-block result
+
+BLOCK 1
+  prefix run `run-0muxud0ly-0001`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/0/run-0muxud0ly-0001/record.json`
+  truth pool: 9 canonical candidate(s) of the shared discovery prefix — every one of them gets a slot
+  paired in both arms: 9 of 9
+  candidates missing from an arm: 0 of 9 — never a transition
+  undecided transitions: 1 of 9 paired — counted on their own
+    `finding-0muxufnb4-0008` — on not-adjudicated, off upheld (verdict axis)
+  unchanged (decided both sides, same way): 8 of 8 decided —
+    a verdict-axis fact, so it reads with no sheet
+  decided both sides: 8 of 9 paired — the direction denominator
+  TRUTH LABELS UNAVAILABLE:
+    no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+BLOCK 2
+  prefix run `run-0muxupxrz-0017`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/1/run-0muxupxrz-0017/record.json`
+  truth pool: 14 canonical candidate(s) of the shared discovery prefix — every one of them gets a slot
+  paired in both arms: 14 of 14
+  candidates missing from an arm: 0 of 14 — never a transition
+  undecided transitions: 2 of 14 paired — counted on their own
+    `finding-0muxurdss-001n` — on unresolved, off upheld (verdict axis)
+    `finding-0muxurdss-001s` — on unresolved, off upheld (verdict axis)
+  unchanged (decided both sides, same way): 12 of 12 decided —
+    a verdict-axis fact, so it reads with no sheet
+  decided both sides: 12 of 14 paired — the direction denominator
+  TRUTH LABELS UNAVAILABLE:
+    no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+BLOCK 3
+  prefix run `run-0muxv74r6-002c`, record `/Users/xuyangy/trash/git2/MAD/ablation/evidence/paired-oauth-evaluation-run-5-bundle/prefix/2/run-0muxv74r6-002c/record.json`
+  truth pool: 9 canonical candidate(s) of the shared discovery prefix — every one of them gets a slot
+  paired in both arms: 9 of 9
+  candidates missing from an arm: 0 of 9 — never a transition
+  undecided transitions: 1 of 9 paired — counted on their own
+    `finding-0muxv9oi3-002j` — on upheld, off not-adjudicated (verdict axis)
+  unchanged (decided both sides, same way): 8 of 8 decided —
+    a verdict-axis fact, so it reads with no sheet
+  decided both sides: 8 of 9 paired — the direction denominator
+  TRUTH LABELS UNAVAILABLE:
+    no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+WHAT THIS REPORT DOES NOT MEASURE. No precision, no precision bound, no final recall, no cost contrast and no
+earned / did-not-earn reading. Precision, its bounds, final recall and the cost contrast are story 2.8's, under
+the frozen protocol's bound arithmetic, printed by the evaluation report (`ablation/evaluation-report.ts`). The
+labelled report's U is not a truth label and no number here was derived from it. This report prints and gates
+nothing.
+
+MAD EVALUATION REPORT
+provenance: `live`, as the sealed schedule records it
+bundle ablation/evidence/paired-oauth-evaluation-run-5-bundle
+sealed schedule sha256:70cb3f0389e88cf8188aa14903f723d316f1f3a480454349db9280e3e2505a16
+
+ESTIMANDS — beside every number below
+  DIRECTION READS ON − OFF (`evaluation-protocol.md:123-126`). The randomized first-arm order does not change it.
+  PRECISION is a point only when U = 0; otherwise it lies in [TP/N, (TP+U)/N]. U counts upheld findings with no
+  decisive truth label: truth unresolved, label missing, or outside the prefix pool. N = 0 is UNDEFINED.
+  EVERY BOUND IS AN IDENTIFICATION BOUND, never a confidence interval. The SHARED-LABEL bound is primary: a
+  candidate both arms upheld has one truth label. The OUTER bound [L_on − U_off, U_on − L_off] lets one claim carry
+  two labels, so it is wider and is labelled as such.
+  RECALL here is the planted-defect MATCHER's, a preservation diagnostic over the sealed planted defects. It is
+  not truth-sheet precision, and it gates nothing.
+  COST is NEWLY ISSUED MAD ATTEMPTS (protocol v2 A8): shared prefix + ON continuation + OFF continuation, each
+  admitted attempt once, retries included and shown apart, read from `paired-journal.jsonl`. ON − OFF compares the
+  continuations only. It is a WORKFLOW-USE CONTRAST: never token cost, money, subscription quota or a physical request
+  count. Host-reported tokens are unverified diagnostics and enter no figure.
+  Three blocks are DESCRIPTIVE evidence: no significance claim is available from them (`evaluation-protocol.md` §4).
+
+EXECUTION COVERAGE — every failure retained
+  scheduled blocks: 3; completed: 2 of 3, both continuations recorded completed in `paired-slots.jsonl`; measured: 3 of 3, both arms read into a pair
+  block 1: completed and measured — arms off `run-0muxufnbb-0015` (degraded), on `run-0muxufnbb-0016` (degraded)
+  block 2: measured, NOT COMPLETED — arms on `run-0muxurdsx-002a` (degraded), off `run-0muxurdsx-002b` (degraded)
+    the ON slot is failed: the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts
+  block 3: completed and measured — arms off `run-0muxv9oi9-003i` (degraded), on `run-0muxv9oi9-003j` (degraded)
+  SLOTS THAT DID NOT COMPLETE, from `paired-slots.jsonl`
+    block 2 on: failed — the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts
+
+AVAILABILITY — n/3 separately for each quantity
+  precision difference: 0/3
+    block 1 unavailable — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 unavailable — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 unavailable — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  planted-defect matcher recall change: 3/3
+  lost true candidates: 0/3
+    block 1 unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 2 unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+    block 3 unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  cost contrast: 2/3
+    block 2 unavailable — the ON slot is failed: the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts; a contrast against a truncated continuation would report the truncation as a workflow-use difference
+  treatment opportunity: 3/3
+
+PRECISION — per pair, from the human truth sheet's labels
+  BLOCK 1, prefix `run-0muxud0ly-0001`
+    UNAVAILABLE:
+      truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  BLOCK 2, prefix `run-0muxupxrz-0017`
+    UNAVAILABLE:
+      truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  BLOCK 3, prefix `run-0muxv74r6-002c`
+    UNAVAILABLE:
+      truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  OBSERVED SPREAD — every pair difference, then mean, min and max over all three pairs
+    no three-pair summary: a pair is undefined or unavailable, and no subset stands in for the three
+      block 1 — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+      block 2 — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+      block 3 — unavailable: truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+FINAL RECALL — planted-defect matcher recall (a preservation diagnostic) and the lost true candidates
+  BLOCK 1
+    arm on, run `run-0muxufnbb-0016`, matcher recall: 6 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+    arm off, run `run-0muxufnbb-0015`, matcher recall: 6 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+    ON − OFF matcher recall change: 0 of 13 planted defects
+    lost true candidates: unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  BLOCK 2
+    arm on, run `run-0muxurdsx-002a`, matcher recall: 9 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+    arm off, run `run-0muxurdsx-002b`, matcher recall: 9 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `unreleased-connection`, `swallowed-refund-failure`, `ledger-diverges-on-insert-failure`, `n-plus-one-notice-queries`, `card-number-in-notice-log`)
+    ON − OFF matcher recall change: 0 of 13 planted defects
+    lost true candidates: unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+  BLOCK 3
+    arm on, run `run-0muxv9oi9-003j`, matcher recall: 6 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    arm off, run `run-0muxv9oi9-003i`, matcher recall: 6 of 13 planted defects (`sql-injection`, `unchecked-idempotency-key`, `unvalidated-refund-amount`, `missing-await-ledger-write`, `ledger-diverges-on-insert-failure`, `card-number-in-notice-log`)
+    ON − OFF matcher recall change: 0 of 13 planted defects
+    lost true candidates: unavailable — truth labels unavailable: no adjudication sheet at `ablation/evidence/paired-oauth-evaluation-run-5-bundle/adjudication.json`
+
+COST — newly issued MAD attempts: a workflow-use contrast, never token cost, money, subscription quota or physical requests
+  BLOCK 1
+    source: `paired-journal.jsonl`, replayed and validated by `ablation/journal-read.ts`: each admitted attempt once, under the block and phase its admission was bound to, with `not-issued` settlements excluded
+    shared prefix, counted once: 5 attempt(s) (5 first, 0 retries); realised 5 of the 10-attempt threshold
+    ON continuation: 35 attempt(s) (34 first, 1 retry); realised 35 of the 45-attempt threshold
+    OFF continuation: 9 attempt(s) (9 first, 0 retries); realised 9 of the 45-attempt threshold
+    ON − OFF continuation attempts: exactly 26
+    block (prefix once + both continuations): 49 newly issued attempt(s); realised 49 of the 100-attempt threshold
+    by stage and slot:
+      prefix discover/discovery-1 — openai/gpt-6-sol (model from continuation manifest `run-0muxufnbb-0016`, same roster): 1 first, 0 retries
+      prefix discover/discovery-2 — anthropic/claude-sonnet-5 (model from continuation manifest `run-0muxufnbb-0016`, same roster): 1 first, 0 retries
+      prefix discover/discovery-3 — github-copilot/gpt-6-luna (model from continuation manifest `run-0muxufnbb-0016`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from continuation manifest `run-0muxufnbb-0016`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-security — openai/gpt-5.6-terra-fast (model from continuation manifest `run-0muxufnbb-0016`, same roster): 1 first, 0 retries
+      on debate/discovery-1 — openai/gpt-6-sol (model from run `run-0muxufnbb-0016`'s manifest roster): 2 first, 0 retries
+      on debate/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxufnbb-0016`'s manifest roster): 2 first, 0 retries
+      on debate/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxufnbb-0016`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from run `run-0muxufnbb-0016`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-security — openai/gpt-5.6-terra-fast (model from run `run-0muxufnbb-0016`'s manifest roster): 1 first, 0 retries
+      on judge/discovery-1 — openai/gpt-6-sol (model from run `run-0muxufnbb-0016`'s manifest roster): 5 first, 0 retries
+      on judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxufnbb-0016`'s manifest roster): 6 first, 1 retry
+      on judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxufnbb-0016`'s manifest roster): 16 first, 0 retries
+      off judge/discovery-1 — openai/gpt-6-sol (model from run `run-0muxufnbb-0015`'s manifest roster): 3 first, 0 retries
+      off judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxufnbb-0015`'s manifest roster): 3 first, 0 retries
+      off judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxufnbb-0015`'s manifest roster): 3 first, 0 retries
+  BLOCK 2
+    source: `paired-journal.jsonl`, replayed and validated by `ablation/journal-read.ts`: each admitted attempt once, under the block and phase its admission was bound to, with `not-issued` settlements excluded
+    shared prefix, counted once: 5 attempt(s) (5 first, 0 retries); realised 5 of the 10-attempt threshold
+    ON continuation: 45 attempt(s) (44 first, 1 retry); realised 45 of the 45-attempt threshold
+    OFF continuation: 14 attempt(s) (14 first, 0 retries); realised 14 of the 45-attempt threshold
+    ON − OFF continuation attempts: unavailable — the ON slot is failed: the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts; a contrast against a truncated continuation would report the truncation as a workflow-use difference
+    block (prefix once + both continuations): 64 newly issued attempt(s); realised 64 of the 100-attempt threshold
+    by stage and slot:
+      prefix discover/discovery-1 — openai/gpt-6-sol (model from continuation manifest `run-0muxurdsx-002a`, same roster): 1 first, 0 retries
+      prefix discover/discovery-2 — anthropic/claude-sonnet-5 (model from continuation manifest `run-0muxurdsx-002a`, same roster): 1 first, 0 retries
+      prefix discover/discovery-3 — github-copilot/gpt-6-luna (model from continuation manifest `run-0muxurdsx-002a`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from continuation manifest `run-0muxurdsx-002a`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-security — openai/gpt-5.6-terra-fast (model from continuation manifest `run-0muxurdsx-002a`, same roster): 1 first, 0 retries
+      on debate/discovery-1 — openai/gpt-6-sol (model from run `run-0muxurdsx-002a`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxurdsx-002a`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxurdsx-002a`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from run `run-0muxurdsx-002a`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-security — openai/gpt-5.6-terra-fast (model from run `run-0muxurdsx-002a`'s manifest roster): 1 first, 0 retries
+      on judge/discovery-1 — openai/gpt-6-sol (model from run `run-0muxurdsx-002a`'s manifest roster): 6 first, 0 retries
+      on judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxurdsx-002a`'s manifest roster): 14 first, 1 retry
+      on judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxurdsx-002a`'s manifest roster): 19 first, 0 retries
+      off judge/discovery-1 — openai/gpt-6-sol (model from run `run-0muxurdsx-002b`'s manifest roster): 3 first, 0 retries
+      off judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxurdsx-002b`'s manifest roster): 5 first, 0 retries
+      off judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxurdsx-002b`'s manifest roster): 6 first, 0 retries
+  BLOCK 3
+    source: `paired-journal.jsonl`, replayed and validated by `ablation/journal-read.ts`: each admitted attempt once, under the block and phase its admission was bound to, with `not-issued` settlements excluded
+    shared prefix, counted once: 5 attempt(s) (5 first, 0 retries); realised 5 of the 10-attempt threshold
+    ON continuation: 26 attempt(s) (26 first, 0 retries); realised 26 of the 45-attempt threshold
+    OFF continuation: 9 attempt(s) (9 first, 0 retries); realised 9 of the 45-attempt threshold
+    ON − OFF continuation attempts: exactly 17
+    block (prefix once + both continuations): 40 newly issued attempt(s); realised 40 of the 100-attempt threshold
+    by stage and slot:
+      prefix discover/discovery-1 — openai/gpt-6-sol (model from continuation manifest `run-0muxv9oi9-003j`, same roster): 1 first, 0 retries
+      prefix discover/discovery-2 — anthropic/claude-sonnet-5 (model from continuation manifest `run-0muxv9oi9-003j`, same roster): 1 first, 0 retries
+      prefix discover/discovery-3 — github-copilot/gpt-6-luna (model from continuation manifest `run-0muxv9oi9-003j`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from continuation manifest `run-0muxv9oi9-003j`, same roster): 1 first, 0 retries
+      prefix discover/discovery-lens-security — openai/gpt-5.6-terra-fast (model from continuation manifest `run-0muxv9oi9-003j`, same roster): 1 first, 0 retries
+      on debate/discovery-1 — openai/gpt-6-sol (model from run `run-0muxv9oi9-003j`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxv9oi9-003j`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxv9oi9-003j`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-reliability — github-copilot/claude-haiku-4.5 (model from run `run-0muxv9oi9-003j`'s manifest roster): 1 first, 0 retries
+      on debate/discovery-lens-security — openai/gpt-5.6-terra-fast (model from run `run-0muxv9oi9-003j`'s manifest roster): 1 first, 0 retries
+      on judge/discovery-1 — openai/gpt-6-sol (model from run `run-0muxv9oi9-003j`'s manifest roster): 2 first, 0 retries
+      on judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxv9oi9-003j`'s manifest roster): 9 first, 0 retries
+      on judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxv9oi9-003j`'s manifest roster): 10 first, 0 retries
+      off judge/discovery-2 — anthropic/claude-sonnet-5 (model from run `run-0muxv9oi9-003i`'s manifest roster): 5 first, 0 retries
+      off judge/discovery-3 — github-copilot/gpt-6-luna (model from run `run-0muxv9oi9-003i`'s manifest roster): 4 first, 0 retries
+  Host-reported tokens on this route are unverified diagnostics and are in no figure above. Token spend and
+  subscription quota are not measured; the host's own retries, tool steps and held-open requests are not counted.
+  LIMITATION: the effect of persistent logs, `project` and `event` rows in the OAuth data directory on later runs is unmeasured; every table outside the store guard's allowlist of opencode 1.18.32 tables is unguarded, and a table a newer schema adds goes unseen.
+  The launcher starts no host unless the store guard counts every guarded table at 0 before the spawn, and fails
+  the run's exit code unless it does again after the exit: a precondition the launcher enforces, not an observation
+  this report read. Nothing else the host keeps there is checked.
+
+TREATMENT OPPORTUNITY — how many candidates normal policy would have debated, and whether debate ran
+  BLOCK 1
+    OFF run `run-0muxufnbb-0015`: normal policy would have debated 6 of 9 candidates sent to the judge
+    ON run `run-0muxufnbb-0016`: the debate stage ran and debated 6 candidate(s)
+  BLOCK 2
+    OFF run `run-0muxurdsx-002b`: normal policy would have debated 11 of 14 candidates sent to the judge
+    ON run `run-0muxurdsx-002a`: the debate stage ran and debated 11 candidate(s)
+  BLOCK 3
+    OFF run `run-0muxv9oi9-003i`: normal policy would have debated 4 of 9 candidates sent to the judge
+    ON run `run-0muxv9oi9-003j`: the debate stage ran and debated 4 candidate(s)
+
+PRODUCT VALUE — not assessed, by design (`evaluation-protocol.md` §6). This report prints; it grades nothing.
+Its inputs are the paired (`ablation/paired-read.ts`), labelled (`ablation/labelled-read.ts`) and adjudication
+(`ablation/adjudication-read.ts`) reports above, each read once.
+

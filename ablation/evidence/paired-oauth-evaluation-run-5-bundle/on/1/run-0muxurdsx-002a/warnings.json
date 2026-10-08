@@ -1,0 +1,65 @@
+[
+  {
+    "code": "provider-fan-out",
+    "stage": "roster",
+    "message": "This review sends the change to 3 provider(s): openai, anthropic, github-copilot. Models: openai/gpt-6-sol, anthropic/claude-sonnet-5, github-copilot/gpt-6-luna, openai/gpt-5.6-terra-fast (lens security), github-copilot/claude-haiku-4.5 (lens reliability).",
+    "detail": {
+      "providers": [
+        "openai",
+        "anthropic",
+        "github-copilot"
+      ],
+      "models": [
+        "openai/gpt-6-sol",
+        "anthropic/claude-sonnet-5",
+        "github-copilot/gpt-6-luna",
+        "openai/gpt-5.6-terra-fast (lens security)",
+        "github-copilot/claude-haiku-4.5 (lens reliability)"
+      ]
+    }
+  },
+  {
+    "code": "roster-single-lineage",
+    "stage": "roster",
+    "message": "DEGRADED ROSTER: 3 discovery slot(s) requested but only 2 distinct verified lineage(s) available (GPT (OpenAI), Claude (Anthropic), GPT (OpenAI)). Co-discovery over a roster this narrow is a WEAK SIGNAL — models from one lineage share training data and therefore share blind spots. Add a provider from another lineage under the `provider` key in your opencode config to fix this. Temperature variation across one model is not an accepted substitute for a diverse roster.",
+    "detail": {
+      "requested": 3,
+      "distinctLineages": 2,
+      "lineages": [
+        "gpt",
+        "claude"
+      ],
+      "providerConfigKey": "provider"
+    }
+  },
+  {
+    "code": "blame-unavailable",
+    "stage": "judge",
+    "message": "MAD COULD NOT RUN `git blame`: 11 attempt(s) failed, so those findings were decided without the repository's own record of who last changed the lines they cite. THIS IS NOT \"the history contradicts nothing\" — nothing was read either way. A bad path, a line past the end of a file, an uncommitted line and a shallow clone all land here. Failures: src/billing/refund.ts:20-22 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD; src/billing/refund.ts:37-44 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD; src/billing/refund-notice.ts:14-15 — git blame failed: fatal: no such path 'src/billing/refund-notice.ts' in HEAD; src/billing/refund.ts:27-36 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD; src/billing/refund.ts:47-54 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD (+6 more, all of them in this warning's detail).",
+    "detail": {
+      "failures": [
+        "src/billing/refund.ts:20-22 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund.ts:37-44 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund-notice.ts:14-15 — git blame failed: fatal: no such path 'src/billing/refund-notice.ts' in HEAD",
+        "src/billing/refund.ts:27-36 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund.ts:47-54 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund.ts:19-44 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund.ts:31-35 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund.ts:18-24 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund-notice.ts:12-21 — git blame failed: fatal: no such path 'src/billing/refund-notice.ts' in HEAD",
+        "src/billing/refund.ts:18-24 — git blame failed: fatal: no such path 'src/billing/refund.ts' in HEAD",
+        "src/billing/refund-notice.ts:26-28 — git blame failed: fatal: no such path 'src/billing/refund-notice.ts' in HEAD"
+      ]
+    }
+  },
+  {
+    "code": "unresolved-findings",
+    "stage": "judge",
+    "message": "ADMISSION REFUSED IN JUDGING: 2 finding(s) were still undecided when the experiment's admission refused the next request (block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts). They are reported in the UNRESOLVED section with the evidence they accumulated — nothing was dropped.",
+    "detail": {
+      "cap": null,
+      "unresolved": 2,
+      "admission": "block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts"
+    }
+  }
+]

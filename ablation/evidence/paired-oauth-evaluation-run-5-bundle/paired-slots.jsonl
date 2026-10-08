@@ -1,0 +1,12 @@
+{"block":1,"arm":"off","position":"first","status":"started","reason":"the OFF continuation of block 1 started","at":"2026-10-07T08:26:22.542Z","runId":"run-0muxufnbb-0015"}
+{"block":1,"arm":"off","position":"first","status":"completed","reason":"the OFF continuation of block 1 finished","at":"2026-10-07T08:29:22.458Z","runId":"run-0muxufnbb-0015"}
+{"block":1,"arm":"on","position":"second","status":"started","reason":"the ON continuation of block 1 started","at":"2026-10-07T08:29:22.459Z","runId":"run-0muxufnbb-0016"}
+{"block":1,"arm":"on","position":"second","status":"completed","reason":"the ON continuation of block 1 finished","at":"2026-10-07T08:34:22.653Z","runId":"run-0muxufnbb-0016"}
+{"block":2,"arm":"on","position":"first","status":"started","reason":"the ON continuation of block 2 started","at":"2026-10-07T08:35:30.086Z","runId":"run-0muxurdsx-002a"}
+{"block":2,"arm":"on","position":"first","status":"failed","reason":"the ON continuation of block 2 returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with on judge/discovery-2 attempt 1 (budget): block 2's ON continuation allowance is exhausted: 45 of 45 admitted attempts","at":"2026-10-07T08:42:46.851Z","runId":"run-0muxurdsx-002a"}
+{"block":2,"arm":"off","position":"second","status":"started","reason":"the OFF continuation of block 2 started","at":"2026-10-07T08:42:46.854Z","runId":"run-0muxurdsx-002b"}
+{"block":2,"arm":"off","position":"second","status":"completed","reason":"the OFF continuation of block 2 finished","at":"2026-10-07T08:47:44.845Z","runId":"run-0muxurdsx-002b"}
+{"block":3,"arm":"off","position":"first","status":"started","reason":"the OFF continuation of block 3 started","at":"2026-10-07T08:49:43.766Z","runId":"run-0muxv9oi9-003i"}
+{"block":3,"arm":"off","position":"first","status":"completed","reason":"the OFF continuation of block 3 finished","at":"2026-10-07T08:53:03.623Z","runId":"run-0muxv9oi9-003i"}
+{"block":3,"arm":"on","position":"second","status":"started","reason":"the ON continuation of block 3 started","at":"2026-10-07T08:53:03.628Z","runId":"run-0muxv9oi9-003j"}
+{"block":3,"arm":"on","position":"second","status":"completed","reason":"the ON continuation of block 3 finished","at":"2026-10-07T08:57:52.958Z","runId":"run-0muxv9oi9-003j"}

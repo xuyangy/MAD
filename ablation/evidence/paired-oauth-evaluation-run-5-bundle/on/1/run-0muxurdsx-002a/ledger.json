@@ -1,0 +1,640 @@
+{
+  "entries": [
+    {
+      "slot": "discovery-2",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 2632,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 6992
+      },
+      "origin": {
+        "runId": "run-0muxupxrz-0017",
+        "entry": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 553,
+        "output": 852,
+        "reasoning": 1597,
+        "cacheRead": 4848,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxupxrz-0017",
+        "entry": 1
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 2969,
+        "output": 766,
+        "reasoning": 449,
+        "cacheRead": 1920,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxupxrz-0017",
+        "entry": 2
+      }
+    },
+    {
+      "slot": "discovery-lens-reliability",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 20,
+        "output": 1333,
+        "reasoning": 0,
+        "cacheRead": 11594,
+        "cacheWrite": 607
+      },
+      "origin": {
+        "runId": "run-0muxupxrz-0017",
+        "entry": 3
+      }
+    },
+    {
+      "slot": "discovery-lens-security",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 1896,
+        "output": 894,
+        "reasoning": 1010,
+        "cacheRead": 4480,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxupxrz-0017",
+        "entry": 4
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 258,
+        "output": 602,
+        "reasoning": 169,
+        "cacheRead": 6402,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 2095,
+        "reasoning": 0,
+        "cacheRead": 9882,
+        "cacheWrite": 2058
+      }
+    },
+    {
+      "slot": "discovery-lens-security",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 1632,
+        "output": 501,
+        "reasoning": 150,
+        "cacheRead": 5504,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 2155,
+        "output": 1049,
+        "reasoning": 148,
+        "cacheRead": 5376,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-lens-reliability",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 22,
+        "output": 1079,
+        "reasoning": 0,
+        "cacheRead": 7361,
+        "cacheWrite": 1723
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1490,
+        "reasoning": 0,
+        "cacheRead": 4971,
+        "cacheWrite": 2952
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1878,
+        "output": 93,
+        "reasoning": 285,
+        "cacheRead": 2026,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 522,
+        "output": 394,
+        "reasoning": 195,
+        "cacheRead": 5820,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 420,
+        "reasoning": 0,
+        "cacheRead": 5146,
+        "cacheWrite": 4489
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 2,
+      "tokens": {
+        "input": 12,
+        "output": 394,
+        "reasoning": 0,
+        "cacheRead": 9635,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 2036,
+        "output": 608,
+        "reasoning": 440,
+        "cacheRead": 2006,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 600,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 7390
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1198,
+        "reasoning": 0,
+        "cacheRead": 8439,
+        "cacheWrite": 1387
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 3226,
+        "output": 118,
+        "reasoning": 101,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1848,
+        "output": 592,
+        "reasoning": 312,
+        "cacheRead": 2006,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 535,
+        "reasoning": 0,
+        "cacheRead": 4968,
+        "cacheWrite": 2044
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1127,
+        "reasoning": 0,
+        "cacheRead": 9093,
+        "cacheWrite": 1189
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 3175,
+        "output": 128,
+        "reasoning": 70,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 2097,
+        "output": 793,
+        "reasoning": 367,
+        "cacheRead": 2006,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 2052,
+        "output": 77,
+        "reasoning": 106,
+        "cacheRead": 1792,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1938,
+        "output": 447,
+        "reasoning": 26,
+        "cacheRead": 4224,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 2935,
+        "output": 104,
+        "reasoning": 219,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 3758,
+        "output": 422,
+        "reasoning": 127,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 571,
+        "reasoning": 0,
+        "cacheRead": 4968,
+        "cacheWrite": 1751
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1114,
+        "output": 523,
+        "reasoning": 293,
+        "cacheRead": 4918,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 2896,
+        "output": 121,
+        "reasoning": 106,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1967,
+        "output": 472,
+        "reasoning": 160,
+        "cacheRead": 1792,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1241,
+        "output": 99,
+        "reasoning": 240,
+        "cacheRead": 2026,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 385,
+        "output": 525,
+        "reasoning": 655,
+        "cacheRead": 5088,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 907,
+        "output": 128,
+        "reasoning": 10,
+        "cacheRead": 4480,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 697,
+        "output": 434,
+        "reasoning": 171,
+        "cacheRead": 4714,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 4844,
+        "output": 295,
+        "reasoning": 26,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1685,
+        "reasoning": 0,
+        "cacheRead": 8873,
+        "cacheWrite": 518
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1753,
+        "output": 434,
+        "reasoning": 340,
+        "cacheRead": 2006,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 500,
+        "reasoning": 0,
+        "cacheRead": 4968,
+        "cacheWrite": 1708
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1199,
+        "reasoning": 0,
+        "cacheRead": 9722,
+        "cacheWrite": 174
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 3014,
+        "output": 103,
+        "reasoning": 32,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1235,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 7536
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1411,
+        "output": 67,
+        "reasoning": 229,
+        "cacheRead": 2026,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 461,
+        "output": 353,
+        "reasoning": 272,
+        "cacheRead": 5827,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 262,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 9672
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 1796,
+        "output": 459,
+        "reasoning": 415,
+        "cacheRead": 2006,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 513,
+        "reasoning": 0,
+        "cacheRead": 6816,
+        "cacheWrite": 653
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1236,
+        "reasoning": 0,
+        "cacheRead": 9906,
+        "cacheWrite": 174
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 3066,
+        "output": 121,
+        "reasoning": 256,
+        "cacheRead": 2132,
+        "cacheWrite": 0
+      }
+    }
+  ],
+  "total": {
+    "input": 60726,
+    "output": 32678,
+    "reasoning": 8976,
+    "cacheRead": 212427,
+    "cacheWrite": 53017
+  },
+  "cap": null,
+  "maxConcurrency": 4,
+  "shares": {
+    "discover": 0.3,
+    "debate": 0.65,
+    "judge": 1
+  },
+  "unknownUsage": [],
+  "stopOnUnknownUsage": false
+}

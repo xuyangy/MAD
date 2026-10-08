@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-10-07T08:24:19.789Z",
+  "arms": [
+    {
+      "armId": "off",
+      "repeatId": 0
+    },
+    {
+      "armId": "on",
+      "repeatId": 0
+    },
+    {
+      "armId": "on",
+      "repeatId": 1
+    },
+    {
+      "armId": "off",
+      "repeatId": 1
+    },
+    {
+      "armId": "off",
+      "repeatId": 2
+    },
+    {
+      "armId": "on",
+      "repeatId": 2
+    }
+  ]
+}

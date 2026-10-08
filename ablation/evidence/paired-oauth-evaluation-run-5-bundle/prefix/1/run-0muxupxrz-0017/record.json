@@ -1,0 +1,2096 @@
+{
+  "runId": "run-0muxupxrz-0017",
+  "startedAt": "2026-10-07T08:34:22.655Z",
+  "roster": {
+    "slots": [
+      {
+        "slot": "discovery-1",
+        "providerId": "openai",
+        "modelId": "gpt-6-sol",
+        "identity": "gpt-6-sol",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      },
+      {
+        "slot": "discovery-2",
+        "providerId": "anthropic",
+        "modelId": "claude-sonnet-5",
+        "identity": "claude-sonnet-5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": [
+          "github-copilot"
+        ]
+      },
+      {
+        "slot": "discovery-3",
+        "providerId": "github-copilot",
+        "modelId": "gpt-6-luna",
+        "identity": "gpt-6-luna",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": [
+          "openai"
+        ]
+      }
+    ],
+    "lensSlots": [
+      {
+        "slot": "discovery-lens-security",
+        "lens": "security",
+        "providerId": "openai",
+        "modelId": "gpt-5.6-terra-fast",
+        "identity": "gpt-5.6-terra-fast",
+        "lineage": {
+          "lineage": "gpt",
+          "label": "GPT (OpenAI)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      },
+      {
+        "slot": "discovery-lens-reliability",
+        "lens": "reliability",
+        "providerId": "github-copilot",
+        "modelId": "claude-haiku-4.5",
+        "identity": "claude-haiku-4.5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      }
+    ],
+    "requested": 3,
+    "distinctLineages": 2,
+    "providers": [
+      "openai",
+      "anthropic",
+      "github-copilot"
+    ]
+  },
+  "answered": 3,
+  "findings": [
+    {
+      "id": "finding-0muxurdss-0018",
+      "claim": "The charge lookup is vulnerable to SQL injection through `orderId`.",
+      "reasoning": "The query interpolates `req.orderId` directly into `where order_id = '${req.orderId}'`. An order ID containing a quote can alter the predicate or inject SQL, allowing a caller to select another charge for the refund or execute additional SQL, depending on the database driver.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 20,
+        "endLine": 22
+      },
+      "severity": "critical",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The charge lookup is vulnerable to SQL injection through `orderId`."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "SQL injection via unsanitized `req.orderId` interpolated directly into a query string."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The order lookup interpolates `req.orderId` directly into SQL, allowing a crafted order ID to alter the query and potentially select or manipulate charges."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`orderId` is interpolated into a SQL query, allowing SQL injection when the refund request is influenced by an untrusted caller."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "SQL injection vulnerability in query at line 21. The orderId is directly interpolated into the SQL string instead of using parameterized queries."
+        }
+      ],
+      "clusterId": "cluster-1",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001g",
+        "finding-0muxurdss-001o",
+        "finding-0muxurdss-001w",
+        "finding-0muxurdss-0026"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001a",
+      "claim": "The refund can report success before its ledger entry has been written.",
+      "reasoning": "`appendLedgerEntry` now returns a promise that performs a database insert, but the call is not awaited. `conn.release()` and the successful return can happen while that insert is still pending; an insert failure becomes an unhandled rejection, and the connection may be reused before the write completes.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 37,
+        "endLine": 44
+      },
+      "severity": "high",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The refund can report success before its ledger entry has been written."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Refund failures are reported to callers as successful refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`refundOrderSafely` swallows all errors — including failures after the gateway refund already succeeded — and always reports success, risking inconsistent state and silently losing ledger entries."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`appendLedgerEntry` is called without `await` in `refundOrder`, even though it was changed to be `async` and perform a DB insert, so the function returns before the ledger write completes (or any error from it is thrown) and the error becomes an unhandled promise rejection instead of being caught by the surrounding try/catch in `refundOrderSafely`."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The ledger append is not awaited, so `refundOrder` can release the connection and report success before the ledger insert completes."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The safe wrapper reports success even when the refund operation throws before a refund succeeds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Failures are reported as successful refunds even when the gateway was never called or rejected the request."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The ledger write is started without awaiting it, allowing the connection to be released and the refund to be reported successful before the durable ledger entry exists."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "appendLedgerEntry is awaitable but not awaited at line 37, causing the ledger write to race against connection release at line 43. If the write fails or is still in flight when the connection releases, data loss occurs."
+        }
+      ],
+      "clusterId": "cluster-3",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001b",
+        "finding-0muxurdss-001h",
+        "finding-0muxurdss-001k",
+        "finding-0muxurdss-001q",
+        "finding-0muxurdss-001r",
+        "finding-0muxurdss-001z",
+        "finding-0muxurdss-0020",
+        "finding-0muxurdss-0025"
+      ],
+      "clusterSeverity": "critical"
+    },
+    {
+      "id": "finding-0muxurdss-001c",
+      "claim": "Acquired database connections leak on missing charges and errors.",
+      "reasoning": "After `db.acquire()`, the `if (!charge) return { ok: false }` path skips `conn.release()`. Exceptions from the query, insert, or gateway also bypass the only release call; repeated failed requests can exhaust the connection pool.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 18,
+        "endLine": 24
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Acquired database connections leak on missing charges and errors."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Database connections leak whenever no charge is found or an operation throws, eventually exhausting the connection pool."
+        }
+      ],
+      "clusterId": "cluster-4",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-0021"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001d",
+      "claim": "Refund notices write customers' payment card numbers to application logs.",
+      "reasoning": "The customer lookup reads `card_number`, and the `console.log` interpolates it into the log line for each notice. Anyone or any system with access to those logs can obtain customers' card numbers even though sending the notice does not require them.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 14,
+        "endLine": 15
+      },
+      "severity": "critical",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Refund notices write customers' payment card numbers to application logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`notifyRefunds` logs the customer's full card number to console output, exposing sensitive PCI-scoped payment data in logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`notifyRefunds` looks up the customer by `row.email` instead of by an identifier tied to the order/charge, which can pull the wrong customer's data (including the wrong card number) if emails are not unique or the row's email doesn't match the actual order owner."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The refund notice writes the customer's full card number to application logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Full customer card numbers are written to application logs during refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Sensitive data (customer card number) is logged to console at line 15, exposing payment card information."
+        }
+      ],
+      "clusterId": "cluster-5",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001l",
+        "finding-0muxurdss-001m",
+        "finding-0muxurdss-001u",
+        "finding-0muxurdss-0022",
+        "finding-0muxurdss-0028"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001e",
+      "claim": "A failed ledger insert still changes the in-memory balance.",
+      "reasoning": "`balances.set(...)` runs before the awaited `conn.query(...)`. If the insert rejects, the durable ledger has no corresponding entry while the running balance retains the delta, so subsequent balance reads in this process disagree with the ledger.",
+      "locus": {
+        "file": "src/billing/ledger.ts",
+        "startLine": 16,
+        "endLine": 18
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "A failed ledger insert still changes the in-memory balance."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The in-memory balance is updated before the durable ledger insert, so a database insert failure leaves the balance inconsistent with the ledger table."
+        }
+      ],
+      "clusterId": "cluster-6",
+      "coDiscovery": {
+        "raised": 2,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001t"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001f",
+      "claim": "Unescaped order IDs can inject markup into refund emails.",
+      "reasoning": "`renderNotice` inserts `row.orderId` directly into an HTML `<span>`. An order ID containing HTML metacharacters can close that element and add arbitrary email markup, allowing an attacker-controlled order ID to change the message sent to the customer.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 26,
+        "endLine": 28
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Unescaped order IDs can inject markup into refund emails."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The order ID is inserted into the email body as raw HTML, allowing markup injection into refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Refund notice HTML injects the unescaped order ID into the email body."
+        }
+      ],
+      "clusterId": "cluster-7",
+      "coDiscovery": {
+        "raised": 2,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001v",
+        "finding-0muxurdss-0023"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001i",
+      "claim": "`conn.release()` is never called if any step between acquiring the connection and the release line throws, causing a connection pool leak.",
+      "reasoning": "`refundOrder` acquires `conn` via `db.acquire()` at the top, then performs several `await` calls (`conn.query` for charge lookup, `conn.query` for idempotency key insert, `gateway.createRefund`, `appendLedgerEntry`) before finally calling `await conn.release()`. There is no `try/finally`, so if any of these calls throws (e.g., gateway network error, DB constraint violation), `conn.release()` is skipped and the connection is leaked from the pool. Combined with `refundOrderSafely` swallowing the exception, this failure is invisible and will exhaust the connection pool over repeated failures.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 19,
+        "endLine": 44
+      },
+      "severity": "high",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`conn.release()` is never called if any step between acquiring the connection and the release line throws, causing a connection pool leak."
+        }
+      ],
+      "clusterId": "cluster-8",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001j",
+      "claim": "Idempotency key insert uses 'on conflict do nothing' but the code never checks whether the insert actually inserted a new row versus a pre-existing key, so duplicate refund requests with the same idempotencyKey still proceed to call the payment gateway again and double-refund the customer.",
+      "reasoning": "The intent of `idempotencyKey` is to prevent a refund from being processed twice (e.g. due to retries). The code does `insert into refund_keys (key, order_id) values ($1, $2) on conflict do nothing` but discards the result and unconditionally continues to call `gateway.createRefund(...)` and `appendLedgerEntry(...)` afterward. On a retried request with the same key, the insert becomes a no-op (conflict), yet the function still issues a new refund via the gateway and appends another negative ledger entry, resulting in duplicate refunds for the same order.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 27,
+        "endLine": 36
+      },
+      "severity": "critical",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Idempotency key insert uses 'on conflict do nothing' but the code never checks whether the insert actually inserted a new row versus a pre-existing key, so duplicate refund requests with the same idempotencyKey still proceed to call the payment gateway again and double-refund the customer."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Repeated requests with the same idempotency key can create multiple refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The idempotency key does not prevent duplicate gateway refunds; every request calls `createRefund`, even when inserting the key conflicts."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The idempotency key is recorded but never enforced, so retries can issue duplicate gateway refunds."
+        }
+      ],
+      "clusterId": "cluster-2",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-0019",
+        "finding-0muxurdss-001p",
+        "finding-0muxurdss-001x"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001n",
+      "claim": "`renderNotice` builds HTML email content by directly interpolating `row.orderId` and `row.amountCents` without escaping, creating an HTML/email injection risk if orderId is attacker-influenced.",
+      "reasoning": "`<span>Refunded ${row.amountCents} cents for order ${row.orderId}</span>` interpolates `row.orderId` directly into HTML markup sent via `mailer.send`. If `orderId` can contain HTML special characters (e.g., if it originates from user-controllable data upstream), this allows HTML injection into the refund notice email body. This is lower risk than the SQL injection/card logging issues but is still a real defect in untrusted-data handling.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 25,
+        "endLine": 29
+      },
+      "severity": "low",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`renderNotice` builds HTML email content by directly interpolating `row.orderId` and `row.amountCents` without escaping, creating an HTML/email injection risk if orderId is attacker-influenced."
+        }
+      ],
+      "clusterId": "cluster-9",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001s",
+      "claim": "The acquired database connection is leaked when no charge is found, and also on other error paths before the explicit release.",
+      "reasoning": "After `db.acquire()` at line 18, the no-charge branch returns at line 24 without releasing `conn`; exceptions from the subsequent queries or gateway call likewise bypass the release at line 43. Repeated failures can exhaust the connection pool.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 24,
+        "endLine": 24
+      },
+      "severity": "medium",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The acquired database connection is leaked when no charge is found, and also on other error paths before the explicit release."
+        }
+      ],
+      "clusterId": "cluster-10",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001y",
+      "claim": "The refund amount is not validated against the charge amount or even checked for positivity before charging the payment gateway.",
+      "reasoning": "Although the selected charge includes `amount_cents`, the value is never used. Any caller able to invoke this function can submit an amount greater than the order's charge (or a non-finite/negative value) and it is passed directly to `gateway.createRefund`; if the gateway accepts it, this causes an unauthorized over-refund.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 31,
+        "endLine": 35
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The refund amount is not validated against the charge amount or even checked for positivity before charging the payment gateway."
+        }
+      ],
+      "clusterId": "cluster-11"
+    },
+    {
+      "id": "finding-0muxurdss-0024",
+      "claim": "Connection conn is not released on error or on early return at line 24. When charge is not found, the function returns without releasing the connection, leaking it.",
+      "reasoning": "The function acquires a database connection at line 18 with `const conn = await db.acquire()`. At line 24, if no charge is found, the function returns early with `if (!charge) return { ok: false }` without calling `await conn.release()`. The connection is only released at line 43 on the success path. This means any error condition between acquisition and release (including the early return at line 24) will leak the connection.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 18,
+        "endLine": 24
+      },
+      "severity": "high",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Connection conn is not released on error or on early return at line 24. When charge is not found, the function returns without releasing the connection, leaking it."
+        }
+      ],
+      "clusterId": "cluster-12"
+    },
+    {
+      "id": "finding-0muxurdss-0027",
+      "claim": "refundOrderSafely suppresses all errors and returns ok: true, lying about success when the refund operation failed. This misleads callers and breaks error recovery.",
+      "reasoning": "The refundOrderSafely function at line 47-54 catches all exceptions with a bare `catch` block and unconditionally returns `{ ok: true }` at line 52, with the comment 'The customer has already been told the refund went through.' However, this function is called before the customer is notified—there is no mechanism here that tells the customer anything. If any error occurs (network failure, gateway error, ledger write failure, connection leak), the function lies and claims success, leading callers to assume the refund was processed when it was not. This is a lie-to-caller failure mode that prevents proper error handling upstream.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 47,
+        "endLine": 54
+      },
+      "severity": "critical",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "refundOrderSafely suppresses all errors and returns ok: true, lying about success when the refund operation failed. This misleads callers and breaks error recovery."
+        }
+      ],
+      "clusterId": "cluster-13"
+    },
+    {
+      "id": "finding-0muxurdss-0029",
+      "claim": "No error handling in notifyRefunds loop: if any database query, mailer.send call, or renderNotice call fails for one row, the entire loop is aborted and remaining rows are not processed.",
+      "reasoning": "The function at line 11-22 iterates through rows with `for (const row of rows)`. If any operation inside the loop throws an exception (line 13 db.query, line 14 db.query, line 16 mailer.send), the loop terminates immediately and the function throws, leaving remaining rows unprocessed. For a batch refund operation, this means a partial failure (e.g., one customer's email address is invalid) causes all subsequent notifications to fail to send, breaking the expected batch semantics where retrying should eventually get all notifications through.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 12,
+        "endLine": 21
+      },
+      "severity": "high",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "No error handling in notifyRefunds loop: if any database query, mailer.send call, or renderNotice call fails for one row, the entire loop is aborted and remaining rows are not processed."
+        }
+      ],
+      "clusterId": "cluster-14"
+    }
+  ],
+  "pool": [
+    {
+      "id": "finding-0muxurdss-0018",
+      "claim": "The charge lookup is vulnerable to SQL injection through `orderId`.",
+      "reasoning": "The query interpolates `req.orderId` directly into `where order_id = '${req.orderId}'`. An order ID containing a quote can alter the predicate or inject SQL, allowing a caller to select another charge for the refund or execute additional SQL, depending on the database driver.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 20,
+        "endLine": 22
+      },
+      "severity": "critical",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The charge lookup is vulnerable to SQL injection through `orderId`."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "SQL injection via unsanitized `req.orderId` interpolated directly into a query string."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The order lookup interpolates `req.orderId` directly into SQL, allowing a crafted order ID to alter the query and potentially select or manipulate charges."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`orderId` is interpolated into a SQL query, allowing SQL injection when the refund request is influenced by an untrusted caller."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "SQL injection vulnerability in query at line 21. The orderId is directly interpolated into the SQL string instead of using parameterized queries."
+        }
+      ],
+      "clusterId": "cluster-1",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001g",
+        "finding-0muxurdss-001o",
+        "finding-0muxurdss-001w",
+        "finding-0muxurdss-0026"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-0019",
+      "claim": "Repeated requests with the same idempotency key can create multiple refunds.",
+      "reasoning": "`on conflict do nothing` ignores an existing key, but execution always continues to `gateway.createRefund(...)`. A retry after a completed refund therefore calls the gateway again; the key is neither used to retrieve the previous result nor passed to the gateway.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 26,
+        "endLine": 35
+      },
+      "severity": "high",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Repeated requests with the same idempotency key can create multiple refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001j (cluster-2)"
+        }
+      ],
+      "clusterId": "cluster-2"
+    },
+    {
+      "id": "finding-0muxurdss-001a",
+      "claim": "The refund can report success before its ledger entry has been written.",
+      "reasoning": "`appendLedgerEntry` now returns a promise that performs a database insert, but the call is not awaited. `conn.release()` and the successful return can happen while that insert is still pending; an insert failure becomes an unhandled rejection, and the connection may be reused before the write completes.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 37,
+        "endLine": 44
+      },
+      "severity": "high",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The refund can report success before its ledger entry has been written."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Refund failures are reported to callers as successful refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`refundOrderSafely` swallows all errors — including failures after the gateway refund already succeeded — and always reports success, risking inconsistent state and silently losing ledger entries."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`appendLedgerEntry` is called without `await` in `refundOrder`, even though it was changed to be `async` and perform a DB insert, so the function returns before the ledger write completes (or any error from it is thrown) and the error becomes an unhandled promise rejection instead of being caught by the surrounding try/catch in `refundOrderSafely`."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The ledger append is not awaited, so `refundOrder` can release the connection and report success before the ledger insert completes."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The safe wrapper reports success even when the refund operation throws before a refund succeeds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Failures are reported as successful refunds even when the gateway was never called or rejected the request."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The ledger write is started without awaiting it, allowing the connection to be released and the refund to be reported successful before the durable ledger entry exists."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "appendLedgerEntry is awaitable but not awaited at line 37, causing the ledger write to race against connection release at line 43. If the write fails or is still in flight when the connection releases, data loss occurs."
+        }
+      ],
+      "clusterId": "cluster-3",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001b",
+        "finding-0muxurdss-001h",
+        "finding-0muxurdss-001k",
+        "finding-0muxurdss-001q",
+        "finding-0muxurdss-001r",
+        "finding-0muxurdss-001z",
+        "finding-0muxurdss-0020",
+        "finding-0muxurdss-0025"
+      ],
+      "clusterSeverity": "critical"
+    },
+    {
+      "id": "finding-0muxurdss-001b",
+      "claim": "Refund failures are reported to callers as successful refunds.",
+      "reasoning": "If the charge query, key insert, or gateway call throws, `refundOrderSafely` catches the error and returns `{ ok: true }`. The caller can tell the customer a refund succeeded even though no refund was created, and cannot distinguish that case from a successful refund.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 47,
+        "endLine": 53
+      },
+      "severity": "high",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Refund failures are reported to callers as successful refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-001c",
+      "claim": "Acquired database connections leak on missing charges and errors.",
+      "reasoning": "After `db.acquire()`, the `if (!charge) return { ok: false }` path skips `conn.release()`. Exceptions from the query, insert, or gateway also bypass the only release call; repeated failed requests can exhaust the connection pool.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 18,
+        "endLine": 24
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Acquired database connections leak on missing charges and errors."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Database connections leak whenever no charge is found or an operation throws, eventually exhausting the connection pool."
+        }
+      ],
+      "clusterId": "cluster-4",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-0021"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001d",
+      "claim": "Refund notices write customers' payment card numbers to application logs.",
+      "reasoning": "The customer lookup reads `card_number`, and the `console.log` interpolates it into the log line for each notice. Anyone or any system with access to those logs can obtain customers' card numbers even though sending the notice does not require them.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 14,
+        "endLine": 15
+      },
+      "severity": "critical",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Refund notices write customers' payment card numbers to application logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`notifyRefunds` logs the customer's full card number to console output, exposing sensitive PCI-scoped payment data in logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "`notifyRefunds` looks up the customer by `row.email` instead of by an identifier tied to the order/charge, which can pull the wrong customer's data (including the wrong card number) if emails are not unique or the row's email doesn't match the actual order owner."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The refund notice writes the customer's full card number to application logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Full customer card numbers are written to application logs during refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Sensitive data (customer card number) is logged to console at line 15, exposing payment card information."
+        }
+      ],
+      "clusterId": "cluster-5",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001l",
+        "finding-0muxurdss-001m",
+        "finding-0muxurdss-001u",
+        "finding-0muxurdss-0022",
+        "finding-0muxurdss-0028"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001e",
+      "claim": "A failed ledger insert still changes the in-memory balance.",
+      "reasoning": "`balances.set(...)` runs before the awaited `conn.query(...)`. If the insert rejects, the durable ledger has no corresponding entry while the running balance retains the delta, so subsequent balance reads in this process disagree with the ledger.",
+      "locus": {
+        "file": "src/billing/ledger.ts",
+        "startLine": 16,
+        "endLine": 18
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "A failed ledger insert still changes the in-memory balance."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The in-memory balance is updated before the durable ledger insert, so a database insert failure leaves the balance inconsistent with the ledger table."
+        }
+      ],
+      "clusterId": "cluster-6",
+      "coDiscovery": {
+        "raised": 2,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001t"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001f",
+      "claim": "Unescaped order IDs can inject markup into refund emails.",
+      "reasoning": "`renderNotice` inserts `row.orderId` directly into an HTML `<span>`. An order ID containing HTML metacharacters can close that element and add arbitrary email markup, allowing an attacker-controlled order ID to change the message sent to the customer.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 26,
+        "endLine": 28
+      },
+      "severity": "medium",
+      "author": "discovery-1",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Unescaped order IDs can inject markup into refund emails."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The order ID is inserted into the email body as raw HTML, allowing markup injection into refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Refund notice HTML injects the unescaped order ID into the email body."
+        }
+      ],
+      "clusterId": "cluster-7",
+      "coDiscovery": {
+        "raised": 2,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-001v",
+        "finding-0muxurdss-0023"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001g",
+      "claim": "SQL injection via unsanitized `req.orderId` interpolated directly into a query string.",
+      "reasoning": "In `refundOrder`, the query is built as `select id, amount_cents, currency from charges where order_id = '${req.orderId}'` using template-string interpolation instead of a parameterized query (the surrounding code elsewhere in the same file correctly uses `$1`/`$2` placeholders). If `orderId` is attacker-controlled (e.g. passed through from an API request), an attacker can break out of the string literal and inject arbitrary SQL, potentially reading/modifying unrelated data or charges.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 20,
+        "endLine": 22
+      },
+      "severity": "critical",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "SQL injection via unsanitized `req.orderId` interpolated directly into a query string."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-0018 (cluster-1)"
+        }
+      ],
+      "clusterId": "cluster-1"
+    },
+    {
+      "id": "finding-0muxurdss-001h",
+      "claim": "`refundOrderSafely` swallows all errors — including failures after the gateway refund already succeeded — and always reports success, risking inconsistent state and silently losing ledger entries.",
+      "reasoning": "The catch block comment says 'The customer has already been told the refund went through' and returns `{ ok: true }` unconditionally regardless of where the failure occurred. If the charge lookup fails (no charge found scenario aside), or more critically if `gateway.createRefund` succeeds but `appendLedgerEntry`'s DB insert throws (e.g., transient DB error), the function reports success while the ledger was never updated for that refund, and `refundId` is omitted from the result. This can cause financial reconciliation discrepancies — money refunded via gateway but not recorded internally — with no way for the caller to detect or retry the failure.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 46,
+        "endLine": 53
+      },
+      "severity": "high",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`refundOrderSafely` swallows all errors — including failures after the gateway refund already succeeded — and always reports success, risking inconsistent state and silently losing ledger entries."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-001i",
+      "claim": "`conn.release()` is never called if any step between acquiring the connection and the release line throws, causing a connection pool leak.",
+      "reasoning": "`refundOrder` acquires `conn` via `db.acquire()` at the top, then performs several `await` calls (`conn.query` for charge lookup, `conn.query` for idempotency key insert, `gateway.createRefund`, `appendLedgerEntry`) before finally calling `await conn.release()`. There is no `try/finally`, so if any of these calls throws (e.g., gateway network error, DB constraint violation), `conn.release()` is skipped and the connection is leaked from the pool. Combined with `refundOrderSafely` swallowing the exception, this failure is invisible and will exhaust the connection pool over repeated failures.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 19,
+        "endLine": 44
+      },
+      "severity": "high",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`conn.release()` is never called if any step between acquiring the connection and the release line throws, causing a connection pool leak."
+        }
+      ],
+      "clusterId": "cluster-8",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001j",
+      "claim": "Idempotency key insert uses 'on conflict do nothing' but the code never checks whether the insert actually inserted a new row versus a pre-existing key, so duplicate refund requests with the same idempotencyKey still proceed to call the payment gateway again and double-refund the customer.",
+      "reasoning": "The intent of `idempotencyKey` is to prevent a refund from being processed twice (e.g. due to retries). The code does `insert into refund_keys (key, order_id) values ($1, $2) on conflict do nothing` but discards the result and unconditionally continues to call `gateway.createRefund(...)` and `appendLedgerEntry(...)` afterward. On a retried request with the same key, the insert becomes a no-op (conflict), yet the function still issues a new refund via the gateway and appends another negative ledger entry, resulting in duplicate refunds for the same order.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 27,
+        "endLine": 36
+      },
+      "severity": "critical",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Idempotency key insert uses 'on conflict do nothing' but the code never checks whether the insert actually inserted a new row versus a pre-existing key, so duplicate refund requests with the same idempotencyKey still proceed to call the payment gateway again and double-refund the customer."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-1",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "Repeated requests with the same idempotency key can create multiple refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The idempotency key does not prevent duplicate gateway refunds; every request calls `createRefund`, even when inserting the key conflicts."
+        },
+        {
+          "stage": "cluster",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged",
+          "body": "The idempotency key is recorded but never enforced, so retries can issue duplicate gateway refunds."
+        }
+      ],
+      "clusterId": "cluster-2",
+      "coDiscovery": {
+        "raised": 3,
+        "answered": 3
+      },
+      "mergedIds": [
+        "finding-0muxurdss-0019",
+        "finding-0muxurdss-001p",
+        "finding-0muxurdss-001x"
+      ]
+    },
+    {
+      "id": "finding-0muxurdss-001k",
+      "claim": "`appendLedgerEntry` is called without `await` in `refundOrder`, even though it was changed to be `async` and perform a DB insert, so the function returns before the ledger write completes (or any error from it is thrown) and the error becomes an unhandled promise rejection instead of being caught by the surrounding try/catch in `refundOrderSafely`.",
+      "reasoning": "`ledger.ts` was changed from a synchronous function to `export async function appendLedgerEntry(...)`, which now awaits a DB insert. In `refund.ts`, the call site is still `appendLedgerEntry(conn, { ... })` without `await`, followed immediately by `await conn.release()` and returning `{ ok: true, refundId: refund.id }`. This means: (1) the function returns success before the ledger DB write is confirmed, so a transient DB failure writing the ledger entry won't be reflected in the result or caught by `refundOrderSafely`'s try/catch (it becomes a floating/unhandled promise rejection), and (2) `conn.release()` may be called while the ledger insert on that same connection is still in flight, risking a race where the connection is returned to the pool and reused concurrently while the insert is still pending.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 38,
+        "endLine": 43
+      },
+      "severity": "high",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`appendLedgerEntry` is called without `await` in `refundOrder`, even though it was changed to be `async` and perform a DB insert, so the function returns before the ledger write completes (or any error from it is thrown) and the error becomes an unhandled promise rejection instead of being caught by the surrounding try/catch in `refundOrderSafely`."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-001l",
+      "claim": "`notifyRefunds` logs the customer's full card number to console output, exposing sensitive PCI-scoped payment data in logs.",
+      "reasoning": "`console.log(`refund notice ${row.email} card=${customer[0]?.card_number} order=${row.orderId}`)` writes the raw `card_number` field to stdout/logs. Logging full card numbers is a serious data exposure/compliance issue (PCI-DSS), since logs are typically retained, shipped to log aggregators, and accessible to a broader set of engineers/operators than should have access to card data.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 14,
+        "endLine": 14
+      },
+      "severity": "critical",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`notifyRefunds` logs the customer's full card number to console output, exposing sensitive PCI-scoped payment data in logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001d (cluster-5)"
+        }
+      ],
+      "clusterId": "cluster-5"
+    },
+    {
+      "id": "finding-0muxurdss-001m",
+      "claim": "`notifyRefunds` looks up the customer by `row.email` instead of by an identifier tied to the order/charge, which can pull the wrong customer's data (including the wrong card number) if emails are not unique or the row's email doesn't match the actual order owner.",
+      "reasoning": "`const customer = await db.query(\"select * from customers where email = $1\", [row.email])` assumes email uniquely and correctly identifies the customer associated with `row.orderId`. If `row.email` is stale, mistyped, or shared (e.g., a business account with multiple customers, or admin console operator typo), this looks up and logs/sends notice referencing a different customer's card data (`customer[0]?.card_number`) for someone else's order — a correctness and data-exposure bug compounded by the logging issue above.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 13,
+        "endLine": 14
+      },
+      "severity": "medium",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`notifyRefunds` looks up the customer by `row.email` instead of by an identifier tied to the order/charge, which can pull the wrong customer's data (including the wrong card number) if emails are not unique or the row's email doesn't match the actual order owner."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001d (cluster-5)"
+        }
+      ],
+      "clusterId": "cluster-5"
+    },
+    {
+      "id": "finding-0muxurdss-001n",
+      "claim": "`renderNotice` builds HTML email content by directly interpolating `row.orderId` and `row.amountCents` without escaping, creating an HTML/email injection risk if orderId is attacker-influenced.",
+      "reasoning": "`<span>Refunded ${row.amountCents} cents for order ${row.orderId}</span>` interpolates `row.orderId` directly into HTML markup sent via `mailer.send`. If `orderId` can contain HTML special characters (e.g., if it originates from user-controllable data upstream), this allows HTML injection into the refund notice email body. This is lower risk than the SQL injection/card logging issues but is still a real defect in untrusted-data handling.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 25,
+        "endLine": 29
+      },
+      "severity": "low",
+      "author": "discovery-2",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-2",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`renderNotice` builds HTML email content by directly interpolating `row.orderId` and `row.amountCents` without escaping, creating an HTML/email injection risk if orderId is attacker-influenced."
+        }
+      ],
+      "clusterId": "cluster-9",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001o",
+      "claim": "The order lookup interpolates `req.orderId` directly into SQL, allowing a crafted order ID to alter the query and potentially select or manipulate charges.",
+      "reasoning": "At line 21, `req.orderId` is inserted into the SQL string rather than passed as a query parameter. An input containing SQL syntax can escape the quoted value, changing which charge is selected or injecting additional SQL, depending on the driver.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 21,
+        "endLine": 21
+      },
+      "severity": "critical",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The order lookup interpolates `req.orderId` directly into SQL, allowing a crafted order ID to alter the query and potentially select or manipulate charges."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-0018 (cluster-1)"
+        }
+      ],
+      "clusterId": "cluster-1"
+    },
+    {
+      "id": "finding-0muxurdss-001p",
+      "claim": "The idempotency key does not prevent duplicate gateway refunds; every request calls `createRefund`, even when inserting the key conflicts.",
+      "reasoning": "The insert at lines 26–29 uses `on conflict do nothing`, but its result is never checked and execution always proceeds to line 31. Retrying a request with the same key therefore creates another refund because that key is not passed to the gateway either.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 26,
+        "endLine": 31
+      },
+      "severity": "high",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The idempotency key does not prevent duplicate gateway refunds; every request calls `createRefund`, even when inserting the key conflicts."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001j (cluster-2)"
+        }
+      ],
+      "clusterId": "cluster-2"
+    },
+    {
+      "id": "finding-0muxurdss-001q",
+      "claim": "The ledger append is not awaited, so `refundOrder` can release the connection and report success before the ledger insert completes.",
+      "reasoning": "`appendLedgerEntry` is async, but line 37 calls it without `await`; line 43 can release the connection and line 44 can return while its database query is still pending. A failed or interrupted insert can leave a completed gateway refund missing from the durable ledger, with the failure unobserved by this function.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 37,
+        "endLine": 37
+      },
+      "severity": "high",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The ledger append is not awaited, so `refundOrder` can release the connection and report success before the ledger insert completes."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-001r",
+      "claim": "The safe wrapper reports success even when the refund operation throws before a refund succeeds.",
+      "reasoning": "Any exception from acquiring the connection, reading the charge, or calling the gateway is caught and converted to `{ ok: true }` at lines 50–52. Callers therefore treat a failed refund as successful and may not retry or alert.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 50,
+        "endLine": 52
+      },
+      "severity": "high",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The safe wrapper reports success even when the refund operation throws before a refund succeeds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-001s",
+      "claim": "The acquired database connection is leaked when no charge is found, and also on other error paths before the explicit release.",
+      "reasoning": "After `db.acquire()` at line 18, the no-charge branch returns at line 24 without releasing `conn`; exceptions from the subsequent queries or gateway call likewise bypass the release at line 43. Repeated failures can exhaust the connection pool.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 24,
+        "endLine": 24
+      },
+      "severity": "medium",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The acquired database connection is leaked when no charge is found, and also on other error paths before the explicit release."
+        }
+      ],
+      "clusterId": "cluster-10",
+      "coDiscovery": {
+        "raised": 1,
+        "answered": 3
+      }
+    },
+    {
+      "id": "finding-0muxurdss-001t",
+      "claim": "The in-memory balance is updated before the durable ledger insert, so a database insert failure leaves the balance inconsistent with the ledger table.",
+      "reasoning": "`balances.set` runs at line 17 before `conn.query` at line 18. If that query rejects, the map retains the delta although the durable row was not written; later balance reads in this module then reflect a refund that the ledger does not contain.",
+      "locus": {
+        "file": "src/billing/ledger.ts",
+        "startLine": 17,
+        "endLine": 18
+      },
+      "severity": "medium",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The in-memory balance is updated before the durable ledger insert, so a database insert failure leaves the balance inconsistent with the ledger table."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001e (cluster-6)"
+        }
+      ],
+      "clusterId": "cluster-6"
+    },
+    {
+      "id": "finding-0muxurdss-001u",
+      "claim": "The refund notice writes the customer's full card number to application logs.",
+      "reasoning": "Line 15 logs `customer[0]?.card_number` for every notice. Any log sink or user with access to those logs can obtain payment-card data, extending exposure beyond the payment system.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 15,
+        "endLine": 15
+      },
+      "severity": "high",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The refund notice writes the customer's full card number to application logs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001d (cluster-5)"
+        }
+      ],
+      "clusterId": "cluster-5"
+    },
+    {
+      "id": "finding-0muxurdss-001v",
+      "claim": "The order ID is inserted into the email body as raw HTML, allowing markup injection into refund notices.",
+      "reasoning": "`renderNotice` interpolates `row.orderId` directly into a `<span>` at line 27 without HTML escaping. If a notice row contains HTML markup in its order ID, that markup is emitted into the email body and can alter the rendered notice or include active content in email clients that permit it.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 27,
+        "endLine": 27
+      },
+      "severity": "medium",
+      "author": "discovery-3",
+      "source": "pool",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-3",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The order ID is inserted into the email body as raw HTML, allowing markup injection into refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001f (cluster-7)"
+        }
+      ],
+      "clusterId": "cluster-7"
+    },
+    {
+      "id": "finding-0muxurdss-001w",
+      "claim": "`orderId` is interpolated into a SQL query, allowing SQL injection when the refund request is influenced by an untrusted caller.",
+      "reasoning": "The charge lookup builds SQL with ``where order_id = '${req.orderId}'`` rather than binding `req.orderId`. An input such as `' OR '1'='1' --` can alter which charge is selected, causing the subsequent gateway call to refund a charge other than the requested order; depending on the database driver's statement handling, it can also alter the query beyond the predicate.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 20,
+        "endLine": 22
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "`orderId` is interpolated into a SQL query, allowing SQL injection when the refund request is influenced by an untrusted caller."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-0018 (cluster-1)"
+        }
+      ],
+      "clusterId": "cluster-1"
+    },
+    {
+      "id": "finding-0muxurdss-001x",
+      "claim": "The idempotency key is recorded but never enforced, so retries can issue duplicate gateway refunds.",
+      "reasoning": "The `insert ... on conflict do nothing` at lines 26-29 discards whether the key was newly inserted. Execution always continues to `gateway.createRefund` at line 31, including when the same `(key, order_id)` already exists. A caller retry after a timeout therefore creates another external refund instead of returning the original result.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 26,
+        "endLine": 35
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The idempotency key is recorded but never enforced, so retries can issue duplicate gateway refunds."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001j (cluster-2)"
+        }
+      ],
+      "clusterId": "cluster-2"
+    },
+    {
+      "id": "finding-0muxurdss-001y",
+      "claim": "The refund amount is not validated against the charge amount or even checked for positivity before charging the payment gateway.",
+      "reasoning": "Although the selected charge includes `amount_cents`, the value is never used. Any caller able to invoke this function can submit an amount greater than the order's charge (or a non-finite/negative value) and it is passed directly to `gateway.createRefund`; if the gateway accepts it, this causes an unauthorized over-refund.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 31,
+        "endLine": 35
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The refund amount is not validated against the charge amount or even checked for positivity before charging the payment gateway."
+        }
+      ],
+      "clusterId": "cluster-11"
+    },
+    {
+      "id": "finding-0muxurdss-001z",
+      "claim": "Failures are reported as successful refunds even when the gateway was never called or rejected the request.",
+      "reasoning": "`refundOrderSafely` catches every exception from `refundOrder` and returns `{ ok: true }`. This includes database acquisition/lookup failures and errors thrown by `gateway.createRefund`, so callers can tell a customer that a refund succeeded despite no refund existing.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 47,
+        "endLine": 52
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Failures are reported as successful refunds even when the gateway was never called or rejected the request."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-0020",
+      "claim": "The ledger write is started without awaiting it, allowing the connection to be released and the refund to be reported successful before the durable ledger entry exists.",
+      "reasoning": "`appendLedgerEntry` is now async and awaits `conn.query`, but the call at line 37 is not awaited. `refundOrder` proceeds to `conn.release()` and returns success; a rejected insert becomes an unhandled rejection and leaves a completed gateway refund with no corresponding ledger row.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 37,
+        "endLine": 43
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "The ledger write is started without awaiting it, allowing the connection to be released and the refund to be reported successful before the durable ledger entry exists."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-0021",
+      "claim": "Database connections leak whenever no charge is found or an operation throws, eventually exhausting the connection pool.",
+      "reasoning": "The acquired connection is released only at line 43. The early return at line 24 bypasses it, as do exceptions from either query, the gateway, or the ledger operation. Repeated unknown-order requests alone consume all pooled connections.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 18,
+        "endLine": 24
+      },
+      "severity": "medium",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Database connections leak whenever no charge is found or an operation throws, eventually exhausting the connection pool."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001c (cluster-4)"
+        }
+      ],
+      "clusterId": "cluster-4"
+    },
+    {
+      "id": "finding-0muxurdss-0022",
+      "claim": "Full customer card numbers are written to application logs during refund notices.",
+      "reasoning": "The log template includes `customer[0]?.card_number`. Logs are commonly broadly retained and accessible to operational tooling, so this exports payment-card data outside the payment-data boundary on every notice and exposes it to any log reader.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 15,
+        "endLine": 15
+      },
+      "severity": "high",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Full customer card numbers are written to application logs during refund notices."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001d (cluster-5)"
+        }
+      ],
+      "clusterId": "cluster-5"
+    },
+    {
+      "id": "finding-0muxurdss-0023",
+      "claim": "Refund notice HTML injects the unescaped order ID into the email body.",
+      "reasoning": "`row.orderId` is concatenated directly into an HTML `<span>`. A crafted order ID containing markup can modify the email's rendered content (for example, add a phishing link or remote image); HTML email clients do not make this safe by default. The value must be HTML-escaped before rendering.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 27,
+        "endLine": 27
+      },
+      "severity": "low",
+      "author": "discovery-lens-security",
+      "source": "lens",
+      "lens": "security",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-security",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Refund notice HTML injects the unescaped order ID into the email body."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001f (cluster-7)"
+        }
+      ],
+      "clusterId": "cluster-7"
+    },
+    {
+      "id": "finding-0muxurdss-0024",
+      "claim": "Connection conn is not released on error or on early return at line 24. When charge is not found, the function returns without releasing the connection, leaking it.",
+      "reasoning": "The function acquires a database connection at line 18 with `const conn = await db.acquire()`. At line 24, if no charge is found, the function returns early with `if (!charge) return { ok: false }` without calling `await conn.release()`. The connection is only released at line 43 on the success path. This means any error condition between acquisition and release (including the early return at line 24) will leak the connection.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 18,
+        "endLine": 24
+      },
+      "severity": "high",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Connection conn is not released on error or on early return at line 24. When charge is not found, the function returns without releasing the connection, leaking it."
+        }
+      ],
+      "clusterId": "cluster-12"
+    },
+    {
+      "id": "finding-0muxurdss-0025",
+      "claim": "appendLedgerEntry is awaitable but not awaited at line 37, causing the ledger write to race against connection release at line 43. If the write fails or is still in flight when the connection releases, data loss occurs.",
+      "reasoning": "At line 15 of ledger.ts, appendLedgerEntry is now declared as `async function appendLedgerEntry(...): Promise<void>`, meaning it performs an async database operation (lines 18-22). However, at line 37 of refund.ts, the call `appendLedgerEntry(conn, {...})` is not awaited—there is no `await` keyword. The function then proceeds to line 43 and releases the connection immediately. If the pending ledger write has not completed when the connection releases, the write will fail and the ledger entry will not be persisted, causing the refund to not be recorded in the ledger table despite the gateway refund succeeding.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 37,
+        "endLine": 41
+      },
+      "severity": "critical",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "appendLedgerEntry is awaitable but not awaited at line 37, causing the ledger write to race against connection release at line 43. If the write fails or is still in flight when the connection releases, data loss occurs."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001a (cluster-3)"
+        }
+      ],
+      "clusterId": "cluster-3"
+    },
+    {
+      "id": "finding-0muxurdss-0026",
+      "claim": "SQL injection vulnerability in query at line 21. The orderId is directly interpolated into the SQL string instead of using parameterized queries.",
+      "reasoning": "At line 21, the query uses template string interpolation: `\\`select id, amount_cents, currency from charges where order_id = '${req.orderId}'\\``. This passes untrusted user input directly into the SQL query. In contrast, lines 27 and the query at ledger.ts line 18 use parameterized queries with placeholders ($1, $2, etc.). An attacker can inject SQL by including quotes or SQL syntax in the orderId parameter, potentially exposing or modifying data.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 20,
+        "endLine": 22
+      },
+      "severity": "critical",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "SQL injection vulnerability in query at line 21. The orderId is directly interpolated into the SQL string instead of using parameterized queries."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-0018 (cluster-1)"
+        }
+      ],
+      "clusterId": "cluster-1"
+    },
+    {
+      "id": "finding-0muxurdss-0027",
+      "claim": "refundOrderSafely suppresses all errors and returns ok: true, lying about success when the refund operation failed. This misleads callers and breaks error recovery.",
+      "reasoning": "The refundOrderSafely function at line 47-54 catches all exceptions with a bare `catch` block and unconditionally returns `{ ok: true }` at line 52, with the comment 'The customer has already been told the refund went through.' However, this function is called before the customer is notified—there is no mechanism here that tells the customer anything. If any error occurs (network failure, gateway error, ledger write failure, connection leak), the function lies and claims success, leading callers to assume the refund was processed when it was not. This is a lie-to-caller failure mode that prevents proper error handling upstream.",
+      "locus": {
+        "file": "src/billing/refund.ts",
+        "startLine": 47,
+        "endLine": 54
+      },
+      "severity": "critical",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "refundOrderSafely suppresses all errors and returns ok: true, lying about success when the refund operation failed. This misleads callers and breaks error recovery."
+        }
+      ],
+      "clusterId": "cluster-13"
+    },
+    {
+      "id": "finding-0muxurdss-0028",
+      "claim": "Sensitive data (customer card number) is logged to console at line 15, exposing payment card information.",
+      "reasoning": "At line 15 of refund-notice.ts, the code logs `card=${customer[0]?.card_number}` directly to console output. This exposes the customer's payment card number in logs, which is a PCI DSS violation and a security/privacy breach. Logs are typically stored, rotated, and may be accessed by multiple people or systems, making this a serious exposure of sensitive financial data.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 15,
+        "endLine": 15
+      },
+      "severity": "critical",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "Sensitive data (customer card number) is logged to console at line 15, exposing payment card information."
+        },
+        {
+          "stage": "cluster",
+          "actor": "mad",
+          "at": "2026-10-07T08:35:30.079Z",
+          "kind": "merged-into",
+          "body": "merged into finding-0muxurdss-001d (cluster-5)"
+        }
+      ],
+      "clusterId": "cluster-5"
+    },
+    {
+      "id": "finding-0muxurdss-0029",
+      "claim": "No error handling in notifyRefunds loop: if any database query, mailer.send call, or renderNotice call fails for one row, the entire loop is aborted and remaining rows are not processed.",
+      "reasoning": "The function at line 11-22 iterates through rows with `for (const row of rows)`. If any operation inside the loop throws an exception (line 13 db.query, line 14 db.query, line 16 mailer.send), the loop terminates immediately and the function throws, leaving remaining rows unprocessed. For a batch refund operation, this means a partial failure (e.g., one customer's email address is invalid) causes all subsequent notifications to fail to send, breaking the expected batch semantics where retrying should eventually get all notifications through.",
+      "locus": {
+        "file": "src/billing/refund-notice.ts",
+        "startLine": 12,
+        "endLine": 21
+      },
+      "severity": "high",
+      "author": "discovery-lens-reliability",
+      "source": "lens",
+      "lens": "reliability",
+      "history": [
+        {
+          "stage": "discover",
+          "actor": "discovery-lens-reliability",
+          "at": "2026-10-07T08:35:30.076Z",
+          "kind": "raised",
+          "body": "No error handling in notifyRefunds loop: if any database query, mailer.send call, or renderNotice call fails for one row, the entire loop is aborted and remaining rows are not processed."
+        }
+      ],
+      "clusterId": "cluster-14"
+    }
+  ],
+  "lensInstructions": [
+    {
+      "lens": "security",
+      "origin": "shipped"
+    },
+    {
+      "lens": "reliability",
+      "origin": "shipped"
+    }
+  ],
+  "threshold": 0.8,
+  "maxRounds": 3,
+  "warnings": [
+    {
+      "code": "provider-fan-out",
+      "stage": "roster",
+      "message": "This review sends the change to 3 provider(s): openai, anthropic, github-copilot. Models: openai/gpt-6-sol, anthropic/claude-sonnet-5, github-copilot/gpt-6-luna, openai/gpt-5.6-terra-fast (lens security), github-copilot/claude-haiku-4.5 (lens reliability).",
+      "detail": {
+        "providers": [
+          "openai",
+          "anthropic",
+          "github-copilot"
+        ],
+        "models": [
+          "openai/gpt-6-sol",
+          "anthropic/claude-sonnet-5",
+          "github-copilot/gpt-6-luna",
+          "openai/gpt-5.6-terra-fast (lens security)",
+          "github-copilot/claude-haiku-4.5 (lens reliability)"
+        ]
+      }
+    },
+    {
+      "code": "roster-single-lineage",
+      "stage": "roster",
+      "message": "DEGRADED ROSTER: 3 discovery slot(s) requested but only 2 distinct verified lineage(s) available (GPT (OpenAI), Claude (Anthropic), GPT (OpenAI)). Co-discovery over a roster this narrow is a WEAK SIGNAL — models from one lineage share training data and therefore share blind spots. Add a provider from another lineage under the `provider` key in your opencode config to fix this. Temperature variation across one model is not an accepted substitute for a diverse roster.",
+      "detail": {
+        "requested": 3,
+        "distinctLineages": 2,
+        "lineages": [
+          "gpt",
+          "claude"
+        ],
+        "providerConfigKey": "provider"
+      }
+    }
+  ],
+  "ledger": {
+    "entries": [
+      {
+        "slot": "discovery-2",
+        "stage": "discover",
+        "attempt": 1,
+        "tokens": {
+          "input": 12,
+          "output": 2632,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 6992
+        }
+      },
+      {
+        "slot": "discovery-3",
+        "stage": "discover",
+        "attempt": 1,
+        "tokens": {
+          "input": 553,
+          "output": 852,
+          "reasoning": 1597,
+          "cacheRead": 4848,
+          "cacheWrite": 0
+        }
+      },
+      {
+        "slot": "discovery-1",
+        "stage": "discover",
+        "attempt": 1,
+        "tokens": {
+          "input": 2969,
+          "output": 766,
+          "reasoning": 449,
+          "cacheRead": 1920,
+          "cacheWrite": 0
+        }
+      },
+      {
+        "slot": "discovery-lens-reliability",
+        "stage": "discover",
+        "attempt": 1,
+        "tokens": {
+          "input": 20,
+          "output": 1333,
+          "reasoning": 0,
+          "cacheRead": 11594,
+          "cacheWrite": 607
+        }
+      },
+      {
+        "slot": "discovery-lens-security",
+        "stage": "discover",
+        "attempt": 1,
+        "tokens": {
+          "input": 1896,
+          "output": 894,
+          "reasoning": 1010,
+          "cacheRead": 4480,
+          "cacheWrite": 0
+        }
+      }
+    ],
+    "total": {
+      "input": 5450,
+      "output": 6477,
+      "reasoning": 3056,
+      "cacheRead": 22842,
+      "cacheWrite": 7599
+    },
+    "cap": null,
+    "maxConcurrency": 4,
+    "shares": {
+      "discover": 0.3,
+      "debate": 0.65,
+      "judge": 1
+    },
+    "unknownUsage": [],
+    "stopOnUnknownUsage": false
+  }
+}

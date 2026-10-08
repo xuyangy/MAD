@@ -10,6 +10,9 @@ banner with no suppression option.
 This file is how a real number is produced. It is the procedure stories 1, 2 and
 5A each deferred to story 9.
 
+**The paired evaluation's published outcome is [`EVALUATION.md`](EVALUATION.md)**: run 5, an
+accepted incomplete outcome, with its retained bundle and the reader's output over it.
+
 ## Before anything bills
 
 1. **A running opencode server.** The default is `http://localhost:4096`; pass

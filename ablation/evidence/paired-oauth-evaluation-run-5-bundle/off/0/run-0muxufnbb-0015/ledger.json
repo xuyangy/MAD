@@ -1,0 +1,208 @@
+{
+  "entries": [
+    {
+      "slot": "discovery-2",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 2574,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 6992
+      },
+      "origin": {
+        "runId": "run-0muxud0ly-0001",
+        "entry": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 1551,
+        "output": 760,
+        "reasoning": 1441,
+        "cacheRead": 3535,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxud0ly-0001",
+        "entry": 1
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 4904,
+        "output": 909,
+        "reasoning": 170,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxud0ly-0001",
+        "entry": 2
+      }
+    },
+    {
+      "slot": "discovery-lens-reliability",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 20,
+        "output": 1386,
+        "reasoning": 0,
+        "cacheRead": 11681,
+        "cacheWrite": 563
+      },
+      "origin": {
+        "runId": "run-0muxud0ly-0001",
+        "entry": 3
+      }
+    },
+    {
+      "slot": "discovery-lens-security",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 2055,
+        "output": 855,
+        "reasoning": 705,
+        "cacheRead": 5504,
+        "cacheWrite": 0
+      },
+      "origin": {
+        "runId": "run-0muxud0ly-0001",
+        "entry": 4
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1413,
+        "reasoning": 0,
+        "cacheRead": 8948,
+        "cacheWrite": 518
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1136,
+        "reasoning": 0,
+        "cacheRead": 8747,
+        "cacheWrite": 217
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 500,
+        "output": 370,
+        "reasoning": 185,
+        "cacheRead": 4477,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 430,
+        "output": 354,
+        "reasoning": 38,
+        "cacheRead": 4864,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 569,
+        "output": 239,
+        "reasoning": 97,
+        "cacheRead": 4015,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-2",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1568,
+        "reasoning": 0,
+        "cacheRead": 9930,
+        "cacheWrite": 220
+      }
+    },
+    {
+      "slot": "discovery-3",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 409,
+        "output": 442,
+        "reasoning": 436,
+        "cacheRead": 4298,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 349,
+        "output": 319,
+        "reasoning": 56,
+        "cacheRead": 4480,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 332,
+        "output": 339,
+        "reasoning": 90,
+        "cacheRead": 4480,
+        "cacheWrite": 0
+      }
+    }
+  ],
+  "total": {
+    "input": 11167,
+    "output": 12664,
+    "reasoning": 3218,
+    "cacheRead": 74959,
+    "cacheWrite": 8510
+  },
+  "cap": null,
+  "maxConcurrency": 4,
+  "shares": {
+    "discover": 0.3,
+    "debate": 0.65,
+    "judge": 1
+  },
+  "unknownUsage": [],
+  "stopOnUnknownUsage": false
+}
