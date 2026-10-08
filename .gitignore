@@ -43,6 +43,9 @@ _bmad
 # `PROTOCOL_V2_DRAFT` and every labelled report prints it as the provenance for CAP-1 and
 # CAP-11, so the same rule applies to the draft as to the frozen protocol above.
 !/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md
+# Added 2026-10-08 (epic 2, story 2-7d). The v3 draft is committed as v2's draft was: the
+# human freezes it in a later commit, and `ablation/adversarial-call-shape.test.ts` reads it.
+!/_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v3.md
 
 # Added 2026-09-17 (epic 2, story 2-6b). A FILLED adjudication sheet must never enter this
 # repository: it is a truth-labelled document that belongs beside its own bundle, it would be
