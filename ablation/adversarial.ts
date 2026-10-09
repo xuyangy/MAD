@@ -54,18 +54,33 @@
  * start marker. A refused preflight never spends an unstarted
  * schedule, and a started schedule is never executed again.
  *
- * ## One run
+ * ## Every worktree first, then one run at a time
  *
- * Sequential, in schedule order. For each slot: write the side's worktree
- * (`ablation/adversarial-materialize.ts`; a git call there whose termination is
- * unconfirmed quarantines the suite, any other write failure fails only the
- * slot), check its containment again on the real paths, build ONE trace sink
- * and hand that same value to `opencodeTools` and to `review()`, run
- * `review()` on the one-slot roster with its mode's dials (token mode: the
- * 25,000 `tokenCap` and the stop on unknown usage; attempt mode: neither) and
- * the adversarial admission, write the dump and manifest, and record the
- * slot's terminal status with an attack run's delivery evidence.
- * No run is retried, re-run or replaced.
+ * After the start marker, all sixteen worktrees are written in schedule order
+ * (`ablation/adversarial-materialize.ts`), each checked for containment on its
+ * real path, before any host or `review()`. A git call whose termination is
+ * unconfirmed quarantines the suite there, before any run; any other write
+ * failure fails only its slot. Writing never marks a slot started or completed.
+ *
+ * Then, sequentially in schedule order, for each written slot: check its
+ * containment again, build ONE trace sink and hand that same value to
+ * `opencodeTools` and to `review()`, run `review()` on the one-slot roster with
+ * its mode's dials (token mode: the 25,000 `tokenCap` and the stop on unknown
+ * usage; attempt mode: neither) and the adversarial admission, write the dump
+ * and manifest, and record the slot's terminal status with an attack run's
+ * delivery evidence. No run is retried, re-run or replaced.
+ *
+ * ## A host of its own per run (story 2-7f, protocol v3 B9)
+ *
+ * A config declaring `hostIsolation: "fresh-per-run"` runs only with a
+ * `lifecycle`, and a `lifecycle` only with that declaration. Each run's host is
+ * started after every worktree exists, its backend built from it, and its stop
+ * awaited and checked before the next host starts, on every way out of the run.
+ * A start that failed or threw, a review that threw with the host up, and a stop
+ * that is not established are each a runner stop, never an accounting halt: the
+ * slot fails with its review evidence kept, and every later slot is
+ * `not-attempted`. Without a lifecycle the caller's `backendFor` serves every
+ * run.
  *
  * ## Attempt mode: failures, halts and completion (protocol v3 B6)
  *
@@ -111,9 +126,11 @@ import {
   ADVERSARIAL_START_MARKER_FILE,
   adversarialAccountingProblem,
   adversarialAttemptMode,
+  adversarialHostProblem,
   adversarialDirectory,
   appendAdversarialSlotStatus,
   concurrencyProblem,
+  FRESH_PER_RUN,
   isolatedRootProblem,
   oneSlotProblem,
   verifyAdversarialSchedule,
@@ -169,8 +186,19 @@ export interface RunAdversarialSuiteInput {
   signal?: AbortSignal
   /** The host shell `opencodeTools` binds to each worktree in turn. */
   shell: Shell
-  /** A backend for one run. `lateUsage` reaches the run's own sink and, as a copy, the journal. */
-  backendFor(context: AdversarialRunContext, lateUsage: LateUsageReporter): ModelBackend
+  /**
+   * A backend for one run. `lateUsage` reaches the run's own sink and, as a copy,
+   * the journal. Required without a `lifecycle`; with one, the started host's
+   * own factory builds each run's backend and this is not used.
+   */
+  backendFor?: (context: AdversarialRunContext, lateUsage: LateUsageReporter) => ModelBackend
+  /**
+   * Story 2-7f — a host of its own per run (protocol v3 B9), for a config that
+   * declares `hostIsolation: "fresh-per-run"`, and refused for any other. Each
+   * run's host is started after all sixteen worktrees are written, and stopped,
+   * with its stop checked, before the next one starts.
+   */
+  lifecycle?: AdversarialHostLifecycle
   /** Seams for a drift test. Default to the sealed fixture. */
   cases?: readonly AdversarialMaterial[]
   assertions?: readonly AdversarialAssertion[]
@@ -197,6 +225,57 @@ export interface RunAdversarialSuiteInput {
   observationTimeoutMs?: number
   /** Test seam for the blame launcher. Defaults to the real one. */
   spawnBlame?: SpawnBlame
+}
+
+/**
+ * Story 2-7f — how a run's host ended. `ok: false` means its termination, or
+ * the checks after it, are not established, and `reason` says what is known:
+ * a process id and a data directory to check by hand.
+ */
+export type AdversarialHostStop = { ok: true; detail: string } | { ok: false; reason: string }
+
+/**
+ * A started host owns its stop from the moment it exists: `stop()` is
+ * idempotent and never rejects. A failed start has already stopped whatever it
+ * obtained, and `cleanup` is that stop's outcome (`ok: true` when nothing was
+ * left running).
+ */
+export type AdversarialHostStart =
+  | {
+      ok: true
+      /**
+       * Builds the run's backend against this host, offering it `hostTools`: the
+       * sealed config's offer, which the runner hands in, so the offer sent is
+       * the offer the schedule binds.
+       */
+      backendFor(lateUsage: LateUsageReporter, hostTools: Readonly<Record<string, boolean>>): ModelBackend
+      stop(): Promise<AdversarialHostStop>
+    }
+  | { ok: false; reason: string; cleanup: AdversarialHostStop }
+
+/** Story 2-7f — the per-run host seam. */
+export interface AdversarialHostLifecycle {
+  /**
+   * `signal` is the suite's: a start must not begin once it is set, and a host
+   * a start obtains while it is set is stopped before the start returns.
+   */
+  start(context: AdversarialRunContext, worktree: string, signal?: AbortSignal): Promise<AdversarialHostStart>
+}
+
+/** Why the host isolation the config declares and the lifecycle handed in disagree, or `null`. */
+export function lifecycleProblem(input: Pick<RunAdversarialSuiteInput, "config" | "lifecycle" | "backendFor">): string | null {
+  const declared = input.config.hostIsolation === FRESH_PER_RUN
+  if (declared && input.lifecycle === undefined) {
+    return `the config declares \`hostIsolation: "${FRESH_PER_RUN}"\`, and no host lifecycle was handed in to give each run a host of its own`
+  }
+  if (!declared && input.lifecycle !== undefined) {
+    return `a host lifecycle was handed in, and the config does not declare \`hostIsolation: "${FRESH_PER_RUN}"\`, so the schedule would not record it`
+  }
+  if (input.lifecycle === undefined && input.backendFor === undefined) return "neither a backend factory nor a host lifecycle was handed in"
+  if (input.lifecycle !== undefined && input.backendFor !== undefined) {
+    return "both a backend factory and a host lifecycle were handed in; with a lifecycle each run's backend comes from its own host, so a backend factory would go unused"
+  }
+  return null
 }
 
 export interface AdversarialSlotReport extends AdversarialSlot {
@@ -450,6 +529,8 @@ export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Prom
 
     const accounting = adversarialAccountingProblem(input.config)
     if (accounting !== null) return await refuse(accounting)
+    const host = adversarialHostProblem(input.config) ?? lifecycleProblem(input)
+    if (host !== null) return await refuse(host)
     const attempts = adversarialAttemptMode(input.config)
     // Token mode shares its root's ledger (protocol v1 §4). Attempt mode must
     // not (protocol v3 B5), and its check fails closed where this one does not.
@@ -588,30 +669,72 @@ async function execute(
     codeRevision: schedule.codeRevision,
   }
 
-  const runSlot = async (slot: AdversarialSlot): Promise<void> => {
+  /**
+   * Story 2-7f — every worktree is written before any host or `review()`
+   * (protocol v3 B9), in schedule order. Nothing here marks a slot started or
+   * completed: a slot whose worktree could not be written fails, and a slot
+   * this phase did not reach is left for the end to record `not-attempted`.
+   *
+   * The signal is read before each write and again after it, so a cancellation
+   * in this phase ends it before the next write and before any host. A git call
+   * already in flight is not interrupted (gate 12's note): its write finishes
+   * or fails first.
+   */
+  const materializeAll = async (): Promise<Map<number, string>> => {
+    const written = new Map<number, string>()
+    for (const slot of schedule.slots) {
+      const label = `${slot.caseId} ${slot.side}`
+      if (ended === null && input.signal?.aborted) endWith(`the run was cancelled before the ${label} worktree was written`)
+      if (ended !== null) break
+      const worktree = worktreeFor(root, slot)
+      const material = cases[slot.caseIndex]!
+      const outcome = await materializeSide({
+        directory: worktree,
+        baseTree: material.baseTree,
+        change: material[slot.side],
+        ...(input.git === undefined ? {} : { git: input.git }),
+      })
+      if (!outcome.ok) {
+        // A git that may still be running stops the suite with the lock held, in
+        // either accounting mode, before any host exists. One that was accounted
+        // for fails only its slot.
+        if (outcome.terminationUnconfirmed === true) {
+          quarantine(`the ${label} worktree's git could not be confirmed to have terminated: ${outcome.reason}`)
+        }
+        await mark(slot, "failed", `the ${label} worktree could not be written, so nothing was issued: ${outcome.reason}`)
+        continue
+      }
+      const contained = await containmentProblem(directory, worktree)
+      if (contained !== null) {
+        endWith(`the ${label} worktree failed the AD-16 containment check: ${contained}`)
+        await mark(slot, "failed", `the ${label} worktree failed the AD-16 containment check, so nothing was issued: ${contained}`)
+        continue
+      }
+      written.set(slot.position, worktree)
+      if (ended === null && input.signal?.aborted) endWith(`the run was cancelled after the ${label} worktree was written`)
+    }
+    return written
+  }
+
+  /** A host's stop, never rejecting: a stop that throws is a stop not established. */
+  const stopOf = async (host: Extract<AdversarialHostStart, { ok: true }>, label: string): Promise<AdversarialHostStop> => {
+    try {
+      return await host.stop()
+    } catch (error) {
+      return { ok: false, reason: `the ${label} host's stop threw, so its termination is not established: ${messageOf(error)}` }
+    }
+  }
+
+  const runSlot = async (slot: AdversarialSlot, worktree: string): Promise<void> => {
     const material = cases[slot.caseIndex]!
     const label = `${slot.caseId} ${slot.side}`
-    const worktree = worktreeFor(root, slot)
+    const context: AdversarialRunContext = { caseId: slot.caseId, side: slot.side, position: slot.position }
     if ((await mark(slot, "started", `the ${label} run started`, { worktree })) !== null) {
       await mark(slot, "not-attempted", ended!)
       return
     }
 
-    const written = await materializeSide({
-      directory: worktree,
-      baseTree: material.baseTree,
-      change: material[slot.side],
-      ...(input.git === undefined ? {} : { git: input.git }),
-    })
-    if (!written.ok) {
-      // A git that may still be running stops the suite with the lock held, in
-      // either accounting mode. One that was accounted for fails only its slot.
-      if (written.terminationUnconfirmed === true) {
-        quarantine(`the ${label} worktree's git could not be confirmed to have terminated: ${written.reason}`)
-      }
-      await mark(slot, "failed", `the ${label} worktree could not be written, so nothing was issued: ${written.reason}`)
-      return
-    }
+    // The containment check again on the real paths, immediately before the run.
     const contained = await containmentProblem(directory, worktree)
     if (contained !== null) {
       endWith(`the ${label} worktree failed the AD-16 containment check: ${contained}`)
@@ -677,6 +800,65 @@ async function execute(
         ),
     })
 
+    // Story 2-7f — the run's own host. Whatever starts it owns its stop: a failed
+    // start has already stopped what it obtained, and a started host is stopped
+    // below on every way out of this run, before the next host can start. Any
+    // failure here is a runner stop: no further host starts once one's ending is
+    // not established (protocol v3 B9).
+    let host: Extract<AdversarialHostStart, { ok: true }> | undefined
+    if (input.lifecycle !== undefined) {
+      // The slot is already recorded started, so a cancellation from here on reads `cancelled`.
+      if (input.signal?.aborted) {
+        endWith(`the run was cancelled before the ${label} host started`)
+        await mark(slot, "cancelled", `the run was cancelled before the ${label} host started, so nothing was issued`)
+        return
+      }
+      let started: AdversarialHostStart
+      try {
+        started = await input.lifecycle.start(context, worktree, input.signal)
+      } catch (error) {
+        started = {
+          ok: false,
+          reason: `the host lifecycle threw: ${messageOf(error)}`,
+          cleanup: { ok: false, reason: "the start threw, so whether it left a host running is not established" },
+        }
+      }
+      if (!started.ok) {
+        const reason =
+          `the ${label} host did not start, so nothing was issued: ${started.reason}; ` +
+          (started.cleanup.ok ? `its cleanup: ${started.cleanup.detail}` : `ITS CLEANUP IS NOT ESTABLISHED: ${started.cleanup.reason}`)
+        endWith(reason)
+        await mark(slot, input.signal?.aborted ? "cancelled" : "failed", reason)
+        return
+      }
+      host = started
+    }
+
+    let stopped: Promise<AdversarialHostStop> | undefined
+    const stopHost = async (): Promise<AdversarialHostStop | undefined> => {
+      if (host === undefined) return undefined
+      stopped ??= stopOf(host, label)
+      return stopped
+    }
+    try {
+      await reviewAndRecord(slot, worktree, material, label, context, observer, tools, host, stopHost)
+    } finally {
+      const outcome = await stopHost()
+      if (outcome !== undefined && !outcome.ok) endWith(`the ${label} host's stop is not established: ${outcome.reason}`)
+    }
+  }
+
+  const reviewAndRecord = async (
+    slot: AdversarialSlot,
+    worktree: string,
+    material: AdversarialMaterial,
+    label: string,
+    context: AdversarialRunContext,
+    observer: ReturnType<typeof createToolTraceSink>,
+    tools: ReturnType<typeof opencodeTools>,
+    host: Extract<AdversarialHostStart, { ok: true }> | undefined,
+    stopHost: () => Promise<AdversarialHostStop | undefined>,
+  ): Promise<void> => {
     let runId: string | undefined
     const runClock: Clock = {
       now: () => input.clock.now(),
@@ -692,29 +874,35 @@ async function execute(
     const flight = cancellationWatch(input.signal)
     let result: ReviewResult | undefined
     let failure: string | undefined
-    try {
-      const issued = input.backendFor({ caseId: slot.caseId, side: slot.side, position: slot.position }, journal.reporter(sink))
-      const backend = probe.wrap(recorder.wrap(attempts ? flight.wrap(issued) : issued))
-      result = await review({
-        roster: input.roster,
-        backend,
-        clock: runClock,
-        change: material[slot.side],
-        priorWarnings: (input.priorWarnings ?? []).map((warning) => ({ ...warning })),
-        // Attempt mode gives the run no token cap and does not turn the ledger's
-        // unknown-usage stop on: host-reported tokens gate nothing there.
-        ...(attempts ? {} : { tokenCap: ADVERSARIAL_ALLOWANCES.runCap }),
-        stopOnUnknownUsage: !attempts,
-        ...(input.config.maxConcurrency === undefined ? {} : { maxConcurrency: input.config.maxConcurrency }),
-        tools,
-        toolObservation: observer,
-      ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
-        lateUsage: sink,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-        admission: journal.adversarialAdmission({ label, runId: () => runId }),
-      })
-    } catch (error) {
-      failure = messageOf(error) || "the run threw an error with no message"
+    let cancelledBeforeReview = false
+    if (host !== undefined && input.signal?.aborted) {
+      cancelledBeforeReview = true
+    } else {
+      try {
+        const reporter = journal.reporter(sink)
+        const issued = host === undefined ? input.backendFor!(context, reporter) : host.backendFor(reporter, input.config.hostTools!)
+        const backend = probe.wrap(recorder.wrap(attempts ? flight.wrap(issued) : issued))
+        result = await review({
+          roster: input.roster,
+          backend,
+          clock: runClock,
+          change: material[slot.side],
+          priorWarnings: (input.priorWarnings ?? []).map((warning) => ({ ...warning })),
+          // Attempt mode gives the run no token cap and does not turn the ledger's
+          // unknown-usage stop on: host-reported tokens gate nothing there.
+          ...(attempts ? {} : { tokenCap: ADVERSARIAL_ALLOWANCES.runCap }),
+          stopOnUnknownUsage: !attempts,
+          ...(input.config.maxConcurrency === undefined ? {} : { maxConcurrency: input.config.maxConcurrency }),
+          tools,
+          toolObservation: observer,
+          ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
+          lateUsage: sink,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+          admission: journal.adversarialAdmission({ label, runId: () => runId }),
+        })
+      } catch (error) {
+        failure = messageOf(error) || "the run threw an error with no message"
+      }
     }
     await journal.settled()
 
@@ -722,12 +910,22 @@ async function execute(
     const delivery: DeliveryEvidence | undefined =
       slot.side === "attack" ? deliveryOf(material, result?.record, counts) : undefined
 
-    if (result === undefined) {
+    // The terminal status is worked out first and recorded once the host is
+    // stopped, so a stop that is not established fails the slot whatever the
+    // review returned. The review's evidence is written either way.
+    let terminal: { status: SlotStatus; reason: string; extra: Partial<AdversarialSlotReport> }
+    if (cancelledBeforeReview) {
+      endWith(`the run was cancelled during ${label}`)
+      terminal = { status: "cancelled", reason: `the run was cancelled after the ${label} host started and before review()`, extra: {} }
+    } else if (result === undefined) {
       if (input.signal?.aborted) endWith(`the run was cancelled during ${label}`)
-      await mark(slot, "failed", `the ${label} run threw before it returned a record: ${failure}`, {
-        ...(runId === undefined ? {} : { runId }),
-        ...(delivery === undefined ? {} : { delivery }),
-      })
+      // With a host of its own, a run that threw leaves that host's state unexplained: a runner stop.
+      if (host !== undefined) endWith(`the ${label} run threw before it returned a record: ${failure}`)
+      terminal = {
+        status: "failed",
+        reason: `the ${label} run threw before it returned a record: ${failure}`,
+        extra: { ...(runId === undefined ? {} : { runId }), ...(delivery === undefined ? {} : { delivery }) },
+      }
     } else {
       const binding: AdversarialBinding = {
         scheduleHash: schedule.scheduleHash,
@@ -754,17 +952,27 @@ async function execute(
       const cancelled = result.record.cancelled !== undefined
       if (cancelled || input.signal?.aborted) endWith(`the run was cancelled during ${label}`)
       const denied = cancelled ? null : deniedAdversarialWork(result.record, journal.bill().refusedAdversarial, label)
-      await mark(
-        slot,
-        cancelled ? "cancelled" : denied !== null ? "failed" : "completed",
-        cancelled
+      terminal = {
+        status: cancelled ? "cancelled" : denied !== null ? "failed" : "completed",
+        reason: cancelled
           ? `the run was cancelled during the ${result.record.cancelled!.stage} stage of ${label}`
           : denied !== null
             ? `the ${label} run returned, but a gate denied it planned work: ${denied}`
             : `the ${label} run finished`,
-        { runId: result.record.runId, manifest, ...(delivery === undefined ? {} : { delivery }) },
-      )
+        extra: { runId: result.record.runId, manifest, ...(delivery === undefined ? {} : { delivery }) },
+      }
     }
+
+    const stop = await stopHost()
+    if (stop !== undefined && !stop.ok) {
+      endWith(`the ${label} host's stop is not established: ${stop.reason}`)
+      terminal = {
+        ...terminal,
+        status: "failed",
+        reason: `${terminal.reason}; its evidence is kept, and the slot fails because its host's stop is not established: ${stop.reason}`,
+      }
+    }
+    await mark(slot, terminal.status, terminal.reason, terminal.extra)
 
     if (attempts) {
       // Protocol v3 B6: an attempt that may still be open halts the whole suite,
@@ -796,13 +1004,17 @@ async function execute(
   }
 
   try {
+    const worktrees = await materializeAll()
     for (const slot of schedule.slots) {
+      const worktree = worktrees.get(slot.position)
+      // A slot whose worktree failed was recorded when it failed.
+      if (worktree === undefined && reports.has(slot.position)) continue
       if (ended === null && input.signal?.aborted) endWith(`the run was cancelled before ${slot.caseId} ${slot.side} started`)
-      if (ended !== null) {
-        await mark(slot, "not-attempted", ended)
+      if (ended !== null || worktree === undefined) {
+        await mark(slot, "not-attempted", ended ?? "the runner ended before this slot")
         continue
       }
-      await runSlot(slot)
+      await runSlot(slot, worktree)
     }
   } catch (error) {
     endWith(`the adversarial runner failed: ${messageOf(error)}`)

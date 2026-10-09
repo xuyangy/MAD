@@ -8,13 +8,25 @@
 import { $ } from "bun"
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { writeFileSync } from "node:fs"
-import { chmod, mkdir, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
-import { deliveryOf, deliveryProbe, furthestStage, runAdversarialSuite, sharedLedgerProblem, worktreeFor } from "./adversarial.ts"
+import {
+  deliveryOf,
+  deliveryProbe,
+  furthestStage,
+  lifecycleProblem,
+  runAdversarialSuite,
+  sharedLedgerProblem,
+  worktreeFor,
+  type AdversarialHostLifecycle,
+  type AdversarialHostStart,
+  type AdversarialHostStop,
+  type AdversarialRunContext,
+} from "./adversarial.ts"
 import { spawnGit, type RunGit } from "./adversarial-materialize.ts"
 import { ADVERSARIAL_ALLOWANCES } from "./governor.ts"
 import { concurrencyProblem } from "./adversarial-schedule.ts"
@@ -32,6 +44,8 @@ import {
 } from "./adversarial-schedule.ts"
 import { BUNDLE_FILE } from "./bundle.ts"
 import { HALT_MARKER_FILE } from "./governor.ts"
+import { readAdversarialBundle, renderAdversarialBundle } from "./adversarial-read.ts"
+import { main as evalReadMain } from "../scripts/eval-read.ts"
 import { JOURNAL_FILE, LOCK_FILE } from "./journal.ts"
 import { MANIFEST_FILE } from "./manifest.ts"
 import { parseManifest } from "./read-bundle.ts"
@@ -383,9 +397,12 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
       expect(failed.status).toBe("failed")
       expect(failed.reason).toContain("could not be written, so nothing was issued")
       expect(failed.reason).toContain("check process 5252 by hand")
-      expect(outcome.slots.slice(0, index).every((slot) => slot.status === "completed")).toBe(true)
-      expect(outcome.slots.slice(index + 1).every((slot) => slot.status === "not-attempted")).toBe(true)
-      expect(calls.some((call) => call.position >= failed.position)).toBe(false)
+      // Every worktree is written before any run, so the quarantine comes before the first review:
+      // that slot failed, every other slot not attempted, nothing issued.
+      expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "not-attempted")).toBe(true)
+      expect(calls).toHaveLength(0)
+      const statuses = await readAdversarialSlotStatuses(root)
+      expect(statuses.some((line) => line.status === "started" || line.status === "completed")).toBe(false)
       expect(outcome.bill.halt).toContain("OPERATIONAL HALT")
       expect(outcome.bill.halt).toContain("could not be confirmed to have terminated")
       // The halt marker names the worktree and the process, for the operator who recovers by hand.
@@ -1165,5 +1182,369 @@ describe("runAdversarialSuite in attempt mode", () => {
     // None of those refusals spent the schedule.
     const ran = await runAdversarialSuite(other.input)
     expect(ran.ok).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7f — every worktree first, then a host of its own per run (protocol v3 B9)
+// ---------------------------------------------------------------------------
+
+const isDirectory = (path: string) =>
+  stat(path).then(
+    (info) => info.isDirectory(),
+    () => false,
+  )
+
+const ISOLATED = { hostTools: { "*": false, StructuredOutput: true }, hostIsolation: "fresh-per-run" as const }
+
+/**
+ * A scripted per-run host: it starts no process. `events` records each start and
+ * each stop in order, and a stop is recorded only once it has resolved.
+ */
+function scriptedLifecycle(
+  backendFor: NonNullable<Parameters<typeof runAdversarialSuite>[0]["backendFor"]>,
+  script: {
+    start?: (context: AdversarialRunContext, worktree: string) => AdversarialHostStart | "throw" | undefined | Promise<AdversarialHostStart | "throw" | undefined>
+    stop?: (context: AdversarialRunContext) => AdversarialHostStop | "throw" | undefined
+    backend?: (context: AdversarialRunContext) => "throw" | undefined
+  } = {},
+) {
+  const events: string[] = []
+  const worktrees: string[] = []
+  const offers: Readonly<Record<string, boolean>>[] = []
+  const lifecycle: AdversarialHostLifecycle = {
+    async start(context, worktree) {
+      events.push(`start ${context.position}`)
+      worktrees.push(worktree)
+      const scripted = await script.start?.(context, worktree)
+      if (scripted === "throw") throw new Error("the scripted lifecycle threw")
+      if (scripted !== undefined) return scripted
+      let stopped: Promise<AdversarialHostStop> | undefined
+      return {
+        ok: true,
+        backendFor: (lateUsage, hostTools) => {
+          offers.push(hostTools)
+          if (script.backend?.(context) === "throw") throw new Error("the scripted backend factory threw")
+          return backendFor(context, lateUsage)
+        },
+        stop: () => {
+          stopped ??= (async (): Promise<AdversarialHostStop> => {
+            const outcome = script.stop?.(context)
+            events.push(`stop ${context.position}`)
+            if (outcome === "throw") throw new Error("the scripted stop threw")
+            return outcome ?? { ok: true, detail: `scripted host ${context.position} stopped` }
+          })()
+          return stopped
+        },
+      }
+    },
+  }
+  return { lifecycle, events, worktrees, offers }
+}
+
+describe("story 2-7f — all sixteen worktrees are written before any run", () => {
+  test("without a lifecycle the scripted suite completes, and every worktree exists before the first review", async () => {
+    let atFirstCall: boolean[] | undefined
+    const suite = await sealedSuite(scratch, {
+      script: {
+        onCall: async () => {
+          atFirstCall ??= await Promise.all(suite.schedule.slots.map((slot) => isDirectory(worktreeFor(suite.root, slot))))
+        },
+      },
+    })
+    const outcome = await runAdversarialSuite(suite.input)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.complete).toBe(true)
+    expect(atFirstCall).toEqual(Array.from({ length: 16 }, () => true))
+  })
+
+  test("a cancellation between two worktrees ends the phase: no review, no later worktree, every slot not attempted", async () => {
+    const controller = new AbortController()
+    const { root, input, calls, schedule } = await sealedSuite(scratch)
+    const third = worktreeFor(root, schedule.slots[2]!)
+    const git: RunGit = async (cwd, args, stdin) => {
+      const result = await spawnGit(cwd, args, stdin)
+      if (cwd === third && args[0] === "apply") controller.abort()
+      return result
+    }
+    const outcome = await runAdversarialSuite({ ...input, git, signal: controller.signal })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(calls).toHaveLength(0)
+    expect(outcome.slots.map((slot) => slot.status)).toEqual(Array.from({ length: 16 }, () => "not-attempted"))
+    expect(outcome.slots[0]!.reason).toContain("the run was cancelled after the")
+    expect(await isDirectory(third)).toBe(true)
+    expect(await isDirectory(worktreeFor(root, schedule.slots[3]!))).toBe(false)
+    const statuses = await readAdversarialSlotStatuses(root)
+    expect(statuses.some((line) => line.status === "started")).toBe(false)
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("a cancellation in the materialize phase starts no host", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const first = worktreeFor(suite.root, suite.schedule.slots[0]!)
+    const git: RunGit = async (cwd, args, stdin) => {
+      if (cwd === first && args[0] === "init") controller.abort()
+      return spawnGit(cwd, args, stdin)
+    }
+    const hosts = scriptedLifecycle(suite.input.backendFor)
+    const outcome = await runAdversarialSuite({ ...suite.input, git, signal: controller.signal, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual([])
+    expect(outcome.slots.every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.bill.halt).toBeNull()
+  })
+
+  test("an UNCONFIRMED worktree git starts no host either", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const git: RunGit = (cwd, args, stdin) =>
+      cwd.endsWith("adv-03-clean") && args[0] === "apply"
+        ? Promise.resolve({ exitCode: null, termination: "unconfirmed", reason: "scripted unconfirmed termination — check process 5353 by hand" })
+        : spawnGit(cwd, args, stdin)
+    const hosts = scriptedLifecycle(suite.input.backendFor)
+    const outcome = await runAdversarialSuite({ ...suite.input, git, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual([])
+    const failed = outcome.slots.find((slot) => slot.caseId === "adv-03" && slot.side === "clean")!
+    expect(failed.status).toBe("failed")
+    expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.bill.halt).toContain("OPERATIONAL HALT")
+    expect(await exists(join(suite.root, LOCK_FILE))).toBe(true)
+  })
+})
+
+describe("story 2-7f — the reader takes a slot that failed before it started", () => {
+  test("a worktree failure (no `started` line) and the quarantine's never-started slots read by the bundle reader and eval-read", async () => {
+    for (const termination of ["confirmed", "unconfirmed"] as const) {
+      const { root, input } = await sealedSuite(scratch, { attempts: true })
+      const git: RunGit = (cwd, args, stdin) =>
+        cwd.endsWith("adv-02-attack") && args[0] === "apply"
+          ? Promise.resolve({ exitCode: null, termination, reason: `scripted ${termination} non-return of process 6161` })
+          : spawnGit(cwd, args, stdin)
+      const outcome = await runAdversarialSuite({ ...input, git })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      const failed = outcome.slots.find((slot) => slot.caseId === "adv-02" && slot.side === "attack")!
+      const durable = await readAdversarialSlotStatuses(root)
+      expect(durable.filter((line) => line.position === failed.position).map((line) => line.status), termination).toEqual(["failed"])
+      const read = await readAdversarialBundle(root)
+      if (read.kind !== "read") throw new Error(`${termination}: ${JSON.stringify(read)}`)
+      const run = read.cases.find((entry) => entry.caseId === "adv-02")!.attack
+      expect(run.status, termination).toBe("failed")
+      expect(run.statusReason).toContain(`scripted ${termination} non-return`)
+      expect(renderAdversarialBundle(read)).toContain("BOUNDED EVIDENCE")
+      const lines: string[] = []
+      const original = console.log
+      console.log = (...args: unknown[]) => void lines.push(args.map(String).join(" "))
+      let code: number
+      try {
+        code = await evalReadMain(["bun", "eval-read", "--bundle", root])
+      } finally {
+        console.log = original
+      }
+      expect(lines.join("\n"), termination).toContain("ADVERSARIAL")
+      expect(lines.join("\n"), termination).not.toContain("REFUSED")
+      expect(typeof code).toBe("number")
+    }
+  }, 60_000)
+})
+
+describe("story 2-7f — the per-run host lifecycle", () => {
+  test("the config's isolation and the lifecycle must agree, and some backend must be handed in", async () => {
+    const declared = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const refused = await runAdversarialSuite(declared.input)
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.reason).toContain("no host lifecycle was handed in")
+    expect(await exists(join(adversarialDirectory(declared.root), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
+
+    const plain = await sealedSuite(scratch, { attempts: true })
+    const hosts = scriptedLifecycle(plain.input.backendFor)
+    const undeclared = await runAdversarialSuite({ ...plain.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+    expect(undeclared.ok).toBe(false)
+    if (!undeclared.ok) expect(undeclared.reason).toContain("does not declare `hostIsolation: \"fresh-per-run\"`")
+    expect(hosts.events).toEqual([])
+
+    expect(lifecycleProblem({ config: plain.input.config })).toBe("neither a backend factory nor a host lifecycle was handed in")
+    const both = await runAdversarialSuite({ ...declared.input, lifecycle: hosts.lifecycle })
+    expect(both.ok).toBe(false)
+    if (!both.ok) expect(both.reason).toContain("both a backend factory and a host lifecycle were handed in")
+    expect(lifecycleProblem({ config: { ...plain.input.config, ...ISOLATED }, backendFor: undefined, lifecycle: hosts.lifecycle })).toBeNull()
+  })
+
+  test("sixteen hosts, one per run in schedule order, each stopped before the next starts, after every worktree exists", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    let atFirstStart: boolean[] | undefined
+    const hosts = scriptedLifecycle(suite.input.backendFor, {
+      start: async () => {
+        atFirstStart ??= await Promise.all(suite.schedule.slots.map((slot) => isDirectory(worktreeFor(suite.root, slot))))
+        return undefined
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.complete).toBe(true)
+    expect(atFirstStart).toEqual(Array.from({ length: 16 }, () => true))
+    expect(hosts.events).toEqual(suite.schedule.slots.flatMap((slot) => [`start ${slot.position}`, `stop ${slot.position}`]))
+    expect(hosts.worktrees).toEqual(suite.schedule.slots.map((slot) => worktreeFor(suite.root, slot)))
+    // Every run's backend is offered the sealed config's offer, exactly.
+    expect(hosts.offers).toEqual(Array.from({ length: 16 }, () => suite.schedule.config.hostTools as Record<string, boolean>))
+    expect(suite.schedule.config.hostTools).toEqual({ "*": false, StructuredOutput: true })
+    // Every run's turns went through its own host's backend.
+    expect(new Set(suite.calls.map((call) => call.position)).size).toBe(16)
+  })
+
+  for (const [name, start, why] of [
+    ["refuses before spawning", { ok: false, reason: "the scripted host was refused before its spawn", cleanup: { ok: true, detail: "no host was started" } }, "its cleanup: no host was started"],
+    [
+      "fails with its cleanup unconfirmed",
+      { ok: false, reason: "the scripted host failed its directory verification", cleanup: { ok: false, reason: "the stop of process 4242 is UNCONFIRMED; data directory /d/run-3 kept" } },
+      "ITS CLEANUP IS NOT ESTABLISHED: the stop of process 4242 is UNCONFIRMED; data directory /d/run-3 kept",
+    ],
+    ["throws", "throw", "the host lifecycle threw: the scripted lifecycle threw"],
+  ] as const) {
+    test(`a start that ${name} fails its slot, stops the runner and starts nothing further`, async () => {
+      const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+      const hosts = scriptedLifecycle(suite.input.backendFor, { start: (context) => (context.position === 3 ? (start as AdversarialHostStart | "throw") : undefined) })
+      const outcome = await runAdversarialSuite({ ...suite.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2", "start 3"])
+      expect(outcome.slots.slice(0, 2).map((slot) => slot.status)).toEqual(["completed", "completed"])
+      expect(outcome.slots[2]!.status).toBe("failed")
+      expect(outcome.slots[2]!.reason).toContain("host did not start, so nothing was issued")
+      expect(outcome.slots[2]!.reason).toContain(why)
+      expect(outcome.slots.slice(3).every((slot) => slot.status === "not-attempted")).toBe(true)
+      expect(outcome.slots[3]!.reason).toContain("host did not start")
+      expect(suite.calls.some((call) => call.position >= 3)).toBe(false)
+      // A runner stop, not an accounting halt.
+      expect(outcome.bill.halt).toBeNull()
+      expect(outcome.complete).toBe(false)
+    })
+  }
+
+  test("a backend factory that throws with the host up: the host is stopped, then the runner stops", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const hosts = scriptedLifecycle(suite.input.backendFor, { backend: (context) => (context.position === 2 ? "throw" : undefined) })
+    const outcome = await runAdversarialSuite({ ...suite.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2"])
+    expect(outcome.slots[1]!.status).toBe("failed")
+    expect(outcome.slots[1]!.reason).toContain("threw before it returned a record: the scripted backend factory threw")
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.bill.halt).toBeNull()
+  })
+
+  test("a review that throws with the host up: the host is stopped, then the runner stops", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const hosts = scriptedLifecycle(suite.input.backendFor)
+    const outcome = await runAdversarialSuite({
+      ...suite.input,
+      backendFor: undefined,
+      lifecycle: hosts.lifecycle,
+      clock: {
+        ...suite.input.clock,
+        id: (prefix) => {
+          if (prefix === "run" && hosts.events.at(-1) === "start 2") throw new Error("the scripted clock threw inside review()")
+          return suite.input.clock.id(prefix)
+        },
+      },
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2"])
+    expect(outcome.slots[1]!.status).toBe("failed")
+    expect(outcome.slots[1]!.reason).toContain("the scripted clock threw inside review()")
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+  })
+
+  for (const [name, stop, why] of [
+    ["is unconfirmed", { ok: false, reason: "the stop of process 4343 is UNCONFIRMED — check it by hand; its data directory /d/run-2 is kept" }, "check it by hand; its data directory /d/run-2 is kept"],
+    ["reports missing post-stop checks", { ok: false, reason: "process 4343 exited, and no post-stop checks were returned, so post-stop verification is missing" }, "post-stop verification is missing"],
+    ["throws", "throw", "the adv-01 attack host's stop threw, so its termination is not established: the scripted stop threw"],
+  ] as const) {
+    test(`a stop that ${name} keeps the run's evidence, fails its slot and stops the runner`, async () => {
+      const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+      const hosts = scriptedLifecycle(suite.input.backendFor, { stop: (context) => (context.position === 2 ? (stop as AdversarialHostStop | "throw") : undefined) })
+      const outcome = await runAdversarialSuite({ ...suite.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2"])
+      const second = outcome.slots[1]!
+      expect(`${second.caseId} ${second.side}`).toBe("adv-01 attack")
+      expect(second.status).toBe("failed")
+      expect(second.reason).toContain("the adv-01 attack run finished; its evidence is kept, and the slot fails because its host's stop is not established")
+      expect(second.reason).toContain(why)
+      // The review's evidence is kept.
+      expect(second.manifest?.kind).toBe("written")
+      expect(second.runId).toBeDefined()
+      expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+      expect(outcome.slots[2]!.reason).toContain("host's stop is not established")
+      expect(suite.calls.some((call) => call.position > 2)).toBe(false)
+      expect(outcome.bill.halt).toBeNull()
+      expect(outcome.complete).toBe(false)
+    })
+  }
+
+  test("a cancellation once the host is up: no review, the host is stopped, the slot reads cancelled", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const hosts = scriptedLifecycle(suite.input.backendFor, {
+      start: (context) => {
+        if (context.position === 2) controller.abort()
+        return undefined
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2"])
+    expect(outcome.slots[1]!.status).toBe("cancelled")
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(suite.calls.some((call) => call.position >= 2)).toBe(false)
+    expect(outcome.bill.halt).toBeNull()
+  })
+
+  test("a cancellation that lands while a host is starting: the start's refusal is recorded `cancelled`, never `not-attempted`", async () => {
+    const controller = new AbortController()
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const hosts = scriptedLifecycle(suite.input.backendFor, {
+      start: (context) => {
+        if (context.position !== 2) return undefined
+        controller.abort()
+        return { ok: false, reason: "the run was cancelled while this host was starting; it was stopped before its run", cleanup: { ok: true, detail: "process 4444 exited" } }
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, signal: controller.signal, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.slots[1]!.status).toBe("cancelled")
+    expect(outcome.slots[1]!.reason).toContain("its cleanup: process 4444 exited")
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+    const durable = await readAdversarialSlotStatuses(suite.root)
+    expect(durable.filter((line) => line.position === 2).map((line) => line.status)).toEqual(["started", "cancelled"])
+  })
+
+  test("a failed slot-status append after the host is up still stops the host before the runner ends", async () => {
+    const suite = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    const hosts = scriptedLifecycle(suite.input.backendFor, {
+      start: async (context) => {
+        // The slot status file becomes a directory: every later append fails.
+        if (context.position === 2) {
+          const file = join(adversarialDirectory(suite.root), "adversarial-slots.jsonl")
+          await rm(file)
+          await mkdir(file)
+        }
+        return undefined
+      },
+    })
+    const outcome = await runAdversarialSuite({ ...suite.input, backendFor: undefined, lifecycle: hosts.lifecycle })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(hosts.events).toEqual(["start 1", "stop 1", "start 2", "stop 2"])
+    expect(outcome.warnings.some((warning) => warning.includes("could not be appended"))).toBe(true)
+    expect(outcome.slots.slice(2).every((slot) => slot.status === "not-attempted")).toBe(true)
+    expect(outcome.complete).toBe(false)
+  })
+
+  test("a config declaring neither field keeps its digest; declaring them binds both", async () => {
+    const plain = await sealedSuite(scratch, { attempts: true })
+    const isolated = await sealedSuite(scratch, { attempts: true, config: ISOLATED })
+    expect("hostTools" in plain.schedule.config).toBe(false)
+    expect("hostIsolation" in plain.schedule.config).toBe(false)
+    expect(isolated.schedule.config).toMatchObject({ hostTools: { "*": false, StructuredOutput: true }, hostIsolation: "fresh-per-run" })
+    expect(isolated.schedule.configDigest).not.toBe(plain.schedule.configDigest)
   })
 })

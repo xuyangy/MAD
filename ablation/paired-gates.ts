@@ -25,12 +25,15 @@
  * ## The adversarial phase (story 2-7e)
  *
  * Gates 10, 11 and 12 are required for `adversarial` on the oauth route. Gate
- * 12 is CLOSED; gates 10 and 11 are OPEN. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
+ * 12 is CLOSED; gates 10 and 11 are OPEN, and gate 11 is story 2-7f2's real-host
+ * probe. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
  * pins are `null` until they are chosen, and `adversarialRunProblem` refuses a
  * run with none. For this phase `gatePreflight` reports that problem, and consults
  * `ADVERSARIAL_CANDIDATE_NON_GATES`, the record of the one prerequisite that may
  * turn out not to be a gate: while that record is unresolved, absent or
  * malformed the preflight refuses, and no list a caller supplies replaces it.
+ * Story 2-7f resolved it `NON-GATING` on the evidence of `bun run adversarial`'s
+ * full import closure.
  *
  * ## Routes (story 2-8c3a)
  *
@@ -575,10 +578,10 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     kind: "engineering",
     phase: "adversarial",
     routes: ["oauth"],
-    owner: "story 2-7f",
+    owner: "story 2-7f2",
     status: "OPEN",
     requires:
-      "story 2-7f's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the " +
+      "story 2-7f2's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the " +
       "suite's own root before it is issued and counted once, an admission refused on the run, suite or root allowance " +
       "reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity " +
       "failure halts. Paired and pilot evidence is reused only within its measured scope",
@@ -653,13 +656,27 @@ export const ADVERSARIAL_CANDIDATE_NON_GATES: readonly CandidateNonGate[] = [
   {
     item: 7,
     name: "review-path reads (`adapters/opencode/repo.ts`)",
-    status: "OPEN",
+    status: "NON-GATING",
     validatedBy: "story 2-7f",
     claim: `the reads of the change through the host shell in \`adapters/opencode/repo.ts\` are ${CANDIDATE_CLAIM_WORDING}`,
     basis:
-      "`runAdversarialSuite` hands `review()` the sealed material of each case and side and never calls `opencodeRepo`. No " +
-      "adversarial launcher exists yet, so its preflight, its backend and Tools factories, its directory verification and " +
-      "its callbacks have not been examined, and nothing is established about them",
+      "`bun run adversarial` (scripts/adversarial.ts) hands `runAdversarialSuite` the sealed material, and the suite hands " +
+      "`review()` each case's side of it; every run's backend is an `OpencodeModelBackend` against that run's managed host " +
+      "and its Tools port is `opencodeTools`. Nothing is said about the reads in repo.ts themselves, wherever else they " +
+      "are reached",
+    evidence:
+      "story 2-7f's source and tests, on stand-in hosts and a scripted backend; no real host was run. A scan in " +
+      "scripts/adversarial.test.ts reads every file in the import closure of scripts/adversarial.ts (the launcher, the " +
+      "scripts/paired.ts helpers it imports, its host lifecycle, roster verification and callbacks, ablation/managed-host.ts " +
+      "and ablation/adversarial*.ts, every static and dynamic relative import followed and every package specifier listed) " +
+      "with comments and string, template and regular-expression literals removed. It finds the name `opencodeRepo` or the " +
+      "call `repo.change(` in exactly two files, the two exceptions: adapters/opencode/repo.ts, which defines `opencodeRepo` " +
+      "and `repo.change`, and adapters/opencode/plugin.ts, which calls them only inside the `mad_review` tool's `execute` " +
+      "handler, not at module top level. A second scan reads the launcher, the paired helpers, the lifecycle and host " +
+      "modules and every ablation/adversarial*.ts with comments included, and finds neither. The closure walk enumerates " +
+      "the importers of repo.ts: plugin.ts, reached only through scripts/paired.ts's import of `DEFAULT_DISCOVERY_SLOTS`, " +
+      "and adapters/opencode/tools.ts, which takes `GitError` alone. repo.ts and plugin.ts stay in the closure; the claim " +
+      `is that the reads are ${CANDIDATE_CLAIM_WORDING}, and nothing more. Tests: scripts/adversarial.test.ts`,
     reopensWhen:
       "the launcher, its factories or `runAdversarialSuite` ever read the reviewed change through `opencodeRepo` or `repo.change()`",
   },
@@ -713,6 +730,23 @@ export function candidateRecordProblems(record: readonly CandidateNonGate[] | un
   return problems
 }
 
+/**
+ * The refusals of the canonical candidate record and of a supplied one. The
+ * canonical record's refusals are always kept: a supplied record can add a
+ * refusal and can never remove one. `gatePreflight` passes
+ * `ADVERSARIAL_CANDIDATE_NON_GATES` as `canonical`; the parameter exists so that
+ * property can be shown for a canonical record that is OPEN.
+ */
+export function candidateProblems(
+  canonical: readonly CandidateNonGate[] | null | undefined,
+  supplied?: readonly CandidateNonGate[] | null,
+): string[] {
+  const records: (readonly CandidateNonGate[] | null | undefined)[] = [canonical]
+  // `undefined` is "none supplied". A supplied `null` or empty list is a record, and an unresolved one.
+  if (supplied !== undefined && supplied !== canonical) records.push(supplied)
+  return [...new Set(records.flatMap((record) => candidateRecordProblems(record)))]
+}
+
 export const PAIRED_NON_GATES: readonly CheckedNonGate[] = [
   {
     name: "bounded review-path reads (`adapters/opencode/repo.ts`)",
@@ -751,8 +785,10 @@ export interface GatePreflight {
  * and that gate is consulted: a malformed value never decides coverage.
  *
  * THE ADVERSARIAL PHASE ALSO NEEDS ITS RUN NAMED AND ITS CANDIDATE RECORD
- * RESOLVED (story 2-7e). `adversarialRunProblem()` is reported for
- * `ADVERSARIAL_RUN`, so the phase cannot pass while its pins are not chosen.
+ * RESOLVED (story 2-7e). `adversarialRunProblem()` is reported for `run`,
+ * `ADVERSARIAL_RUN` unless a caller supplies another (as the launcher's test
+ * seam does, beside its `gates`), so the phase cannot pass while its pins are
+ * not chosen.
  * `ADVERSARIAL_CANDIDATE_NON_GATES` is consulted on every call for that phase,
  * and `candidates`, when a caller supplies one, is checked as well: it can add a
  * refusal and can never remove the canonical record's. Every other phase ignores
@@ -763,6 +799,7 @@ export function gatePreflight(
   phase: GatePhase,
   route: GateRoute,
   candidates?: readonly CandidateNonGate[] | null,
+  run: AdversarialRun = ADVERSARIAL_RUN,
 ): GatePreflight {
   const lines: string[] = []
   const problems: string[] = []
@@ -826,16 +863,13 @@ export function gatePreflight(
     problems.push(`the table holds no authorization gate for ${phase} on route ${route}, so nothing authorizes its spend`)
   }
   if (phase === "adversarial") {
-    const run = adversarialRunProblem()
-    lines.push(`adversarial run ${ADVERSARIAL_RUN.run} — pins ${ADVERSARIAL_RUN.pins === null ? "not yet chosen" : ADVERSARIAL_RUN.pins.join(", ")}`)
-    if (run !== null) problems.push(run)
-    const records: (readonly CandidateNonGate[] | null | undefined)[] = [ADVERSARIAL_CANDIDATE_NON_GATES]
-    // `undefined` is "none supplied". A supplied `null` or empty list is a record, and an unresolved one.
-    if (candidates !== undefined && candidates !== ADVERSARIAL_CANDIDATE_NON_GATES) records.push(candidates)
+    const runProblem = adversarialRunProblem(run)
+    lines.push(`adversarial run ${run.run} — pins ${run.pins === null ? "not yet chosen" : run.pins.join(", ")}`)
+    if (runProblem !== null) problems.push(runProblem)
     for (const entry of ADVERSARIAL_CANDIDATE_NON_GATES) {
       lines.push(`candidate non-gate ${entry.item} — ${entry.name} — validated by ${entry.validatedBy} — ${entry.status}`)
     }
-    for (const problem of records.flatMap((record) => candidateRecordProblems(record))) {
+    for (const problem of candidateProblems(ADVERSARIAL_CANDIDATE_NON_GATES, candidates)) {
       if (!problems.includes(problem)) problems.push(problem)
     }
   }

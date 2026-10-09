@@ -134,6 +134,51 @@ export interface AdversarialConfig {
   accounting?: "attempts"
   /** How the host reaches its providers. Absent means `api-key`. */
   route?: GateRoute
+  /**
+   * Story 2-7f — the host tools every turn is offered, as opencode's per-call
+   * allowlist (protocol v3 B8). Absent: the config declares no offer.
+   */
+  hostTools?: Readonly<Record<string, boolean>>
+  /**
+   * Story 2-7f — `fresh-per-run`: each run gets a managed host and an OAuth data
+   * directory of its own, started after every worktree is written and stopped
+   * before the next run (protocol v3 B9). The runner refuses it without a
+   * `lifecycle`, and a `lifecycle` without it.
+   */
+  hostIsolation?: "fresh-per-run"
+}
+
+/** The one host isolation a config can declare. */
+export const FRESH_PER_RUN = "fresh-per-run"
+
+/** Protocol v3 B8 — the one host offer a config can declare: `StructuredOutput` only, every other tool name refused. */
+export const ADVERSARIAL_HOST_OFFER: Readonly<Record<string, boolean>> = Object.freeze({ "*": false, StructuredOutput: true })
+
+/**
+ * Why the config's host offer or host isolation cannot be sealed, or `null`.
+ * Both are declared together or not at all, and only with `accounting:
+ * "attempts"` on the oauth route. The offer is exactly `ADVERSARIAL_HOST_OFFER`
+ * and the isolation `fresh-per-run`. A config declaring neither is unaffected.
+ */
+export function adversarialHostProblem(config: Pick<AdversarialConfig, "hostTools" | "hostIsolation" | "accounting" | "route">): string | null {
+  const { hostTools, hostIsolation, accounting, route } = config as { hostTools?: unknown; hostIsolation?: unknown; accounting?: unknown; route?: unknown }
+  if (hostTools === undefined && hostIsolation === undefined) return null
+  if (hostTools === undefined || hostIsolation === undefined) {
+    return "the config declares only one of the host offer and the host isolation; they are declared together or not at all"
+  }
+  if (accounting !== "attempts" || route !== "oauth") {
+    return "the host offer and isolation belong to an attempt-mode schedule on the oauth route (protocol v3 B8 and B9)"
+  }
+  if (hostIsolation !== FRESH_PER_RUN) return `the config's host isolation ${JSON.stringify(hostIsolation)} is not \`${FRESH_PER_RUN}\``
+  if (
+    hostTools === null ||
+    typeof hostTools !== "object" ||
+    Array.isArray(hostTools) ||
+    canonicalJson(hostTools) !== canonicalJson(ADVERSARIAL_HOST_OFFER)
+  ) {
+    return `the config's host tool offer ${JSON.stringify(hostTools)} is not ${JSON.stringify(ADVERSARIAL_HOST_OFFER)}: protocol v3 B8 offers StructuredOutput only`
+  }
+  return null
 }
 
 /** Whether the config selects attempt accounting. */
@@ -188,7 +233,8 @@ export function adversarialProtocolProblem(
  * In attempt mode the dials say what the runs receive: no `tokenCap` (`null`),
  * no stop on unknown usage, and the attempt allowances in place of the token
  * ones. A token-mode config carries none of the attempt fields, so its digest
- * does not depend on them.
+ * does not depend on them. In either mode the host offer and isolation are
+ * bound only when the config declares them.
  */
 export function adversarialRunConfig(config: AdversarialConfig, roster: Roster): Record<string, unknown> {
   if (adversarialAttemptMode(config)) {
@@ -203,6 +249,7 @@ export function adversarialRunConfig(config: AdversarialConfig, roster: Roster):
       route: config.route,
       instructionsDigest: instructionsDigestOf(roster),
       tools: config.tools,
+      ...hostFields(config),
     }
   }
   return {
@@ -214,6 +261,15 @@ export function adversarialRunConfig(config: AdversarialConfig, roster: Roster):
     allowances: { ...ADVERSARIAL_ALLOWANCES },
     instructionsDigest: instructionsDigestOf(roster),
     tools: config.tools,
+    ...hostFields(config),
+  }
+}
+
+/** The host offer and isolation, each only when the config declares it, so a config declaring neither keeps its digest. */
+function hostFields(config: AdversarialConfig): Record<string, unknown> {
+  return {
+    ...(config.hostTools === undefined ? {} : { hostTools: { ...config.hostTools } }),
+    ...(config.hostIsolation === undefined ? {} : { hostIsolation: config.hostIsolation }),
   }
 }
 
@@ -341,6 +397,8 @@ async function publishAdversarialSchedule(input: CreateAdversarialScheduleInput,
   }
   const accounting = adversarialAccountingProblem(input.config)
   if (accounting !== null) return { ok: false, reason: `${accounting}; nothing was tossed` }
+  const host = adversarialHostProblem(input.config)
+  if (host !== null) return { ok: false, reason: `${host}; nothing was tossed` }
   const protocol = await readFrozenProtocol(input.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
   const protocolProblem = adversarialProtocolProblem(input.config, protocol)
@@ -479,6 +537,8 @@ export async function verifyAdversarialSchedule(
   const refuse = (why: string): AdversarialScheduleRead => ({ ok: false, reason: `the adversarial schedule at \`${file}\` ${why}` })
   const accounting = adversarialAccountingProblem(binding.config)
   if (accounting !== null) return { ok: false, reason: accounting }
+  const host = adversarialHostProblem(binding.config)
+  if (host !== null) return { ok: false, reason: host }
   const protocol = await readFrozenProtocol(binding.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
   const protocolProblem = adversarialProtocolProblem(binding.config, protocol)

@@ -464,11 +464,11 @@ const API_KEY_FLAGS = ["provider-url", "provider-key-env", "provider-model"] as 
 const OAUTH_FLAGS = ["oauth-provider", "oauth-data-dir", "oauth-prepared"] as const
 const KNOWN_FLAGS = new Set<string>(["live", ...VALUE_FLAGS])
 
-const matchesFlag = (arg: string, name: string) => arg === `--${name}` || arg.startsWith(`--${name}=`)
+export const matchesFlag = (arg: string, name: string) => arg === `--${name}` || arg.startsWith(`--${name}=`)
 
-type FlagValue = { ok: true; value: string | undefined } | { ok: false; message: string; short: string }
+export type FlagValue = { ok: true; value: string | undefined } | { ok: false; message: string; short: string }
 
-function valueFlag(args: readonly string[], name: string): FlagValue {
+export function valueFlag(args: readonly string[], name: string): FlagValue {
   const indices = args.flatMap((arg, index) => (matchesFlag(arg, name) ? [index] : []))
   if (indices.length === 0) return { ok: true, value: undefined }
   if (indices.length > 1) {
@@ -488,7 +488,7 @@ function valueFlag(args: readonly string[], name: string): FlagValue {
 }
 
 /** `provider/model`, split at the first slash; neither side may be blank. */
-function parsePin(value: string): Pin | undefined {
+export function parsePin(value: string): Pin | undefined {
   const cut = value.indexOf("/")
   if (cut < 0) return undefined
   const providerId = value.slice(0, cut).trim()
@@ -1022,16 +1022,16 @@ export async function worktreeIdentity(directory: string, reference: string, git
 // Checks shared by stages 1 and 3
 // ---------------------------------------------------------------------------
 
-type Check =
+export type Check =
   | { name: string; state: "pass"; detail: string[] }
   | { name: string; state: "fail"; detail: string[] }
   | { name: string; state: "not-evaluated"; prerequisite: string }
 
-const pass = (name: string, detail: string[] = []): Check => ({ name, state: "pass", detail })
-const fail = (name: string, detail: string[]): Check => ({ name, state: "fail", detail })
-const notEvaluated = (name: string, prerequisite: string): Check => ({ name, state: "not-evaluated", prerequisite })
+export const pass = (name: string, detail: string[] = []): Check => ({ name, state: "pass", detail })
+export const fail = (name: string, detail: string[]): Check => ({ name, state: "fail", detail })
+export const notEvaluated = (name: string, prerequisite: string): Check => ({ name, state: "not-evaluated", prerequisite })
 
-async function contained(inner: string, outer: string): Promise<boolean> {
+export async function contained(inner: string, outer: string): Promise<boolean> {
   return refusalFor(inner, outer) !== undefined || (await realRefusalFor(inner, outer)) !== undefined
 }
 
@@ -1044,7 +1044,7 @@ export async function guarded(name: string, run: () => Promise<Check>): Promise<
   }
 }
 
-async function presence(file: string): Promise<"absent" | "present" | string> {
+export async function presence(file: string): Promise<"absent" | "present" | string> {
   try {
     await lstat(file)
     return "present"
@@ -1089,7 +1089,7 @@ async function bundleRoot(out: string): Promise<{ check: Check; preexisting: str
   return { check, preexisting }
 }
 
-function printCheck(check: Check): void {
+export function printCheck(check: Check): void {
   if (check.state === "not-evaluated") {
     console.log(`  ${check.name} — not evaluated: ${check.prerequisite}`)
     return
@@ -1875,7 +1875,7 @@ async function oauthChecks(
  * A check that states its refusals (`REFUSED: …` lines, as the gate check does) is
  * reduced to those, each whole; any other check keeps every detail line.
  */
-function failureReason(check: Extract<Check, { state: "fail" }>): string {
+export function failureReason(check: Extract<Check, { state: "fail" }>): string {
   const refused = check.detail.filter((line) => line.startsWith("REFUSED: ")).map((line) => line.slice("REFUSED: ".length))
   return (refused.length > 0 ? refused : check.detail).join("; ")
 }

@@ -185,7 +185,7 @@ export async function experimentRoot(scratch: string[]): Promise<string> {
 export interface SealedSuite {
   root: string
   schedule: AdversarialSchedule
-  input: RunAdversarialSuiteInput
+  input: RunAdversarialSuiteInput & { backendFor: NonNullable<RunAdversarialSuiteInput["backendFor"]> }
   calls: ScriptedCall[]
 }
 
@@ -199,6 +199,8 @@ export async function sealedSuite(
     root?: string
     /** Seal an attempt-mode schedule against a frozen copy of protocol v3. Default: the token-mode schedule over v1. */
     attempts?: boolean
+    /** Fields added to the config, such as story 2-7f's host offer and isolation. */
+    config?: Partial<AdversarialConfig>
   } = {},
 ): Promise<SealedSuite> {
   const root = options.root ?? (await experimentRoot(scratch))
@@ -209,7 +211,7 @@ export async function sealedSuite(
     protocolFile: options.attempts === true ? (await frozenV3Copy(scratch)).file : PROTOCOL_FILE,
     codeRevision: known({ commit: "abc123", dirty: false }),
     roster: resolved.roster,
-    config: options.attempts === true ? ATTEMPT_CONFIG : SCRIPTED_CONFIG,
+    config: { ...(options.attempts === true ? ATTEMPT_CONFIG : SCRIPTED_CONFIG), ...options.config },
   }
   const created = await createAdversarialSchedule({ ...base, createdAt: "2026-09-18T00:00:00.000Z", coin: () => coins.shift()! })
   if (!created.ok) throw new Error(created.reason)

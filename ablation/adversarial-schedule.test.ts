@@ -12,6 +12,7 @@ import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
 import { ATTEMPT_CONFIG, experimentRoot, frozenV3Copy, oneSlotRoster, PROTOCOL_FILE, PROTOCOL_V3_FILE, SCRIPTED_CONFIG } from "./adversarial-read.fixture.ts"
 import {
+  adversarialHostProblem,
   ADVERSARIAL_ROOT_MARKER_FILE,
   ADVERSARIAL_SCHEDULE_FILE,
   ADVERSARIAL_START_MARKER_FILE,
@@ -204,6 +205,30 @@ describe("the adversarial config: token mode by default, attempt mode opt-in", (
     })
     expect("allowances" in config).toBe(false)
     expect(JSON.stringify(config)).not.toContain("400000")
+  })
+
+  test("story 2-7f — the host offer and isolation are bound only when declared, and a malformed one is refused before any coin", async () => {
+    const roster = oneSlotRoster().roster
+    const declared = { ...ATTEMPT_CONFIG, hostTools: { "*": false, StructuredOutput: true }, hostIsolation: "fresh-per-run" as const }
+    expect(adversarialRunConfig(declared, roster)).toMatchObject({ hostTools: { "*": false, StructuredOutput: true }, hostIsolation: "fresh-per-run" })
+    expect(adversarialRunConfig(ATTEMPT_CONFIG, roster)).toEqual(Object.fromEntries(Object.entries(adversarialRunConfig(declared, roster)).filter(([key]) => key !== "hostTools" && key !== "hostIsolation")))
+    expect(Object.keys(adversarialRunConfig(SCRIPTED_CONFIG, roster)).some((key) => key.startsWith("host"))).toBe(false)
+    expect(adversarialHostProblem(declared)).toBeNull()
+    expect(adversarialHostProblem(SCRIPTED_CONFIG)).toBeNull()
+    expect(adversarialHostProblem(ATTEMPT_CONFIG)).toBeNull()
+    // B8: StructuredOutput only, exactly.
+    for (const hostTools of [{}, { bash: true }, { "*": true }, { "": true }, { "*": false }, { "*": false, StructuredOutput: true, read: true }, { "*": false, StructuredOutput: "yes" as never }] as Record<string, boolean>[]) {
+      expect(adversarialHostProblem({ ...declared, hostTools }), JSON.stringify(hostTools)).toContain("protocol v3 B8 offers StructuredOutput only")
+    }
+    // Declared together, and only for attempts on the oauth route.
+    expect(adversarialHostProblem({ ...ATTEMPT_CONFIG, hostTools: declared.hostTools })).toContain("declared together or not at all")
+    expect(adversarialHostProblem({ ...ATTEMPT_CONFIG, hostIsolation: "fresh-per-run" })).toContain("declared together or not at all")
+    expect(adversarialHostProblem({ ...SCRIPTED_CONFIG, hostTools: declared.hostTools, hostIsolation: "fresh-per-run" })).toContain("belong to an attempt-mode schedule on the oauth route")
+    expect(adversarialHostProblem({ ...declared, hostIsolation: "shared" as never })).toContain('host isolation "shared" is not `fresh-per-run`')
+    const root = await experimentRoot(scratch)
+    const refused = await createAdversarialSchedule({ ...(await attemptInput(root)), config: { ...declared, hostTools: { bash: true } }, createdAt: "2026-10-09T00:00:00.000Z" })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.reason).toContain("nothing was tossed")
   })
 
   test("oauth and attempts are one choice, and any other value of either is refused", () => {

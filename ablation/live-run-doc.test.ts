@@ -63,6 +63,7 @@ import {
   PAIRED_NON_GATES,
 } from "./paired-gates.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
+import { ADVERSARIAL_HOST_TOOLS, ADVERSARIAL_HOSTS_FILE } from "../scripts/adversarial.ts"
 import { STORE_TABLES } from "./oauth-store.ts"
 import { PERSISTENT_HOST_STATE_LIMITATION } from "./evaluation-report.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE } from "./schedule.ts"
@@ -338,7 +339,7 @@ describe("the adjudication sheet's contract is the one both documents state", ()
 describe("LIVE-RUN.md documents the adversarial suite that is actually shipped", () => {
   const section = async (): Promise<string> => {
     const doc = await liveRunDoc()
-    const start = doc.indexOf("## The adversarial suite (story 2-7b)")
+    const start = doc.indexOf("## The adversarial suite (stories 2-7b and 2-7f)")
     const end = doc.indexOf("## What would falsify the design", start)
     if (start < 0 || end < 0) throw new Error("LIVE-RUN.md carries no adversarial section")
     return doc.slice(start, end)
@@ -397,7 +398,8 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       // A blocker a reader counting the numbered list does not count is one
       // nobody schedules, so the materializer is an entry of its own.
       ["Bounded materializer termination", "CLOSED"],
-      ["Bounded review-path reads", "OPEN"],
+      // Story 2-7f resolved it: a candidate non-gate, not reached by the launcher.
+      ["Bounded review-path reads", "NON-GATING"],
     ] as const
     const list = between(text, "### Before the sixteen live runs", "**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**", "the prerequisite list")
     const items = [...list.matchAll(/(?:^| )(\d)\. \*\*(.+?) — (.+?)\.\*\*/g)].map((item) => [Number(item[1]), item[2], item[3]])
@@ -409,11 +411,11 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
     const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value === status ? [index + 1] : []))
-    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE")]).toEqual([[2, 3, 7], [4, 5, 6], [1]])
+    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[2, 3], [4, 5, 6], [1], [7]])
     expect(text).toContain(
-      "On the planned OAuth route three of the seven are open (2, 3 and 7), three are closed (4, 5 and 6) and one does not apply (1).",
+      "On the planned OAuth route two of the seven are open (2 and 3), three are closed (4, 5 and 6), one does not apply (1) and one is not a gate (7).",
     )
-    expect(text).toContain("**The live execution is still blocked.** (2), (3) and (7) are open.")
+    expect(text).toContain("**The live execution is still blocked.** (2) and (3) are open.")
     // And the honest headline: story 2-7c did not close every hang, and the
     // materializer's half closed with gate 12.
     expect(text).toContain("The live execution is still blocked")
@@ -432,7 +434,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
   test("each prerequisite names what would satisfy it on the OAuth route: gates 10, 11 and 12, and the item-7 candidate", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     const list = between(text, "### Before the sixteen live runs", "**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**", "the prerequisite list")
-    const item = (number: number): string => between(list, ` ${number}. **`, number === 7 ? " — with `status: \"OPEN\"`." : ` ${number + 1}. **`, `prerequisite ${number}`)
+    const item = (number: number): string => between(list, ` ${number}. **`, number === 7 ? " — with `status: \"NON-GATING\"` and that evidence." : ` ${number + 1}. **`, `prerequisite ${number}`)
     const gate = (number: number) => PAIRED_GATES.find((entry) => entry.number === number)!
 
     // Item 1 does not apply on OAuth; on the api-key route it is open.
@@ -465,20 +467,25 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(6)).toContain("The api-key route has no gate that opens the adversarial phase at all")
     expect(PAIRED_GATES.some((entry) => entry.phase === "adversarial" && (entry.routes === undefined || entry.routes.includes("api-key")))).toBe(false)
 
-    // Item 7 is the candidate, unresolved, in the record's own wording.
+    // Item 7 is the candidate, resolved by story 2-7f, in the record's own wording, with the scans and the walk named.
     const candidate = ADVERSARIAL_CANDIDATE_NON_GATES.find((entry) => entry.item === 7)!
-    expect(candidate.status).toBe("OPEN")
-    expect(item(7)).toContain(`A candidate non-gate, unresolved, to be validated by ${candidate.validatedBy}.`)
+    expect(candidate.status).toBe("NON-GATING")
+    expect(item(7)).toContain(`A candidate non-gate, validated by ${candidate.validatedBy}'s source and tests, on stand-in hosts and a scripted backend.`)
+    expect(item(7)).not.toContain("for review at acceptance")
     expect(item(7)).toContain(CANDIDATE_CLAIM_WORDING)
+    expect(item(7)).toContain(
+      "finds `opencodeRepo` or `repo.change(` only in the two exceptions: `repo.ts`, which defines `opencodeRepo` and `repo.change`, and `adapters/opencode/plugin.ts`, which calls them only inside the `mad_review` tool's `execute` handler, not at module top level.",
+    )
+    expect(item(7)).toContain("which takes `GitError` alone. `repo.ts` stays in the closure.")
     expect(list).toContain("`ADVERSARIAL_CANDIDATE_NON_GATES`")
-    expect(list).toContain("It stays a blocker until story 2-7f validates the complete launcher path and records its evidence")
+    expect(list).toContain("The record says only that the reads are not reached, and nothing about the reads themselves")
     expect(list).toContain("`gatePreflight` refuses that phase while any of them is OPEN and while item 7's record is unresolved")
   })
 
   test("attempt mode is documented: the opt-in, the figures, the root, the scope, the halts and the exposure report", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### Attempt mode on the OAuth route (story 2-7e)", " ### ", "the attempt-mode section")
     expect(text).toContain("`accounting: \"attempts\"` and `route: \"oauth\"`")
-    expect(text).toContain("**It bills nothing by itself, no command runs it, and protocol v3 is a draft.**")
+    expect(text).toContain("**It bills nothing by itself, only `bun run adversarial` runs it, and protocol v3 is a draft.**")
     expect(text).toContain("The v3 draft, v1 and v2 are each refused by name")
     expect(text).toContain("`tokenCap: null`, `stopOnUnknownUsage: false`")
     const figure = ADVERSARIAL_ATTEMPT_ALLOWANCES
@@ -510,6 +517,42 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).toContain("`EXPOSURE` section")
     // No 400,000 figure is offered as an OAuth allowance.
     expect(text).not.toContain("400,000")
+  })
+
+  test("story 2-7f — the launcher is documented: the command, stage 1's refusal, per-run isolation, the host record and signals", async () => {
+    const text = between((await section()).replace(/\s+/g, " "), "### The OAuth launcher (story 2-7f): `bun run adversarial`", " ### ", "the launcher section")
+    const pkg = JSON.parse(await Bun.file(new URL("../package.json", import.meta.url)).text()) as { scripts: Record<string, string> }
+    expect(pkg.scripts.adversarial).toBe("bun run scripts/adversarial.ts")
+    expect(text).toContain("bun run adversarial --live --provider-mode oauth")
+    for (const flag of ["--oauth-provider", "--pin", "--oauth-prepared", "--oauth-data-root", "--out"]) expect(text, flag).toContain(flag)
+    expect(text).toContain("`--provider-mode api-key`, `--server`, `--target` and `--directory` are refused at parse")
+    expect(text).toContain("**Stage 1 refuses on the shipped tree, and writes nothing.**")
+    expect(text).toContain("`gatePreflight(gates, \"adversarial\", \"oauth\")`")
+    expect(ADVERSARIAL_HOST_TOOLS).toEqual({ "*": false, StructuredOutput: true })
+    expect(text).toContain('`ADVERSARIAL_HOST_TOOLS` (`{ "*": false, StructuredOutput: true }`')
+    expect(text).toContain("`hostIsolation: \"fresh-per-run\"`")
+    expect(text).toContain("All sixteen worktrees are written first.")
+    expect(text).toContain("`<data-root>/run-<position>/opencode` holding only the `auth.json` symlink (made by `symlink`, never read, never reused)")
+    expect(text).toContain("a missing post-stop check is missing verification")
+    expect(text).toContain("The sixteen `run-*/opencode/auth.json` symlinks under `--oauth-data-root` are kept after the run")
+    expect(text).toContain("the offer must be exactly that one (`adversarialHostProblem`)")
+    expect(text).toContain("each is checked again to be outside this repository and not to contain it (AD-16, on real paths)")
+    expect(text).toContain("they do not remove every filesystem race")
+    // The two roots are created one after the other, so a failed `mkdir` may leave the first behind.
+    expect(text).toContain("A failed recheck, or one that cannot be made, refuses before either root is created.")
+    expect(text).toContain("A failed `mkdir` refuses before any schedule is sealed or host started, and may leave a root it already created.")
+    expect(text).not.toContain("a failed `mkdir` each refuse with no root")
+    expect(text).toContain("that slot reads `cancelled`")
+    expect(text).toContain("is a runner stop, never an accounting halt")
+    expect(text).toContain(`\`adversarial/${ADVERSARIAL_HOSTS_FILE}\` gets one line per start, verify, stop and post-stop outcome`)
+    expect(text).toContain("No complete disclosure is claimed after that.")
+    expect(text).toContain("its own handler never exits first")
+    expect(text).toContain("do not show isolation at the provider, account or cache level")
+    expect(text).toContain("story 2-7f2's zero-bill probe")
+    // The suite's own section says every worktree comes first, and what an early stop leaves.
+    const suite = (await section()).replace(/\s+/g, " ")
+    expect(suite).toContain("All sixteen worktrees are written, in schedule order, before any run starts (story 2-7f).")
+    expect(suite).toContain("An early stop can therefore leave written worktrees of slots that never ran.")
   })
 
   test("the preflight checks are listed in the order the runner makes them", async () => {
