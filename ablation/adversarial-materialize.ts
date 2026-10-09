@@ -223,14 +223,14 @@ export function gitOutcomeOf(command: string, outcome: BlameExecOutcome): GitOut
       return {
         exitCode: null,
         termination: "confirmed",
-        reason: `\`${command}\` timed out and was killed; termination of ${processOf(outcome.pid)} was confirmed: ${outcome.why}`,
+        reason: `\`${command}\` did not return before its deadline; termination of ${processOf(outcome.pid)} was confirmed: ${outcome.why}`,
       }
     case "cleanup-unresolved":
       return {
         exitCode: null,
         termination: "unconfirmed",
         reason:
-          `\`${command}\` timed out; termination is UNCONFIRMED and the process may still be running — ` +
+          `\`${command}\` did not return before its deadline; termination is UNCONFIRMED and the process may still be running — ` +
           `check ${processOf(outcome.pid)} by hand: ${outcome.why}`,
       }
     default: {

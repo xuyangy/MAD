@@ -17,7 +17,7 @@ import { join } from "node:path"
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import * as blameExec from "../adapters/opencode/blame-exec.ts"
-import type { BlameExecOutcome } from "../adapters/opencode/blame-exec.ts"
+import type { BlameExecOutcome, SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
 import { DEFAULT_BLAME_CLEANUP_TIMEOUT_MS, DEFAULT_BLAME_TIMEOUT_MS } from "../adapters/opencode/tools.ts"
 import {
   boundedGit,
@@ -292,8 +292,44 @@ describe("every git call is bounded", () => {
     expect(value.exitCode).toBeNull()
     if (value.exitCode !== null) return
     expect(value.termination).toBe("confirmed")
-    expect(value.reason).toContain("`git status` timed out and was killed")
+    expect(value.reason).toContain("`git status` did not return before its deadline")
     expect(pidIn(value.reason)).toBeGreaterThan(0)
+  })
+
+  test("a kill that could not be sent, followed by a natural exit during cleanup, is confirmed without claiming a kill", async () => {
+    const dir = await tempDir()
+    const closedAfter = (ms: number) =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          setTimeout(() => controller.close(), ms)
+        },
+      })
+    let exitCode: number | null = null
+    const spawn = (): SpawnedBlame => ({
+      pid: 12345,
+      stdout: closedAfter(200),
+      stderr: closedAfter(200),
+      exited: new Promise<number>((resolve) =>
+        setTimeout(() => {
+          exitCode = 0
+          resolve(0)
+        }, 200),
+      ),
+      get exitCode() {
+        return exitCode
+      },
+      signalCode: null,
+      kill: () => {
+        throw new Error("scripted signal delivery failure")
+      },
+    })
+    const value = await boundedGit({ spawn, deadlineMs: 50, cleanupMs: 500 })(dir, ["status"])
+    expect(value.exitCode).toBeNull()
+    if (value.exitCode !== null) return
+    expect(value.termination).toBe("confirmed")
+    expect(value.reason).toContain("`git status` did not return before its deadline")
+    expect(value.reason).toContain("SIGKILL could not be sent (scripted signal delivery failure)")
+    expect(value.reason).not.toContain("timed out and was killed")
   })
 
   test("a child that traps SIGTERM is ended by the immediate SIGKILL, and termination is confirmed", async () => {
