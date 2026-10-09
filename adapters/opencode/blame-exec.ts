@@ -48,12 +48,13 @@
  * owes no schedule. What is promised is that MAD stops waiting and says which of
  * the outcomes it got.
  *
- * NO EXIT CODE IS EVER INVENTED. There is no synthesized `124` here.
- * `ablation/adversarial-materialize.ts`'s `spawnGit` is the anti-pattern this
- * file was written against: it sends SIGTERM with no escalation, awaits both
- * pipes BEFORE `exited` — so a child holding a pipe open cannot be waited out at
- * all — and fabricates `exitCode: 124` from a timeout flag, which is a number a
- * reader cannot tell from one git actually returned.
+ * NO EXIT CODE IS EVER INVENTED. A call that did not return carries no status
+ * at all, never one synthesized from a timeout flag, which is a number a reader
+ * cannot tell from one git actually returned. The pipes and the exit are raced
+ * together, never the pipes first (see below), so a child holding a pipe open
+ * cannot stop the call returning. `ablation/adversarial-materialize.ts` runs
+ * its git calls through this launcher as well (story 2-7e2), with its own spawn
+ * seam.
  *
  * ## What CONFIRMED termination requires, and why it is three things
  *

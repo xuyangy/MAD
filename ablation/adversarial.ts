@@ -57,12 +57,14 @@
  * ## One run
  *
  * Sequential, in schedule order. For each slot: write the side's worktree
- * (`ablation/adversarial-materialize.ts`), check its containment again on the
- * real paths, build ONE trace sink and hand that same value to `opencodeTools`
- * and to `review()`, run `review()` on the one-slot roster with its mode's dials
- * (token mode: the 25,000 `tokenCap` and the stop on unknown usage; attempt
- * mode: neither) and the adversarial admission, write the dump and manifest,
- * and record the slot's terminal status with an attack run's delivery evidence.
+ * (`ablation/adversarial-materialize.ts`; a git call there whose termination is
+ * unconfirmed quarantines the suite, any other write failure fails only the
+ * slot), check its containment again on the real paths, build ONE trace sink
+ * and hand that same value to `opencodeTools` and to `review()`, run
+ * `review()` on the one-slot roster with its mode's dials (token mode: the
+ * 25,000 `tokenCap` and the stop on unknown usage; attempt mode: neither) and
+ * the adversarial admission, write the dump and manifest, and record the
+ * slot's terminal status with an attack run's delivery evidence.
  * No run is retried, re-run or replaced.
  *
  * ## Attempt mode: failures, halts and completion (protocol v3 B6)
@@ -530,8 +532,8 @@ async function execute(
   }
 
   /**
-   * Story 2-7c — the suite's response to an unconfirmed process cleanup or an
-   * unconfirmed trace append.
+   * Story 2-7c — the suite's response to an unconfirmed process cleanup (a
+   * blame's, or a worktree git call's) or an unconfirmed trace append.
    *
    * SYNCHRONOUS, AND IN THIS ORDER. `endWith` stops local admission and
    * `haltOperationally` latches the journal's own stop, both before this
@@ -602,6 +604,11 @@ async function execute(
       ...(input.git === undefined ? {} : { git: input.git }),
     })
     if (!written.ok) {
+      // A git that may still be running stops the suite with the lock held, in
+      // either accounting mode. One that was accounted for fails only its slot.
+      if (written.terminationUnconfirmed === true) {
+        quarantine(`the ${label} worktree's git could not be confirmed to have terminated: ${written.reason}`)
+      }
       await mark(slot, "failed", `the ${label} worktree could not be written, so nothing was issued: ${written.reason}`)
       return
     }

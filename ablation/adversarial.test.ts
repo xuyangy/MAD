@@ -346,6 +346,61 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
     expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "completed")).toBe(true)
   })
 
+  for (const attempts of [false, true]) {
+    const mode = attempts ? "attempt" : "token"
+
+    test(`a worktree git that did not return with confirmed or not-started termination fails only its slot (${mode} mode)`, async () => {
+      for (const termination of ["confirmed", "not-started"] as const) {
+        const { root, input, calls } = await sealedSuite(scratch, { attempts })
+        const git: RunGit = (cwd, args, stdin) =>
+          cwd.endsWith("adv-02-attack") && args[0] === "apply"
+            ? Promise.resolve({ exitCode: null, termination, reason: `scripted ${termination} non-return of process 5151` })
+            : spawnGit(cwd, args, stdin)
+        const outcome = await runAdversarialSuite({ ...input, git })
+        if (!outcome.ok) throw new Error(outcome.reason)
+        const failed = outcome.slots.find((slot) => slot.caseId === "adv-02" && slot.side === "attack")!
+        expect(failed.status, termination).toBe("failed")
+        expect(failed.reason).toContain(`scripted ${termination} non-return`)
+        expect(calls.some((call) => call.position === failed.position)).toBe(false)
+        expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "completed")).toBe(true)
+        expect(outcome.bill.halt).toBeNull()
+        expect(await exists(join(root, HALT_MARKER_FILE))).toBe(false)
+        expect(await exists(join(root, LOCK_FILE))).toBe(false)
+      }
+    })
+
+    test(`an UNCONFIRMED worktree git quarantines the suite (${mode} mode)`, async () => {
+      const { root, input, calls } = await sealedSuite(scratch, { attempts })
+      const git: RunGit = (cwd, args, stdin) =>
+        cwd.endsWith("adv-02-attack") && args[0] === "apply"
+          ? Promise.resolve({ exitCode: null, termination: "unconfirmed", reason: "scripted unconfirmed termination — check process 5252 by hand" })
+          : spawnGit(cwd, args, stdin)
+      const outcome = await runAdversarialSuite({ ...input, git })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      const index = outcome.slots.findIndex((slot) => slot.caseId === "adv-02" && slot.side === "attack")
+      expect(index).toBeGreaterThan(0)
+      const failed = outcome.slots[index]!
+      expect(failed.status).toBe("failed")
+      expect(failed.reason).toContain("could not be written, so nothing was issued")
+      expect(failed.reason).toContain("check process 5252 by hand")
+      expect(outcome.slots.slice(0, index).every((slot) => slot.status === "completed")).toBe(true)
+      expect(outcome.slots.slice(index + 1).every((slot) => slot.status === "not-attempted")).toBe(true)
+      expect(calls.some((call) => call.position >= failed.position)).toBe(false)
+      expect(outcome.bill.halt).toContain("OPERATIONAL HALT")
+      expect(outcome.bill.halt).toContain("could not be confirmed to have terminated")
+      // The halt marker names the worktree and the process, for the operator who recovers by hand.
+      const worktree = worktreeFor(root, failed)
+      const marker = await readFile(join(root, HALT_MARKER_FILE), "utf8")
+      expect(marker).toContain(worktree)
+      expect(marker).toContain("process 5252")
+      // The partly written worktree is left for the operator, never removed.
+      expect((await readdir(worktree)).length).toBeGreaterThan(0)
+      expect(await exists(join(root, LOCK_FILE))).toBe(true)
+      expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(true)
+      expect(outcome.complete).toBe(false)
+    })
+  }
+
   test("a worktree that fails containment after it is written fails its slot and ends the suite", async () => {
     const { root, input, calls } = await sealedSuite(scratch)
     const git: RunGit = async (cwd, args, stdin) => {

@@ -21,25 +21,36 @@
  * component at any depth is refused, so the tree can never write git's own
  * files or plant a nested repository.
  *
- * ## `GIT_TIMEOUT_MS` IS NOT BOUNDED TERMINATION
+ * ## Every git call is bounded, and a call that did not return says so
  *
- * It does not make this module safe to leave running, and it must not be quoted
- * as though it did. What `spawnGit` actually gives:
+ * Every git call runs through `runBoundedBlame` (`adapters/opencode/blame-exec.ts`),
+ * the launcher `git blame` uses, so "confirmed" means one thing in this tree,
+ * and it is three things: the direct child was reaped, its stdout reached EOF,
+ * and its stderr reached EOF. The pipes count because a descendant that
+ * inherited one keeps it open after the child is gone. The launcher races the
+ * pipes and the exit against the deadline as one; it never awaits a pipe
+ * before the exit.
  *
- * - The timer fires and sends a bare `kill()` — SIGTERM, with no escalation,
- *   which a process may ignore — and termination is never confirmed afterwards.
- * - The call awaits BOTH PIPES before `exited`, so a descendant that inherited
- *   the write end keeps that read outstanding. The timer still fires and the
- *   signal is still sent; what is prevented is `spawnGit` RETURNING at all, so
- *   it can neither confirm cleanup nor report it, and the caller waits forever.
- * - It reports `exitCode: 124`, a number git never returned, synthesized from a
- *   local flag and indistinguishable from a real status.
+ * - **Deadline.** `GIT_TIMEOUT_MS` of nominal execution, then SIGKILL at once,
+ *   with no graceful period: a worktree is disposable and never reused, so a
+ *   torn repository only ever fails its own slot.
+ * - **Cleanup budget.** `GIT_CLEANUP_TIMEOUT_MS` more to account for the child
+ *   and its pipes. Both are event-loop deadlines measured by `setTimeout`, not a
+ *   guaranteed wall-clock maximum.
+ * - **No status is synthesized.** A call that returned carries git's own exit
+ *   code. One that did not is a `GitNotReturned` with `exitCode: null`, a reason
+ *   and its `termination`: `not-started` (refused or launch-failed),
+ *   `confirmed`, or `unconfirmed` (the process, or something that inherited a
+ *   pipe, may still be running). `materializeSide` reports an `unconfirmed`
+ *   call as `terminationUnconfirmed`, and the runner quarantines on it.
+ * - **Known limit, carried over from the launcher.** A descendant that closed
+ *   the inherited pipes is not seen. No process group is killed and no
+ *   descendant is hunted.
  *
- * So worktree materialization is UNBOUNDED IN ITS FAILURE CASES and the
- * experiment lock can still be held indefinitely. `adapters/opencode/blame-exec.ts`
- * is the shape a fix takes; the gap is filed in
- * `_bmad-output/implementation-artifacts/deferred-work.md` and named as an open
- * blocker in `ablation/LIVE-RUN.md`. No test covers any of it.
+ * A worktree whose git did not return is left where it is and is never
+ * reviewed. Where that git's termination is unconfirmed, it may still be
+ * writing there. A later write into the same directory is refused only if the
+ * directory is not empty, which this module checks and does not assume.
  *
  * ## Containment is not decided here
  *
@@ -51,16 +62,39 @@
 import { mkdir, readdir, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 
+import { deadlineProblem } from "../core/ports/observation-wait.ts"
+import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 
+/** A git call that returned: its own status, never a synthesized one. */
 export interface GitResult {
   exitCode: number
   stdout: string
   stderr: string
+  /** The terminating signal the OS reported, when there was one. */
+  signal?: string | null
+  /** MAD's reason it could not read git's stderr, kept apart from it. Never something git said. */
+  stderrFailure?: string | null
 }
 
+/**
+ * Whether a git call that did not return was accounted for. `not-started`:
+ * nothing was launched. `confirmed`: the child was reaped and both pipes reached
+ * EOF. `unconfirmed`: it, or something that inherited a pipe, may still be running.
+ */
+export type GitTermination = "not-started" | "confirmed" | "unconfirmed"
+
+/** A git call that did not return. It has no exit code. */
+export interface GitNotReturned {
+  exitCode: null
+  reason: string
+  termination: GitTermination
+}
+
+export type GitOutcome = GitResult | GitNotReturned
+
 /** Injected so a test can observe the calls; defaults to real `git`. */
-export type RunGit = (cwd: string, args: readonly string[], stdin?: string) => Promise<GitResult>
+export type RunGit = (cwd: string, args: readonly string[], stdin?: string) => Promise<GitOutcome>
 
 /** A deterministic author and no signing, so a base commit never depends on the operator's config. */
 const GIT_IDENTITY = ["-c", "user.name=MAD fixture", "-c", "user.email=fixture@mad.invalid", "-c", "commit.gpgsign=false"]
@@ -82,33 +116,131 @@ export function isolatedGitEnv(base: Readonly<Record<string, string | undefined>
   return env
 }
 
-/** How long one git call may run before it is killed. */
+/** Nominal execution of one git call. At this point the child is sent SIGKILL. */
 export const GIT_TIMEOUT_MS = 60_000
 
-export const spawnGit: RunGit = async (cwd, args, stdin) => {
-  try {
-    const spawned = Bun.spawn(["git", ...GIT_ISOLATION, ...args], {
-      cwd,
-      env: isolatedGitEnv(),
-      stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      spawned.kill()
-    }, GIT_TIMEOUT_MS)
-    try {
-      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
-      const exitCode = await spawned.exited
-      if (timedOut) return { exitCode: 124, stdout, stderr: `\`git ${args.join(" ")}\` was killed after ${GIT_TIMEOUT_MS} ms` }
-      return { exitCode, stdout, stderr }
-    } finally {
-      clearTimeout(timer)
+/** How long after the kill MAD waits to account for the child and its pipes. */
+export const GIT_CLEANUP_TIMEOUT_MS = 5_000
+
+/** How one git process is started: the launcher's request plus this call's standard input. */
+export type SpawnGit = (request: { cmd: string[]; cwd: string; stdin: Uint8Array | "ignore" }) => SpawnedBlame
+
+/**
+ * `Bun.spawn` with the isolated environment, `PWD` matching the working
+ * directory, and piped output.
+ *
+ * `PWD` is set because `posix_spawn` sets the working directory without
+ * touching `PWD`, so the child would otherwise be handed the parent's `PWD`
+ * while running somewhere else; `blame-exec.ts`'s default spawn makes the same
+ * repair.
+ */
+export const isolatedSpawn: SpawnGit = (request) =>
+  Bun.spawn({
+    cmd: request.cmd,
+    cwd: request.cwd,
+    env: { ...isolatedGitEnv(), PWD: request.cwd },
+    stdin: request.stdin,
+    stdout: "pipe",
+    stderr: "pipe",
+  }) as unknown as SpawnedBlame
+
+export interface BoundedGitOptions {
+  /** Test seam. Defaults to `isolatedSpawn`. */
+  spawn?: SpawnGit
+  /** Defaults to `GIT_TIMEOUT_MS`. */
+  deadlineMs?: number
+  /** Defaults to `GIT_CLEANUP_TIMEOUT_MS`. */
+  cleanupMs?: number
+}
+
+/** A `RunGit` over the bounded launcher, with the isolation options on every call. */
+export function boundedGit(options: BoundedGitOptions = {}): RunGit {
+  const spawn = options.spawn ?? isolatedSpawn
+  const deadlineMs = options.deadlineMs ?? GIT_TIMEOUT_MS
+  const cleanupMs = options.cleanupMs ?? GIT_CLEANUP_TIMEOUT_MS
+  return async (cwd, args, stdin) => {
+    const command = `git ${args.join(" ")}`
+    // Checked here, under this module's own names, so a refusal never reads as
+    // the launcher's. Nothing is launched and no process id exists.
+    for (const [name, ms] of [
+      ["the materializer git deadline", deadlineMs],
+      ["the materializer git cleanup budget", cleanupMs],
+    ] as const) {
+      const problem = deadlineProblem(name, ms)
+      if (problem !== null) return { exitCode: null, termination: "not-started", reason: `\`${command}\` was not launched: ${problem}` }
     }
-  } catch (error) {
-    return { exitCode: 127, stdout: "", stderr: `\`git\` could not be run: ${error instanceof Error ? error.message : String(error)}` }
+    const input = stdin === undefined ? ("ignore" as const) : new TextEncoder().encode(stdin)
+    const spawnWithInput: SpawnBlame = (request) => spawn({ ...request, stdin: input })
+    const outcome = await runBoundedBlame({
+      argv: ["git", ...GIT_ISOLATION, ...args],
+      cwd,
+      deadlineMs,
+      cleanupMs,
+      spawn: spawnWithInput,
+    })
+    return gitOutcomeOf(command, outcome)
+  }
+}
+
+/** Every git call this module makes by default. */
+export const spawnGit: RunGit = boundedGit()
+
+/** A process id, named only when the spawn handle established one. */
+function processOf(pid: number): string {
+  return pid > 0 ? `process ${pid}` : "a process whose id the spawn handle did not give"
+}
+
+/** The launcher's outcome as a `GitOutcome`. A call that did not return gets no exit code. */
+export function gitOutcomeOf(command: string, outcome: BlameExecOutcome): GitOutcome {
+  switch (outcome.kind) {
+    case "returned":
+      return {
+        exitCode: outcome.exitCode,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+        signal: outcome.signal,
+        stderrFailure: outcome.stderrFailure,
+      }
+    case "refused":
+      return { exitCode: null, termination: "not-started", reason: `\`${command}\` was not launched: ${outcome.why}` }
+    case "launch-failed":
+      return { exitCode: null, termination: "not-started", reason: `\`${command}\` could not be started: ${outcome.why}` }
+    case "observation-failed":
+      return outcome.cleanup.kind === "confirmed"
+        ? {
+            exitCode: null,
+            termination: "confirmed",
+            reason: `\`${command}\` could not be observed (${outcome.why}); termination of ${processOf(outcome.pid)} was confirmed`,
+          }
+        : {
+            exitCode: null,
+            termination: "unconfirmed",
+            reason:
+              `\`${command}\` could not be observed (${outcome.why}); termination is UNCONFIRMED (${outcome.cleanup.why}) — ` +
+              `check ${processOf(outcome.pid)} by hand`,
+          }
+    case "terminated":
+      return {
+        exitCode: null,
+        termination: "confirmed",
+        reason: `\`${command}\` timed out and was killed; termination of ${processOf(outcome.pid)} was confirmed: ${outcome.why}`,
+      }
+    case "cleanup-unresolved":
+      return {
+        exitCode: null,
+        termination: "unconfirmed",
+        reason:
+          `\`${command}\` timed out; termination is UNCONFIRMED and the process may still be running — ` +
+          `check ${processOf(outcome.pid)} by hand: ${outcome.why}`,
+      }
+    default: {
+      const unhandled: never = outcome
+      return {
+        exitCode: null,
+        termination: "unconfirmed",
+        reason: `\`${command}\` ended with an outcome this module does not know: ${JSON.stringify(unhandled)}`,
+      }
+    }
   }
 }
 
@@ -120,7 +252,11 @@ export interface MaterializeSideInput {
   git?: RunGit
 }
 
-export type Materialized = { ok: true; directory: string } | { ok: false; reason: string }
+/**
+ * `terminationUnconfirmed` is set when a git call did not return and its
+ * process may still be running; the runner quarantines on it.
+ */
+export type Materialized = { ok: true; directory: string } | { ok: false; reason: string; terminationUnconfirmed?: true }
 
 /** Write the base tree, commit it, apply the change uncommitted. Never throws. */
 export async function materializeSide(input: MaterializeSideInput): Promise<Materialized> {
@@ -157,11 +293,27 @@ export async function materializeSide(input: MaterializeSideInput): Promise<Mate
     ]
     for (const step of steps) {
       const result = await git(root, step.args, step.stdin)
-      if (result.exitCode !== 0) {
+      if (result.exitCode === null) {
+        // The directory is left as it is, and never removed here.
+        const where =
+          result.termination === "not-started"
+            ? `was not started in \`${root}\`; the directory holds only what the steps before it wrote`
+            : result.termination === "confirmed"
+              ? `did not return in \`${root}\`; its process was confirmed ended, and it may have written part of its change there`
+              : `did not return in \`${root}\`; its process may still be running and still writing there`
         return {
           ok: false,
-          reason: `\`${step.label}\` failed in \`${root}\`: ${result.stderr.trim() || result.stdout.trim() || "git reported no detail"}`,
+          reason: `\`${step.label}\` ${where}: ${result.reason}`,
+          ...(result.termination === "unconfirmed" ? { terminationUnconfirmed: true as const } : {}),
         }
+      }
+      // A successful step is judged on its status and signal alone. Its stderr
+      // is not read for success, so an unread stderr there is not a failure.
+      if (result.exitCode !== 0 || (result.signal ?? null) !== null) {
+        const detail = result.stderr.trim() || result.stdout.trim() || "git reported no detail"
+        const signal = (result.signal ?? null) === null ? "" : ` (the OS reported signal ${result.signal})`
+        const unread = (result.stderrFailure ?? null) === null ? "" : ` [MAD could not read git's stderr: ${result.stderrFailure}]`
+        return { ok: false, reason: `\`${step.label}\` failed in \`${root}\` with status ${result.exitCode}${signal}: ${detail}${unread}` }
       }
     }
     return { ok: true, directory: root }

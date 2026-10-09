@@ -414,10 +414,18 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       "On the planned OAuth route four of the seven are open (2, 3, 6 and 7), one is half done (4), one is closed (5) and one does not apply (1).",
     )
     expect(text).toContain("**The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half done")
-    // And the honest headline: this patch did not close every hang.
+    // And the honest headline: story 2-7c did not close every hang, and the
+    // materializer's bound is implemented but not accepted.
     expect(text).toContain("The live execution is still blocked")
-    expect(text).toContain("materializer termination remains unverified")
-    expect(text).toContain("This patch does not close every hang")
+    expect(text).toContain("Materializer termination is implemented but not accepted")
+    expect(text).toContain("no reviewed change has closed gate 12")
+    expect(text).toContain("Story 2-7c does not close every hang")
+    expect(text).not.toContain("remains unverified")
+    expect(text).toContain("(4)'s blame half is bounded; its materializer half is (6).")
+    expect(text).toContain("a child that traps SIGTERM (the deadline sends SIGKILL at once, so the trap never matters and no SIGTERM is sent)")
+    // The quarantine names the worktree git as a trigger, and the partly written worktree is the operator's to remove.
+    expect(text).toContain("a git call that writes a worktree did not return and its termination cannot be confirmed")
+    expect(text).toContain("The operator inspects and removes that directory before any rerun")
     // Billing authorization is a decision with a named owner, not a task.
     expect(text).toContain("Owner: the human who owns the budget")
   })
@@ -445,6 +453,10 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
     expect(item(3)).toContain("No real host has exercised that gate.")
     expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
+    // Item 6 says the bound is implemented and that it awaits acceptance and a reviewed gate change.
+    expect(item(6)).toContain("Story 2-7e2 implements the bound")
+    expect(item(6)).toContain("The entry stays OPEN until the story is accepted and a reviewed change to the gate table closes gate 12.")
+    expect(gate(12).status).toBe("OPEN")
     // Item 6 stays route-neutral: it makes no claim that api-key materialization is safe.
     expect(item(6)).toContain("The prerequisite is route-neutral")
     expect(item(6)).toContain("nothing here says api-key materialization is safe")

@@ -2037,16 +2037,19 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    failure are each recorded. No real host has exercised that gate. Story 2-8c's probe and the paired
    and pilot evidence cover the Blocks admission only, and are reused only within that scope.
 4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
-   The blame path is addressed; the materializer is not. See below.
+   The blame path is addressed. The materializer's half is (6), implemented and not yet
+   accepted. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
 6. **Bounded materializer termination — OPEN.** Gate 12, owned by story 2-7e2, which must be
-   accepted before story 2-7f. `ablation/adversarial-materialize.ts`'s `spawnGit` sends a bare
-   SIGTERM with no escalation, never confirms termination, and awaits both pipes before `exited` — so
-   a descendant holding a pipe stops the call returning at all while the caller holds the experiment
-   lock. It also reports a synthesized `exitCode: 124` no reader can tell from a status git returned.
-   This is the open half of (4). The prerequisite is route-neutral: the materializer is the same
-   code on every route, and nothing here says api-key materialization is safe. Gate 12 is its gate
-   on the oauth route. The api-key route has no gate that opens the adversarial phase at all, so
+   accepted before story 2-7f. Story 2-7e2 implements the bound: every git call that writes an
+   adversarial worktree (`ablation/adversarial-materialize.ts`) runs through the bounded launcher
+   `runBoundedBlame`, is sent SIGKILL at its 60,000 ms deadline with no graceful period, and gets
+   a separate 5,000 ms to have its termination confirmed. A call that did not return carries no
+   exit code; one whose termination is unconfirmed quarantines the suite and retains the lock. The
+   evidence is local tests over stand-in processes. The entry stays OPEN until the story is
+   accepted and a reviewed change to the gate table closes gate 12. This is the open half of (4).
+   The prerequisite is route-neutral: the materializer is the same code on every route, and
+   nothing here says api-key materialization is safe. Gate 12 is its gate on the oauth route. The api-key route has no gate that opens the adversarial phase at all, so
    `gatePreflight` refuses that phase there whatever is closed.
 7. **Bounded review-path reads — OPEN.** A candidate non-gate, unresolved, to be validated by story
    2-7f. `adapters/opencode/repo.ts` reads the change through the host shell with no deadline of any
@@ -2065,22 +2068,17 @@ blocks the sixteen runs is recorded only in the prose below; the prose explains 
 not add to them.
 
 **The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half
-done: this prerequisite originally named a non-returning `git blame` and assumed
-parenthetically that "the git calls that write each worktree are already killed after 60
-seconds". **That assumption was false.** `ablation/adversarial-materialize.ts`'s `spawnGit`
-sends a bare SIGTERM with no escalation and never confirms termination; and it reports a
-synthesized `exitCode: 124` that a reader cannot tell from a status git returned. Worse, it
-awaits both pipes before `exited`, so a descendant holding a pipe stops `spawnGit` RETURNING
-at all — the timer still fires and the signal is still sent, but the call can neither confirm
-cleanup nor report it, and the caller waits indefinitely while holding the experiment lock.
-No test covers any of it. Story 2-7c deliberately did not touch it — its Boundaries forbid
-refactoring other git callers — so **materializer termination remains unverified and
-unbounded in its failure cases**, and it is named as an outstanding blocker in its own right.
-The file's own header claim has been corrected rather than left to be quoted as evidence.
+done: (4)'s blame half is bounded; its materializer half is (6). Story 2-7e2 runs the git calls
+that write each worktree through the same bounded launcher as `blame`. Local tests over stand-in
+processes cover a hang, a child that traps SIGTERM (the deadline sends SIGKILL at once, so the
+trap never matters and no SIGTERM is sent), a descendant holding a pipe, a refused launch and an
+unusable budget. **Materializer termination
+is implemented but not accepted**: no reviewed change has closed gate 12, so it is named as an
+outstanding blocker in its own right.
 
-**This patch does not close every hang.** It closes the two named in (4)'s blame half and in
-(5). The two it does not close are entries (6) and (7) above, each named there with what is
-wrong with it.
+**Story 2-7c does not close every hang.** It closes the two named in (4)'s blame half and in
+(5). Of the two it does not close, (6) is implemented by story 2-7e2 and awaits acceptance, and
+(7) is open; each is named above with what remains.
 
 ### The blame path and the observer writes — what closed, and on what evidence
 
@@ -2149,13 +2147,14 @@ that override exists for tests and nothing shipped uses one.
 - **A signalled exit is not a completed run.** A child killed from outside can report status 0
   with whatever it had flushed. That produces no citation and no successful fact count.
 - **The production review path is NOT thereby "bounded".** `adapters/opencode/repo.ts` still
-  reads the change through the host shell with no deadline, the materializer is unbounded in
-  its failure cases (above), and FR9 is not complete.
+  reads the change through the host shell with no deadline, the materializer's bound awaits
+  acceptance (6), and FR9 is not complete.
 
 ### The cleanup-unconfirmed quarantine, and how to recover from it
 
-When a blame's cleanup cannot be confirmed, or a trace append is abandoned with its physical
-effect unconfirmed, the suite quarantines the bundle:
+When a blame's cleanup cannot be confirmed, a git call that writes a worktree did not return
+and its termination cannot be confirmed, or a trace append is abandoned with its physical effect
+unconfirmed, the suite quarantines the bundle:
 
 - the adapter instance refuses every further launch;
 - the runner stops admitting **synchronously, at that moment** — not when `review()` returns,
@@ -2167,7 +2166,11 @@ effect unconfirmed, the suite quarantines the bundle:
 - every later slot is marked `not-attempted`, incomplete evidence is preserved, and nothing
   is re-run or replaced;
 - **the experiment lock is NOT released.** It is what stops a second writer appending beside
-  a process or a file operation nobody can account for.
+  a process or a file operation nobody can account for;
+- **a worktree whose git did not return is left where it is**, partly written, and never
+  reviewed. The halt reason names the call, the directory and the process. The operator
+  inspects and removes that directory before any rerun; MAD never deletes it, because the git
+  may still be writing to it, and a rerun refuses a directory that is not empty.
 
 If the halt file itself cannot be written, admission still stops and the lock is still held —
 neither depends on that write.
@@ -2196,8 +2199,9 @@ would have to own and garbage-collect across machines, which is a design decisio
 a patch.
 
 **Recovery is manual, and nothing clears the quarantine automatically.** No late success ever
-releases the lock or clears the halt. Check the named process (the reason gives its pid) and
-the state of `adversarial/tool-trace.jsonl` by hand; only then remove `paired.lock`, and only
+releases the lock or clears the halt. Check the named process (the reason gives its pid), the
+state of `adversarial/tool-trace.jsonl` and any partly written worktree the reason names by hand,
+and remove that worktree; only then remove `paired.lock`, and only
 then the halt marker. A halt reason beginning `OPERATIONAL HALT` says a cleanup is unresolved
 and **makes no claim about spend** — read the bill for that, and note that an accounting halt
 and an operational quarantine can both be true at once, in either order. Whichever latched
