@@ -2037,8 +2037,8 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    failure are each recorded. No real host has exercised that gate. Story 2-8c's probe and the paired
    and pilot evidence cover the Blocks admission only, and are reused only within that scope.
 4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
-   The blame path is addressed. The materializer's half is (6), implemented and not yet
-   accepted. See below.
+   The blame path is addressed. The materializer's half is (6), implemented and accepted; gate 12
+   remains OPEN. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
 6. **Bounded materializer termination — OPEN.** Gate 12, owned by story 2-7e2. Story 2-7e2
    implements the bound: every git call that writes an adversarial worktree
