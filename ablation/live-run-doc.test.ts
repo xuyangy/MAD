@@ -415,9 +415,9 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     )
     expect(text).toContain("**The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half done")
     // And the honest headline: story 2-7c did not close every hang, and the
-    // materializer's bound is implemented but not accepted.
+    // materializer's bound is accepted while gate 12 stays OPEN.
     expect(text).toContain("The live execution is still blocked")
-    expect(text).toContain("Materializer termination is implemented but not accepted")
+    expect(text).toContain("Materializer termination is implemented and accepted, and gate 12 is still OPEN")
     expect(text).toContain("no reviewed change has closed gate 12")
     expect(text).toContain("Story 2-7c does not close every hang")
     expect(text).not.toContain("remains unverified")
@@ -453,9 +453,10 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
     expect(item(3)).toContain("No real host has exercised that gate.")
     expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
-    // Item 6 says the bound is implemented and that it awaits acceptance and a reviewed gate change.
+    // Item 6 says the bound is implemented and accepted, and that only a reviewed gate change closes it.
     expect(item(6)).toContain("Story 2-7e2 implements the bound")
-    expect(item(6)).toContain("The entry stays OPEN until the story is accepted and a reviewed change to the gate table closes gate 12.")
+    expect(item(6)).toContain("The story was accepted on 2026-10-09 by the review channel at commit 9166c42.")
+    expect(item(6)).toContain("the entry stays OPEN until a reviewed change to the gate table closes gate 12.")
     expect(gate(12).status).toBe("OPEN")
     // Item 6 stays route-neutral: it makes no claim that api-key materialization is safe.
     expect(item(6)).toContain("The prerequisite is route-neutral")

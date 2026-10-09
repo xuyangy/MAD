@@ -2040,16 +2040,18 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    The blame path is addressed. The materializer's half is (6), implemented and not yet
    accepted. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
-6. **Bounded materializer termination — OPEN.** Gate 12, owned by story 2-7e2, which must be
-   accepted before story 2-7f. Story 2-7e2 implements the bound: every git call that writes an
-   adversarial worktree (`ablation/adversarial-materialize.ts`) runs through the bounded launcher
-   `runBoundedBlame`, is sent SIGKILL at its 60,000 ms deadline with no graceful period, and gets
-   a separate 5,000 ms to have its termination confirmed. A call that did not return carries no
-   exit code; one whose termination is unconfirmed quarantines the suite and retains the lock. The
-   evidence is local tests over stand-in processes. The entry stays OPEN until the story is
-   accepted and a reviewed change to the gate table closes gate 12. This is the open half of (4).
-   The prerequisite is route-neutral: the materializer is the same code on every route, and
-   nothing here says api-key materialization is safe. Gate 12 is its gate on the oauth route. The api-key route has no gate that opens the adversarial phase at all, so
+6. **Bounded materializer termination — OPEN.** Gate 12, owned by story 2-7e2. Story 2-7e2
+   implements the bound: every git call that writes an adversarial worktree
+   (`ablation/adversarial-materialize.ts`) runs through the bounded launcher `runBoundedBlame`, is
+   sent SIGKILL at its nominal 60,000 ms deadline with no graceful period, and gets a separate
+   5,000 ms to have its termination confirmed. A call that did not return carries no exit code;
+   one whose termination is unconfirmed quarantines the suite and retains the lock. The evidence
+   is local tests over stand-in processes. The story was accepted on 2026-10-09 by the review
+   channel at commit 9166c42. Acceptance of that engineering evidence does not close the gate: the
+   entry stays OPEN until a reviewed change to the gate table closes gate 12. This is the open half
+   of (4). The prerequisite is route-neutral: the materializer is the same code on every route,
+   and nothing here says api-key materialization is safe. Gate 12 is its gate on the oauth route.
+   The api-key route has no gate that opens the adversarial phase at all, so
    `gatePreflight` refuses that phase there whatever is closed.
 7. **Bounded review-path reads — OPEN.** A candidate non-gate, unresolved, to be validated by story
    2-7f. `adapters/opencode/repo.ts` reads the change through the host shell with no deadline of any
@@ -2073,12 +2075,12 @@ that write each worktree through the same bounded launcher as `blame`. Local tes
 processes cover a hang, a child that traps SIGTERM (the deadline sends SIGKILL at once, so the
 trap never matters and no SIGTERM is sent), a descendant holding a pipe, a refused launch and an
 unusable budget. **Materializer termination
-is implemented but not accepted**: no reviewed change has closed gate 12, so it is named as an
-outstanding blocker in its own right.
+is implemented and accepted, and gate 12 is still OPEN**: no reviewed change has closed gate 12,
+so it is named as an outstanding blocker in its own right.
 
 **Story 2-7c does not close every hang.** It closes the two named in (4)'s blame half and in
-(5). Of the two it does not close, (6) is implemented by story 2-7e2 and awaits acceptance, and
-(7) is open; each is named above with what remains.
+(5). Of the two it does not close, (6) is implemented and accepted (story 2-7e2) while gate 12
+stays OPEN, and (7) is open; each is named above with what remains.
 
 ### The blame path and the observer writes — what closed, and on what evidence
 
@@ -2147,8 +2149,8 @@ that override exists for tests and nothing shipped uses one.
 - **A signalled exit is not a completed run.** A child killed from outside can report status 0
   with whatever it had flushed. That produces no citation and no successful fact count.
 - **The production review path is NOT thereby "bounded".** `adapters/opencode/repo.ts` still
-  reads the change through the host shell with no deadline, the materializer's bound awaits
-  acceptance (6), and FR9 is not complete.
+  reads the change through the host shell with no deadline, the materializer's gate 12 is
+  still OPEN (6), and FR9 is not complete.
 
 ### The cleanup-unconfirmed quarantine, and how to recover from it
 
