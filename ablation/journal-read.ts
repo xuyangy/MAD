@@ -11,6 +11,8 @@
  *
  * - an absent or unreadable file, or a line that does not validate;
  * - a file mixing accounting modes, or recording another mode than expected;
+ * - a file whose lines declare the adversarial suite's scope: that journal is
+ *   the suite's, read by `ablation/adversarial-read.ts`, and never a paired bill;
  * - any integrity failure;
  * - any request issued and never settled (uncertain), because its ending is not
  *   established and the count would be read as final.
@@ -34,7 +36,7 @@ export async function readPersistedJournal(bundleRoot: string, expected?: Accoun
   const file = join(resolve(bundleRoot), JOURNAL_FILE)
   const refuse = (reason: string): JournalReadOutcome => ({ ok: false, file, reason })
   try {
-    const replayed = await replayPersistedJournal(file, expected)
+    const replayed = await replayPersistedJournal(file, expected, "paired")
     if (!replayed.ok) return refuse(replayed.reason)
     if (!replayed.existed) return refuse(`the journal \`${file}\` does not exist, so nothing it admitted can be read`)
     const bill = replayed.bill

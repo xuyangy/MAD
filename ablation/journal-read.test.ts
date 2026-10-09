@@ -113,4 +113,19 @@ describe("readPersistedJournal", () => {
     expect(read.ok).toBe(false)
     if (!read.ok) expect(read.reason).toContain("line 2")
   })
+
+  test("a journal whose lines declare the adversarial suite's scope is refused; a paired journal with no scope reads", async () => {
+    const suite = (id: string): JournalLine => issued(id, { category: "adversarial", block: null, phase: null, scope: "adversarial" })
+    const refused = await readPersistedJournal(await rootWith([suite("a"), usage("a")]), "attempts")
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.reason).toContain("records the adversarial scope, and it was opened in the paired scope")
+    // With no expected mode either: the scope is pinned whatever the mode.
+    expect((await readPersistedJournal(await rootWith([suite("a"), usage("a")]))).ok).toBe(false)
+
+    const paired = await readPersistedJournal(await rootWith([issued("a"), usage("a")]), "attempts")
+    if (!paired.ok) throw new Error(paired.reason)
+    expect(paired.mode).toBe("attempts")
+    expect(paired.bill.scope).toBeUndefined()
+    expect(paired.bill.overshoot.global.limit).toBe(300)
+  })
 })
