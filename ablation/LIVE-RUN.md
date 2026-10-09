@@ -825,8 +825,8 @@ preflight. **With the shipped gate table the api-key route always refuses:** gat
 is required for the evaluation on that route, so the command prints every check and exits 1 before any
 host, client, schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
 evaluation. Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see "The OAuth route" below) gate 4 refuses: runs 1 to 5 of its evaluation were used (runs 1 to 3 on 2026-10-02, run 4 on 2026-10-05, run 5 on 2026-10-07), and its note records all five. Gate 8 is OPEN too; it is required only for the OAuth pilot (see "OAuth pilot (story 2-8c5)"
-below), so it is printed and not consulted for the evaluation. Gates 10, 11 and 12 are OPEN and are
-required only for the adversarial suite on the oauth route (see "Before the sixteen live runs" below), so
+below), so it is printed and not consulted for the evaluation. Gates 10 and 11 are OPEN and gate 12 is
+CLOSED; all three are required only for the adversarial suite on the oauth route (see "Before the sixteen live runs" below), so
 they too are printed and not consulted for the evaluation. Nothing in this section authorizes
 billing, and the command's existence is not authorization.
 
@@ -859,7 +859,7 @@ refused.
 9. **api-key evaluation spend authorization — OPEN.** Authorization, required for evaluation on the api-key route only. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend on the api-key route in ledger tokens: the three blocks' token spend under PAIRED_ALLOWANCES, unchanged. Closing gate 4, which covers only the oauth route, never stands in for it. Printed, and not consulted for the oauth route. No story closes it.
 10. **adversarial spend authorization — OPEN.** Authorization, required for adversarial on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes run 1 (`ADVERSARIAL_RUN`) of the sixteen adversarial runs on the oauth route in admitted attempts under a frozen protocol v3: 30 per run, 480 for the suite and 480 for the suite's own root, each an admission threshold and not a proven-adequate budget. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing gate 4 or gate 8 never stands in for it. Printed, and not consulted by this launcher.
 11. **adversarial attempt accounting — OPEN.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7f. Requires: story 2-7f's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the suite's own root before it is issued and counted once, an admission refused on the run, suite or root allowance reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity failure halts. Paired and pilot evidence is reused only within its measured scope. Printed, and not consulted by this launcher.
-12. **bounded materializer termination — OPEN.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7e2. Requires: the git calls that write each adversarial worktree (ablation/adversarial-materialize.ts) end within a bound: a call past its deadline is escalated, its termination is confirmed or reported as unconfirmed, a descendant holding a pipe cannot stop the call returning, and a synthesized status is told apart from one git returned. Printed, and not consulted by this launcher.
+12. **bounded materializer termination — CLOSED.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7e2. Requires: the git calls that write each adversarial worktree (ablation/adversarial-materialize.ts) end within a bound: a call past its deadline is sent SIGKILL with no graceful period, its termination is confirmed or reported as unconfirmed, a descendant holding a pipe cannot stop the call returning, and a synthesized status is told apart from one git returned. Evidence: story 2-7e2, accepted by the review channel on 2026-10-09 at commit 9166c42: every production git call in ablation/adversarial-materialize.ts goes through `boundedGit()` over `runBoundedBlame` (adapters/opencode/blame-exec.ts). If the call has not completed when its nominal 60,000 ms event-loop deadline fires, the launcher attempts SIGKILL with no graceful period and uses a separate nominal 5,000 ms cleanup budget; a failed signal delivery is reported. Termination is confirmed only when the direct child is accounted for and both its pipes reach EOF; a descendant that closed the inherited pipes is not observed, and no process group is killed. A call that did not return is a `GitNotReturned` with `exitCode: null` and termination `not-started`, `confirmed` or `unconfirmed`; no status is synthesized. An `unconfirmed` call sets `terminationUnconfirmed`, and the runner quarantines the suite and retains the lock in both accounting modes. Budgets are validated under the materializer's own names before anything is launched. Scope: local tests over `sh` stand-in processes (a hang, a child that traps SIGTERM, a descendant holding a pipe, a kill that could not be sent, a refused launch, an unusable budget) and real git writing every case and side; no real host and no hung real git. The code is route-neutral and this gate covers the oauth route only; nothing here says api-key materialization is safe. Tests: ablation/adversarial-materialize.test.ts, ablation/adversarial.test.ts. Printed, and not consulted by this launcher. Note: Not covered: cancellation during materialization does not interrupt it; the runner observes it only after `materializeSide` returns. Each git call has nominal event-loop budgets of 60,000 ms for execution and 5,000 ms for cleanup. Materialization may finish its remaining git steps (five in total) and filesystem operations before returning; no cancellation-response or guaranteed wall-clock bound is established.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
 `PAIRED_GATES`. Gates 10 to 12 belong to the adversarial suite on the oauth route and never open or
@@ -2036,23 +2036,23 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    request: a refused admission reaches no backend, and settlement, a timeout and an integrity
    failure are each recorded. No real host has exercised that gate. Story 2-8c's probe and the paired
    and pilot evidence cover the Blocks admission only, and are reused only within that scope.
-4. **Bounded tool termination — PARTLY CLOSED 2026-09-21 (story 2-7c), AND STILL BLOCKING.**
-   The blame path is addressed. The materializer's half is (6), implemented and accepted; gate 12
-   remains OPEN. See below.
+4. **Bounded tool termination — CLOSED.** The blame half closed on 2026-09-21 (story 2-7c). The
+   materializer's half is (6), closed with gate 12. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
-6. **Bounded materializer termination — OPEN.** Gate 12, owned by story 2-7e2. Story 2-7e2
+6. **Bounded materializer termination — CLOSED.** Gate 12, owned by story 2-7e2. Story 2-7e2
    implements the bound: every git call that writes an adversarial worktree
-   (`ablation/adversarial-materialize.ts`) runs through the bounded launcher `runBoundedBlame`, is
-   sent SIGKILL at its nominal 60,000 ms deadline with no graceful period, and gets a separate
-   5,000 ms to have its termination confirmed. A call that did not return carries no exit code;
-   one whose termination is unconfirmed quarantines the suite and retains the lock. The evidence
-   is local tests over stand-in processes. The story was accepted on 2026-10-09 by the review
-   channel at commit 9166c42. Acceptance of that engineering evidence does not close the gate: the
-   entry stays OPEN until a reviewed change to the gate table closes gate 12. This is the open half
-   of (4). The prerequisite is route-neutral: the materializer is the same code on every route,
-   and nothing here says api-key materialization is safe. Gate 12 is its gate on the oauth route.
-   The api-key route has no gate that opens the adversarial phase at all, so
-   `gatePreflight` refuses that phase there whatever is closed.
+   (`ablation/adversarial-materialize.ts`) runs through the bounded launcher `runBoundedBlame`. A
+   call still running at its nominal 60,000 ms deadline is sent SIGKILL with no graceful period
+   and gets a separate 5,000 ms to have its termination confirmed. A call that did not return
+   carries no exit code; one whose termination is unconfirmed quarantines the suite and retains
+   the lock. The evidence is local tests over stand-in processes. The story was accepted on
+   2026-10-09 by the review channel at commit 9166c42, and a reviewed change to the gate table
+   closed gate 12 on that evidence. This is the materializer half of (4). A cancellation during
+   materialization is not observed until materialization returns. The prerequisite is
+   route-neutral: the materializer is the same code on every route, and nothing here says api-key
+   materialization is safe. Gate 12 is its gate on the oauth route. The api-key route has no gate
+   that opens the adversarial phase at all, so `gatePreflight` refuses that phase there whatever
+   is closed.
 7. **Bounded review-path reads — OPEN.** A candidate non-gate, unresolved, to be validated by story
    2-7f. `adapters/opencode/repo.ts` reads the change through the host shell with no deadline of any
    kind (`git()` at `:37-41`, and a serial per-file loop at `:69-80` whose `git diff --no-index` has
@@ -2064,23 +2064,22 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    stays a blocker until story 2-7f validates the complete launcher path and records its evidence;
    the record then says only that the reads are not reached, and nothing about the reads themselves.
 
-**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** On the planned OAuth route four of the seven are open
-(2, 3, 6 and 7), one is half done (4), one is closed (5) and one does not apply (1). Nothing that
+**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** On the planned OAuth route three of the seven are open
+(2, 3 and 7), three are closed (4, 5 and 6) and one does not apply (1). Nothing that
 blocks the sixteen runs is recorded only in the prose below; the prose explains the entries, it does
 not add to them.
 
-**The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half
-done: (4)'s blame half is bounded; its materializer half is (6). Story 2-7e2 runs the git calls
+**The live execution is still blocked.** (2), (3) and (7) are open. (4)'s blame half is bounded;
+its materializer half is (6). Story 2-7e2 runs the git calls
 that write each worktree through the same bounded launcher as `blame`. Local tests over stand-in
 processes cover a hang, a child that traps SIGTERM (the deadline sends SIGKILL at once, so the
 trap never matters and no SIGTERM is sent), a descendant holding a pipe, a refused launch and an
-unusable budget. **Materializer termination
-is implemented and accepted, and gate 12 is still OPEN**: no reviewed change has closed gate 12,
-so it is named as an outstanding blocker in its own right.
+unusable budget. **Materializer termination is implemented and accepted, and gate 12 is
+CLOSED.**
 
 **Story 2-7c does not close every hang.** It closes the two named in (4)'s blame half and in
-(5). Of the two it does not close, (6) is implemented and accepted (story 2-7e2) while gate 12
-stays OPEN, and (7) is open; each is named above with what remains.
+(5). Of the two it does not close, (6) is closed by story 2-7e2 and gate 12, and (7) is open; each is
+named above with what remains.
 
 ### The blame path and the observer writes — what closed, and on what evidence
 
@@ -2149,8 +2148,7 @@ that override exists for tests and nothing shipped uses one.
 - **A signalled exit is not a completed run.** A child killed from outside can report status 0
   with whatever it had flushed. That produces no citation and no successful fact count.
 - **The production review path is NOT thereby "bounded".** `adapters/opencode/repo.ts` still
-  reads the change through the host shell with no deadline, the materializer's gate 12 is
-  still OPEN (6), and FR9 is not complete.
+  reads the change through the host shell with no deadline (7), and FR9 is not complete.
 
 ### The cleanup-unconfirmed quarantine, and how to recover from it
 

@@ -384,19 +384,19 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
   test("the live execution stays open, with its prerequisites named", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     expect(text).toContain("the sixteen live runs have not been executed")
-    // EACH PREREQUISITE WITH ITS STATUS, not just its name. Story 2-7c closed
-    // one and half of another, and a list that only checked the five headings
-    // would read the same whether they were all open or all closed — which is
-    // the one thing a readiness document must not be ambiguous about.
+    // EACH PREREQUISITE WITH ITS STATUS, not just its name. A list that only
+    // checked the headings would read the same whether they were all open or
+    // all closed — which is the one thing a readiness document must not be
+    // ambiguous about.
     const prerequisites = [
       ["Host accounting", "NOT APPLICABLE ON THE OAUTH ROUTE"],
       ["Billing authorization", "OPEN"],
       ["Verified shared gates", "OPEN"],
-      ["Bounded tool termination", "PARTLY CLOSED"],
+      ["Bounded tool termination", "CLOSED"],
       ["Bounded observer writes", "CLOSED"],
       // A blocker a reader counting the numbered list does not count is one
       // nobody schedules, so the materializer is an entry of its own.
-      ["Bounded materializer termination", "OPEN"],
+      ["Bounded materializer termination", "CLOSED"],
       ["Bounded review-path reads", "OPEN"],
     ] as const
     const list = between(text, "### Before the sixteen live runs", "**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.**", "the prerequisite list")
@@ -409,16 +409,15 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
     const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value === status ? [index + 1] : []))
-    expect([numbers("OPEN"), numbers("PARTLY CLOSED"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE")]).toEqual([[2, 3, 6, 7], [4], [5], [1]])
+    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE")]).toEqual([[2, 3, 7], [4, 5, 6], [1]])
     expect(text).toContain(
-      "On the planned OAuth route four of the seven are open (2, 3, 6 and 7), one is half done (4), one is closed (5) and one does not apply (1).",
+      "On the planned OAuth route three of the seven are open (2, 3 and 7), three are closed (4, 5 and 6) and one does not apply (1).",
     )
-    expect(text).toContain("**The live execution is still blocked.** (2), (3), (6) and (7) are open, and (4) is only half done")
+    expect(text).toContain("**The live execution is still blocked.** (2), (3) and (7) are open.")
     // And the honest headline: story 2-7c did not close every hang, and the
-    // materializer's bound is accepted while gate 12 stays OPEN.
+    // materializer's half closed with gate 12.
     expect(text).toContain("The live execution is still blocked")
-    expect(text).toContain("Materializer termination is implemented and accepted, and gate 12 is still OPEN")
-    expect(text).toContain("no reviewed change has closed gate 12")
+    expect(text).toContain("Materializer termination is implemented and accepted, and gate 12 is CLOSED.")
     expect(text).toContain("Story 2-7c does not close every hang")
     expect(text).not.toContain("remains unverified")
     expect(text).toContain("(4)'s blame half is bounded; its materializer half is (6).")
@@ -453,11 +452,11 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
     expect(item(3)).toContain("No real host has exercised that gate.")
     expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
-    // Item 6 says the bound is implemented and accepted, and that only a reviewed gate change closes it.
+    // Item 6 says the bound is implemented and accepted, and that a reviewed gate change closed it.
     expect(item(6)).toContain("Story 2-7e2 implements the bound")
-    expect(item(6)).toContain("The story was accepted on 2026-10-09 by the review channel at commit 9166c42.")
-    expect(item(6)).toContain("the entry stays OPEN until a reviewed change to the gate table closes gate 12.")
-    expect(gate(12).status).toBe("OPEN")
+    expect(item(6)).toContain("The story was accepted on 2026-10-09 by the review channel at commit 9166c42, and a reviewed change to the gate table closed gate 12 on that evidence.")
+    expect(item(6)).toContain("A cancellation during materialization is not observed until materialization returns.")
+    expect(gate(12).status).toBe("CLOSED")
     // Item 6 stays route-neutral: it makes no claim that api-key materialization is safe.
     expect(item(6)).toContain("The prerequisite is route-neutral")
     expect(item(6)).toContain("nothing here says api-key materialization is safe")
@@ -674,10 +673,10 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
     expect(text).toContain(
-      "Gates 10, 11 and 12 are OPEN and are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
+      "Gates 10 and 11 are OPEN and gate 12 is CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12])
-    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").every((gate) => gate.status === "OPEN")).toBe(true)
+    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "CLOSED"])
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {

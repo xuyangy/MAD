@@ -119,8 +119,8 @@ type Shell = PluginInput["$"]
  * The same number `ablation/adversarial-materialize.ts` names for the git calls
  * that write each worktree, so the two halves of one evaluation do not disagree
  * about how long a git may take; those calls run through the same launcher with
- * the same five-second cleanup budget below (story 2-7e2, accepted; gate 12
- * stays OPEN until a reviewed gate change, see `ablation/LIVE-RUN.md`). Far outside the range a
+ * the same five-second cleanup budget below (story 2-7e2; gate 12, see
+ * `ablation/LIVE-RUN.md`). Far outside the range a
  * healthy blame answers in over the at most `MAX_BLAME_ROWS` lines
  * `core/stages/judge.ts` asks for, and inside the range a cold, very large or
  * network-backed repository can legitimately need. Fixed, with no user-facing

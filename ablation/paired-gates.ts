@@ -24,8 +24,8 @@
  *
  * ## The adversarial phase (story 2-7e)
  *
- * Gates 10, 11 and 12 are required for `adversarial` on the oauth route, and all
- * three are OPEN. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
+ * Gates 10, 11 and 12 are required for `adversarial` on the oauth route. Gate
+ * 12 is CLOSED; gates 10 and 11 are OPEN. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
  * pins are `null` until they are chosen, and `adversarialRunProblem` refuses a
  * run with none. For this phase `gatePreflight` reports that problem, and consults
  * `ADVERSARIAL_CANDIDATE_NON_GATES`, the record of the one prerequisite that may
@@ -590,11 +590,31 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "adversarial",
     routes: ["oauth"],
     owner: "story 2-7e2",
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       "the git calls that write each adversarial worktree (ablation/adversarial-materialize.ts) end within a bound: a call " +
-      "past its deadline is escalated, its termination is confirmed or reported as unconfirmed, a descendant holding a pipe " +
-      "cannot stop the call returning, and a synthesized status is told apart from one git returned",
+      "past its deadline is sent SIGKILL with no graceful period, its termination is confirmed or reported as unconfirmed, a " +
+      "descendant holding a pipe cannot stop the call returning, and a synthesized status is told apart from one git returned",
+    evidence:
+      "story 2-7e2, accepted by the review channel on 2026-10-09 at commit 9166c42: every production git call in " +
+      "ablation/adversarial-materialize.ts goes through `boundedGit()` over `runBoundedBlame` " +
+      "(adapters/opencode/blame-exec.ts). If the call has not completed when its nominal 60,000 ms event-loop deadline fires, " +
+      "the launcher attempts SIGKILL with no graceful period and uses a separate nominal 5,000 ms cleanup budget; a failed " +
+      "signal delivery is reported. Termination is confirmed only when the direct child is accounted for and both its pipes " +
+      "reach EOF; a descendant that closed the inherited pipes is not observed, and no process group is killed. A call that " +
+      "did not return is a `GitNotReturned` with `exitCode: null` and termination `not-started`, `confirmed` or " +
+      "`unconfirmed`; no status is synthesized. An `unconfirmed` call sets `terminationUnconfirmed`, and the runner " +
+      "quarantines the suite and retains the lock in both accounting modes. Budgets are validated under the materializer's " +
+      "own names before anything is launched. Scope: local tests over `sh` stand-in processes (a hang, a child that traps " +
+      "SIGTERM, a descendant holding a pipe, a kill that could not be sent, a refused launch, an unusable budget) and real " +
+      "git writing every case and side; no real host and no hung real git. The code is route-neutral and this gate covers the " +
+      "oauth route only; nothing here says api-key materialization is safe. Tests: ablation/adversarial-materialize.test.ts, " +
+      "ablation/adversarial.test.ts",
+    note:
+      "Not covered: cancellation during materialization does not interrupt it; the runner observes it only after " +
+      "`materializeSide` returns. Each git call has nominal event-loop budgets of 60,000 ms for execution and 5,000 ms for " +
+      "cleanup. Materialization may finish its remaining git steps (five in total) and filesystem operations before " +
+      "returning; no cancellation-response or guaranteed wall-clock bound is established",
   },
 ]
 
