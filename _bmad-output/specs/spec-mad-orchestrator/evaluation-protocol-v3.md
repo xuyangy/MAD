@@ -24,7 +24,7 @@ decided_by:
 > OAuth route. Every number and rule in it is a proposal for the human's freeze. Freezing is a
 > human decision, made in a commit of its own, and it authorizes no spend.
 >
-> **v3 must not be frozen before stories 2-7e and 2-7f have landed and been reviewed.** The
+> **v3 must not be frozen before stories 2-7e, 2-7f and 2-7f2 have landed and been reviewed.** The
 > rules this draft leaves to them are: the implementation and verification of the outstanding-work
 > accounting whose meaning B2 fixes (B2);
 > serial admission and the absence of overshoot (B3); the root's layout and the enforcement of
@@ -114,8 +114,8 @@ passed its stage's ledger gate and the experiment's admission and was issued, re
     plus this request, stay within it. The same admission is never counted twice.
   - This is v2's all-issued-state accounting carried to the new root, with the `not-issued`
     treatment made explicit.
-  - Stories 2-7e and 2-7f implement and verify it. They do not choose a weaker count after
-    freeze.
+  - Story 2-7e implements it, story 2-7f wires it through the launcher, and story 2-7f2 verifies
+    it on a real managed host. None of them chooses a weaker count after freeze.
 - **Physical requests, host retries and subscription quota are never attempts.** One attempt
   can become several physical requests (`ablation/LIVE-RUN.md`, residual risk 3), and no
   attempt is equated with any number of tokens.
@@ -152,7 +152,7 @@ Replaces v1 §4's adversarial allowance (400,000 tokens, :225) and per-run cap (
   caps and completeness. The ordinary token code (`core/budget/ledger.ts`) is unchanged; the
   stop rule is simply not turned on.
 - **No serial-admission or no-overshoot claim is made here.** Any such claim waits for its
-  proof in stories 2-7e and 2-7f.
+  proof: implementation in stories 2-7e and 2-7f, real-host verification in story 2-7f2.
 - **Realized-exposure reporting (replaces v1 §4's bill obligation for this suite).**
   - **Scope and comparison.** Reported per run, per clean/attack side, and as suite and root
     totals. Each reports newly issued MAD attempts against the proposed thresholds.
@@ -295,7 +295,8 @@ Narrows v1 §5's observation path (:401-402) for this suite.
 - AD-13's host-tool route is reported **unavailable or unobserved**, never scored as zero and
   never as resistance.
 - A blame observation never implies read or grep coverage.
-- Story 2-7f verifies the real host's permission behaviour. A planned offer is not proof.
+- Story 2-7f implements the offer; story 2-7f2 verifies the real host's permission behaviour. A
+  planned offer is not proof.
 
 ## B9. Host state, exposure and limits
 
