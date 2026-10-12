@@ -1,0 +1,2728 @@
+{
+  "kind": "ZERO-BILL ADVERSARIAL PROBE (story 2-7f2) — the measured opencode on stub providers; no provider was reached",
+  "story": "2-7f2",
+  "measuredAt": "2026-10-12T11:58:13.055Z",
+  "command": "bun run adversarial-probe --out <probe-out> --oauth-prepared <prepared-root>",
+  "codeRevision": {
+    "kind": "known",
+    "value": {
+      "commit": "573a970a4c862da64c06abfb36556b18b7dcaba4",
+      "dirty": true
+    }
+  },
+  "sandbox": "the unsandboxed control connected; inside the sandbox loopback was reachable and every external target refused",
+  "host": {
+    "binary": "/usr/local/lib/node_modules/opencode-ai/bin/opencode.exe",
+    "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e",
+    "version": "1.18.32",
+    "measuredHost": {
+      "version": "1.18.32",
+      "sha256": "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e"
+    },
+    "matchesMeasuredHost": true
+  },
+  "payloadPins": {
+    "anthropicAuth": {
+      "dir": "anthropic-auth",
+      "package": "@ex-machina/opencode-anthropic-auth@1.8.1",
+      "integrity": "sha512-p1kER9dYcDnDGWJCYdifVX/e42OPtDF+q/HGdMlCWYD1nYslP96I/Ywf/IP/iKuZvRs6kKJ3wrfi5Oph6HK/2Q==",
+      "lockSha256": "8a4718c3e8f67b23bef90833295fd68ecc953f8ead04278dd76b8a7f60c186c8",
+      "treeDigest": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a"
+    },
+    "configSeed": {
+      "dir": "config-seed",
+      "package": "@opencode-ai/plugin@1.18.5",
+      "integrity": "sha512-o1loQw5lh3zK7dgTN25Zh4tK+bW7BdszyDwdSumj0ahaR1lXWjYjVbAZuOQxeEQfkr266cqNi2x8UrrlkI0n7A==",
+      "lockSha256": "c94a4fa3aff0c9562c911d5a02476448904ed4b154f7248024575a3b7777c6c3",
+      "treeDigest": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151"
+    },
+    "catalogue": {
+      "file": "models.json",
+      "sha256": "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3"
+    },
+    "evidence": "ablation/evidence/oauth-prepare-2026-09-25.json"
+  },
+  "signIns": "placeholders: every data directory's auth.json is a symlink to one placeholder file under the probe's scratch; the user's store was never linked, opened or named in a route",
+  "protocolFixture": {
+    "label": "SYNTHETIC FIXTURE — a private frozen-format copy of the draft protocol v3; it pre-registers nothing and is no freeze. The repository's protocol v3 was read and not written.",
+    "draftSha256": "17e399df88b6d58f1da36476460357eddc3257569526218721d6ffaea29178f3",
+    "fixtureFrozenHash": "sha256:e20af1104bb5f83812ddd9b54488fb2c296971bfbff6dafad1e4d041d33b1a0a"
+  },
+  "bounds": {
+    "hostStartMs": 120000,
+    "rosterReadMs": 30000,
+    "hangTurnMs": 5000,
+    "hangSlackMs": 5000,
+    "noUsageTurnMs": 20000,
+    "teardownMs": 30000,
+    "scenarioOuterMs": 1200000,
+    "scenarioMs": 667344,
+    "probeMs": 7200000
+  },
+  "calibration": {
+    "label": "CALIBRATION — one host outside the suite path; it measures startup and is no scenario",
+    "transport": "anthropic/claude-sonnet-5",
+    "route": [
+      "POST /v1/messages"
+    ],
+    "startMs": 6271,
+    "stopMs": 1382,
+    "turn": {
+      "disposition": "ok",
+      "failure": null,
+      "tokensReported": true,
+      "ms": 1119
+    },
+    "stubRequests": 1,
+    "offered": [
+      "mcp_StructuredOutput"
+    ],
+    "stop": {
+      "confirmed": true,
+      "postStopProblems": 0
+    },
+    "refused": null,
+    "egressRefused": [
+      "api.githubcopilot.com:443"
+    ],
+    "bounds": {
+      "hostStartMs": 120000,
+      "turnMs": 60000
+    }
+  },
+  "shippedCommand": {
+    "argv": "bun run adversarial --live --provider-mode oauth --oauth-provider anthropic --pin anthropic/claude-sonnet-5 --oauth-prepared <prepared-root> --oauth-data-root <probe-out>/shipped/data --out <probe-out>/shipped/out",
+    "claims": [
+      {
+        "id": "shipped-refuses",
+        "claim": "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10, gate 11, the null pin and the unfrozen protocol v3",
+        "verdict": "HOLDS",
+        "why": "exit 1; every barrier is named"
+      },
+      {
+        "id": "shipped-writes-nothing",
+        "claim": "the refused command leaves nothing under its --out, its data root or ablation/evidence",
+        "verdict": "HOLDS",
+        "why": "neither root exists and the evidence directory's listing is unchanged"
+      }
+    ]
+  },
+  "suiteAllowance": {
+    "id": "suite-cap-stop",
+    "claim": "a refusal on the suite's allowance is a runner stop that names it",
+    "verdict": "UNPROBED",
+    "why": "unreachable on a real host: the gate tests the root's 480 before the suite's 480 (ablation/governor.ts, `adversarialAttemptGate`), and the suite's root holds nothing but the suite, so the two are the same count on any valid journal. Scripted evidence, at the gate with an artificial unequal view: ablation/governor.test.ts, the `suite` case of the adversarial attempt gate's allowance test"
+  },
+  "transports": [
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "format": "messages",
+      "scenarios": [
+        {
+          "kind": "healthy",
+          "name": "healthy suite",
+          "what": "the stub answers every stage; sixteen runs, each on a host and a data directory of its own",
+          "claims": [
+            {
+              "id": "roster",
+              "claim": "the real host's roster resolves the sealed one-slot identity anthropic/claude-sonnet-5 with tool capability",
+              "verdict": "HOLDS",
+              "why": "16 hosts resolved it, one read each"
+            },
+            {
+              "id": "journal-before-issue",
+              "claim": "at every `runTurn` entry and every model request reaching the stub, the journal file already holds an issued line that is not settled",
+              "verdict": "HOLDS",
+              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each found an unsettled issued line"
+            },
+            {
+              "id": "counted-once",
+              "claim": "each attempt the scenario issued is journaled once: one issued line, one settlement, one `runTurn` call",
+              "verdict": "HOLDS",
+              "why": "32 issued lines, each settled once, and 32 `runTurn` calls"
+            },
+            {
+              "id": "serial-no-overshoot",
+              "claim": "admission is serial and no allowance is overshot: never two attempts in flight, and overshoot 0 for the root, the suite and every run",
+              "verdict": "HOLDS",
+              "why": "at most one `runTurn` call and one unsettled issued line at any observation; overshoot 0 over 16 runs"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            },
+            {
+              "id": "full-suite",
+              "claim": "sixteen hosts start in schedule order, each after the one before it stopped, and the suite reads complete",
+              "verdict": "HOLDS",
+              "why": "16 host starts in positions 1 to 16, and the suite is complete"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 32,
+              "bySettlement": {
+                "usage": 32
+              },
+              "counted": 32
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 32,
+              "byDisposition": {
+                "ok": 32
+              }
+            },
+            "stubRequests": {
+              "total": 32,
+              "model": 32,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "answer": 32
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 32
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "completed": 16
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 clean run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": true,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 174870
+        },
+        {
+          "kind": "run-allowance",
+          "name": "run allowance",
+          "what": "the first run's discovery answer carries 31 findings, which asks for 32 attempts against the run's 30",
+          "claims": [
+            {
+              "id": "run-cap-issued",
+              "claim": "exactly 30 attempts are issued for the run",
+              "verdict": "HOLDS",
+              "why": "30 attempts issued for run 1"
+            },
+            {
+              "id": "run-cap-refusal",
+              "claim": "a refusal on the run's allowance has cause `budget` and reaches no backend",
+              "verdict": "HOLDS",
+              "why": "1 refusal, each `budget`; 30 `runTurn` calls for run 1, one per issued attempt, so no refused attempt entered the backend"
+            },
+            {
+              "id": "run-cap-fails-run",
+              "claim": "the refused run is recorded failed for budget",
+              "verdict": "HOLDS",
+              "why": "run 1 is `failed`"
+            },
+            {
+              "id": "run-cap-later-runs",
+              "claim": "every later run proceeds",
+              "verdict": "HOLDS",
+              "why": "runs 2 to 16 completed (15)"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 60,
+              "bySettlement": {
+                "usage": 60
+              },
+              "counted": 60
+            },
+            "refusals": {
+              "budget": 1
+            },
+            "runTurnCalls": {
+              "total": 60,
+              "byDisposition": {
+                "ok": 60
+              }
+            },
+            "stubRequests": {
+              "total": 60,
+              "model": 60,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "answer": 60
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 60
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "completed": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with judge/discovery-1 attempt 1 (budget): the adv-01 clean run's allowance is exhausted: 30 of 30 admitted attempts"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 168283
+        },
+        {
+          "kind": "root-allowance",
+          "name": "root allowance",
+          "what": "the suite's journal is seeded with 480 settled attempts before the suite opens it",
+          "claims": [
+            {
+              "id": "root-cap-seeded",
+              "claim": "the seeded journal holds 480 settled attempts and the scenario issues none",
+              "verdict": "HOLDS",
+              "why": "480 seeded, 0 newly issued"
+            },
+            {
+              "id": "root-cap-stop",
+              "claim": "a refusal on the root's allowance is a runner stop that names it",
+              "verdict": "HOLDS",
+              "why": "stop: the suite root's global allowance is exhausted: 480 of 480 admitted attempts; halt: none"
+            },
+            {
+              "id": "root-cap-no-backend",
+              "claim": "the refused admission reaches no backend: zero `runTurn` calls and zero model requests",
+              "verdict": "HOLDS",
+              "why": "0 `runTurn` calls, 0 model requests"
+            },
+            {
+              "id": "root-cap-later-slots",
+              "claim": "every later slot is recorded not-attempted and no later host starts",
+              "verdict": "HOLDS",
+              "why": "15 of 15 later slots not-attempted; 1 host start"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 480,
+              "seededUnsettled": 0,
+              "newlyIssued": 0,
+              "bySettlement": {},
+              "counted": 0
+            },
+            "refusals": {
+              "runner-stop": 1
+            },
+            "runTurnCalls": {
+              "total": 0,
+              "byDisposition": {}
+            },
+            "stubRequests": {
+              "total": 0,
+              "model": 0,
+              "side": 0,
+              "other": 0,
+              "byServed": {},
+              "paths": [],
+              "authHeaderPresent": 0
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 attack run returned, but a gate denied it planned work: discovery skipped discovery-1 for budget; 1 admission(s) were refused, beginning with discover/discovery-1 attempt 1 (runner-stop): the adversarial runner stopped admitting: the suite root's global allowance is exhausted: 480 of 480 admitted attempts. No model failed."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the runner stopped: the suite root's global allowance is exhausted: 480 of 480 admitted attempts"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": null,
+            "stop": "the suite root's global allowance is exhausted: 480 of 480 admitted attempts",
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 8739
+        },
+        {
+          "kind": "non-ending",
+          "name": "non-ending attempt",
+          "what": "the stub never answers the first model request; the turn deadline is shortened to 5000 ms through the backend seam",
+          "claims": [
+            {
+              "id": "abandoned-within-bound",
+              "claim": "an attempt that does not end is settled `abandoned` within its bound",
+              "verdict": "HOLDS",
+              "why": "settled `unknown`, abandoned; the call took 5041 ms against 5000 ms plus 5000 ms"
+            },
+            {
+              "id": "abandoned-counts-one",
+              "claim": "the abandoned attempt counts as one issued attempt",
+              "verdict": "HOLDS",
+              "why": "1 issued line, 1 settlement"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported; marker present"
+            },
+            {
+              "id": "connection-closed",
+              "claim": "the request the stub held is closed",
+              "verdict": "HOLDS",
+              "why": "closed after 3469 ms"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown (abandoned)": 1
+              },
+              "counted": 1
+            },
+            "refusals": {
+              "halted": 1
+            },
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "hang": 1
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "stop": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 5000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 13701
+        },
+        {
+          "kind": "cancel-in-flight",
+          "name": "cancellation in flight",
+          "what": "the probe sets the suite's signal when the first model request reaches the stub, which then never answers",
+          "claims": [
+            {
+              "id": "cancelled-counts-one",
+              "claim": "an attempt in flight when the signal is set still counts one",
+              "verdict": "HOLDS",
+              "why": "1 counted issued line; settled `unknown`"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported; marker present"
+            },
+            {
+              "id": "not-issued-release",
+              "claim": "an admission settled `not-issued` releases its reservation and counts nothing",
+              "verdict": "UNPROBED",
+              "why": "no `not-issued` settlement occurred: it arises only when the signal has fired by the time admission resolves, so the stage never calls `runTurn` and no host is involved. Scripted evidence: ablation/journal-adversarial.test.ts, \"a not-issued settlement releases its reservation exactly once\""
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown (abandoned)": 1
+              },
+              "counted": 1
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "hang": 1
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "cancelled": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "cancelled",
+              "reason": "the run was cancelled during the discover stage of adv-01 clean"
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the run was cancelled during adv-01 clean"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported",
+            "stop": "the run was cancelled during adv-01 clean",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 5000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 10392
+        },
+        {
+          "kind": "integrity-before-start",
+          "name": "integrity failure before the start",
+          "what": "the suite's journal is seeded with one issued line that was never settled",
+          "claims": [
+            {
+              "id": "refused-as-halted",
+              "claim": "work found unsettled on reopen refuses the suite as halted",
+              "verdict": "HOLDS",
+              "why": "the suite refused before its start marker, naming the halt"
+            },
+            {
+              "id": "nothing-started",
+              "claim": "no start marker is written, no host starts and no request is sent",
+              "verdict": "HOLDS",
+              "why": "start marker absent; 0 host starts; 0 `runTurn` calls; 0 model requests"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 1,
+              "seededUnsettled": 1,
+              "newlyIssued": 0,
+              "bySettlement": {},
+              "counted": 0
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 0,
+              "byDisposition": {}
+            },
+            "stubRequests": {
+              "total": 0,
+              "model": 0,
+              "side": 0,
+              "other": 0,
+              "byServed": {},
+              "paths": [],
+              "authHeaderPresent": 0
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 0,
+            "events": {},
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {},
+          "firstSlots": [],
+          "suite": {
+            "refused": "the experiment is already halted, so the adversarial schedule was not started: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): 1 attempt(s) were issued by an earlier invocation and never settled, beginning with `probe-seed-open`; each is counted, and whether it ended is not established",
+            "complete": false,
+            "halt": null,
+            "stop": null,
+            "haltMarker": true,
+            "startMarker": false,
+            "overshoot": null
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [],
+          "elapsedMs": 10
+        },
+        {
+          "kind": "integrity-injected",
+          "name": "integrity failure in a run (injected)",
+          "what": "the stub answers the first model request with HTTP 400; when the real backend returns that envelope, the probe's wrapper reports two unequal SYNTHETIC token payloads for its execution id and returns the envelope unchanged",
+          "claims": [
+            {
+              "id": "one-attempt-reaches-stub",
+              "claim": "one newly issued attempt reaches the stub, which answers HTTP 400, a real model error",
+              "verdict": "HOLDS",
+              "why": "1 issued line; 1 model request, served `http-400`"
+            },
+            {
+              "id": "unknown-binds-id",
+              "claim": "the attempt settles `unknown` with an execution id and without `abandoned`",
+              "verdict": "HOLDS",
+              "why": "settled `unknown`; execution id present; abandoned: false"
+            },
+            {
+              "id": "conflict-recorded",
+              "claim": "two unequal late payloads for one execution id are recorded as an integrity failure (INJECTED by the probe, through the late-usage reporter the lifecycle handed the backend; never a spontaneous host failure)",
+              "verdict": "HOLDS",
+              "why": "1 integrity failure; payloads kept: 2"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads; marker present"
+            },
+            {
+              "id": "retry-refused",
+              "claim": "MAD's retry of the failed attempt is refused before any backend entry",
+              "verdict": "HOLDS",
+              "why": "1 `runTurn` call, 1 model request, 1 admission refused `halted`"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown": 1
+              },
+              "counted": 1
+            },
+            "refusals": {
+              "halted": 1
+            },
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "http-400": 1
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 attack run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads. Admission does not resume automatically."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads",
+            "stop": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 10435
+        },
+        {
+          "kind": "host-offer",
+          "name": "host tool offer (protocol v3 B8)",
+          "what": "the stub's first answer calls a file-reading tool the host did not offer, on a canary file inside the worktree; its next answer calls StructuredOutput",
+          "claims": [
+            {
+              "id": "offered-names",
+              "claim": "the host offers the model exactly `StructuredOutput`",
+              "verdict": "HOLDS",
+              "why": "offered, normalized, over 33 model requests: structuredoutput"
+            },
+            {
+              "id": "treatment",
+              "claim": "the host's treatment of a call to a tool it did not offer is recorded",
+              "verdict": "HOLDS",
+              "why": "the stub called the tool the host names `mcp_Read`; observed treatment: rejection: an error result that names an unavailable tool"
+            },
+            {
+              "id": "canary-nondisclosure",
+              "claim": "the continuation the stub inspected carries no canary token",
+              "verdict": "HOLDS",
+              "why": "no canary token in the one continuation inspected; this is the narrow nondisclosure observation only"
+            },
+            {
+              "id": "not-executed",
+              "claim": "the unoffered tool was not executed",
+              "verdict": "HOLDS",
+              "why": "the host rejected the call explicitly (rejection: an error result that names an unavailable tool)"
+            },
+            {
+              "id": "structured-output-usable",
+              "claim": "`StructuredOutput` then completes the turn",
+              "verdict": "HOLDS",
+              "why": "the attempt that carried the call ended `ok`"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 32,
+              "bySettlement": {
+                "usage": 32
+              },
+              "counted": 32
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 32,
+              "byDisposition": {
+                "ok": 32
+              }
+            },
+            "stubRequests": {
+              "total": 33,
+              "model": 33,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "unoffered-tool": 1,
+                "answer": 32
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 33
+            },
+            "extraRequests": [
+              {
+                "position": 1,
+                "requestIndex": 2,
+                "classification": "tool-continuation",
+                "why": "the stub had served a tool call and this request carries its tool result"
+              }
+            ],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "completed": 16
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 clean run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": true,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 159249
+        },
+        {
+          "kind": "stream-without-usage",
+          "name": "stream without usage (observation)",
+          "what": "the stub leaves the usage figures out of an otherwise valid stream; the turn deadline is shortened to 20000 ms",
+          "claims": [],
+          "observations": [
+            "1 attempt issued by the scenario; 1 `runTurn` call; 4 model requests reached the stub, each served `no-usage`",
+            "at most 4 model requests arrived inside one `runTurn` call's window",
+            "calls by how they ended: 1 failed; settlements: 1 unknown (abandoned)",
+            "the first call ended `failed` (transport-error) after 20029 ms against a 20000 ms turn deadline",
+            "its attempt settled `unknown`, abandoned",
+            "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported; stop: the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "host stop: HOLDS (1 host started and 1 stop confirmed); post-stop: HOLDS (1 post-stop record, each with no problem)",
+            "The requests beyond a call's first are an observed re-send pattern inside one admitted attempt. Repetition alone does not establish a host retry, and this is not workload or quota evidence."
+          ],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown (abandoned)": 1
+              },
+              "counted": 1
+            },
+            "refusals": {
+              "halted": 1
+            },
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 4,
+              "model": 4,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "no-usage": 4
+              },
+              "paths": [
+                "POST /v1/messages"
+              ],
+              "authHeaderPresent": 4
+            },
+            "extraRequests": [
+              {
+                "position": 1,
+                "requestIndex": 2,
+                "classification": "after-served-failure",
+                "why": "the stub had served `no-usage` to the request before it: an observed re-send pattern, whose cause inside the host is not established"
+              },
+              {
+                "position": 1,
+                "requestIndex": 3,
+                "classification": "after-served-failure",
+                "why": "the stub had served `no-usage` to the request before it: an observed re-send pattern, whose cause inside the host is not established"
+              },
+              {
+                "position": 1,
+                "requestIndex": 4,
+                "classification": "after-served-failure",
+                "why": "the stub had served `no-usage` to the request before it: an observed re-send pattern, whose cause inside the host is not established"
+              }
+            ],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "stop": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 20000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 28943
+        }
+      ]
+    },
+    {
+      "provider": "github-copilot",
+      "model": "gpt-5-mini",
+      "format": "chat-completions",
+      "scenarios": [
+        {
+          "kind": "healthy",
+          "name": "healthy suite",
+          "what": "the stub answers every stage; sixteen runs, each on a host and a data directory of its own",
+          "claims": [
+            {
+              "id": "roster",
+              "claim": "the real host's roster resolves the sealed one-slot identity github-copilot/gpt-5-mini with tool capability",
+              "verdict": "HOLDS",
+              "why": "16 hosts resolved it, one read each"
+            },
+            {
+              "id": "journal-before-issue",
+              "claim": "at every `runTurn` entry and every model request reaching the stub, the journal file already holds an issued line that is not settled",
+              "verdict": "HOLDS",
+              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each found an unsettled issued line"
+            },
+            {
+              "id": "counted-once",
+              "claim": "each attempt the scenario issued is journaled once: one issued line, one settlement, one `runTurn` call",
+              "verdict": "HOLDS",
+              "why": "32 issued lines, each settled once, and 32 `runTurn` calls"
+            },
+            {
+              "id": "serial-no-overshoot",
+              "claim": "admission is serial and no allowance is overshot: never two attempts in flight, and overshoot 0 for the root, the suite and every run",
+              "verdict": "HOLDS",
+              "why": "at most one `runTurn` call and one unsettled issued line at any observation; overshoot 0 over 16 runs"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            },
+            {
+              "id": "full-suite",
+              "claim": "sixteen hosts start in schedule order, each after the one before it stopped, and the suite reads complete",
+              "verdict": "HOLDS",
+              "why": "16 host starts in positions 1 to 16, and the suite is complete"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 32,
+              "bySettlement": {
+                "usage": 32
+              },
+              "counted": 32
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 32,
+              "byDisposition": {
+                "ok": 32
+              }
+            },
+            "stubRequests": {
+              "total": 32,
+              "model": 32,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "answer": 32
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 32
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "completed": 16
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "completed",
+              "reason": "the adv-01 clean run finished"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": true,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 160464
+        },
+        {
+          "kind": "run-allowance",
+          "name": "run allowance",
+          "what": "the first run's discovery answer carries 31 findings, which asks for 32 attempts against the run's 30",
+          "claims": [
+            {
+              "id": "run-cap-issued",
+              "claim": "exactly 30 attempts are issued for the run",
+              "verdict": "HOLDS",
+              "why": "30 attempts issued for run 1"
+            },
+            {
+              "id": "run-cap-refusal",
+              "claim": "a refusal on the run's allowance has cause `budget` and reaches no backend",
+              "verdict": "HOLDS",
+              "why": "1 refusal, each `budget`; 30 `runTurn` calls for run 1, one per issued attempt, so no refused attempt entered the backend"
+            },
+            {
+              "id": "run-cap-fails-run",
+              "claim": "the refused run is recorded failed for budget",
+              "verdict": "HOLDS",
+              "why": "run 1 is `failed`"
+            },
+            {
+              "id": "run-cap-later-runs",
+              "claim": "every later run proceeds",
+              "verdict": "HOLDS",
+              "why": "runs 2 to 16 completed (15)"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 60,
+              "bySettlement": {
+                "usage": 60
+              },
+              "counted": 60
+            },
+            "refusals": {
+              "budget": 1
+            },
+            "runTurnCalls": {
+              "total": 60,
+              "byDisposition": {
+                "ok": 60
+              }
+            },
+            "stubRequests": {
+              "total": 60,
+              "model": 60,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "answer": 60
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 60
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "completed": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with judge/discovery-1 attempt 1 (budget): the adv-01 clean run's allowance is exhausted: 30 of 30 admitted attempts"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 170568
+        },
+        {
+          "kind": "root-allowance",
+          "name": "root allowance",
+          "what": "the suite's journal is seeded with 480 settled attempts before the suite opens it",
+          "claims": [
+            {
+              "id": "root-cap-seeded",
+              "claim": "the seeded journal holds 480 settled attempts and the scenario issues none",
+              "verdict": "HOLDS",
+              "why": "480 seeded, 0 newly issued"
+            },
+            {
+              "id": "root-cap-stop",
+              "claim": "a refusal on the root's allowance is a runner stop that names it",
+              "verdict": "HOLDS",
+              "why": "stop: the suite root's global allowance is exhausted: 480 of 480 admitted attempts; halt: none"
+            },
+            {
+              "id": "root-cap-no-backend",
+              "claim": "the refused admission reaches no backend: zero `runTurn` calls and zero model requests",
+              "verdict": "HOLDS",
+              "why": "0 `runTurn` calls, 0 model requests"
+            },
+            {
+              "id": "root-cap-later-slots",
+              "claim": "every later slot is recorded not-attempted and no later host starts",
+              "verdict": "HOLDS",
+              "why": "15 of 15 later slots not-attempted; 1 host start"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 480,
+              "seededUnsettled": 0,
+              "newlyIssued": 0,
+              "bySettlement": {},
+              "counted": 0
+            },
+            "refusals": {
+              "runner-stop": 1
+            },
+            "runTurnCalls": {
+              "total": 0,
+              "byDisposition": {}
+            },
+            "stubRequests": {
+              "total": 0,
+              "model": 0,
+              "side": 0,
+              "other": 0,
+              "byServed": {},
+              "paths": [],
+              "authHeaderPresent": 0
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: discovery skipped discovery-1 for budget; 1 admission(s) were refused, beginning with discover/discovery-1 attempt 1 (runner-stop): the adversarial runner stopped admitting: the suite root's global allowance is exhausted: 480 of 480 admitted attempts. No model failed."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the runner stopped: the suite root's global allowance is exhausted: 480 of 480 admitted attempts"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": null,
+            "stop": "the suite root's global allowance is exhausted: 480 of 480 admitted attempts",
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 8838
+        },
+        {
+          "kind": "non-ending",
+          "name": "non-ending attempt",
+          "what": "the stub never answers the first model request; the turn deadline is shortened to 5000 ms through the backend seam",
+          "claims": [
+            {
+              "id": "abandoned-within-bound",
+              "claim": "an attempt that does not end is settled `abandoned` within its bound",
+              "verdict": "HOLDS",
+              "why": "settled `unknown`, abandoned; the call took 5034 ms against 5000 ms plus 5000 ms"
+            },
+            {
+              "id": "abandoned-counts-one",
+              "claim": "the abandoned attempt counts as one issued attempt",
+              "verdict": "HOLDS",
+              "why": "1 issued line, 1 settlement"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported; marker present"
+            },
+            {
+              "id": "connection-closed",
+              "claim": "the request the stub held is closed",
+              "verdict": "HOLDS",
+              "why": "closed after 3457 ms"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown (abandoned)": 1
+              },
+              "counted": 1
+            },
+            "refusals": {
+              "halted": 1
+            },
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "hang": 1
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "stop": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 5000ms deadline while in flight, so the request was issued and its usage was never reported",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 5000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 13734
+        },
+        {
+          "kind": "cancel-in-flight",
+          "name": "cancellation in flight",
+          "what": "the probe sets the suite's signal when the first model request reaches the stub, which then never answers",
+          "claims": [
+            {
+              "id": "cancelled-counts-one",
+              "claim": "an attempt in flight when the signal is set still counts one",
+              "verdict": "HOLDS",
+              "why": "1 counted issued line; settled `unknown`"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported; marker present"
+            },
+            {
+              "id": "not-issued-release",
+              "claim": "an admission settled `not-issued` releases its reservation and counts nothing",
+              "verdict": "UNPROBED",
+              "why": "no `not-issued` settlement occurred: it arises only when the signal has fired by the time admission resolves, so the stage never calls `runTurn` and no host is involved. Scripted evidence: ablation/journal-adversarial.test.ts, \"a not-issued settlement releases its reservation exactly once\""
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown (abandoned)": 1
+              },
+              "counted": 1
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "hang": 1
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "cancelled": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "cancelled",
+              "reason": "the run was cancelled during the discover stage of adv-01 attack"
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the run was cancelled during adv-01 attack"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported",
+            "stop": "the run was cancelled during adv-01 attack",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 5000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 10483
+        },
+        {
+          "kind": "integrity-before-start",
+          "name": "integrity failure before the start",
+          "what": "the suite's journal is seeded with one issued line that was never settled",
+          "claims": [
+            {
+              "id": "refused-as-halted",
+              "claim": "work found unsettled on reopen refuses the suite as halted",
+              "verdict": "HOLDS",
+              "why": "the suite refused before its start marker, naming the halt"
+            },
+            {
+              "id": "nothing-started",
+              "claim": "no start marker is written, no host starts and no request is sent",
+              "verdict": "HOLDS",
+              "why": "start marker absent; 0 host starts; 0 `runTurn` calls; 0 model requests"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 1,
+              "seededUnsettled": 1,
+              "newlyIssued": 0,
+              "bySettlement": {},
+              "counted": 0
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 0,
+              "byDisposition": {}
+            },
+            "stubRequests": {
+              "total": 0,
+              "model": 0,
+              "side": 0,
+              "other": 0,
+              "byServed": {},
+              "paths": [],
+              "authHeaderPresent": 0
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 0,
+            "events": {},
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {},
+          "firstSlots": [],
+          "suite": {
+            "refused": "the experiment is already halted, so the adversarial schedule was not started: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): 1 attempt(s) were issued by an earlier invocation and never settled, beginning with `probe-seed-open`; each is counted, and whether it ended is not established",
+            "complete": false,
+            "halt": null,
+            "stop": null,
+            "haltMarker": true,
+            "startMarker": false,
+            "overshoot": null
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [],
+          "elapsedMs": 10
+        },
+        {
+          "kind": "integrity-injected",
+          "name": "integrity failure in a run (injected)",
+          "what": "the stub answers the first model request with HTTP 400; when the real backend returns that envelope, the probe's wrapper reports two unequal SYNTHETIC token payloads for its execution id and returns the envelope unchanged",
+          "claims": [
+            {
+              "id": "one-attempt-reaches-stub",
+              "claim": "one newly issued attempt reaches the stub, which answers HTTP 400, a real model error",
+              "verdict": "HOLDS",
+              "why": "1 issued line; 1 model request, served `http-400`"
+            },
+            {
+              "id": "unknown-binds-id",
+              "claim": "the attempt settles `unknown` with an execution id and without `abandoned`",
+              "verdict": "HOLDS",
+              "why": "settled `unknown`; execution id present; abandoned: false"
+            },
+            {
+              "id": "conflict-recorded",
+              "claim": "two unequal late payloads for one execution id are recorded as an integrity failure (INJECTED by the probe, through the late-usage reporter the lifecycle handed the backend; never a spontaneous host failure)",
+              "verdict": "HOLDS",
+              "why": "1 integrity failure; payloads kept: 2"
+            },
+            {
+              "id": "halt-and-marker",
+              "claim": "the suite halts and writes its halt marker",
+              "verdict": "HOLDS",
+              "why": "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads; marker present"
+            },
+            {
+              "id": "retry-refused",
+              "claim": "MAD's retry of the failed attempt is refused before any backend entry",
+              "verdict": "HOLDS",
+              "why": "1 `runTurn` call, 1 model request, 1 admission refused `halted`"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "1 host started and 1 stop confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "1 post-stop record, each with no problem"
+            },
+            {
+              "id": "nothing-later",
+              "claim": "no later host starts and no later model request is sent",
+              "verdict": "HOLDS",
+              "why": "1 host start, 1 model request"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 1,
+              "bySettlement": {
+                "unknown": 1
+              },
+              "counted": 1
+            },
+            "refusals": {
+              "halted": 1
+            },
+            "runTurnCalls": {
+              "total": 1,
+              "byDisposition": {
+                "failed": 1
+              }
+            },
+            "stubRequests": {
+              "total": 1,
+              "model": 1,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "http-400": 1
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 1
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 1,
+            "events": {
+              "start": {
+                "ok": 1,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 1,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 1,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 1,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "failed": 1,
+            "not-attempted": 15
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "failed",
+              "reason": "the adv-01 attack run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads. Admission does not resume automatically."
+            },
+            {
+              "position": 2,
+              "status": "not-attempted",
+              "reason": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": false,
+            "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads",
+            "stop": "the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): integrity failure: execution `run-1/exec-1` was reported late with two different token payloads",
+            "haltMarker": true,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 10526
+        },
+        {
+          "kind": "host-offer",
+          "name": "host tool offer (protocol v3 B8)",
+          "what": "the stub's first answer calls a file-reading tool the host did not offer, on a canary file inside the worktree; its next answer calls StructuredOutput",
+          "claims": [
+            {
+              "id": "offered-names",
+              "claim": "the host offers the model exactly `StructuredOutput`",
+              "verdict": "HOLDS",
+              "why": "offered, normalized, over 33 model requests: structuredoutput"
+            },
+            {
+              "id": "treatment",
+              "claim": "the host's treatment of a call to a tool it did not offer is recorded",
+              "verdict": "HOLDS",
+              "why": "the stub called the tool the host names `read`; observed treatment: rejection: a result that names an unavailable tool, with no error flag in this format"
+            },
+            {
+              "id": "canary-nondisclosure",
+              "claim": "the continuation the stub inspected carries no canary token",
+              "verdict": "HOLDS",
+              "why": "no canary token in the one continuation inspected; this is the narrow nondisclosure observation only"
+            },
+            {
+              "id": "not-executed",
+              "claim": "the unoffered tool was not executed",
+              "verdict": "HOLDS",
+              "why": "the host rejected the call explicitly (rejection: a result that names an unavailable tool, with no error flag in this format)"
+            },
+            {
+              "id": "structured-output-usable",
+              "claim": "`StructuredOutput` then completes the turn",
+              "verdict": "HOLDS",
+              "why": "the attempt that carried the call ended `ok`"
+            },
+            {
+              "id": "stop-confirmed",
+              "claim": "every started host's stop is confirmed",
+              "verdict": "HOLDS",
+              "why": "16 hosts started and 16 stops confirmed"
+            },
+            {
+              "id": "post-stop-clean",
+              "claim": "every started host's post-stop checks are present and clean (the ordinary store guard included)",
+              "verdict": "HOLDS",
+              "why": "16 post-stop records, each with no problem"
+            }
+          ],
+          "observations": [],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 32,
+              "bySettlement": {
+                "usage": 32
+              },
+              "counted": 32
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 32,
+              "byDisposition": {
+                "ok": 32
+              }
+            },
+            "stubRequests": {
+              "total": 33,
+              "model": 33,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "unoffered-tool": 1,
+                "answer": 32
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 33
+            },
+            "extraRequests": [
+              {
+                "position": 1,
+                "requestIndex": 2,
+                "classification": "tool-continuation",
+                "why": "the stub had served a tool call and this request carries its tool result"
+              }
+            ],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "completed": 16
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 clean run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": true,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": null
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 159861
+        },
+        {
+          "kind": "stream-without-usage",
+          "name": "stream without usage (observation)",
+          "what": "the stub leaves the usage figures out of an otherwise valid stream; the turn deadline is shortened to 20000 ms",
+          "claims": [],
+          "observations": [
+            "32 attempts issued by the scenario; 32 `runTurn` calls; 32 model requests reached the stub, each served `no-usage`",
+            "at most 1 model request arrived inside one `runTurn` call's window",
+            "calls by how they ended: 32 ok; settlements: 32 usage",
+            "the first call ended `ok` after 1888 ms against a 20000 ms turn deadline",
+            "its attempt settled `usage`",
+            "halt: none; stop: none",
+            "host stop: HOLDS (16 hosts started and 16 stops confirmed); post-stop: HOLDS (16 post-stop records, each with no problem)",
+            "No call's window held a second request: this transport showed no re-send for a stream without usage. This is not workload or quota evidence."
+          ],
+          "records": {
+            "issuedAttempts": {
+              "seeded": 0,
+              "seededUnsettled": 0,
+              "newlyIssued": 32,
+              "bySettlement": {
+                "usage": 32
+              },
+              "counted": 32
+            },
+            "refusals": {},
+            "runTurnCalls": {
+              "total": 32,
+              "byDisposition": {
+                "ok": 32
+              }
+            },
+            "stubRequests": {
+              "total": 32,
+              "model": 32,
+              "side": 0,
+              "other": 0,
+              "byServed": {
+                "no-usage": 32
+              },
+              "paths": [
+                "POST /chat/completions"
+              ],
+              "authHeaderPresent": 32
+            },
+            "extraRequests": [],
+            "attributionLimit": "a stub request is attributed to the `runTurn` call whose window it arrived in (entry to return, plus 2000 ms). That is evidence with limits: it does not prove which attempt a request belongs to, nor why the host sent it"
+          },
+          "hosts": {
+            "starts": 16,
+            "events": {
+              "start": {
+                "ok": 16,
+                "failed": 0
+              },
+              "verify": {
+                "ok": 16,
+                "failed": 0
+              },
+              "stop": {
+                "ok": 16,
+                "failed": 0
+              },
+              "postStop": {
+                "ok": 16,
+                "failed": 0
+              }
+            },
+            "failures": [],
+            "unestablished": [],
+            "recordFailure": null
+          },
+          "slots": {
+            "completed": 16
+          },
+          "firstSlots": [
+            {
+              "position": 1,
+              "status": "completed",
+              "reason": "the adv-01 attack run finished"
+            },
+            {
+              "position": 2,
+              "status": "completed",
+              "reason": "the adv-01 clean run finished"
+            }
+          ],
+          "suite": {
+            "refused": null,
+            "complete": true,
+            "halt": null,
+            "stop": null,
+            "haltMarker": false,
+            "startMarker": true,
+            "overshoot": {
+              "root": 0,
+              "suite": 0,
+              "runs": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          "bounds": {
+            "scenarioMs": 667344,
+            "turnTimeoutMs": 20000
+          },
+          "deadline": null,
+          "egressRefused": [
+            "api.githubcopilot.com:443"
+          ],
+          "elapsedMs": 160101
+        }
+      ]
+    }
+  ],
+  "unprobedTransports": [
+    {
+      "transport": "openai (any model)",
+      "why": "OpenAI's OAuth transport ignores the provider `baseURL` override, so no stub can stand in for it and a sandboxed host cannot reach it"
+    },
+    {
+      "transport": "github-copilot/gpt-6-luna and any other github-copilot model served over `/responses`",
+      "why": "the measured host sent `POST /responses` for this model during calibration, and no stub here answers the Responses API (the chat-completions stub answered 404, a stub limitation that says nothing about the provider)"
+    }
+  ],
+  "summary": {
+    "holds": 98,
+    "fails": 0,
+    "unprobed": 3,
+    "failing": [],
+    "note": "Counts of per-claim verdicts. They are not a verdict on gate 11, and a HOLDS on one transport says nothing about another."
+  },
+  "limitations": [
+    "Every result holds for its exact provider, model and route on opencode 1.18.32 (sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e); it validates no other pin, model or build.",
+    "Sign-ins were placeholders and every provider was a loopback stub: nothing here shows what a real provider, account, cache or quota does.",
+    "The launcher's stages 1 and 2 (offline preflight, authorization, reservation) were not run on a real host; only the shipped command's refusal was observed. That command ran as the user would run it, so its stage 1 resolved the path of the user's opencode store for its disjointness check; it opens nothing there.",
+    "The schedules were sealed with `provenance: \"scripted\"` against a private frozen-format copy of protocol v3. That copy is a fixture: protocol v3 is a draft, and nothing here is pre-registered or frozen.",
+    "The non-ending and stream-without-usage rows shorten the turn deadline through the backend seam. The shipped launcher passes no turn deadline, so its bound is the backend's default.",
+    "The in-run integrity failure was injected by the probe through the late-usage reporter. No spontaneous integrity failure of a real host was observed or is claimed.",
+    "A request beyond an attempt's first is classified from what the stub served and from time-window attribution. The host's reason for sending it is not established.",
+    "AD-13's host-tool route is unavailable under the StructuredOutput-only offer and is reported unobserved, never as zero and never as resistance.",
+    "The suite and the hosts wrote their own session data, dumps, manifests and worktrees under --out. Those stay in private scratch and are not part of this file."
+  ],
+  "gate11": "OPEN. This file is evidence for a separate, reviewed gate change; it closes nothing."
+}

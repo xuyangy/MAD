@@ -1,0 +1,1067 @@
+import { afterEach, describe, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { z, type ZodType } from "zod"
+
+import type { OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
+import { startRefusingProxy } from "../ablation/accounting-stub.ts"
+import { startAdversarialStub, type AdversarialStub } from "../ablation/adversarial-stub.ts"
+import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
+import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
+import { authLinkPaths } from "../ablation/oauth-payload.ts"
+import { readFrozenProtocol } from "../ablation/schedule.ts"
+import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
+import { candidate } from "../core/test-support/fakes.ts"
+import {
+  boundedStart,
+  cancelClaims,
+  claimsFor,
+  EVIDENCE_FILE,
+  extraRequests,
+  frozenProtocolFixture,
+  healthyClaims,
+  hostOfferClaims,
+  hostStopClaims,
+  integrityBeforeStartClaims,
+  integrityInjectedClaims,
+  main,
+  manyFindings,
+  nonEndingClaims,
+  noUsageObservations,
+  parseProbeArgs,
+  pathProblems,
+  rootAllowanceClaims,
+  rosterClaim,
+  runAllowanceClaims,
+  runScenario,
+  runShippedCommand,
+  scenarioBound,
+  SCENARIOS,
+  seededAttempts,
+  shippedClaims,
+  SHIPPED_BARRIERS,
+  SUITE_ALLOWANCE_CLAIM,
+  TRANSPORTS,
+  UNPROBED_TRANSPORTS,
+  type CallFact,
+  type Claim,
+  type HostFact,
+  type IssuedFact,
+  type ProbeContext,
+  type ProbeSeams,
+  type RequestFact,
+  type ScenarioFacts,
+  type ScenarioKind,
+  type ScenarioSpec,
+  type Transport,
+} from "./adversarial-probe.ts"
+import { PROTOCOL_V3_FILE } from "./adversarial.ts"
+import { placeholderAuth } from "./oauth-probe.ts"
+
+const scratch: string[] = []
+const stoppers: { stop(): unknown }[] = []
+afterEach(async () => {
+  for (const entry of stoppers.splice(0)) await entry.stop()
+  for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true })
+})
+
+async function tempDir(): Promise<string> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "mad-adversarial-probe-test-")))
+  scratch.push(dir)
+  return dir
+}
+
+const PIN = "anthropic/claude-sonnet-5"
+const verdictOf = (claims: readonly Claim[], id: string) => claims.find((entry) => entry.id === id)?.verdict
+const whyOf = (claims: readonly Claim[], id: string) => claims.find((entry) => entry.id === id)?.why ?? ""
+
+// ---------------------------------------------------------------------------
+// Facts, built by hand
+// ---------------------------------------------------------------------------
+
+const hostRun = (position: number, overrides: Partial<Record<HostFact["event"], Partial<HostFact>>> = {}): HostFact[] =>
+  (["start", "verify", "stop", "postStop"] as const).map((event) => ({ event, ok: true, position, detail: `${event} of run ${position}`, ...overrides[event] }))
+
+const issuedLine = (index: number, position: number, extra: Partial<IssuedFact> = {}): IssuedFact => ({
+  physicalId: `request-${index}`,
+  position,
+  settlements: 1,
+  kind: "usage",
+  abandoned: false,
+  executionId: false,
+  ...extra,
+})
+
+const call = (position: number, at: number, extra: Partial<CallFact> = {}): CallFact => ({
+  position,
+  startedAt: at,
+  endedAt: at + 50,
+  unsettledAtEntry: 1,
+  disposition: "ok",
+  failure: null,
+  usageUnknown: false,
+  abandoned: false,
+  ...extra,
+})
+
+const request = (index: number, position: number, atMs: number, extra: Partial<RequestFact> = {}): RequestFact => ({
+  index,
+  provider: "anthropic",
+  method: "POST",
+  path: "/v1/messages",
+  model: true,
+  authHeaderPresent: true,
+  offered: ["mcp_StructuredOutput"],
+  stage: "discover",
+  toolResult: null,
+  served: "answer",
+  atMs,
+  position,
+  closedAfterMs: null,
+  unsettledAtArrival: 1,
+  ...extra,
+})
+
+function facts(kind: ScenarioKind, extra: Partial<ScenarioFacts> = {}): ScenarioFacts {
+  return {
+    kind,
+    refused: null,
+    complete: false,
+    halt: null,
+    stop: null,
+    haltMarker: false,
+    startMarker: true,
+    slots: [],
+    overshoot: { root: 0, suite: 0, runs: [] },
+    integrity: [],
+    refusals: [],
+    seeded: { issued: 0, unsettled: 0 },
+    issued: [],
+    journalProblems: [],
+    calls: [],
+    maxConcurrentCalls: 0,
+    requests: [],
+    hosts: { starts: 0, records: [], unestablished: [], recordFailure: null },
+    injected: null,
+    cancelled: false,
+    unofferedTool: null,
+    deadline: null,
+    turnTimeoutMs: null,
+    egress: [],
+    elapsedMs: 1,
+    ...extra,
+  }
+}
+
+/** A suite of `runs` completed runs, one attempt each. */
+function healthy(runs = 16, extra: Partial<ScenarioFacts> = {}): ScenarioFacts {
+  const positions = Array.from({ length: runs }, (_unused, index) => index + 1)
+  return facts("healthy", {
+    complete: runs === 16,
+    slots: Array.from({ length: 16 }, (_unused, index) => ({ position: index + 1, status: index < runs ? "completed" : "not-attempted", reason: "" })),
+    overshoot: { root: 0, suite: 0, runs: positions.map(() => 0) },
+    issued: positions.map((position) => issuedLine(position, position)),
+    calls: positions.map((position) => call(position, position * 1000)),
+    maxConcurrentCalls: 1,
+    requests: positions.map((position) => request(position, position, position * 1000 + 10)),
+    hosts: { starts: runs, records: positions.flatMap((position) => hostRun(position)), unestablished: [], recordFailure: null },
+    ...extra,
+  })
+}
+
+describe("the healthy suite's claims", () => {
+  test("sixteen clean runs hold every claim", () => {
+    const claims = healthyClaims(healthy(), PIN)
+    expect(claims.map((entry) => entry.verdict)).toEqual(Array.from({ length: 7 }, () => "HOLDS"))
+    expect(claims.map((entry) => entry.id)).toEqual(["roster", "journal-before-issue", "counted-once", "serial-no-overshoot", "stop-confirmed", "post-stop-clean", "full-suite"])
+  })
+
+  test("a post-stop failure after run 1 fails the guard and the full suite, and the journal claims hold only for the run observed", () => {
+    const one = healthy(1, {
+      hosts: { starts: 1, records: hostRun(1, { postStop: { ok: false, detail: "FAILED: session=1" } }), unestablished: ["run 1"], recordFailure: null },
+      slots: [{ position: 1, status: "failed", reason: "stop not established" }, ...Array.from({ length: 15 }, (_unused, index) => ({ position: index + 2, status: "not-attempted", reason: "" }))],
+    })
+    const claims = healthyClaims(one, PIN)
+    expect(verdictOf(claims, "post-stop-clean")).toBe("FAILS")
+    expect(verdictOf(claims, "stop-confirmed")).toBe("HOLDS")
+    expect(verdictOf(claims, "full-suite")).toBe("FAILS")
+    expect(whyOf(claims, "full-suite")).toContain("the post-stop check of run 1's host failed")
+    for (const id of ["journal-before-issue", "counted-once", "serial-no-overshoot"]) {
+      expect(verdictOf(claims, id), id).toBe("HOLDS")
+      expect(whyOf(claims, id), id).toContain("0 of 16 runs completed")
+    }
+  })
+
+  test("an observation that found no unsettled issued line fails journal-before-issue", () => {
+    const broken = healthy()
+    broken.requests[4]!.unsettledAtArrival = 0
+    expect(verdictOf(healthyClaims(broken, PIN), "journal-before-issue")).toBe("FAILS")
+    const unread = healthy()
+    unread.calls[2]!.unsettledAtEntry = null
+    expect(whyOf(healthyClaims(unread, PIN), "journal-before-issue")).toContain("could not be read")
+  })
+
+  test("a repeated id, a missing settlement or a call count that disagrees fails counted-once", () => {
+    const repeated = healthy()
+    repeated.issued[1]!.physicalId = repeated.issued[0]!.physicalId
+    expect(verdictOf(healthyClaims(repeated, PIN), "counted-once")).toBe("FAILS")
+    const unsettled = healthy()
+    unsettled.issued[3]!.settlements = 0
+    expect(verdictOf(healthyClaims(unsettled, PIN), "counted-once")).toBe("FAILS")
+    const extraCall = healthy()
+    extraCall.calls.push(call(16, 99_000))
+    expect(whyOf(healthyClaims(extraCall, PIN), "counted-once")).toContain("17 `runTurn` calls")
+  })
+
+  test("two calls open at once, two unsettled lines, or any overshoot fails the serial claim", () => {
+    expect(verdictOf(healthyClaims(healthy(16, { maxConcurrentCalls: 2 }), PIN), "serial-no-overshoot")).toBe("FAILS")
+    const two = healthy()
+    two.calls[0]!.unsettledAtEntry = 2
+    expect(verdictOf(healthyClaims(two, PIN), "serial-no-overshoot")).toBe("FAILS")
+    expect(verdictOf(healthyClaims(healthy(16, { overshoot: { root: 1, suite: 0, runs: [] } }), PIN), "serial-no-overshoot")).toBe("FAILS")
+  })
+
+  test("with no host started, every observation is UNPROBED and names what blocked it; the full suite FAILS", () => {
+    const none = facts("healthy", { hosts: { starts: 1, records: [{ event: "start", ok: false, position: 1, detail: "the sandbox refused" }], unestablished: [], recordFailure: null } })
+    const claims = healthyClaims(none, PIN)
+    for (const id of ["roster", "journal-before-issue", "counted-once", "serial-no-overshoot", "stop-confirmed", "post-stop-clean"]) expect(verdictOf(claims, id), id).toBe("UNPROBED")
+    expect(whyOf(claims, "roster")).toContain("the host of run 1 did not start")
+    expect(verdictOf(claims, "full-suite")).toBe("FAILS")
+  })
+
+  test("a host that fails its verification fails the roster claim with the lifecycle's reason", () => {
+    const failed = healthy(1, { hosts: { starts: 1, records: hostRun(1, { verify: { ok: false, detail: "the host lists no model claude-sonnet-5" } }), unestablished: [], recordFailure: null } })
+    const roster = rosterClaim(failed, PIN)
+    expect(roster.verdict).toBe("FAILS")
+    expect(roster.why).toContain("lists no model")
+  })
+
+  test("an unconfirmed stop fails stop-confirmed and leaves post-stop a separate claim", () => {
+    const [stop, post] = hostStopClaims(facts("healthy", { hosts: { starts: 1, records: hostRun(1, { stop: { ok: false, detail: "UNCONFIRMED pid 7" } }), unestablished: [], recordFailure: null } }))
+    expect(stop!.verdict).toBe("FAILS")
+    expect(stop!.why).toContain("UNCONFIRMED pid 7")
+    expect(post!.verdict).toBe("HOLDS")
+  })
+})
+
+describe("the run allowance's claims", () => {
+  const reached = (extra: Partial<ScenarioFacts> = {}) =>
+    facts("run-allowance", {
+      slots: [{ position: 1, status: "failed", reason: "a gate denied it planned work: … (budget) …" }, ...Array.from({ length: 15 }, (_unused, index) => ({ position: index + 2, status: "completed", reason: "" }))],
+      issued: Array.from({ length: 30 }, (_unused, index) => issuedLine(index, 1)),
+      calls: Array.from({ length: 30 }, (_unused, index) => call(1, index * 100)),
+      refusals: [
+        { cause: "budget", position: 1 },
+        { cause: "budget", position: 1 },
+      ],
+      hosts: { starts: 16, records: Array.from({ length: 16 }, (_unused, index) => hostRun(index + 1)).flat(), unestablished: [], recordFailure: null },
+      ...extra,
+    })
+
+  test("thirty issued, budget refusals that reached no backend, the run failed and the rest completed", () => {
+    expect(runAllowanceClaims(reached()).map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "run-cap-issued:HOLDS",
+      "run-cap-refusal:HOLDS",
+      "run-cap-fails-run:HOLDS",
+      "run-cap-later-runs:HOLDS",
+      "stop-confirmed:HOLDS",
+      "post-stop-clean:HOLDS",
+    ])
+  })
+
+  test("a refused attempt that entered the backend, or a refusal with another cause, fails the refusal claim", () => {
+    const entered = reached()
+    entered.calls.push(call(1, 9000))
+    expect(verdictOf(runAllowanceClaims(entered), "run-cap-refusal")).toBe("FAILS")
+    expect(verdictOf(runAllowanceClaims(reached({ refusals: [{ cause: "runner-stop", position: 1 }] })), "run-cap-refusal")).toBe("FAILS")
+    expect(verdictOf(runAllowanceClaims(reached({ issued: Array.from({ length: 31 }, (_unused, index) => issuedLine(index, 1)) })), "run-cap-issued")).toBe("FAILS")
+  })
+
+  test("later runs blocked by run 1's post-stop check are UNPROBED, naming it; stopped for no such reason they FAIL", () => {
+    const blocked = reached({
+      slots: [{ position: 1, status: "failed", reason: "(budget)" }, ...Array.from({ length: 15 }, (_unused, index) => ({ position: index + 2, status: "not-attempted", reason: "" }))],
+      hosts: { starts: 1, records: hostRun(1, { postStop: { ok: false, detail: "FAILED: session=2" } }), unestablished: [], recordFailure: null },
+    })
+    const claims = runAllowanceClaims(blocked)
+    expect(verdictOf(claims, "run-cap-later-runs")).toBe("UNPROBED")
+    expect(whyOf(claims, "run-cap-later-runs")).toContain("the post-stop check of run 1's host failed")
+    expect(verdictOf(claims, "post-stop-clean")).toBe("FAILS")
+    const stopped = reached({ slots: [{ position: 1, status: "failed", reason: "(budget)" }, ...Array.from({ length: 15 }, (_unused, index) => ({ position: index + 2, status: "not-attempted", reason: "" }))], stop: "something else" })
+    expect(verdictOf(runAllowanceClaims(stopped), "run-cap-later-runs")).toBe("FAILS")
+  })
+
+  test("an allowance never reached fails the issued claim and leaves the refusal claims UNPROBED", () => {
+    const short = reached({ refusals: [], issued: [issuedLine(1, 1)], calls: [call(1, 0)] })
+    const claims = runAllowanceClaims(short)
+    expect(verdictOf(claims, "run-cap-issued")).toBe("FAILS")
+    expect(verdictOf(claims, "run-cap-refusal")).toBe("UNPROBED")
+    expect(verdictOf(runAllowanceClaims({ ...short, deadline: "the scenario did not end" }), "run-cap-issued")).toBe("UNPROBED")
+  })
+})
+
+describe("the root allowance's claims, and the suite allowance", () => {
+  const stopped = (extra: Partial<ScenarioFacts> = {}) =>
+    facts("root-allowance", {
+      stop: "the suite root's global allowance is exhausted: 480 of 480 admitted attempts",
+      seeded: { issued: 480, unsettled: 0 },
+      slots: [{ position: 1, status: "failed", reason: "" }, ...Array.from({ length: 15 }, (_unused, index) => ({ position: index + 2, status: "not-attempted", reason: "" }))],
+      hosts: { starts: 1, records: hostRun(1), unestablished: [], recordFailure: null },
+      ...extra,
+    })
+
+  test("a runner stop naming the root's 480, with no backend call, no request and no later host", () => {
+    expect(rootAllowanceClaims(stopped()).every((entry) => entry.verdict === "HOLDS")).toBe(true)
+  })
+
+  test("a backend call, a model request, a second host or another stop each fail their claim", () => {
+    expect(verdictOf(rootAllowanceClaims(stopped({ calls: [call(1, 0)] })), "root-cap-no-backend")).toBe("FAILS")
+    expect(verdictOf(rootAllowanceClaims(stopped({ requests: [request(1, 1, 5)] })), "root-cap-no-backend")).toBe("FAILS")
+    expect(verdictOf(rootAllowanceClaims(stopped({ hosts: { starts: 2, records: [...hostRun(1), ...hostRun(2)], unestablished: [], recordFailure: null } })), "root-cap-later-slots")).toBe("FAILS")
+    expect(verdictOf(rootAllowanceClaims(stopped({ stop: "the adversarial suite's allowance is exhausted: 480 of 480 admitted attempts" })), "root-cap-stop")).toBe("FAILS")
+    expect(verdictOf(rootAllowanceClaims(stopped({ seeded: { issued: 479, unsettled: 0 } })), "root-cap-seeded")).toBe("FAILS")
+  })
+
+  test("a suite that was refused before it started fails the stop claim", () => {
+    expect(verdictOf(rootAllowanceClaims(facts("root-allowance", { refused: "the schedule could not be sealed" })), "root-cap-stop")).toBe("FAILS")
+  })
+
+  test("the suite allowance is UNPROBED by construction, citing the gate and its scripted test", () => {
+    expect(SUITE_ALLOWANCE_CLAIM.verdict).toBe("UNPROBED")
+    expect(SUITE_ALLOWANCE_CLAIM.why).toContain("ablation/governor.ts")
+    expect(SUITE_ALLOWANCE_CLAIM.why).toContain("ablation/governor.test.ts")
+    expect(ADVERSARIAL_ATTEMPT_ALLOWANCES.global).toBe(ADVERSARIAL_ATTEMPT_ALLOWANCES.suite)
+  })
+})
+
+describe("a non-ending attempt, and a cancellation in flight", () => {
+  const hung = (extra: Partial<ScenarioFacts> = {}) =>
+    facts("non-ending", {
+      halt: "attempt `request-1` did not end within its bound",
+      haltMarker: true,
+      turnTimeoutMs: 5000,
+      issued: [issuedLine(1, 1, { kind: "unknown", abandoned: true, executionId: true })],
+      calls: [call(1, 1000, { endedAt: 6030, disposition: "failed", failure: "transport-error", usageUnknown: true, abandoned: true })],
+      requests: [request(1, 1, 10, { served: "hang", closedAfterMs: 5010 })],
+      hosts: { starts: 1, records: hostRun(1), unestablished: [], recordFailure: null },
+      ...extra,
+    })
+
+  test("settled abandoned within its bound, counted once, halted, the connection closed, nothing later", () => {
+    expect(nonEndingClaims(hung()).every((entry) => entry.verdict === "HOLDS")).toBe(true)
+  })
+
+  test("past the bound, not abandoned, no marker, an open connection or a later request each fail", () => {
+    expect(verdictOf(nonEndingClaims(hung({ calls: [call(1, 0, { endedAt: 10_001 })] })), "abandoned-within-bound")).toBe("FAILS")
+    expect(verdictOf(nonEndingClaims(hung({ issued: [issuedLine(1, 1, { kind: "unknown" })] })), "abandoned-within-bound")).toBe("FAILS")
+    expect(verdictOf(nonEndingClaims(hung({ haltMarker: false })), "halt-and-marker")).toBe("FAILS")
+    expect(verdictOf(nonEndingClaims(hung({ requests: [request(1, 1, 10, { served: "hang" })] })), "connection-closed")).toBe("FAILS")
+    expect(verdictOf(nonEndingClaims(hung({ requests: [request(1, 1, 10, { served: "hang", closedAfterMs: 1 }), request(2, 2, 9000)] })), "nothing-later")).toBe("FAILS")
+    expect(verdictOf(nonEndingClaims(hung({ hosts: { starts: 1, records: hostRun(1, { stop: { ok: false, detail: "UNCONFIRMED" } }), unestablished: [], recordFailure: null } })), "stop-confirmed")).toBe("FAILS")
+  })
+
+  test("with no attempt issued the claim is UNPROBED, and FAILS when the suite itself refused", () => {
+    expect(verdictOf(nonEndingClaims(facts("non-ending")), "abandoned-within-bound")).toBe("UNPROBED")
+    expect(verdictOf(nonEndingClaims(facts("non-ending", { refused: "refused" })), "abandoned-within-bound")).toBe("FAILS")
+  })
+
+  const cancelled = (extra: Partial<ScenarioFacts> = {}) => hung({ kind: "cancel-in-flight", cancelled: true, ...extra })
+
+  test("the in-flight attempt counts one; with no not-issued settlement that claim is UNPROBED and cites the scripted test", () => {
+    const claims = cancelClaims(cancelled())
+    expect(verdictOf(claims, "cancelled-counts-one")).toBe("HOLDS")
+    expect(verdictOf(claims, "halt-and-marker")).toBe("HOLDS")
+    expect(verdictOf(claims, "not-issued-release")).toBe("UNPROBED")
+    expect(whyOf(claims, "not-issued-release")).toContain("ablation/journal-adversarial.test.ts")
+  })
+
+  test("a not-issued settlement that was seen is reported, and it is not a counted attempt", () => {
+    const seen = cancelled({ issued: [issuedLine(1, 1, { kind: "unknown", abandoned: true }), issuedLine(2, 1, { kind: "not-issued" })] })
+    const claims = cancelClaims(seen)
+    expect(verdictOf(claims, "not-issued-release")).toBe("HOLDS")
+    expect(verdictOf(claims, "cancelled-counts-one")).toBe("HOLDS")
+  })
+
+  test("two counted attempts fail; a signal that was never set leaves the claim UNPROBED", () => {
+    expect(verdictOf(cancelClaims(cancelled({ issued: [issuedLine(1, 1), issuedLine(2, 1)] })), "cancelled-counts-one")).toBe("FAILS")
+    expect(verdictOf(cancelClaims(cancelled({ cancelled: false })), "cancelled-counts-one")).toBe("UNPROBED")
+  })
+})
+
+describe("the integrity rows", () => {
+  test("a suite refused as halted with nothing started holds; a start marker or a host fails", () => {
+    const refused = facts("integrity-before-start", { refused: "the experiment is already halted, so the adversarial schedule was not started", startMarker: false })
+    expect(integrityBeforeStartClaims(refused).every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(verdictOf(integrityBeforeStartClaims({ ...refused, startMarker: true }), "nothing-started")).toBe("FAILS")
+    expect(verdictOf(integrityBeforeStartClaims({ ...refused, hosts: { starts: 1, records: [], unestablished: [], recordFailure: null } }), "nothing-started")).toBe("FAILS")
+    expect(verdictOf(integrityBeforeStartClaims(facts("integrity-before-start")), "refused-as-halted")).toBe("FAILS")
+  })
+
+  const injected = (extra: Partial<ScenarioFacts> = {}) =>
+    facts("integrity-injected", {
+      halt: "integrity failure: execution `run-1/exec-1` was reported late with two different token payloads",
+      haltMarker: true,
+      injected: { reported: true, why: "reported" },
+      integrity: [{ reason: "two different token payloads", payloads: 2 }],
+      issued: [issuedLine(1, 1, { kind: "unknown", executionId: true })],
+      calls: [call(1, 0, { disposition: "failed", failure: "model-error", usageUnknown: true })],
+      requests: [request(1, 1, 5, { served: "http-400" })],
+      refusals: [{ cause: "halted", position: 1 }],
+      hosts: { starts: 1, records: hostRun(1), unestablished: [], recordFailure: null },
+      ...extra,
+    })
+
+  test("the injected conflict holds every claim, and is labelled injected", () => {
+    const claims = integrityInjectedClaims(injected())
+    expect(claims.every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(claims.find((entry) => entry.id === "conflict-recorded")!.claim).toContain("INJECTED by the probe")
+  })
+
+  test("a conflict that does not halt FAILS, and so does a retry that entered the backend", () => {
+    expect(verdictOf(integrityInjectedClaims(injected({ halt: null, haltMarker: false })), "halt-and-marker")).toBe("FAILS")
+    const retried = injected()
+    retried.calls.push(call(1, 500))
+    retried.requests.push(request(2, 1, 505))
+    const claims = integrityInjectedClaims(retried)
+    expect(verdictOf(claims, "retry-refused")).toBe("FAILS")
+    expect(verdictOf(claims, "nothing-later")).toBe("FAILS")
+    expect(verdictOf(integrityInjectedClaims(injected({ integrity: [] })), "conflict-recorded")).toBe("FAILS")
+    expect(verdictOf(integrityInjectedClaims(injected({ issued: [issuedLine(1, 1, { kind: "unknown", abandoned: true, executionId: true })] })), "unknown-binds-id")).toBe("FAILS")
+  })
+
+  test("reports that were never made fail the row with the reason, never UNPROBED", () => {
+    const claims = integrityInjectedClaims(injected({ injected: { reported: false, why: "the HTTP 400 envelope carried a token figure" } }))
+    expect(verdictOf(claims, "conflict-recorded")).toBe("FAILS")
+    expect(whyOf(claims, "conflict-recorded")).toContain("carried a token figure")
+  })
+})
+
+describe("the host offer's claims (protocol v3 B8)", () => {
+  const offer = (result: RequestFact["toolResult"] | undefined, extra: Partial<ScenarioFacts> = {}) =>
+    facts("host-offer", {
+      calls: [call(1, 0)],
+      requests: [request(1, 1, 5, { served: "unoffered-tool" }), ...(result === undefined ? [] : [request(2, 1, 20, { toolResult: result })])],
+      hosts: { starts: 1, records: hostRun(1), unestablished: [], recordFailure: null },
+      ...extra,
+    })
+
+  test("an explicit rejection with no canary holds all five claims", () => {
+    const claims = hostOfferClaims(offer({ isError: true, namesUnavailableTool: true, canary: false }))
+    expect(claims.slice(0, 5).map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "offered-names:HOLDS",
+      "treatment:HOLDS",
+      "canary-nondisclosure:HOLDS",
+      "not-executed:HOLDS",
+      "structured-output-usable:HOLDS",
+    ])
+    expect(whyOf(claims, "treatment")).toContain("rejection")
+    expect(whyOf(hostOfferClaims(offer({ isError: true, namesUnavailableTool: true, canary: false }, { unofferedTool: "mcp_Read" })), "treatment")).toContain("`mcp_Read`")
+  })
+
+  test("a canary token in the continuation fails nondisclosure and not-executed", () => {
+    const claims = hostOfferClaims(offer({ isError: false, namesUnavailableTool: false, canary: true }))
+    expect(verdictOf(claims, "canary-nondisclosure")).toBe("FAILS")
+    expect(whyOf(claims, "canary-nondisclosure")).toContain("a forbidden read result reached the provider")
+    expect(verdictOf(claims, "not-executed")).toBe("FAILS")
+  })
+
+  test("no token and no rejection: nondisclosure holds narrowly, not-executed is UNPROBED", () => {
+    const claims = hostOfferClaims(offer({ isError: true, namesUnavailableTool: false, canary: false }))
+    expect(verdictOf(claims, "canary-nondisclosure")).toBe("HOLDS")
+    expect(verdictOf(claims, "not-executed")).toBe("UNPROBED")
+    expect(whyOf(claims, "not-executed")).toContain("no adequate execution witness")
+  })
+
+  test("no continuation leaves nondisclosure and not-executed UNPROBED and keeps the offered names", () => {
+    const claims = hostOfferClaims(offer(undefined))
+    expect(verdictOf(claims, "offered-names")).toBe("HOLDS")
+    expect(verdictOf(claims, "treatment")).toBe("UNPROBED")
+    expect(verdictOf(claims, "canary-nondisclosure")).toBe("UNPROBED")
+    expect(verdictOf(claims, "not-executed")).toBe("UNPROBED")
+  })
+
+  test("a second offered tool fails the offered names; a turn that did not complete fails usability", () => {
+    const wide = offer({ isError: true, namesUnavailableTool: true, canary: false })
+    wide.requests[1]!.offered = ["mcp_StructuredOutput", "mcp_Read"]
+    expect(verdictOf(hostOfferClaims(wide), "offered-names")).toBe("FAILS")
+    expect(verdictOf(hostOfferClaims(offer({ isError: true, namesUnavailableTool: true, canary: false }, { calls: [call(1, 0, { disposition: "failed", failure: "model-error" })] })), "structured-output-usable")).toBe("FAILS")
+  })
+
+  test("usability and offered names stay visible when a later cleanup fails", () => {
+    const claims = hostOfferClaims(offer({ isError: true, namesUnavailableTool: true, canary: false }, { hosts: { starts: 1, records: hostRun(1, { postStop: { ok: false, detail: "FAILED" } }), unestablished: [], recordFailure: null } }))
+    expect(verdictOf(claims, "structured-output-usable")).toBe("HOLDS")
+    expect(verdictOf(claims, "offered-names")).toBe("HOLDS")
+    expect(verdictOf(claims, "post-stop-clean")).toBe("FAILS")
+  })
+})
+
+describe("extra requests, and the observation row", () => {
+  test("a tool continuation, a re-send after a served failure and an unexplained request are told apart", () => {
+    const observed = facts("host-offer", {
+      calls: [call(1, 1000, { endedAt: 1300 }), call(2, 5000, { endedAt: 5300 }), call(3, 9000, { endedAt: 9300 })],
+      requests: [
+        request(1, 1, 10, { served: "unoffered-tool" }),
+        request(2, 1, 100, { toolResult: { isError: true, namesUnavailableTool: true, canary: false } }),
+        request(3, 2, 4010, { served: "http-500" }),
+        request(4, 2, 4100),
+        request(5, 3, 8010),
+        request(6, 3, 8100),
+      ],
+    })
+    const extras = extraRequests(observed, 1000)
+    expect(extras.map((entry) => `${entry.requestIndex}:${entry.classification}`)).toEqual(["2:tool-continuation", "4:after-served-failure", "6:unexplained"])
+    expect(extras[1]!.why).toContain("cause inside the host is not established")
+  })
+
+  test("a request that arrives just after a call returned belongs to the next call that was entered, not to the one before", () => {
+    // Two attempts of one run 300 ms apart, well inside the attribution slack: one request each, and no extra.
+    const observed = facts("healthy", {
+      calls: [call(1, 1000, { endedAt: 1200 }), call(1, 1500, { endedAt: 1700 })],
+      requests: [request(1, 1, 10), request(2, 1, 510)],
+    })
+    expect(extraRequests(observed, 1000)).toEqual([])
+    // A request before any call was entered is attributed to none.
+    expect(extraRequests(facts("healthy", { calls: [call(1, 5000)], requests: [request(1, 1, 10)] }), 1000)).toEqual([])
+  })
+
+  test("the stream-without-usage row states what was seen and makes no verdict", () => {
+    const observed = facts("stream-without-usage", {
+      turnTimeoutMs: 20_000,
+      halt: "did not end within its bound",
+      issued: [issuedLine(1, 1, { kind: "unknown", abandoned: true })],
+      calls: [call(1, 0, { endedAt: 20_040, disposition: "failed", failure: "transport-error", abandoned: true })],
+      requests: [1, 2, 3, 4].map((index) => request(index, 1, index * 5000, { served: "no-usage" })),
+      hosts: { starts: 1, records: hostRun(1), unestablished: [], recordFailure: null },
+    })
+    expect(claimsFor(observed, PIN)).toEqual([])
+    const lines = noUsageObservations(observed)
+    expect(lines[0]).toContain("1 attempt issued")
+    expect(lines[0]).toContain("4 model requests")
+    expect(lines[1]).toBe("at most 4 model requests arrived inside one `runTurn` call's window")
+    expect(lines[2]).toContain("1 failed")
+    expect(lines[2]).toContain("1 unknown (abandoned)")
+    expect(lines.at(-1)).toContain("Repetition alone does not establish a host retry")
+    expect(lines.at(-1)).toContain("not workload or quota evidence")
+  })
+
+  test("with one request per call the row says no re-send was seen", () => {
+    const observed = facts("stream-without-usage", {
+      issued: [issuedLine(1, 1), issuedLine(2, 2)],
+      calls: [call(1, 0), call(2, 5000)],
+      requests: [request(1, 1, 10, { served: "no-usage" }), request(2, 2, 5010, { served: "no-usage" })],
+    })
+    const lines = noUsageObservations(observed)
+    expect(lines[1]).toContain("at most 1 model request")
+    expect(lines.at(-1)).toContain("showed no re-send")
+  })
+})
+
+describe("the shipped command, run for real", () => {
+  test("with valid flags and no override it exits 1 at stage 1 naming every barrier, and writes nothing", async () => {
+    const dir = await tempDir()
+    await mkdir(join(dir, "prepared"))
+    const run = await runShippedCommand([
+      "--live",
+      "--provider-mode",
+      "oauth",
+      "--oauth-provider",
+      "anthropic",
+      "--pin",
+      PIN,
+      "--oauth-prepared",
+      join(dir, "prepared"),
+      "--oauth-data-root",
+      join(dir, "data"),
+      "--out",
+      join(dir, "out"),
+    ])
+    const leftovers = [join(dir, "data"), join(dir, "out")].filter((path) => existsSync(path))
+    expect(shippedClaims(run, leftovers, false).map((entry) => `${entry.id}:${entry.verdict}`)).toEqual(["shipped-refuses:HOLDS", "shipped-writes-nothing:HOLDS"])
+    // A flag the parser refuses still ends at stage 1, with every gate barrier printed beside it.
+    expect(run.output).toContain("REFUSED at stage 1")
+  }, 60_000)
+})
+
+describe("the shipped command's claims", () => {
+  const refusal = SHIPPED_BARRIERS.map((barrier) => barrier.text).join("\n")
+
+  test("exit 1 naming every barrier, with nothing written, holds", () => {
+    expect(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false).every((entry) => entry.verdict === "HOLDS")).toBe(true)
+  })
+
+  test("a parse-time refusal is not the preflight: it names no gate and FAILS", () => {
+    const claims = shippedClaims({ exitCode: 1, output: "REFUSED at stage 1\n--out must be an absolute path", timedOut: false }, [], false)
+    expect(verdictOf(claims, "shipped-refuses")).toBe("FAILS")
+    expect(whyOf(claims, "shipped-refuses")).toContain("gate 10, gate 11, the null pin, the unfrozen protocol v3")
+  })
+
+  test("exit 0, a timeout, a root left behind or a changed evidence directory each fail", () => {
+    expect(verdictOf(shippedClaims({ exitCode: 0, output: refusal, timedOut: false }, [], false), "shipped-refuses")).toBe("FAILS")
+    expect(verdictOf(shippedClaims({ exitCode: null, output: refusal, timedOut: true }, [], false), "shipped-refuses")).toBe("FAILS")
+    expect(verdictOf(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, ["--out exists after the refusal"], false), "shipped-writes-nothing")).toBe("FAILS")
+    expect(verdictOf(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], true), "shipped-writes-nothing")).toBe("FAILS")
+  })
+})
+
+describe("arguments, paths, the fixture and the bounds", () => {
+  test("both flags are required, absolute, and given once", () => {
+    expect(parseProbeArgs(["bun", "x", "--out", "/o", "--oauth-prepared", "/p"])).toEqual({ ok: true, args: { out: "/o", prepared: "/p" } })
+    expect(parseProbeArgs(["bun", "x", "--out=/o", "--oauth-prepared=/p"])).toEqual({ ok: true, args: { out: "/o", prepared: "/p" } })
+    for (const [argv, why] of [
+      [["--out", "/o"], "--oauth-prepared <absolute directory> is required"],
+      [["--oauth-prepared", "/p"], "--out <absolute directory> is required"],
+      [["--out", "rel", "--oauth-prepared", "/p"], "--out needs an absolute path"],
+      [["--out", "/o", "--out", "/o2", "--oauth-prepared", "/p"], "--out was given twice"],
+      [["--out", "/o", "--oauth-prepared", "/p", "--live"], "unexpected argument `--live`"],
+    ] as const) {
+      const parsed = parseProbeArgs(["bun", "x", ...argv])
+      expect(parsed.ok).toBe(false)
+      if (!parsed.ok) expect(parsed.reason).toContain(why)
+    }
+  })
+
+  test("--out and --oauth-prepared must be disjoint, outside the repository, and --out absent or empty", async () => {
+    const dir = await tempDir()
+    const repo = join(dir, "repo")
+    await mkdir(join(repo, "inner"), { recursive: true })
+    await mkdir(join(dir, "prepared"))
+    await mkdir(join(dir, "full"))
+    await writeFile(join(dir, "full", "x"), "x")
+    expect(await pathProblems({ out: join(dir, "out"), prepared: join(dir, "prepared") }, repo)).toEqual([])
+    expect((await pathProblems({ out: join(repo, "inner", "out"), prepared: join(dir, "prepared") }, repo)).join("\n")).toContain("is inside this repository or contains it")
+    expect((await pathProblems({ out: dir, prepared: join(dir, "prepared") }, repo)).join("\n")).toContain("is inside this repository or contains it")
+    expect((await pathProblems({ out: join(dir, "prepared", "out"), prepared: join(dir, "prepared") }, repo)).join("\n")).toContain("overlap")
+    expect((await pathProblems({ out: join(dir, "full"), prepared: join(dir, "prepared") }, repo)).join("\n")).toContain("is not absent or empty")
+    expect((await pathProblems({ out: join(dir, "out"), prepared: join(repo, "inner") }, repo)).join("\n")).toContain("--oauth-prepared")
+  })
+
+  test("the protocol fixture is frozen by the file's own rule, and the repository's protocol is not written", async () => {
+    const dir = await tempDir()
+    const before = await readFile(PROTOCOL_V3_FILE, "utf8")
+    const fixture = await frozenProtocolFixture(dir)
+    expect(await readFile(PROTOCOL_V3_FILE, "utf8")).toBe(before)
+    expect(before).not.toMatch(/^status: frozen$/m)
+    expect(fixture.file.startsWith(dir)).toBe(true)
+    const read = await readFrozenProtocol(fixture.file)
+    expect(read).toMatchObject({ ok: true, version: 3, hash: fixture.fixtureHash })
+    expect(fixture.draftSha256).toBe(new Bun.CryptoHasher("sha256").update(before).digest("hex"))
+    expect(fixture.draftSha256).not.toBe(fixture.fixtureHash)
+  })
+
+  test("a source with no single status line is refused", async () => {
+    const dir = await tempDir()
+    await writeFile(join(dir, "p.md"), "id: x\nversion: 3\n")
+    await expect(frozenProtocolFixture(dir, join(dir, "p.md"))).rejects.toThrow("no single `status:` line")
+  })
+
+  test("a measured startup tightens a scenario's bound and never loosens it past the outer one", () => {
+    expect(scenarioBound(null, null, 1000)).toBe(1000)
+    expect(scenarioBound(7000, 1000, 10_000_000)).toBe(16 * 8000 * 3 + 300_000)
+    expect(scenarioBound(600_000, 600_000, 1_200_000)).toBe(1_200_000)
+  })
+
+  test("the seed fills the root's allowance exactly, and the run-allowance script asks for more than the run's", () => {
+    const lines = seededAttempts(16, 30).trim().split("\n")
+    expect(lines).toHaveLength(960)
+    expect(lines.filter((line) => line.includes('"type":"issued"'))).toHaveLength(ADVERSARIAL_ATTEMPT_ALLOWANCES.global)
+    expect(manyFindings("anything").findings).toHaveLength(ADVERSARIAL_ATTEMPT_ALLOWANCES.run + 1)
+  })
+
+  test("the transports name exact models, and openai and the copilot Responses route are listed UNPROBED", () => {
+    expect(TRANSPORTS.map((entry) => `${entry.providerId}/${entry.modelId}:${entry.format}`)).toEqual(["anthropic/claude-sonnet-5:messages", "github-copilot/gpt-5-mini:chat-completions"])
+    expect(UNPROBED_TRANSPORTS.map((entry) => entry.transport).join("\n")).toContain("openai")
+    expect(UNPROBED_TRANSPORTS.map((entry) => entry.transport).join("\n")).toContain("github-copilot/gpt-6-luna")
+    expect(SCENARIOS.map((entry) => entry.kind)).toHaveLength(9)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The scenarios, end to end on stand-in hosts and a stand-in backend, against the real suite and its real journal
+// ---------------------------------------------------------------------------
+
+/** A managed host that starts and stops as asked, with clean post-stop checks. */
+function standInHosts() {
+  const started: ManagedHostOptions[] = []
+  const startHost = async (asked: ManagedHostOptions): Promise<ManagedHostStart> => {
+    started.push(asked)
+    const pid = 4000 + started.length
+    const stop = async (): Promise<StopOutcome> => ({ confirmed: true, pid, how: "exited (status 143) after SIGTERM", postStop: { held: ["the OAuth store is empty"], problems: [] } })
+    asked.onSpawn?.({ pid, stop })
+    return {
+      ok: true,
+      host: {
+        url: `http://127.0.0.1:${47000 + started.length}`,
+        pid,
+        binary: "/opt/opencode",
+        sha256: MEASURED_HOST.sha256,
+        version: MEASURED_HOST.version,
+        config: {},
+        reportedConfig: {},
+        environmentKeys: [],
+        pluginInstall: async () => ({ installed: true, version: "1.18.5" }),
+        stop,
+      },
+    } as ManagedHostStart
+  }
+  return { startHost, started }
+}
+
+/**
+ * A backend that sends each turn to the stub over HTTP in the Messages format,
+ * as a host would: it offers `mcp_StructuredOutput` with the stage's schema,
+ * answers an unoffered tool call with the measured host's rejection, maps an
+ * HTTP 400 to a model error with unknown usage, and a request past its deadline
+ * or cancelled in flight to an abandoned turn.
+ */
+function standInBackend(stub: AdversarialStub, options: OpencodeBackendOptions): ModelBackend {
+  let executions = 0
+  return {
+    capabilities: () => ({ tools: true }),
+    async runTurn<T>(slot: string, _instructions: string, _input: string, schema: ZodType<T>, signal?: AbortSignal): Promise<Envelope<T>> {
+      const executionId = `${options.executionIdPrefix ?? ""}exec-${(executions += 1)}`
+      const messages: unknown[] = [{ role: "user", content: [{ type: "text", text: "review" }] }]
+      const deadline = AbortSignal.timeout(options.timeoutMs ?? 5000)
+      const abort = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
+      for (let step = 0; step < 4; step += 1) {
+        let response: Response
+        try {
+          response = await fetch(`${stub.baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+            body: JSON.stringify({ tools: [{ name: "mcp_StructuredOutput", input_schema: z.toJSONSchema(schema) }], messages }),
+            signal: abort,
+          })
+        } catch {
+          return { ok: false, slot, failure: "transport-error", message: "the turn did not end", usageUnknown: { executionId, why: "the turn did not end within its bound", abandoned: true } }
+        }
+        if (response.status !== 200) {
+          return { ok: false, slot, failure: "model-error", message: `HTTP ${response.status}`, usageUnknown: { executionId, why: "the turn ended in a host error" } }
+        }
+        const events = (await response.text())
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => JSON.parse(line.slice(6)) as Record<string, any>)
+        const tool = events.find((event) => event.type === "content_block_start")?.content_block?.name as string | undefined
+        const json = events.find((event) => event.type === "content_block_delta")?.delta?.partial_json as string | undefined
+        if (tool !== "StructuredOutput") {
+          messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "Model tried to call unavailable tool 'invalid'. Available tools: StructuredOutput.", is_error: true }] })
+          continue
+        }
+        const parsed = schema.safeParse(JSON.parse(json ?? "{}"))
+        if (!parsed.success) return { ok: false, slot, failure: "schema-invalid", message: parsed.error.message, tokens: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 } } as Envelope<T>
+        return { ok: true, slot, value: parsed.data, tokens: { input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }
+      }
+      return { ok: false, slot, failure: "model-error", message: "the stand-in gave up", usageUnknown: { executionId, why: "the stand-in gave up" } }
+    },
+  }
+}
+
+const ANTHROPIC: Transport = TRANSPORTS[0]!
+const spec = (kind: ScenarioKind): ScenarioSpec => SCENARIOS.find((entry) => entry.kind === kind)!
+
+async function standInContext(extra: ProbeSeams = {}): Promise<{ context: ProbeContext; stub: AdversarialStub; hosts: ReturnType<typeof standInHosts> }> {
+  const dir = await tempDir()
+  const home = join(dir, "home")
+  const { target } = authLinkPaths(join(dir, "unused"), home)
+  await mkdir(join(target, ".."), { recursive: true })
+  await writeFile(target, JSON.stringify(placeholderAuth(Date.now())))
+  const stub = startAdversarialStub(ANTHROPIC.providerId, ANTHROPIC.format)
+  const proxy = startRefusingProxy()
+  stoppers.push(stub, proxy)
+  const hosts = standInHosts()
+  const seams: ProbeSeams = {
+    startHost: hosts.startHost,
+    createBackend: (options) => standInBackend(stub, options),
+    createClient: (init) => ({ fake: init }),
+    enumerate: async () => [candidate(ANTHROPIC.providerId, ANTHROPIC.modelId)],
+    hangTurnMs: 300,
+    noUsageTurnMs: 300,
+    ...extra,
+  }
+  const context: ProbeContext = {
+    out: join(dir, "out"),
+    prepared: join(dir, "prepared"),
+    scratch: dir,
+    home,
+    protocol: await frozenProtocolFixture(dir),
+    proxy,
+    signal: new AbortController().signal,
+    current: { stop: null },
+    seams,
+    clock: (await import("../core/ports/clock.ts")).systemClock(),
+    codeRevision: { kind: "known", value: { commit: "abc123", dirty: false } },
+    identity: null,
+    scenarioMs: 120_000,
+  }
+  return { context, stub, hosts }
+}
+
+async function observed(kind: ScenarioKind, extra: ProbeSeams = {}) {
+  const { context, stub, hosts } = await standInContext(extra)
+  const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec(kind))
+  return { facts: seen, claims: claimsFor(seen, PIN), hosts, context }
+}
+
+describe("the scenarios on stand-ins, through the real suite and journal", () => {
+  test("healthy: sixteen hosts in order, each attempt journaled before it is issued and counted once", async () => {
+    const { facts: seen, claims, hosts } = await observed("healthy")
+    expect(claims.map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "roster:HOLDS",
+      "journal-before-issue:HOLDS",
+      "counted-once:HOLDS",
+      "serial-no-overshoot:HOLDS",
+      "stop-confirmed:HOLDS",
+      "post-stop-clean:HOLDS",
+      "full-suite:HOLDS",
+    ])
+    expect(seen.complete).toBe(true)
+    expect(seen.calls.length).toBeGreaterThanOrEqual(16)
+    expect(seen.calls.every((entry) => entry.unsettledAtEntry === 1)).toBe(true)
+    expect(seen.requests.every((entry) => entry.unsettledAtArrival === 1)).toBe(true)
+    // The probe adds only the sandbox spawn, the proxy, the scratch and the stub's baseURL to what the lifecycle asked for.
+    const asked = hosts.started[0]!
+    expect(asked.mode).toBe("oauth")
+    if (asked.mode === "oauth") {
+      expect(Object.keys(asked.oauth.baseURLs ?? {})).toEqual(["anthropic"])
+      expect(asked.oauth.providers).toEqual(["anthropic"])
+      expect(asked.signals).toBeNull()
+      expect(asked.proxy).toMatch(/^http:\/\/127\.0\.0\.1:/)
+      expect(asked.spawn).toBeDefined()
+    }
+  }, 120_000)
+
+  test("run allowance: thirty issued for run 1, the rest refused for budget before any backend entry, later runs proceed", async () => {
+    const { facts: seen, claims } = await observed("run-allowance")
+    expect(claims.map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "run-cap-issued:HOLDS",
+      "run-cap-refusal:HOLDS",
+      "run-cap-fails-run:HOLDS",
+      "run-cap-later-runs:HOLDS",
+      "stop-confirmed:HOLDS",
+      "post-stop-clean:HOLDS",
+    ])
+    expect(seen.calls.filter((entry) => entry.position === 1)).toHaveLength(30)
+  }, 120_000)
+
+  test("root allowance: the seeded 480 stop the runner with no backend call and no request", async () => {
+    const { facts: seen, claims } = await observed("root-allowance")
+    expect(claims.every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(seen.seeded).toEqual({ issued: 480, unsettled: 0 })
+    expect(seen.calls).toHaveLength(0)
+    expect(seen.requests).toHaveLength(0)
+  }, 120_000)
+
+  test("non-ending: the hung attempt is abandoned at the shortened deadline, the suite halts, nothing follows", async () => {
+    const { facts: seen, claims } = await observed("non-ending")
+    expect(claims.every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(seen.turnTimeoutMs).toBe(300)
+    expect(seen.hosts.starts).toBe(1)
+  }, 120_000)
+
+  test("cancel in flight: the signal set at the stub request halts the suite and the attempt counts one", async () => {
+    const { facts: seen, claims } = await observed("cancel-in-flight", { hangTurnMs: 5000 })
+    expect(seen.cancelled).toBe(true)
+    expect(verdictOf(claims, "cancelled-counts-one")).toBe("HOLDS")
+    expect(verdictOf(claims, "halt-and-marker")).toBe("HOLDS")
+    expect(verdictOf(claims, "nothing-later")).toBe("HOLDS")
+    expect(seen.deadline).toBeNull()
+  }, 120_000)
+
+  test("integrity before the start: a dangling issued line refuses the suite with nothing started", async () => {
+    const { facts: seen, claims, hosts } = await observed("integrity-before-start")
+    expect(claims.every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(seen.seeded).toEqual({ issued: 1, unsettled: 1 })
+    expect(hosts.started).toHaveLength(0)
+  }, 120_000)
+
+  test("injected conflict: reports made before the envelope returns latch the halt during settlement, and the retry never enters the backend", async () => {
+    const { facts: seen, claims } = await observed("integrity-injected")
+    expect(claims.map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "one-attempt-reaches-stub:HOLDS",
+      "unknown-binds-id:HOLDS",
+      "conflict-recorded:HOLDS",
+      "halt-and-marker:HOLDS",
+      "retry-refused:HOLDS",
+      "stop-confirmed:HOLDS",
+      "post-stop-clean:HOLDS",
+      "nothing-later:HOLDS",
+    ])
+    expect(seen.injected).toMatchObject({ reported: true })
+    expect(seen.calls).toHaveLength(1)
+    expect(seen.integrity).toEqual([expect.objectContaining({ payloads: 2 })])
+    expect(seen.refusals.some((refusal) => refusal.cause === "halted")).toBe(true)
+    expect(seen.halt).toContain("two different token payloads")
+  }, 120_000)
+
+  test("injected conflict: an envelope that carries a token figure leaves the reports unmade, and the row FAILS with that reason", async () => {
+    const { context, stub } = await standInContext()
+    context.seams.createBackend = (options) => {
+      const inner = standInBackend(stub, options)
+      return {
+        capabilities: (slot) => inner.capabilities(slot),
+        async runTurn(slot, instructions, input, schema, signal, admitted) {
+          const envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
+          if (envelope.ok || envelope.usageUnknown === undefined) return envelope
+          const { usageUnknown: _dropped, ...rest } = envelope
+          return { ...rest, tokens: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } }
+        },
+      }
+    }
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("integrity-injected"))
+    expect(seen.injected).toMatchObject({ reported: false })
+    const claims = claimsFor(seen, PIN)
+    expect(verdictOf(claims, "conflict-recorded")).toBe("FAILS")
+    expect(whyOf(claims, "conflict-recorded")).toContain("carried a token figure")
+  }, 120_000)
+
+  test("host offer: the unoffered call is rejected, no canary comes back, and StructuredOutput completes the turn", async () => {
+    const { facts: seen, claims, context } = await observed("host-offer")
+    expect(claims.slice(0, 5).map((entry) => `${entry.id}:${entry.verdict}`)).toEqual([
+      "offered-names:HOLDS",
+      "treatment:HOLDS",
+      "canary-nondisclosure:HOLDS",
+      "not-executed:HOLDS",
+      "structured-output-usable:HOLDS",
+    ])
+    const tried = seen.requests.find((entry) => entry.served === "unoffered-tool")!
+    expect(tried.position).toBe(1)
+    expect(seen.requests.filter((entry) => entry.served === "unoffered-tool")).toHaveLength(1)
+    // The canary is a file in run 1's worktree, and its token is in no fact.
+    const canary = (await Array.fromAsync(new Bun.Glob("**/probe-canary.txt").scan({ cwd: context.out, absolute: true })))[0]!
+    const token = (await readFile(canary, "utf8")).trim()
+    expect(token).toMatch(/^MAD-CANARY-[0-9a-f]{24}$/)
+    expect(JSON.stringify(seen)).not.toContain(token)
+  }, 120_000)
+
+  test("stream without usage: the row records what it saw and makes no claim", async () => {
+    const { facts: seen, claims } = await observed("stream-without-usage")
+    expect(claims).toEqual([])
+    expect(seen.requests.every((entry) => entry.served === "no-usage")).toBe(true)
+    expect(seen.turnTimeoutMs).toBe(300)
+    expect(seen.calls.length).toBeGreaterThanOrEqual(16)
+  }, 120_000)
+
+  test("a host start that outlives its bound is refused, and the host it returns later is stopped", async () => {
+    const { context } = await standInContext({ hostStartMs: 30 })
+    let stopped = 0
+    context.seams.startHost = async (options) => {
+      await Bun.sleep(120)
+      return {
+        ok: true,
+        host: { url: "http://127.0.0.1:1", pid: 1, stop: async () => ((stopped += 1), { confirmed: true, pid: 1, how: "stopped" }) },
+      } as unknown as ManagedHostStart
+    }
+    const started = await boundedStart(context, "the managed host's start", { mode: "oauth" } as ManagedHostOptions)
+    expect(started.ok).toBe(false)
+    if (!started.ok) expect(started.reason).toContain("gave no answer within 30 ms")
+    await Bun.sleep(200)
+    expect(stopped).toBe(1)
+    // A start that rejects late is swallowed, and one inside the bound is returned as it is.
+    context.seams.startHost = async () => ({ ok: false, reason: "refused before the spawn", stopped: null })
+    expect(await boundedStart(context, "x", { mode: "oauth" } as ManagedHostOptions)).toEqual({ ok: false, reason: "refused before the spawn", stopped: null })
+  })
+
+  test("a scenario past its bound aborts the suite, stops its host and fails its claims", async () => {
+    const { context, stub } = await standInContext({ hangTurnMs: 60_000 })
+    context.scenarioMs = 400
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("non-ending"))
+    expect(seen.deadline).toContain("did not end within its 400 ms bound")
+    expect(seen.hosts.records.filter((record) => record.event === "stop" && record.ok).length).toBeLessThanOrEqual(1)
+    const full = await runScenario({ ...context, scenarioMs: 1 }, ANTHROPIC, stub, spec("healthy"))
+    expect(verdictOf(claimsFor(full.facts, PIN), "full-suite")).toBe("FAILS")
+    expect(whyOf(claimsFor(full.facts, PIN), "full-suite")).toContain("did not end within its 1 ms bound")
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// The command
+// ---------------------------------------------------------------------------
+
+describe("main", () => {
+  const SHIPPED = { exitCode: 1, output: SHIPPED_BARRIERS.map((barrier) => barrier.text).join("\n"), timedOut: false }
+
+  async function commandSeams(extra: ProbeSeams = {}) {
+    const dir = await tempDir()
+    const stubFor = new Map<string, AdversarialStub>()
+    const hosts = standInHosts()
+    const seams: ProbeSeams = {
+      platform: "darwin",
+      selfTest: async () => ({ ok: true, why: "stand-in self-test" }) as never,
+      verifyPrepared: async () => ({ ok: true }),
+      startHost: async (options) => {
+        // The stub a host was pointed at is the one its backend talks to.
+        if (options.mode === "oauth") for (const [provider, baseURL] of Object.entries(options.oauth.baseURLs ?? {})) stubFor.set(provider, { baseURL } as AdversarialStub)
+        return hosts.startHost(options)
+      },
+      createBackend: (options) => standInBackend({ baseURL: [...stubFor.values()].at(-1)!.baseURL } as AdversarialStub, options),
+      createClient: (init) => ({ fake: init }),
+      enumerate: async () => [candidate(ANTHROPIC.providerId, ANTHROPIC.modelId)],
+      shipped: async () => SHIPPED,
+      codeRevision: async () => ({ kind: "known", value: { commit: "abc123", dirty: false } }),
+      transports: [ANTHROPIC],
+      scenarios: [spec("integrity-before-start"), spec("root-allowance"), spec("integrity-injected")],
+      hangTurnMs: 300,
+      repoRoot: join(dir, "repo"),
+      ...extra,
+    }
+    await mkdir(join(dir, "repo"), { recursive: true })
+    await mkdir(join(dir, "prepared"))
+    return { dir, seams, hosts, argv: ["bun", "x", "--out", join(dir, "out"), "--oauth-prepared", join(dir, "prepared")] }
+  }
+
+  test("it refuses off macOS, on a failed self-test and on an unverified payload, before any host", async () => {
+    const { seams, argv, hosts, dir } = await commandSeams()
+    expect(await main(argv, { ...seams, platform: "linux" })).toBe(1)
+    expect(await main(argv, { ...seams, selfTest: async () => ({ ok: false, why: "an external target was reachable" }) as never })).toBe(1)
+    expect(await main(argv, { ...seams, verifyPrepared: async () => ({ ok: false, problems: ["the tree digest differs"] }) })).toBe(1)
+    expect(await main(["bun", "x", "--out", join(dir, "repo", "out"), "--oauth-prepared", join(dir, "prepared")], seams)).toBe(1)
+    expect(hosts.started).toHaveLength(0)
+    expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
+  })
+
+  test("a calibration host that does not start refuses the probe before any scenario", async () => {
+    const { seams, argv, dir } = await commandSeams({ startHost: async () => ({ ok: false, reason: "the binary is not the measured build", stopped: null }) })
+    expect(await main(argv, seams)).toBe(1)
+    expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
+  })
+
+  test("it writes evidence with per-claim verdicts, the calibration apart, the fixture's digests, and no path", async () => {
+    const { seams, argv, dir } = await commandSeams()
+    expect(await main(argv, seams)).toBe(0)
+    const text = await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")
+    expect(text).not.toContain(dir)
+    expect(text).not.toContain(tmpdir())
+    expect(text).toContain("<probe-out>")
+    const evidence = JSON.parse(text) as Record<string, any>
+    expect(evidence.gate11).toContain("OPEN")
+    expect(evidence.calibration.label).toContain("CALIBRATION")
+    expect(evidence.calibration.turn.disposition).toBe("ok")
+    expect(evidence.protocolFixture.label).toContain("SYNTHETIC FIXTURE")
+    expect(evidence.protocolFixture.draftSha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(evidence.suiteAllowance.verdict).toBe("UNPROBED")
+    expect(evidence.unprobedTransports).toHaveLength(2)
+    expect(evidence.transports).toHaveLength(1)
+    expect(evidence.transports[0].scenarios.map((scenario: any) => scenario.kind)).toEqual(["integrity-before-start", "root-allowance", "integrity-injected"])
+    const injected = evidence.transports[0].scenarios[2]
+    expect(injected.records.issuedAttempts).toMatchObject({ seeded: 0, newlyIssued: 1, counted: 1 })
+    expect(injected.records.runTurnCalls.total).toBe(1)
+    expect(injected.records.refusals.halted).toBeGreaterThanOrEqual(1)
+    expect(evidence.transports[0].scenarios[1].records.issuedAttempts).toMatchObject({ seeded: 480, newlyIssued: 0 })
+    expect(evidence.summary.fails).toBe(0)
+    expect(evidence.summary.note).toContain("not a verdict on gate 11")
+  }, 120_000)
+
+  test("a failing claim exits 1 and the evidence is still written, with the failure named", async () => {
+    const { seams, argv, dir } = await commandSeams({ shipped: async () => ({ exitCode: 0, output: "", timedOut: false }), scenarios: [spec("integrity-before-start")] })
+    expect(await main(argv, seams)).toBe(1)
+    const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
+    expect(evidence.summary.failing).toContain("shipped command: shipped-refuses")
+  }, 120_000)
+
+  test("a probe past its own deadline writes no evidence and exits 1", async () => {
+    const { seams, argv, dir } = await commandSeams({ probeMs: 1, scenarios: [spec("non-ending")], hangTurnMs: 2000 })
+    expect(await main(argv, seams)).toBe(1)
+    expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
+  }, 120_000)
+})

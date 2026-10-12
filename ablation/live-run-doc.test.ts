@@ -452,7 +452,12 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // The api-key allowance is named only to say it authorizes nothing here.
     expect(item(2)).toContain("authorizes no OAuth work")
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
-    expect(item(3)).toContain("No real host has exercised that gate.")
+    // Item 3 names the probe's evidence and its limits, and says no gate change has closed it.
+    expect(gate(11).status).toBe("OPEN")
+    expect(item(3)).toContain("Story 2-7f2's zero-bill probe exercised that gate on the measured host for two stubbed transports (`ablation/evidence/adversarial-attempts-2026-10-12.json`")
+    expect(item(3)).toContain("the suite's own refusal is unreachable apart from the root's")
+    expect(item(3)).toContain("The gate closes only by a reviewed change to the gate table on that evidence, and no such change has been made.")
+    expect(item(3)).toContain("OpenAI's transport and the copilot models served over `/responses` are unprobed.")
     expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
     // Item 6 says the bound is implemented and accepted, and that a reviewed gate change closed it.
     expect(item(6)).toContain("Story 2-7e2 implements the bound")
@@ -1319,5 +1324,161 @@ describe("LIVE-RUN.md documents the OAuth pre-run guards", () => {
     ]) {
       expect(text, phrase).toContain(phrase)
     }
+  })
+})
+
+/**
+ * Story 2-7f2 — the adversarial probe's section, tied to the committed evidence:
+ * each transport, each scenario's verdicts and each UNPROBED row it states is
+ * what the evidence file records.
+ */
+describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actually run", () => {
+  const EVIDENCE = "ablation/evidence/adversarial-attempts-2026-10-12.json"
+  const section = async (): Promise<string> =>
+    between(await liveRunDoc(), "### The zero-bill probe (story 2-7f2): `bun run adversarial-probe`", "\n### Reading the result", "the adversarial probe section")
+
+  interface Claim {
+    id: string
+    verdict: "HOLDS" | "FAILS" | "UNPROBED"
+    why: string
+  }
+  interface Scenario {
+    kind: string
+    claims: Claim[]
+    observations: string[]
+    records: {
+      issuedAttempts: { seeded: number; newlyIssued: number; counted: number }
+      refusals: Record<string, number>
+      runTurnCalls: { total: number }
+      stubRequests: { model: number; paths: string[]; byServed: Record<string, number> }
+      extraRequests: { classification: string }[]
+    }
+    hosts: { starts: number }
+    egressRefused: string[]
+  }
+  const evidence = async () =>
+    JSON.parse(await Bun.file(new URL(`../${EVIDENCE}`, import.meta.url)).text()) as {
+      story: string
+      gate11: string
+      host: { version: string; matchesMeasuredHost: boolean }
+      protocolFixture: { label: string; draftSha256: string; fixtureFrozenHash: string }
+      calibration: { label: string; egressRefused: string[] }
+      shippedCommand: { claims: Claim[] }
+      suiteAllowance: Claim
+      transports: { provider: string; model: string; format: string; scenarios: Scenario[] }[]
+      unprobedTransports: { transport: string }[]
+      summary: { holds: number; fails: number; unprobed: number; failing: string[] }
+    }
+  const scenario = (transport: { scenarios: Scenario[] }, kind: string) => transport.scenarios.find((entry) => entry.kind === kind)!
+  const verdict = (entry: Scenario, id: string) => entry.claims.find((claim) => claim.id === id)?.verdict
+
+  test("the transports, the routes and the UNPROBED rows are the evidence's", async () => {
+    const text = await section()
+    const file = await evidence()
+    expect(text).toContain(`\`${EVIDENCE}\``)
+    expect(text).toContain(`the measured opencode (${file.host.version})`)
+    expect(file.host.matchesMeasuredHost).toBe(true)
+    expect(file.story).toBe("2-7f2")
+    for (const transport of file.transports) {
+      const paths = scenario(transport, "healthy").records.stubRequests.paths
+      expect(paths).toHaveLength(1)
+      expect(text).toContain(`| \`${transport.provider}/${transport.model}\` | \`${paths[0]}\` | probed |`)
+    }
+    expect(file.transports.map((transport) => `${transport.provider}/${transport.model}`)).toEqual(["anthropic/claude-sonnet-5", "github-copilot/gpt-5-mini"])
+    expect(file.unprobedTransports).toHaveLength(2)
+    expect(text).toContain("| `github-copilot/gpt-6-luna` | `POST /responses` | UNPROBED: no stub here answers the Responses API |")
+    expect(text).toContain("| `openai` (any model) | not observable | UNPROBED: its OAuth transport ignores `baseURL` |")
+  })
+
+  test("every claim the section states as observed HOLDS on both transports, and nothing FAILS", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const file = await evidence()
+    expect(text).toContain("**What the run of 2026-10-12 observed, on both probed transports:**")
+    expect(file.summary.fails).toBe(0)
+    expect(file.summary.failing).toEqual([])
+    expect(file.shippedCommand.claims.map((claim) => claim.verdict)).toEqual(["HOLDS", "HOLDS"])
+    for (const transport of file.transports) {
+      const name = `${transport.provider}/${transport.model}`
+      for (const kind of ["healthy", "run-allowance", "root-allowance", "non-ending", "integrity-before-start", "integrity-injected", "host-offer"]) {
+        expect(scenario(transport, kind).claims.map((claim) => `${claim.id}:${claim.verdict}`).filter((entry) => !entry.endsWith(":HOLDS")), `${name} ${kind}`).toEqual([])
+      }
+      // The counts the bullets give.
+      const healthy = scenario(transport, "healthy")
+      expect(healthy.hosts.starts, name).toBe(16)
+      expect(healthy.records.runTurnCalls.total, name).toBe(healthy.records.issuedAttempts.newlyIssued)
+      expect(healthy.records.extraRequests, name).toEqual([])
+      const run = scenario(transport, "run-allowance")
+      expect(run.claims.find((claim) => claim.id === "run-cap-issued")!.why, name).toBe("30 attempts issued for run 1")
+      expect(run.records.refusals, name).toEqual({ budget: 1 })
+      const root = scenario(transport, "root-allowance")
+      expect(root.records.issuedAttempts, name).toMatchObject({ seeded: 480, newlyIssued: 0 })
+      expect(root.records.runTurnCalls.total + root.records.stubRequests.model, name).toBe(0)
+      const injected = scenario(transport, "integrity-injected")
+      expect(injected.records.stubRequests.byServed, name).toEqual({ "http-400": 1 })
+      expect(injected.records.runTurnCalls.total, name).toBe(1)
+      // The cancellation: the attempt counts one, and not-issued was not seen.
+      const cancel = scenario(transport, "cancel-in-flight")
+      expect(verdict(cancel, "cancelled-counts-one"), name).toBe("HOLDS")
+      expect(verdict(cancel, "not-issued-release"), name).toBe("UNPROBED")
+      // The host offer: an explicit rejection, and one tool continuation, which is expected.
+      const offer = scenario(transport, "host-offer")
+      expect(offer.claims.find((claim) => claim.id === "treatment")!.why, name).toContain("rejection")
+      expect(offer.records.extraRequests.map((entry) => entry.classification), name).toEqual(["tool-continuation"])
+      expect(offer.records.stubRequests.byServed["unoffered-tool"], name).toBe(1)
+      // Every scenario that started a host saw the same refused egress target.
+      for (const entry of transport.scenarios) if (entry.hosts.starts > 0) expect(entry.egressRefused, `${name} ${entry.kind}`).toEqual(["api.githubcopilot.com:443"])
+    }
+    expect(file.calibration.egressRefused).toEqual(["api.githubcopilot.com:443"])
+    expect(text).toContain("Every host also asked the refusing proxy for `api.githubcopilot.com:443`, on the anthropic-only hosts too.")
+    expect(file.suiteAllowance.verdict).toBe("UNPROBED")
+    expect(text).toContain("**The suite's allowance: UNPROBED.**")
+    expect(text).toContain("No `not-issued` settlement occurred, so its release is UNPROBED here")
+    expect(text).toContain("No spontaneous integrity failure of a real host was observed, and none is claimed.")
+    expect(text).toContain("reported unobserved, never as zero and never as resistance")
+  })
+
+  test("the stream-without-usage row is an observation, and the two routes differ as the section says", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const file = await evidence()
+    const [messages, chat] = file.transports.map((transport) => scenario(transport, "stream-without-usage"))
+    expect(messages!.claims).toEqual([])
+    expect(chat!.claims).toEqual([])
+    // Messages: several requests inside one attempt, abandoned. Chat-completions: one request per attempt, none abandoned.
+    expect(messages!.records.issuedAttempts.newlyIssued).toBe(1)
+    expect(messages!.records.stubRequests.model).toBeGreaterThan(1)
+    expect(messages!.records.extraRequests.every((entry) => entry.classification === "after-served-failure")).toBe(true)
+    expect(messages!.observations.join(" ")).toContain("unknown (abandoned)")
+    expect(chat!.records.stubRequests.model).toBe(chat!.records.issuedAttempts.newlyIssued)
+    expect(chat!.records.extraRequests).toEqual([])
+    expect(chat!.observations.join(" ")).toContain("showed no re-send")
+    expect(text).toContain("**A stream without usage figures (an observation, with no verdict).**")
+    expect(text).toContain("Repetition alone does not establish a host retry, and neither result is workload or quota evidence.")
+  })
+
+  test("it states its isolation, its fixture and that gate 11 stays OPEN", async () => {
+    const text = (await section()).replace(/\s+/g, " ")
+    const file = await evidence()
+    for (const phrase of [
+      "bun run adversarial-probe --out <probe-out> --oauth-prepared <prepared-root>",
+      "**It bills nothing.** macOS only.",
+      "the user's store is never linked, opened or named in a route",
+      "never a header value, a prompt, a body or response text",
+      "The probe wraps two seams and nothing else",
+      "then calls the ordinary `startManagedHost`, so every stop is held to the ordinary store guard",
+      "Stages 1 and 2 of the launcher (the offline checks, the authorization and the reservation) are not run on a real host",
+      "That copy is a fixture: it pre-registers nothing, it is no freeze, and the protocol file in this repository is read and never written.",
+      "the host's reason for sending it is not established",
+      "The shipped launcher passes no turn deadline, so its bound is the backend's default.",
+      "Gate 11 stays OPEN: this evidence is for a separate, reviewed gate change and closes nothing.",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    expect(file.gate11).toContain("OPEN")
+    expect(file.protocolFixture.label).toContain("SYNTHETIC FIXTURE")
+    expect(file.calibration.label).toContain("CALIBRATION")
+    // The committed file carries placeholders, not paths.
+    const raw = await Bun.file(new URL(`../${EVIDENCE}`, import.meta.url)).text()
+    for (const fragment of ["/private/", "/var/folders/", "/Users/", "/tmp/"]) expect(raw, fragment).not.toContain(fragment)
+    expect(raw).toContain("<probe-out>")
   })
 })

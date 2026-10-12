@@ -38,17 +38,19 @@ import {
   ADVERSARIAL_HOST_TOOLS,
   ADVERSARIAL_HOSTS_FILE,
   adversarialRoster,
+  adversarialSuiteConfig,
   gitReservationSeam,
   hostRosterProblems,
   main,
   oauthHostLifecycle,
   parseAdversarialFlags,
   rootRecheckProblems,
+  runSuiteStage,
   stopEstablished,
   type AdversarialOverrides,
   type HostRecord,
 } from "./adversarial.ts"
-import { boundedGit, preflightSpawn, type SignalSource } from "./paired.ts"
+import { boundedGit, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const HERE = process.cwd()
@@ -1107,4 +1109,61 @@ test("a refused stage 1 leaves no start marker anywhere under --out", async () =
   expect(result.code).toBe(1)
   expect(existsSync(join(adversarialDirectory(env.out), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
   expect(existsSync(env.out)).toBe(false)
+})
+
+// ---------------------------------------------------------------------------
+// The config and the suite stage the zero-bill probe shares (story 2-7f2)
+// ---------------------------------------------------------------------------
+
+describe("the suite's config and its stage, shared with the zero-bill probe", () => {
+  test("the config is the one the launcher seals, and the probe's differs in provenance only", async () => {
+    const wiring = productionTools({ worktree: join(await tempDir(), "worktrees") })!
+    const live = adversarialSuiteConfig("live", wiring)
+    expect(live).toEqual({
+      provenance: "live",
+      tools: toolsIdentity(wiring),
+      accounting: "attempts",
+      route: "oauth",
+      hostTools: { "*": false, StructuredOutput: true },
+      hostIsolation: "fresh-per-run",
+    })
+    expect(adversarialSuiteConfig("scripted", wiring)).toEqual({ ...live, provenance: "scripted" })
+    // A fresh object each time: sealing one cannot change the next.
+    expect(live.hostTools).not.toBe(adversarialSuiteConfig("live", wiring).hostTools)
+  })
+
+  test("the stage hands the lifecycle's stop to its caller before the suite runs, and returns a refusal without deciding an exit", async () => {
+    const env = await setup()
+    const wiring = productionTools({ worktree: join(adversarialDirectory(env.out), "worktrees") })!
+    const hosts = scriptedHosts()
+    let owned: (() => Promise<void>) | undefined
+    const resolved = adversarialRoster({ providerId: "anthropic", modelId: "claude-sonnet-5" })
+    // No schedule was sealed under this root, so the suite refuses before its start marker.
+    const { outcome, hosts: state, recordFile } = await runSuiteStage({
+      out: env.out,
+      protocolFile: (await frozenV3Copy(scratch)).file,
+      codeRevision: { kind: "known", value: { commit: "abc123", dirty: false } },
+      resolved,
+      config: adversarialSuiteConfig("scripted", wiring),
+      clock: fakeClock(),
+      signal: new AbortController().signal,
+      ownStop: (stop) => {
+        owned = stop
+      },
+      scheduleHash: "0".repeat(64),
+      provider: "anthropic",
+      pin: { providerId: "anthropic", modelId: "claude-sonnet-5" },
+      prepared: env.prepared,
+      dataRoot: env.dataRoot,
+      home: env.home,
+      payloadPins: env.pins,
+      startHost: hosts.startHost,
+    })
+    expect(owned).toBeDefined()
+    await owned!()
+    expect(outcome.ok).toBe(false)
+    expect(state).toEqual({ starts: 0, recordFailure: null, unestablished: [] })
+    expect(recordFile).toBe(join(adversarialDirectory(env.out), ADVERSARIAL_HOSTS_FILE))
+    expect(hosts.started).toHaveLength(0)
+  })
 })

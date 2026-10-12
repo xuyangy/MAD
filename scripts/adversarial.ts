@@ -684,6 +684,99 @@ export function oauthHostLifecycle(options: OAuthHostLifecycleOptions): {
 }
 
 // ---------------------------------------------------------------------------
+// The suite's config and its stage, shared with the zero-bill probe
+// ---------------------------------------------------------------------------
+
+/**
+ * The config every schedule of this launcher is sealed with (protocol v3 B2,
+ * B8 and B9): attempts on the oauth route, the `StructuredOutput`-only host
+ * offer, and a host of its own per run. `provenance` is `live` for the
+ * launcher; the zero-bill probe (`scripts/adversarial-probe.ts`) seals the same
+ * config as `scripted`.
+ */
+export function adversarialSuiteConfig(provenance: AdversarialConfig["provenance"], wiring: ToolsWiring): AdversarialConfig {
+  return {
+    provenance,
+    tools: toolsIdentity(wiring),
+    accounting: "attempts",
+    route: "oauth",
+    hostTools: { ...ADVERSARIAL_HOST_OFFER },
+    hostIsolation: FRESH_PER_RUN,
+  }
+}
+
+/** What stage 4 runs on: a sealed schedule's inputs, the OAuth route, and the seams whose defaults are the shipped behaviour. */
+export interface SuiteStageInput {
+  out: string
+  protocolFile: string
+  codeRevision: Maybe<CodeRevision>
+  /** The one-slot roster the schedule was sealed with, and its warnings. */
+  resolved: SelectResult
+  config: AdversarialConfig
+  clock: Clock
+  signal: AbortSignal
+  /** Takes the lifecycle's stop of the current host before the suite starts, for the caller's signal handling. */
+  ownStop: (stop: () => Promise<void>) => void
+  scheduleHash: string
+  provider: string
+  pin: Pin
+  prepared: string
+  dataRoot: string
+  home: string
+  payloadPins: PayloadPins
+  requestMs?: number
+  startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
+  createClient?: (init: { baseUrl: string; directory: string }) => unknown
+  enumerate?: (client: unknown) => Promise<Candidate[]>
+  createBackend?: (options: OpencodeBackendOptions) => ModelBackend
+  appendHostRecord?: (file: string, line: HostRecord) => Promise<string | null>
+  materializeGit?: MaterializeGit
+}
+
+/**
+ * Stage 4: builds the per-run host lifecycle, hands its stop to the caller, and
+ * runs the suite on it. It prints nothing and decides no exit code.
+ */
+export async function runSuiteStage(
+  input: SuiteStageInput,
+): Promise<{ outcome: Awaited<ReturnType<typeof runAdversarialSuite>>; hosts: LifecycleState; recordFile: string }> {
+  const recordFile = join(adversarialDirectory(input.out), ADVERSARIAL_HOSTS_FILE)
+  const hosts = oauthHostLifecycle({
+    provider: input.provider,
+    pin: input.pin,
+    prepared: input.prepared,
+    dataRoot: input.dataRoot,
+    home: input.home,
+    payloadPins: input.payloadPins,
+    scheduleHash: input.scheduleHash,
+    roster: input.resolved.roster,
+    recordFile,
+    clock: input.clock,
+    requestMs: input.requestMs ?? PAIRED_HOST_REQUEST_MS,
+    startHost: input.startHost ?? startManagedHost,
+    createClient: input.createClient ?? defaultCreateClient,
+    enumerate: input.enumerate ?? ((client: unknown) => enumerateCandidates(client as never)),
+    createBackend: input.createBackend ?? ((options: OpencodeBackendOptions) => new OpencodeModelBackend(options)),
+    append: input.appendHostRecord ?? appendHostRecord,
+  })
+  input.ownStop(hosts.stopCurrent)
+  const outcome = await runAdversarialSuite({
+    experimentRoot: input.out,
+    protocolFile: input.protocolFile,
+    codeRevision: input.codeRevision,
+    roster: input.resolved.roster,
+    priorWarnings: input.resolved.warnings,
+    config: input.config,
+    clock: input.clock,
+    signal: input.signal,
+    shell: $ as never,
+    lifecycle: hosts.lifecycle,
+    ...(input.materializeGit === undefined ? {} : { git: input.materializeGit }),
+  })
+  return { outcome, hosts: hosts.state, recordFile }
+}
+
+// ---------------------------------------------------------------------------
 // The command
 // ---------------------------------------------------------------------------
 
@@ -1076,14 +1169,7 @@ async function launch(
     return 1
   }
   if (interrupted()) return interruptedAfterReservation("after the roots were created and before the schedule was sealed")
-  const config: AdversarialConfig = {
-    provenance: "live",
-    tools: toolsIdentity(wiring),
-    accounting: "attempts",
-    route: "oauth",
-    hostTools: { ...ADVERSARIAL_HOST_OFFER },
-    hostIsolation: FRESH_PER_RUN,
-  }
+  const config = adversarialSuiteConfig("live", wiring)
   const created = await createAdversarialSchedule({
     experimentRoot: out,
     protocolFile,
@@ -1102,38 +1188,29 @@ async function launch(
 
   // ---- STAGE 4: the suite ----
   console.log("\nbun run adversarial — stage 4 of 4: write all sixteen worktrees, then one managed host per run")
-  const recordFile = join(adversarialDirectory(out), ADVERSARIAL_HOSTS_FILE)
-  const hosts = oauthHostLifecycle({
+  const { outcome, hosts, recordFile } = await runSuiteStage({
+    out,
+    protocolFile,
+    codeRevision,
+    resolved,
+    config,
+    clock,
+    signal,
+    ownStop,
+    scheduleHash: created.schedule.scheduleHash,
     provider,
     pin,
     prepared,
     dataRoot,
     home,
     payloadPins,
-    scheduleHash: created.schedule.scheduleHash,
-    roster: resolved.roster,
-    recordFile,
-    clock,
-    requestMs: overrides.hostRequestMs ?? PAIRED_HOST_REQUEST_MS,
-    startHost: overrides.startHost ?? startManagedHost,
-    createClient: overrides.createClient ?? defaultCreateClient,
-    enumerate: overrides.enumerate ?? ((client: unknown) => enumerateCandidates(client as never)),
-    createBackend: overrides.createBackend ?? ((options: OpencodeBackendOptions) => new OpencodeModelBackend(options)),
-    append: overrides.appendHostRecord ?? appendHostRecord,
-  })
-  ownStop(hosts.stopCurrent)
-  const outcome = await runAdversarialSuite({
-    experimentRoot: out,
-    protocolFile,
-    codeRevision,
-    roster: resolved.roster,
-    priorWarnings: resolved.warnings,
-    config,
-    clock,
-    signal,
-    shell: $ as never,
-    lifecycle: hosts.lifecycle,
-    ...(overrides.materializeGit === undefined ? {} : { git: overrides.materializeGit }),
+    ...(overrides.hostRequestMs === undefined ? {} : { requestMs: overrides.hostRequestMs }),
+    ...(overrides.startHost === undefined ? {} : { startHost: overrides.startHost }),
+    ...(overrides.createClient === undefined ? {} : { createClient: overrides.createClient }),
+    ...(overrides.enumerate === undefined ? {} : { enumerate: overrides.enumerate }),
+    ...(overrides.createBackend === undefined ? {} : { createBackend: overrides.createBackend }),
+    ...(overrides.appendHostRecord === undefined ? {} : { appendHostRecord: overrides.appendHostRecord }),
+    ...(overrides.materializeGit === undefined ? {} : { materializeGit: overrides.materializeGit }),
   })
   if (!outcome.ok) {
     console.log(`\nREFUSED by runAdversarialSuite before its start marker: ${outcome.reason}\nNo host was started. The sealed schedule stays at ${created.file}.`)
@@ -1145,12 +1222,12 @@ async function launch(
   const bill = outcome.bill
   console.log(`\nAttempts: ${bill.requests.length} journaled; halt: ${bill.halt ?? "none"}; stop: ${bill.stop ?? "none"}`)
   for (const warning of outcome.warnings) console.log(`warning: ${warning}`)
-  console.log(`\nHosts: ${hosts.state.starts} start(s) attempted, recorded in ${recordFile}`)
-  for (const line of hosts.state.unestablished) console.log(`HOST STOP NOT ESTABLISHED — ${line}`)
-  if (hosts.state.recordFailure !== null) {
-    console.log(`HOST RECORD INCOMPLETE — ${hosts.state.recordFailure}. The host record is not a complete disclosure of the host starts.`)
+  console.log(`\nHosts: ${hosts.starts} start(s) attempted, recorded in ${recordFile}`)
+  for (const line of hosts.unestablished) console.log(`HOST STOP NOT ESTABLISHED — ${line}`)
+  if (hosts.recordFailure !== null) {
+    console.log(`HOST RECORD INCOMPLETE — ${hosts.recordFailure}. The host record is not a complete disclosure of the host starts.`)
   }
-  const clean = outcome.complete && hosts.state.recordFailure === null && hosts.state.unestablished.length === 0 && !interrupted()
+  const clean = outcome.complete && hosts.recordFailure === null && hosts.unestablished.length === 0 && !interrupted()
   console.log(
     (clean
       ? "\nThe suite reads `complete: true`: all sixteen runs completed, every host stopped with its checks held, and every host record was persisted.\n"

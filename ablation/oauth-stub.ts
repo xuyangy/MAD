@@ -68,35 +68,51 @@ function sse(events: { event?: string; data: unknown }[]): string {
   return events.map((entry) => `${entry.event === undefined ? "" : `event: ${entry.event}\n`}data: ${typeof entry.data === "string" ? entry.data : JSON.stringify(entry.data)}\n\n`).join("")
 }
 
-/** A streamed Messages answer: one `tool_use` block calling `StructuredOutput` with `payload`. */
-export function messagesAnswer(index: number, payload: unknown): string {
+/** What an answer may vary: the tool it calls (`StructuredOutput` when absent), and whether it carries usage figures (it does when absent). */
+export interface AnswerOptions {
+  tool?: string
+  usage?: boolean
+}
+
+/** A streamed Messages answer: one `tool_use` block calling `options.tool` with `payload`. */
+export function messagesAnswer(index: number, payload: unknown, options: AnswerOptions = {}): string {
   const input = JSON.stringify(payload)
+  const usage = options.usage ?? true
   return sse([
     {
       event: "message_start",
       data: {
         type: "message_start",
-        message: { id: `msg_stub_${index}`, type: "message", role: "assistant", model: "stub", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } },
+        message: {
+          id: `msg_stub_${index}`,
+          type: "message",
+          role: "assistant",
+          model: "stub",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          ...(usage ? { usage: { input_tokens: 10, output_tokens: 1 } } : {}),
+        },
       },
     },
-    { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_stub_${index}`, name: "StructuredOutput", input: {} } } },
+    { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_stub_${index}`, name: options.tool ?? "StructuredOutput", input: {} } } },
     { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: input } } },
     { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
-    { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } } },
+    { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, ...(usage ? { usage: { output_tokens: 5 } } : {}) } },
     { event: "message_stop", data: { type: "message_stop" } },
   ])
 }
 
-/** A streamed chat-completions answer: one tool call to `StructuredOutput` with `payload`. */
-export function chatCompletionsAnswer(index: number, payload: unknown): string {
+/** A streamed chat-completions answer: one tool call to `options.tool` with `payload`. */
+export function chatCompletionsAnswer(index: number, payload: unknown, options: AnswerOptions = {}): string {
   const base = { id: `chatcmpl-stub-${index}`, object: "chat.completion.chunk", created: 0, model: "stub" }
-  const call = { id: `call_stub_${index}`, type: "function", function: { name: "StructuredOutput", arguments: JSON.stringify(payload) } }
+  const call = { id: `call_stub_${index}`, type: "function", function: { name: options.tool ?? "StructuredOutput", arguments: JSON.stringify(payload) } }
   return (
     sse([
       { data: { ...base, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] } },
       { data: { ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, ...call }] }, finish_reason: null }] } },
       { data: { ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] } },
-      { data: { ...base, choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } } },
+      ...((options.usage ?? true) ? [{ data: { ...base, choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } } }] : []),
     ]) + "data: [DONE]\n\n"
   )
 }

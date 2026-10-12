@@ -2051,9 +2051,110 @@ writes its bill before the launcher exits 1. Each managed host is started with `
 its own handler never exits first.
 
 **What it does not establish.** Fresh local data directories do not show isolation at the
-provider, account or cache level, and the host offer is planned, not observed: the real host's
-permission behaviour, and the suite's attempt gate on a real host (gate 11), are story 2-7f2's
-zero-bill probe. Every test of this launcher runs on stand-in hosts and a scripted backend.
+provider, account or cache level. Every test of this launcher runs on stand-in hosts and a scripted
+backend. What a real host does to the host offer and to the suite's attempt gate (gate 11) is
+observed by story 2-7f2's zero-bill probe, below, for two stubbed transports and no other.
+
+### The zero-bill probe (story 2-7f2): `bun run adversarial-probe`
+
+```
+bun run oauth-prepare --out <prepared-root>
+bun run adversarial-probe --out <probe-out> --oauth-prepared <prepared-root>
+```
+
+Both paths are absolute, disjoint and outside this repository, and `--out` is absent or empty. The
+probe runs the measured opencode (1.18.32) through this launcher's own suite composition
+(`adversarialSuiteConfig` and `runSuiteStage` in `scripts/adversarial.ts`) and writes
+`<probe-out>/adversarial-attempts.json`. The committed copy, with every path replaced by a
+placeholder, is `ablation/evidence/adversarial-attempts-2026-10-12.json`.
+
+**It bills nothing.** macOS only. Every host is spawned inside `sandbox-exec` with all outbound
+network denied but loopback, after a self-test of that profile; a failed self-test, a prepared
+payload that does not verify, or a host that is not the measured build refuses before any scenario.
+Sign-ins are placeholders under the probe's own scratch, and the user's store is never linked,
+opened or named in a route. Each provider is a loopback stub (`ablation/adversarial-stub.ts`) that
+answers a whole `review()`, and that keeps tool names, schema property names and booleans, never a
+header value, a prompt, a body or response text.
+
+**What it runs.** Each scenario seals a schedule in a root of its own and runs
+`runAdversarialSuite` on `oauthHostLifecycle`. The probe wraps two seams and nothing else:
+`startHost` adds the sandbox spawn, a refusing proxy and the stub's `baseURL` and then calls the
+ordinary `startManagedHost`, so every stop is held to the ordinary store guard; `createBackend`
+builds the real `OpencodeModelBackend` from the options the lifecycle passes and counts its
+`runTurn` calls. Stages 1 and 2 of the launcher (the offline checks, the authorization and the
+reservation) are not run on a real host: one row runs the shipped command as a child process and
+records that it still refuses, naming gates 10 and 11, the null pin and the unfrozen protocol.
+
+The schedules are `provenance: "scripted"`, sealed against a private frozen-format copy of protocol
+v3 that the probe writes into its scratch. That copy is a fixture: it pre-registers nothing, it is
+no freeze, and the protocol file in this repository is read and never written.
+
+**Transports.** A result holds for its exact provider, model and route:
+
+| Transport | Route the host used | Status |
+| --- | --- | --- |
+| `anthropic/claude-sonnet-5` | `POST /v1/messages` | probed |
+| `github-copilot/gpt-5-mini` | `POST /chat/completions` | probed |
+| `github-copilot/gpt-6-luna` | `POST /responses` | UNPROBED: no stub here answers the Responses API |
+| `openai` (any model) | not observable | UNPROBED: its OAuth transport ignores `baseURL` |
+
+**Verdicts are per claim.** HOLDS, FAILS, or UNPROBED: a branch the real host cannot reach, or an
+observation an earlier failure blocked, which the verdict names. Four records are reported apart
+for every scenario: journaled issued attempts (seeded lines apart from the scenario's own),
+refusals, backend `runTurn` calls, and physical stub requests. A request beyond an attempt's first
+is classified from what the stub served and from the time window it arrived in; the host's reason
+for sending it is not established.
+
+**What the run of 2026-10-12 observed, on both probed transports:**
+
+- **A healthy suite.** Sixteen hosts started in schedule order, each stopped and held to its
+  post-stop checks before the next. At every `runTurn` entry and every request reaching the stub,
+  the journal file already held an issued line that was not settled. Each attempt was journaled
+  once, never two were in flight, and no allowance was overshot. Every host resolved the sealed
+  one-slot roster.
+- **The run's allowance.** A run asked for 32 attempts: 30 were issued, the next was refused for
+  `budget` without entering the backend, the run was recorded failed, and the fifteen later runs
+  completed.
+- **The root's allowance.** With 480 settled attempts seeded, the runner stopped naming the root's
+  480. No `runTurn` call was made, no model request was sent, and no later host started.
+- **The suite's allowance: UNPROBED.** The gate tests the root's 480 before the suite's 480, and
+  the suite's root holds nothing but the suite, so a valid journal reaches the two together. The
+  branch is covered at the gate only, with an artificial view, in `ablation/governor.test.ts`.
+- **A non-ending attempt.** With the turn deadline shortened to 5,000 ms through the backend seam,
+  the attempt was settled `abandoned` within its bound and counted once, the suite halted and wrote
+  its marker, the held request was closed, the host's stop was confirmed and its post-stop checks
+  were clean, and nothing followed. The shipped launcher passes no turn deadline, so its bound is
+  the backend's default.
+- **A cancellation in flight.** The attempt in flight still counted one and the suite halted. No
+  `not-issued` settlement occurred, so its release is UNPROBED here: it arises only when the signal
+  has fired by the time admission resolves, and then no host is reached
+  (`ablation/journal-adversarial.test.ts` covers it on a scripted backend).
+- **An integrity failure before the start.** A journal holding one issued line that was never
+  settled refused the suite as halted, with no start marker, no host and no request.
+- **An integrity failure in a run, injected.** The stub answered one attempt with HTTP 400, a real
+  model error, which settled `unknown` with an execution id. The probe's wrapper then reported two
+  unequal synthetic token payloads for that id. Both were recorded, the suite halted and wrote its
+  marker, and MAD's retry was refused before any backend entry. No spontaneous integrity failure of
+  a real host was observed, and none is claimed.
+- **The host offer (v3 B8).** Every model request offered exactly `StructuredOutput`. A call to a
+  file-reading tool the host had not offered, on a canary file inside the worktree, came back as
+  "Model tried to call unavailable tool": an explicit rejection. The canary token was in no
+  continuation the stub inspected, and `StructuredOutput` then completed the turn. AD-13's
+  host-tool route stays unavailable under this offer and is reported unobserved, never as zero and
+  never as resistance.
+- **A stream without usage figures (an observation, with no verdict).** On the Messages route the
+  host sent the request again, several times inside one admitted attempt, until the shortened turn
+  deadline abandoned it. On the chat-completions route it reported a token figure and each attempt
+  ended normally. Repetition alone does not establish a host retry, and neither result is workload
+  or quota evidence.
+
+Every host also asked the refusing proxy for `api.githubcopilot.com:443`, on the anthropic-only
+hosts too. The sandbox denied it.
+
+**What it does not establish.** Gate 11 stays OPEN: this evidence is for a separate, reviewed gate
+change and closes nothing. It validates no other pin, model or build, and nothing about a real
+provider, account, cache or quota. The exit status is 0 only when every scenario ran and no claim
+FAILS; the evidence is written whatever the verdicts.
 
 ### Reading the result
 
@@ -2117,8 +2218,14 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
 3. **Verified shared gates — OPEN.** Gate 11, owned by story 2-7f2. The suite's attempt gate (run,
    suite and root) is verified against a real host, on the adversarial path, before the first paid
    request: a refused admission reaches no backend, and settlement, a timeout and an integrity
-   failure are each recorded. No real host has exercised that gate. Story 2-8c's probe and the paired
-   and pilot evidence cover the Blocks admission only, and are reused only within that scope.
+   failure are each recorded. Story 2-7f2's zero-bill probe exercised that gate on the measured host
+   for two stubbed transports (`ablation/evidence/adversarial-attempts-2026-10-12.json`, and "The
+   zero-bill probe" above): the run and root refusals, settlement, a non-ending attempt and both
+   integrity rows hold there, and the suite's own refusal is unreachable apart from the root's. The
+   gate closes only by a reviewed change to the gate table on that evidence, and no such change has
+   been made. OpenAI's transport and the copilot models served over `/responses` are unprobed. Story
+   2-8c's probe and the paired and pilot evidence cover the Blocks admission only, and are reused
+   only within that scope.
 4. **Bounded tool termination — CLOSED.** The blame half closed on 2026-09-21 (story 2-7c). The
    materializer's half is (6), closed with gate 12. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
@@ -2362,7 +2469,8 @@ experiment's shared gates.
 
 Every test drives a scripted backend over real git. They show the runner's order, gates,
 evidence and trace, and the reader's coverage rules. They say nothing about whether a live
-model honours the material frame, and nothing about a real host's requests.
+model honours the material frame, and nothing about a real host's requests. The zero-bill probe
+(story 2-7f2) observes a real host's requests against stub providers, and no live model.
 
 ### When the suite stops and needs a human
 
