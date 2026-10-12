@@ -2105,11 +2105,21 @@ refusals, backend `runTurn` calls, and physical stub requests. A request beyond 
 is classified from what the stub served and from the time window it arrived in; the host's reason
 for sending it is not established.
 
+**It owns every host it starts.** Each process has one stop, bounded at 30,000 ms, that the
+lifecycle, the probe's cleanup and a start that outlived its 120,000 ms bound all share, and its
+outcome is kept. A stop that is unconfirmed, that rejects or that passes its bound, and a start that
+has not returned, each end the probe before another host starts: it writes no evidence, exits 1 and
+keeps its scratch. The calibration host must also stop with its post-stop checks present and clean.
+A confirmed stop whose post-stop check failed is reported as a FAILS and lets the later scenarios
+run, each in a root of its own.
+
 **What the run of 2026-10-12 observed, on both probed transports:**
 
 - **A healthy suite.** Sixteen hosts started in schedule order, each stopped and held to its
-  post-stop checks before the next. At every `runTurn` entry and every request reaching the stub,
-  the journal file already held an issued line that was not settled. Each attempt was journaled
+  post-stop checks before the next. At every `runTurn` entry the journal file held exactly one
+  unsettled issued line, and it was that attempt's: a line the scenario issued, new to that call,
+  carrying the run the suite's slot report gives that call, still the one unsettled line when each
+  of the call's requests reached the stub, and settled once afterwards. Each attempt was journaled
   once, never two were in flight, and no allowance was overshot. Every host resolved the sealed
   one-slot roster.
 - **The run's allowance.** A run asked for 32 attempts: 30 were issued, the next was refused for
@@ -2134,9 +2144,10 @@ for sending it is not established.
 - **An integrity failure in a run, injected.** The stub answered one attempt with HTTP 400, a real
   model error, which settled `unknown` with an execution id. The probe's wrapper then reported two
   unequal synthetic token payloads for that id. Both were recorded, the suite halted and wrote its
-  marker, and MAD's retry was refused before any backend entry. No spontaneous integrity failure of
+  marker, and MAD's retry was refused `halted` before any backend entry. No spontaneous integrity failure of
   a real host was observed, and none is claimed.
-- **The host offer (v3 B8).** Every model request offered exactly `StructuredOutput`. A call to a
+- **The host offer (v3 B8).** Every prompt request, checked one by one, offered exactly
+  `StructuredOutput`. A call to a
   file-reading tool the host had not offered, on a canary file inside the worktree, came back as
   "Model tried to call unavailable tool": an explicit rejection. The canary token was in no
   continuation the stub inspected, and `StructuredOutput` then completed the turn. AD-13's

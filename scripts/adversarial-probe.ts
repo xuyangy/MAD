@@ -46,6 +46,17 @@
  * (`frozenProtocolFixture`). The copy is a fixture: it pre-registers nothing
  * and freezes nothing, and the repository's protocol file is never written.
  *
+ * ## Host ownership
+ *
+ * Every process the probe starts is owned by one `HostOwner`, which holds one
+ * bounded stop for it. The lifecycle's stop, the probe's cleanup and a start
+ * that outlived its bound all get that same stop, and its outcome is kept. A
+ * stop that is unconfirmed, rejects or passes its bound, and a start that has
+ * not returned, each end the probe before another host starts: no evidence is
+ * written, the exit is 1, and the scratch is kept. The calibration host must
+ * also stop with its post-stop checks present and clean. A confirmed stop whose
+ * post-stop check failed is a FAILS that lets later scenarios run.
+ *
  * ## Transports
  *
  * A result holds for its exact provider, model and route. `openai` is UNPROBED:
@@ -96,6 +107,7 @@ import {
   type ManagedHostOptions,
   type ManagedHostStart,
   type SpawnHost,
+  type StopOutcome,
 } from "../ablation/managed-host.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, verifyPrepared } from "../ablation/oauth-payload.ts"
@@ -258,6 +270,11 @@ export interface CallFact {
   endedAt: number | null
   /** Issued lines with no settlement in the journal file when `runTurn` was entered, or `null` when it could not be read. */
   unsettledAtEntry: number | null
+  /** The physical id of that line when there was exactly one, else `null`. An identifier the journal minted, never content. */
+  entryId: string | null
+  /** The run id that line carries, and the schedule position the suite's slot report gives that run. */
+  entryRunId: string | null
+  entryPosition: number | null
   disposition: "ok" | "failed" | "threw" | "open"
   failure: string | null
   usageUnknown: boolean
@@ -268,8 +285,9 @@ export interface RequestFact extends Omit<AdversarialStubRequest, "at" | "closed
   atMs: number
   position: number | null
   closedAfterMs: number | null
-  /** As `unsettledAtEntry`, read when the request reached the stub. */
+  /** As `unsettledAtEntry` and `entryId`, read when the request reached the stub. */
   unsettledAtArrival: number | null
+  arrivalId: string | null
 }
 
 export interface HostFact {
@@ -305,6 +323,8 @@ export interface ScenarioFacts {
   cancelled: boolean
   /** The host-offer scenario only: the tool the stub's scripted call named. */
   unofferedTool: string | null
+  /** Why no further host may start after this scenario: a stop that is not confirmed, or a start that has not returned. */
+  unsafe: string[]
   /** The bound that passed, or `null`. */
   deadline: string | null
   turnTimeoutMs: number | null
@@ -330,9 +350,9 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
  * it arrived before that call returned plus the slack; a request no call's
  * window holds is attributed to none. Attribution by time, with its limits.
  */
-export function requestsPerCall(facts: ScenarioFacts, startedAt: number): RequestFact[][] {
+export function requestsPerCall(facts: ScenarioFacts, startedAt: number, withSide = false): RequestFact[][] {
   const perCall: RequestFact[][] = facts.calls.map(() => [])
-  for (const request of modelRequests(facts)) {
+  for (const request of withSide ? facts.requests.filter((entry) => entry.model) : modelRequests(facts)) {
     let owner = -1
     facts.calls.forEach((call, index) => {
       if (request.position !== null && call.position !== request.position) return
@@ -442,21 +462,56 @@ export function rosterClaim(facts: ScenarioFacts, pin: string): Claim {
     : claim("roster", text, "FAILS", `run ${failed.position}'s host: ${failed.detail}`)
 }
 
-function journalBeforeIssue(facts: ScenarioFacts): Claim {
-  const text = "at every `runTurn` entry and every model request reaching the stub, the journal file already holds an issued line that is not settled"
-  const entries = facts.calls.map((call) => call.unsettledAtEntry)
-  const arrivals = modelRequests(facts).map((request) => request.unsettledAtArrival)
-  const all = [...entries, ...arrivals]
-  if (all.length === 0) return claim("journal-before-issue", text, "UNPROBED", `no attempt was observed${blocker(facts) === null ? "" : `: ${blocker(facts)}`}`)
-  const unread = all.filter((value) => value === null).length
-  const empty = all.filter((value) => value === 0).length
-  if (empty > 0) return claim("journal-before-issue", text, "FAILS", `${plural(empty, "observation")} of ${all.length} found no unsettled issued line`)
-  if (unread > 0) return claim("journal-before-issue", text, "FAILS", `the journal could not be read at ${plural(unread, "observation")} of ${all.length}`)
+/**
+ * Journal before issue, per attempt. At each `runTurn` entry the journal file
+ * must hold exactly one unsettled issued line, and that line must be this
+ * attempt's: one the scenario issued, new to this call, carrying the run the
+ * suite's slot report gives this call's position, and settled exactly once by
+ * the end. Each request the call is attributed must find that same line still
+ * unsettled. A count alone certifies nothing: a stale, reused, wrong-run or
+ * ambiguous snapshot fails.
+ */
+function journalBeforeIssue(facts: ScenarioFacts, startedAt: number): Claim {
+  const text =
+    "at every `runTurn` entry the journal file holds exactly one unsettled issued line, and it is that attempt's: issued by the scenario, new to the call, " +
+    "bound to the call's run, still the one unsettled line at each of the call's requests, and settled once afterwards"
+  const arrivals = modelRequests(facts)
+  if (facts.calls.length === 0 && arrivals.length === 0) {
+    return claim("journal-before-issue", text, "UNPROBED", `no attempt was observed${blocker(facts) === null ? "" : `: ${blocker(facts)}`}`)
+  }
+  const issued = new Map(facts.issued.map((line) => [line.physicalId, line]))
+  const seen = new Map<string, number>()
+  const problems: string[] = []
+  const perCall = requestsPerCall(facts, startedAt)
+  facts.calls.forEach((call, index) => {
+    const name = `call ${index + 1}${call.position === null ? "" : ` (run ${call.position})`}`
+    if (call.unsettledAtEntry === null) problems.push(`${name}: the journal could not be read at entry`)
+    else if (call.unsettledAtEntry === 0) problems.push(`${name}: no unsettled issued line at entry`)
+    else if (call.unsettledAtEntry > 1 || call.entryId === null) problems.push(`${name}: ${call.unsettledAtEntry} unsettled issued lines at entry, so which is this attempt's is ambiguous`)
+    else if (!issued.has(call.entryId)) problems.push(`${name}: the unsettled line at entry is not one this scenario issued (stale or seeded)`)
+    else if (seen.has(call.entryId)) problems.push(`${name}: the unsettled line at entry was already call ${seen.get(call.entryId)! + 1}'s (reused)`)
+    else if (call.position === null || call.entryPosition !== call.position) {
+      problems.push(`${name}: the unsettled line at entry belongs to ${call.entryPosition === null ? "no run the suite reported" : `run ${call.entryPosition}`}, not to this call's run`)
+    } else if (issued.get(call.entryId)!.settlements !== 1) problems.push(`${name}: its line has ${issued.get(call.entryId)!.settlements} settlements, not one`)
+    if (call.entryId !== null && !seen.has(call.entryId)) seen.set(call.entryId, index)
+    for (const request of perCall[index]!) {
+      if (request.unsettledAtArrival !== 1 || request.arrivalId === null) {
+        problems.push(`request ${request.index}: ${request.unsettledAtArrival ?? "an unreadable number of"} unsettled issued lines when it reached the stub, not exactly one`)
+      } else if (request.arrivalId !== call.entryId) problems.push(`request ${request.index}: the unsettled line when it reached the stub is not the one ${name} saw at entry`)
+    }
+  })
+  const attributed = new Set(perCall.flat().map((request) => request.index))
+  for (const request of arrivals) if (!attributed.has(request.index)) problems.push(`request ${request.index}: it falls in no \`runTurn\` call's window, so its attempt is not identified`)
+  if (problems.length > 0) {
+    return claim("journal-before-issue", text, "FAILS", `${plural(problems.length, "observation")} failed: ${problems.slice(0, 5).join("; ")}${problems.length > 5 ? "; …" : ""}`)
+  }
   return claim(
     "journal-before-issue",
     text,
     "HOLDS",
-    `${entries.length} \`runTurn\` ${entries.length === 1 ? "entry" : "entries"} and ${plural(arrivals.length, "model request")} observed, over ${plural(new Set(facts.calls.map((call) => call.position)).size, "run")}; each found an unsettled issued line`,
+    `${facts.calls.length} \`runTurn\` ${facts.calls.length === 1 ? "entry" : "entries"} and ${plural(arrivals.length, "model request")} observed, over ${plural(new Set(facts.calls.map((call) => call.position)).size, "run")}; ` +
+      `each entry found one unsettled line, with ${plural(seen.size, "distinct physical id")}, each bound to its call's run by the suite's slot report. ` +
+      "A request is tied to its call by time window, which is evidence with limits",
   )
 }
 
@@ -502,7 +557,7 @@ function scoped(facts: ScenarioFacts, held: Claim): Claim {
     : { ...held, why: `${held.why}. This holds for the runs and attempts observed only: ${runs} of ${ADVERSARIAL_ATTEMPT_ALLOWANCES.runs} runs completed` }
 }
 
-export function healthyClaims(facts: ScenarioFacts, pin: string): Claim[] {
+export function healthyClaims(facts: ScenarioFacts, pin: string, startedAt = 0): Claim[] {
   const [stopClaim, postClaim] = hostStopClaims(facts)
   const starts = hostEvents(facts, "start").map((record) => record.position)
   const ordered = starts.every((position, index) => position === index + 1)
@@ -518,7 +573,7 @@ export function healthyClaims(facts: ScenarioFacts, pin: string): Claim[] {
         `${facts.halt === null ? "" : `; halt: ${facts.halt}`}${facts.stop === null ? "" : `; stop: ${facts.stop}`}${blocker(facts) === null ? "" : `; ${blocker(facts)}`}`,
     )
   }
-  return [rosterClaim(facts, pin), scoped(facts, journalBeforeIssue(facts)), scoped(facts, countedOnce(facts)), scoped(facts, serialAdmission(facts)), stopClaim!, postClaim!, full]
+  return [rosterClaim(facts, pin), scoped(facts, journalBeforeIssue(facts, startedAt)), scoped(facts, countedOnce(facts)), scoped(facts, serialAdmission(facts)), stopClaim!, postClaim!, full]
 }
 
 export function runAllowanceClaims(facts: ScenarioFacts): Claim[] {
@@ -713,7 +768,9 @@ export function integrityInjectedClaims(facts: ScenarioFacts): Claim[] {
     const why = `the two synthetic reports were not made: ${facts.injected?.why ?? facts.refused ?? blocker(facts) ?? "no attempt reached the backend"}`
     return [claim("conflict-recorded", `two unequal late payloads for one execution id are recorded as an integrity failure (${label})`, "FAILS", why), ...hostStopClaims(facts)]
   }
-  const halted = facts.refusals.filter((refusal) => refusal.cause === "halted").length
+  // The retry belongs to the run whose attempt carried the conflict: a refusal for any other run says nothing about it.
+  const run = line?.position ?? requests[0]?.position ?? null
+  const halted = run === null ? 0 : facts.refusals.filter((refusal) => refusal.cause === "halted" && refusal.position === run).length
   return [
     claim(
       "one-attempt-reaches-stub",
@@ -734,12 +791,22 @@ export function integrityInjectedClaims(facts: ScenarioFacts): Claim[] {
       facts.integrity.length === 0 ? "the bill records no integrity failure" : `${plural(facts.integrity.length, "integrity failure")}; payloads kept: ${facts.integrity.map((failure) => failure.payloads).join(", ")}`,
     ),
     haltClaim(facts),
-    claim(
-      "retry-refused",
-      "MAD's retry of the failed attempt is refused before any backend entry",
-      facts.calls.length === 1 && requests.length === 1 ? "HOLDS" : "FAILS",
-      `${plural(facts.calls.length, "`runTurn` call")}, ${plural(requests.length, "model request")}, ${plural(halted, "admission refused `halted`")}`,
-    ),
+    facts.calls.length !== 1 || requests.length !== 1
+      ? claim("retry-refused", "MAD's retry of the failed attempt is refused `halted` before any backend entry", "FAILS", `${plural(facts.calls.length, "`runTurn` call")} and ${plural(requests.length, "model request")}: something entered the backend after the conflict`)
+      : halted === 0
+        ? claim(
+            "retry-refused",
+            "MAD's retry of the failed attempt is refused `halted` before any backend entry",
+            "UNPROBED",
+            `no second backend entry or request was observed (1 \`runTurn\` call, 1 model request), but no admission of ${run === null ? "the run" : `run ${run}`} was recorded refused \`halted\`` +
+              `${facts.refusals.length === 0 ? "" : ` (${plural(facts.refusals.length, "refusal")} recorded for other runs or causes)`}, so a retry that was attempted and refused is not established`,
+          )
+        : claim(
+            "retry-refused",
+            "MAD's retry of the failed attempt is refused `halted` before any backend entry",
+            "HOLDS",
+            `${plural(halted, "admission")} of run ${run} refused \`halted\`, with 1 \`runTurn\` call and 1 model request in all`,
+          ),
     ...hostStopClaims(facts),
     nothingLater(facts, 1),
   ]
@@ -747,9 +814,37 @@ export function integrityInjectedClaims(facts: ScenarioFacts): Claim[] {
 
 const normalized = (name: string) => name.toLowerCase().replace(/^mcp_/, "")
 
-export function hostOfferClaims(facts: ScenarioFacts): Claim[] {
+/**
+ * The offer, request by request. Every request that is a prompt must offer
+ * exactly `StructuredOutput`. A request that offers no tool at all is a host
+ * side request only when it carries no tool result and another request of the
+ * same `runTurn` call carries the offer; it is then counted apart and is
+ * outside the claim. Any other empty or wider offer fails, named by its index.
+ */
+export function offeredNamesClaim(facts: ScenarioFacts, startedAt = 0, none = "no model request reached the stub"): Claim {
+  const text = "every prompt request offers the model exactly `StructuredOutput`"
+  const all = facts.requests.filter((request) => request.model)
+  if (all.length === 0) return claim("offered-names", text, "UNPROBED", none)
+  const exact = (request: RequestFact) => request.offered.length === 1 && normalized(request.offered[0]!) === "structuredoutput"
+  const perCall = requestsPerCall(facts, startedAt, true)
+  const failures: string[] = []
+  let side = 0
+  for (const request of all) {
+    if (exact(request)) continue
+    if (request.offered.length > 0) failures.push(`request ${request.index} offered ${request.offered.map(normalized).sort().join(", ")}`)
+    else if (request.stage !== "side" || request.toolResult !== null) failures.push(`request ${request.index} is a prompt that offered no tool`)
+    else if (!(perCall.find((requests) => requests.some((entry) => entry.index === request.index)) ?? []).some(exact)) {
+      failures.push(`request ${request.index} offered no tool, and no request of its call carried the offer`)
+    } else side += 1
+  }
+  const scope = side === 0 ? "" : `; ${plural(side, "host-side request")} offered no tool, beside a prompt of the same call that did, and ${side === 1 ? "is" : "are"} outside this claim`
+  return failures.length === 0
+    ? claim("offered-names", text, "HOLDS", `each of ${plural(all.length - side, "prompt request")} offered exactly structuredoutput (normalized)${scope}`)
+    : claim("offered-names", text, "FAILS", `${failures.join("; ")}${scope}`)
+}
+
+export function hostOfferClaims(facts: ScenarioFacts, startedAt = 0): Claim[] {
   const requests = modelRequests(facts)
-  const offered = [...new Set(requests.flatMap((request) => request.offered.map(normalized)))].sort()
   const tried = requests.find((request) => request.served === "unoffered-tool")
   const continuation = tried === undefined ? undefined : requests.find((request) => request.index > tried.index && request.position === tried.position && request.toolResult !== null)
   const result = continuation?.toolResult ?? null
@@ -766,14 +861,7 @@ export function hostOfferClaims(facts: ScenarioFacts): Claim[] {
             ? "error result"
             : "a result with no error flag and no rejection wording"
   return [
-    requests.length === 0
-      ? claim("offered-names", "the host offers the model exactly `StructuredOutput`", "UNPROBED", none)
-      : claim(
-          "offered-names",
-          "the host offers the model exactly `StructuredOutput`",
-          offered.length === 1 && offered[0] === "structuredoutput" ? "HOLDS" : "FAILS",
-          `offered, normalized, over ${plural(requests.length, "model request")}: ${offered.join(", ") || "nothing"}`,
-        ),
+    offeredNamesClaim(facts, startedAt, none),
     claim(
       "treatment",
       "the host's treatment of a call to a tool it did not offer is recorded",
@@ -832,10 +920,10 @@ export function noUsageObservations(facts: ScenarioFacts, startedAt = 0): string
   ]
 }
 
-export function claimsFor(facts: ScenarioFacts, pin: string): Claim[] {
+export function claimsFor(facts: ScenarioFacts, pin: string, startedAt = 0): Claim[] {
   switch (facts.kind) {
     case "healthy":
-      return healthyClaims(facts, pin)
+      return healthyClaims(facts, pin, startedAt)
     case "run-allowance":
       return runAllowanceClaims(facts)
     case "root-allowance":
@@ -849,7 +937,7 @@ export function claimsFor(facts: ScenarioFacts, pin: string): Claim[] {
     case "integrity-injected":
       return integrityInjectedClaims(facts)
     case "host-offer":
-      return hostOfferClaims(facts)
+      return hostOfferClaims(facts, startedAt)
     case "stream-without-usage":
       return []
   }
@@ -937,6 +1025,9 @@ export interface ProbeSeams {
   hangTurnMs?: number
   noUsageTurnMs?: number
   hostStartMs?: number
+  teardownMs?: number
+  /** Test-only: the suite stage, for a stage that fails in a way the real one does not. */
+  suiteStage?: typeof runSuiteStage
   repoRoot?: string
 }
 
@@ -948,8 +1039,8 @@ export interface ProbeContext {
   protocol: ProtocolFixture
   proxy: RefusingProxy
   signal: AbortSignal
-  /** The stop of whatever host is current, for the probe's own cleanup. */
-  current: { stop: (() => Promise<void>) | null }
+  /** Every host this probe started, and the one stop it owns for each. */
+  owner: HostOwner
   seams: ProbeSeams
   clock: Clock
   codeRevision: Maybe<CodeRevision>
@@ -1040,11 +1131,19 @@ export function manyFindings(caseId: string): { findings: Record<string, unknown
   }
 }
 
-async function unsettledIn(root: string): Promise<number | null> {
+/** The journal file's unsettled issued lines at one instant: how many, and which one when there is exactly one. */
+export interface UnsettledSnapshot {
+  count: number
+  id: string | null
+  runId: string | null
+}
+
+async function unsettledIn(root: string): Promise<UnsettledSnapshot | null> {
   try {
     const { lines } = await journalLines(root)
     const settled = new Set(lines.filter((line): line is SettledLine => line.type === "settled").map((line) => line.physicalId))
-    return lines.filter((line): line is IssuedLine => line.type === "issued" && !settled.has(line.physicalId)).length
+    const open = lines.filter((line): line is IssuedLine => line.type === "issued" && !settled.has(line.physicalId))
+    return { count: open.length, id: open.length === 1 ? open[0]!.physicalId : null, runId: open.length === 1 ? open[0]!.runId : null }
   } catch {
     return null
   }
@@ -1114,7 +1213,7 @@ export function scenarioRecord(spec: ScenarioSpec, facts: ScenarioFacts, pin: st
     kind: spec.kind,
     name: spec.name,
     what: spec.what,
-    claims: claimsFor(facts, pin),
+    claims: claimsFor(facts, pin, startedAt),
     observations: spec.kind === "stream-without-usage" ? noUsageObservations(facts, startedAt) : [],
     records: {
       issuedAttempts: {
@@ -1165,25 +1264,160 @@ export const SYNTHETIC_LATE_PAYLOADS = [
   { input: 6, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
 ] as const
 
+/** One process the probe started, and the one stop it owns for it. */
+export interface OwnedHost {
+  /** The data directory the host was started on: one per host. */
+  key: string
+  pid: number
+  /** How the stop ended, once it has. */
+  outcome: StopOutcome | null
+  /** Memoized, bounded, and never rejecting: every caller gets the same stop. */
+  stop(): Promise<StopOutcome>
+}
+
 /**
- * `startManagedHost` under the host-start bound. A start that outlives the bound
- * is refused, and whatever host it later returns is stopped when it arrives, so
- * no host outlives the scenario that gave up on it.
+ * Every host the probe started, each with one stop that every caller shares:
+ * the lifecycle's, the probe's own cleanup and a late start's.
+ *
+ * A stop is bounded by `teardownMs`. One that rejects, passes its bound or is
+ * not confirmed is kept as its outcome, never dropped. `settle()` stops whatever
+ * is still running, waits for every start that outlived its bound, and returns
+ * why another host must not be started: a host whose termination is not
+ * confirmed, or a start that has not returned.
+ */
+export class HostOwner {
+  readonly hosts: OwnedHost[] = []
+  private readonly raw = new Map<string, () => Promise<StopOutcome>>()
+  private readonly late = new Map<string, { done: boolean; settled: Promise<void> }>()
+  private readonly rejected: string[] = []
+
+  constructor(private readonly teardownMs: number = TEARDOWN_MS) {}
+
+  /**
+   * Takes ownership of a process. A second handle for the same host (the spawn
+   * handle, then the started host) replaces the stop that will be called, so the
+   * stop used is the fullest one known when it is first asked for.
+   */
+  own(key: string, pid: number, stop: () => Promise<StopOutcome>): OwnedHost {
+    this.raw.set(key, stop)
+    const known = this.hosts.find((host) => host.key === key)
+    if (known !== undefined) return known
+    let stopping: Promise<StopOutcome> | undefined
+    const host: OwnedHost = {
+      key,
+      pid,
+      outcome: null,
+      stop: () =>
+        (stopping ??= this.bounded(pid, this.raw.get(key)!).then((outcome) => {
+          host.outcome = outcome
+          return outcome
+        })),
+    }
+    this.hosts.push(host)
+    return host
+  }
+
+  /** Records the stop `startManagedHost` already made of what a refused start had spawned. */
+  record(key: string, outcome: StopOutcome): void {
+    const known = this.hosts.find((host) => host.key === key)
+    if (known === undefined) this.hosts.push({ key, pid: outcome.pid, outcome, stop: async () => outcome })
+    else known.outcome ??= outcome
+  }
+
+  /** Keeps a start that outlived its bound: whatever it returns is owned and stopped, and its failure is kept. */
+  trackLate(key: string, starting: Promise<ManagedHostStart>): void {
+    const entry = { done: false, settled: Promise.resolve() }
+    entry.settled = starting
+      .then(
+        async (late) => {
+          if (late.ok) await this.own(key, late.host.pid, late.host.stop).stop()
+          else if (late.stopped !== null) this.record(key, late.stopped)
+        },
+        (error: unknown) => {
+          this.rejected.push(`the start on \`${key}\` outlived its bound and then rejected (${messageOf(error)}), so whether it left a process running is not established`)
+        },
+      )
+      .then(() => {
+        entry.done = true
+      })
+    this.late.set(key, entry)
+  }
+
+  /** Stops every owned host that has no outcome, waits out late starts, and returns why another host must not start. */
+  async settle(): Promise<string[]> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      Promise.all([...this.late.values()].map((entry) => entry.settled)),
+      new Promise((done) => {
+        timer = setTimeout(done, this.teardownMs)
+      }),
+    ])
+    if (timer !== undefined) clearTimeout(timer)
+    for (const host of [...this.hosts]) if (host.outcome === null) await host.stop()
+    return this.unresolved()
+  }
+
+  /** Why another host must not be started, as things stand. */
+  unresolved(): string[] {
+    return [
+      ...this.hosts
+        .filter((host) => host.outcome !== null && !host.outcome.confirmed)
+        .map((host) => `the stop of process ${host.pid} (\`${host.key}\`) is UNCONFIRMED — check it by hand: ${host.outcome!.confirmed ? "" : host.outcome!.why}`),
+      ...this.hosts.filter((host) => host.outcome === null).map((host) => `process ${host.pid} (\`${host.key}\`) was started and has not been stopped`),
+      ...[...this.late].filter(([, entry]) => !entry.done).map(([key]) => `the start on \`${key}\` outlived its bound and has not returned, so whether it left a process running is not established`),
+      ...this.rejected,
+    ]
+  }
+
+  private async bounded(pid: number, stop: () => Promise<StopOutcome>): Promise<StopOutcome> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        (async () => stop())().catch((error: unknown): StopOutcome => ({ confirmed: false, pid, why: `the stop rejected: ${messageOf(error)}` })),
+        new Promise<StopOutcome>((done) => {
+          timer = setTimeout(() => done({ confirmed: false, pid, why: `the stop gave no answer within ${this.teardownMs} ms` }), this.teardownMs)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+}
+
+/**
+ * `startManagedHost` under the host-start bound, with every process it reports
+ * owned by `context.owner`. The caller's `onSpawn` and the returned host both
+ * get the owner's one stop for that process.
+ *
+ * A start that outlives the bound is refused and stays owned: the owner stops
+ * whatever it returns, keeps that stop's outcome, and reports the start as
+ * unresolved until it has returned.
  */
 export async function boundedStart(context: ProbeContext, what: string, options: ManagedHostOptions): Promise<ManagedHostStart> {
-  const starting = (context.seams.startHost ?? startManagedHost)(options)
-  const ms = context.seams.hostStartMs ?? HOST_START_MS
-  try {
-    return await within(ms, what, () => starting)
-  } catch (error) {
-    void starting.then(
-      (late) => {
-        if (late.ok) void late.host.stop().catch(() => undefined)
+  if (options.mode !== "oauth") return { ok: false, reason: "the probe starts OAuth-mode hosts only", stopped: null }
+  const key = options.oauth.dataDir
+  const starting = (async () =>
+    (context.seams.startHost ?? startManagedHost)({
+      ...options,
+      onSpawn: (handle) => {
+        const owned = context.owner.own(key, handle.pid, handle.stop)
+        options.onSpawn?.({ pid: handle.pid, stop: owned.stop })
       },
-      () => undefined,
-    )
-    return { ok: false, reason: `${messageOf(error)}; a host that start returns later is stopped when it arrives`, stopped: null }
+    }))()
+  const ms = context.seams.hostStartMs ?? HOST_START_MS
+  let started: ManagedHostStart
+  try {
+    started = await within(ms, what, () => starting)
+  } catch (error) {
+    context.owner.trackLate(key, starting)
+    return { ok: false, reason: `${messageOf(error)}; the start stays owned, and no further host starts until it has returned and what it left is stopped`, stopped: null }
   }
+  if (!started.ok) {
+    if (started.stopped !== null) context.owner.record(key, started.stopped)
+    return started
+  }
+  const owned = context.owner.own(key, started.host.pid, started.host.stop)
+  return { ok: true, host: { ...started.host, stop: owned.stop } }
 }
 
 /** Runs one scenario on one transport, in roots of its own, and returns what it observed. */
@@ -1223,7 +1457,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
   let maxConcurrentCalls = 0
   let cancelled = false
   let injected: ScenarioFacts["injected"] = spec.kind === "integrity-injected" ? { reported: false, why: "no envelope with an execution id and without `abandoned` came back from the backend" } : null
-  const arrivals = new Map<number, number | null>()
+  const arrivals = new Map<number, UnsettledSnapshot | null>()
   const canary = `MAD-CANARY-${randomBytes(12).toString("hex")}`
   const script: AdversarialStubScript = {
     discovery: (run) => (spec.kind === "run-allowance" && run?.position === 1 ? manyFindings(run.caseId) : { findings: run === null ? [] : [targetFinding(run.caseId)] }),
@@ -1248,6 +1482,8 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
   let schedule: AdversarialSchedule | undefined
   const startHost = async (options: ManagedHostOptions): Promise<ManagedHostStart> => {
     if (options.mode !== "oauth") return { ok: false, reason: "the probe starts OAuth-mode hosts only", stopped: null }
+    const unresolved = context.owner.unresolved()
+    if (unresolved.length > 0) return { ok: false, reason: `no further host starts while an earlier one is unresolved: ${unresolved.join("; ")}`, stopped: null }
     const started = await boundedStart(context, "the managed host's start", {
       ...options,
       oauth: { ...options.oauth, baseURLs: { [transport.providerId]: stub.baseURL } },
@@ -1276,7 +1512,20 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
     return {
       capabilities: (slotId) => inner.capabilities(slotId),
       async runTurn(slotId, instructions, input, schema, signal, admitted) {
-        const call: CallFact = { position: run?.position ?? null, startedAt: Date.now(), endedAt: null, unsettledAtEntry: await unsettledIn(root), disposition: "open", failure: null, usageUnknown: false, abandoned: false }
+        const entry = await unsettledIn(root)
+        const call: CallFact = {
+          position: run?.position ?? null,
+          startedAt: Date.now(),
+          endedAt: null,
+          unsettledAtEntry: entry?.count ?? null,
+          entryId: entry?.id ?? null,
+          entryRunId: entry?.runId ?? null,
+          entryPosition: null,
+          disposition: "open",
+          failure: null,
+          usageUnknown: false,
+          abandoned: false,
+        }
         calls.push(call)
         open += 1
         maxConcurrentCalls = Math.max(maxConcurrentCalls, open)
@@ -1312,6 +1561,8 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
 
   let refused: string | null = null
   let outcome: Awaited<ReturnType<typeof runSuiteStage>> | undefined
+  let stopCurrent: (() => Promise<void>) | null = null
+  let unsafe: string[] = []
   try {
     const resolved = adversarialRoster(pin)
     const wiring = productionTools({ worktree: join(adversarialDirectory(root), "worktrees") })
@@ -1331,7 +1582,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
       schedule = created.schedule
       if (spec.kind === "root-allowance") await writeFile(journalFile, seededAttempts(ADVERSARIAL_ATTEMPT_ALLOWANCES.runs, ADVERSARIAL_ATTEMPT_ALLOWANCES.run), "utf8")
       if (spec.kind === "integrity-before-start") await writeFile(journalFile, danglingAttempt(), "utf8")
-      outcome = await runSuiteStage({
+      outcome = await (context.seams.suiteStage ?? runSuiteStage)({
         out: root,
         protocolFile: context.protocol.file,
         codeRevision: context.codeRevision,
@@ -1340,7 +1591,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
         clock: context.clock,
         signal: controller.signal,
         ownStop: (stop) => {
-          context.current.stop = stop
+          stopCurrent = stop
         },
         scheduleHash: created.schedule.scheduleHash,
         provider: transport.providerId,
@@ -1359,12 +1610,25 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
     }
   } catch (error) {
     refused = `the scenario threw: ${messageOf(error)}`
+    // The suite did not return, so nothing it would have stopped can be assumed stopped: the lifecycle's own
+    // stop is asked for first (it waits for a start in flight), within the teardown bound.
+    if (stopCurrent !== null) {
+      let bound: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        (stopCurrent as () => Promise<void>)().catch(() => undefined),
+        new Promise((done) => {
+          bound = setTimeout(done, TEARDOWN_MS)
+        }),
+      ])
+      if (bound !== undefined) clearTimeout(bound)
+    }
   } finally {
     clearTimeout(timer)
     context.signal.removeEventListener("abort", onProbeAbort)
-    context.current.stop = null
     stub.onRequest(null)
     stub.setRun(null)
+    // Whatever this scenario started is stopped, and its outcome known, before the probe may start another host.
+    unsafe = await context.owner.settle()
   }
 
   const suite = outcome?.outcome.ok ? outcome.outcome : undefined
@@ -1373,6 +1637,11 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
   const settledLines = lines.filter((line): line is SettledLine => line.type === "settled")
   const positionOf = new Map<string, number>()
   for (const slot of suite?.slots ?? []) if (slot.runId !== undefined) positionOf.set(slot.runId, slot.position)
+  // The run a call's unsettled line belongs to, by the suite's own slot report: never by the call that observed it.
+  for (const call of calls) call.entryPosition = call.entryRunId === null ? null : (positionOf.get(call.entryRunId) ?? null)
+  // A refusal's run, by the slot report, or failing that by the one call that saw that run id unsettled.
+  const refusalPosition = (runId: string | undefined): number | null =>
+    runId === undefined ? null : (positionOf.get(runId) ?? calls.find((call) => call.entryRunId === runId)?.position ?? null)
   const issued: IssuedFact[] = lines
     .filter((line): line is IssuedLine => line.type === "issued" && !seededIds.has(line.physicalId))
     .map((line) => {
@@ -1403,7 +1672,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
         ? null
         : { root: suite.overshoot.global.overshoot, suite: suite.overshoot.adversarial.overshoot, runs: (suite.overshoot.runTotals ?? []).map((row) => row.overshoot) },
     integrity: (suite?.bill.integrity ?? []).map((failure) => ({ reason: failure.reason, payloads: failure.payloads?.length ?? 0 })),
-    refusals: (suite?.bill.refusedAdversarial ?? []).map((refusal) => ({ cause: refusal.cause, position: refusal.runId === undefined ? null : (positionOf.get(refusal.runId) ?? null) })),
+    refusals: (suite?.bill.refusedAdversarial ?? []).map((refusal) => ({ cause: refusal.cause, position: refusalPosition(refusal.runId) })),
     seeded: { issued: seededIds.size, unsettled: [...seededIds].filter((id) => !settledLines.some((entry) => entry.physicalId === id)).length },
     issued,
     journalProblems: problems,
@@ -1411,7 +1680,8 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
     maxConcurrentCalls,
     requests: stub.requests().map((request) => {
       const { at, closed, run, ...rest } = request
-      return { ...rest, atMs: at - startedAt, position: run?.position ?? null, closedAfterMs: closed?.afterMs ?? null, unsettledAtArrival: arrivals.get(request.index) ?? null }
+      const arrival = arrivals.get(request.index) ?? null
+      return { ...rest, atMs: at - startedAt, position: run?.position ?? null, closedAfterMs: closed?.afterMs ?? null, unsettledAtArrival: arrival?.count ?? null, arrivalId: arrival?.id ?? null }
     }),
     hosts: {
       starts: outcome?.hosts.starts ?? 0,
@@ -1422,6 +1692,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
     injected,
     cancelled,
     unofferedTool: script.unofferedCall?.tool ?? null,
+    unsafe,
     deadline,
     turnTimeoutMs,
     egress: egressTargets(context.proxy.attempts().slice(proxyBefore)),
@@ -1439,7 +1710,12 @@ export interface CalibrationRecord {
   turn: { disposition: string; failure: string | null; tokensReported: boolean; ms: number } | null
   stubRequests: number
   offered: string[]
-  stop: { confirmed: boolean; postStopProblems: number } | null
+  /** `postStopProblems` is `null` when no post-stop checks came back. */
+  stop: { confirmed: boolean; postStopProblems: number | null } | null
+  /** Why the calibration host's stop does not let a scenario start: unconfirmed, no post-stop checks, or a failed check. */
+  stopProblem: string | null
+  /** As `ScenarioFacts.unsafe`. */
+  unsafe: string[]
   refused: string | null
   egressRefused: string[]
   bounds: { hostStartMs: number; turnMs: number }
@@ -1469,6 +1745,8 @@ export async function calibrate(context: ProbeContext, transport: Transport, stu
     stubRequests: 0,
     offered: [],
     stop: null,
+    stopProblem: null,
+    unsafe: [],
     refused: null,
     egressRefused: [],
     bounds: { hostStartMs: HOST_START_MS, turnMs: CALIBRATION_TURN_MS },
@@ -1483,15 +1761,10 @@ export async function calibrate(context: ProbeContext, transport: Transport, stu
     spawn: context.seams.spawn ?? sandboxSpawn,
     proxy: context.proxy.url,
     scratchParent: join(base, "host"),
-    onSpawn: (host) => {
-      context.current.stop = async () => {
-        await host.stop()
-      }
-    },
   })
   if (!started.ok) {
     record.refused = started.reason
-    context.current.stop = null
+    record.unsafe = await context.owner.settle()
     return record
   }
   record.startMs = Date.now() - began
@@ -1514,10 +1787,18 @@ export async function calibrate(context: ProbeContext, transport: Transport, stu
     record.turn = { disposition: "threw", failure: messageOf(error), tokensReported: false, ms: 0 }
   } finally {
     const stopBegan = Date.now()
-    const outcome = await started.host.stop().catch((error: unknown) => ({ confirmed: false as const, pid: 0, why: messageOf(error) }))
+    // The owner's stop: bounded by the teardown bound, and never rejecting.
+    const outcome = await started.host.stop()
     record.stopMs = Date.now() - stopBegan
-    record.stop = { confirmed: outcome.confirmed, postStopProblems: "postStop" in outcome && outcome.postStop !== undefined ? outcome.postStop.problems.length : -1 }
-    context.current.stop = null
+    record.stop = { confirmed: outcome.confirmed, postStopProblems: outcome.confirmed && outcome.postStop !== undefined ? outcome.postStop.problems.length : null }
+    record.stopProblem = !outcome.confirmed
+      ? `its stop is UNCONFIRMED (${outcome.why})`
+      : outcome.postStop === undefined
+        ? "its stop returned no post-stop checks, so post-stop verification is missing"
+        : outcome.postStop.problems.length > 0
+          ? `a post-stop check failed: ${outcome.postStop.problems.join("; ")}`
+          : null
+    record.unsafe = await context.owner.settle()
   }
   const requests = stub.requests()
   record.stubRequests = requests.length
@@ -1632,7 +1913,7 @@ export const LIMITATIONS: readonly string[] = [
 ]
 
 /** Exposed for tests: the whole probe body, given parsed arguments and the things `main` cleans up. */
-export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scratch: string[]; servers: Stoppable[]; current: ProbeContext["current"] }, signal: AbortSignal): Promise<number> {
+export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scratch: string[]; servers: Stoppable[]; owner: HostOwner }, signal: AbortSignal): Promise<number> {
   const selfTest = await (seams.selfTest ?? sandboxSelfTest)()
   if (!selfTest.ok) {
     console.error(`REFUSED — the sandbox self-test failed: ${selfTest.why}. No host was started.`)
@@ -1671,7 +1952,7 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
     protocol,
     proxy,
     signal,
-    current: live.current,
+    owner: live.owner,
     seams,
     clock: seams.clock ?? systemClock(),
     codeRevision,
@@ -1708,6 +1989,11 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
     console.error(`REFUSED — the calibration host did not start: ${calibration.refused}. No scenario was run.`)
     return 1
   }
+  if (calibration.stopProblem !== null || calibration.unsafe.length > 0) {
+    console.error(`REFUSED — the calibration host was started and ${calibration.stopProblem ?? "its termination is not established"}. No scenario was run.`)
+    for (const line of calibration.unsafe) console.error(`  ${line}`)
+    return 1
+  }
   context.scenarioMs = Math.min(context.scenarioMs, scenarioBound(calibration.startMs, calibration.stopMs))
   console.log(`  start ${calibration.startMs} ms, stop ${calibration.stopMs} ms; each scenario is bounded at ${context.scenarioMs} ms`)
 
@@ -1721,6 +2007,10 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
     for (const spec of scenarios) {
       if (signal.aborted) throw new Error(`the probe's deadline passed before \`${spec.name}\` on ${pin} was started`)
       const { facts, startedAt } = await runScenario(context, transport, stub, spec)
+      if (facts.unsafe.length > 0) {
+        // Roots of their own do not make overlapping processes safe: nothing further is started.
+        throw new Error(`a host's termination is not established after \`${spec.name}\` on ${pin}, so no further host was started: ${facts.unsafe.join("; ")}`)
+      }
       const record = scenarioRecord(spec, facts, pin, startedAt, context.scenarioMs)
       records.push(record)
       console.log(`  ${spec.name} — ${record.elapsedMs} ms, ${plural(record.hosts.starts, "host start")}`)
@@ -1819,25 +2109,16 @@ export async function main(argv: readonly string[] = Bun.argv, seams: ProbeSeams
     for (const problem of problems) console.error(`REFUSED — ${problem}. No host was started.`)
     return 1
   }
-  const live = { scratch: [] as string[], servers: [] as Stoppable[], current: { stop: null } as ProbeContext["current"] }
+  const live = { scratch: [] as string[], servers: [] as Stoppable[], owner: new HostOwner(seams.teardownMs ?? TEARDOWN_MS) }
   const controller = new AbortController()
   let cleaning: Promise<string[]> | undefined
   const cleanupOnce = async (): Promise<string[]> => {
-    const left: string[] = []
-    const stop = live.current.stop
-    if (stop !== null) {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const ended = await Promise.race([
-        stop().then(() => "stopped" as const, (error: unknown) => messageOf(error)),
-        new Promise<"timed-out">((done) => {
-          timer = setTimeout(() => done("timed-out"), TEARDOWN_MS)
-        }),
-      ])
-      if (timer !== undefined) clearTimeout(timer)
-      if (ended !== "stopped") left.push(`the current host's stop is not established (${ended}); check for an opencode process by hand`)
-    }
+    const left: string[] = await live.owner.settle()
+    const hostsUnresolved = left.length > 0
     for (const server of live.servers) await Promise.resolve().then(() => server.stop()).catch((error: unknown) => left.push(`a local server did not stop: ${messageOf(error)}`))
-    for (const dir of live.scratch) await rm(dir, { recursive: true, force: true }).catch((error: unknown) => left.push(`\`${dir}\` could not be removed: ${messageOf(error)}`))
+    // A host that may still be running may still hold its placeholder sign-in and its scratch: they are kept.
+    if (hostsUnresolved) for (const dir of live.scratch) left.push(`\`${dir}\` is kept, because a host's termination is not established`)
+    else for (const dir of live.scratch) await rm(dir, { recursive: true, force: true }).catch((error: unknown) => left.push(`\`${dir}\` could not be removed: ${messageOf(error)}`))
     return left
   }
   const cleanup = (): Promise<string[]> => (cleaning ??= cleanupOnce())

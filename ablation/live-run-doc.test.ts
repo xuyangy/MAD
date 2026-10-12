@@ -1407,6 +1407,10 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       expect(healthy.hosts.starts, name).toBe(16)
       expect(healthy.records.runTurnCalls.total, name).toBe(healthy.records.issuedAttempts.newlyIssued)
       expect(healthy.records.extraRequests, name).toEqual([])
+      // Journal before issue is bound per attempt: one distinct line per call, each tied to its run.
+      const journal = healthy.claims.find((claim) => claim.id === "journal-before-issue")!.why
+      expect(journal, name).toContain(`${healthy.records.runTurnCalls.total} \`runTurn\` entries`)
+      expect(journal, name).toContain(`with ${healthy.records.issuedAttempts.newlyIssued} distinct physical ids, each bound to its call's run by the suite's slot report`)
       const run = scenario(transport, "run-allowance")
       expect(run.claims.find((claim) => claim.id === "run-cap-issued")!.why, name).toBe("30 attempts issued for run 1")
       expect(run.records.refusals, name).toEqual({ budget: 1 })
@@ -1416,6 +1420,7 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       const injected = scenario(transport, "integrity-injected")
       expect(injected.records.stubRequests.byServed, name).toEqual({ "http-400": 1 })
       expect(injected.records.runTurnCalls.total, name).toBe(1)
+      expect(injected.claims.find((claim) => claim.id === "retry-refused")!.why, name).toBe("1 admission of run 1 refused `halted`, with 1 `runTurn` call and 1 model request in all")
       // The cancellation: the attempt counts one, and not-issued was not seen.
       const cancel = scenario(transport, "cancel-in-flight")
       expect(verdict(cancel, "cancelled-counts-one"), name).toBe("HOLDS")
@@ -1423,6 +1428,7 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       // The host offer: an explicit rejection, and one tool continuation, which is expected.
       const offer = scenario(transport, "host-offer")
       expect(offer.claims.find((claim) => claim.id === "treatment")!.why, name).toContain("rejection")
+      expect(offer.claims.find((claim) => claim.id === "offered-names")!.why, name).toBe(`each of ${offer.records.stubRequests.model} prompt requests offered exactly structuredoutput (normalized)`)
       expect(offer.records.extraRequests.map((entry) => entry.classification), name).toEqual(["tool-continuation"])
       expect(offer.records.stubRequests.byServed["unoffered-tool"], name).toBe(1)
       // Every scenario that started a host saw the same refused egress target.
@@ -1468,6 +1474,12 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       "Stages 1 and 2 of the launcher (the offline checks, the authorization and the reservation) are not run on a real host",
       "That copy is a fixture: it pre-registers nothing, it is no freeze, and the protocol file in this repository is read and never written.",
       "the host's reason for sending it is not established",
+      "**It owns every host it starts.** Each process has one stop, bounded at 30,000 ms",
+      "each end the probe before another host starts: it writes no evidence, exits 1 and keeps its scratch",
+      "The calibration host must also stop with its post-stop checks present and clean.",
+      "At every `runTurn` entry the journal file held exactly one unsettled issued line, and it was that attempt's",
+      "Every prompt request, checked one by one, offered exactly `StructuredOutput`.",
+      "MAD's retry was refused `halted` before any backend entry",
       "The shipped launcher passes no turn deadline, so its bound is the backend's default.",
       "Gate 11 stays OPEN: this evidence is for a separate, reviewed gate change and closes nothing.",
     ]) {

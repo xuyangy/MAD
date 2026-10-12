@@ -1,12 +1,12 @@
 {
   "kind": "ZERO-BILL ADVERSARIAL PROBE (story 2-7f2) — the measured opencode on stub providers; no provider was reached",
   "story": "2-7f2",
-  "measuredAt": "2026-10-12T11:58:13.055Z",
+  "measuredAt": "2026-10-12T12:41:13.098Z",
   "command": "bun run adversarial-probe --out <probe-out> --oauth-prepared <prepared-root>",
   "codeRevision": {
     "kind": "known",
     "value": {
-      "commit": "573a970a4c862da64c06abfb36556b18b7dcaba4",
+      "commit": "71b68aa01cfea1d8fde459dcb372f8503e1cfd8b",
       "dirty": true
     }
   },
@@ -56,7 +56,7 @@
     "noUsageTurnMs": 20000,
     "teardownMs": 30000,
     "scenarioOuterMs": 1200000,
-    "scenarioMs": 667344,
+    "scenarioMs": 661200,
     "probeMs": 7200000
   },
   "calibration": {
@@ -65,13 +65,13 @@
     "route": [
       "POST /v1/messages"
     ],
-    "startMs": 6271,
-    "stopMs": 1382,
+    "startMs": 6434,
+    "stopMs": 1091,
     "turn": {
       "disposition": "ok",
       "failure": null,
       "tokensReported": true,
-      "ms": 1119
+      "ms": 999
     },
     "stubRequests": 1,
     "offered": [
@@ -81,6 +81,8 @@
       "confirmed": true,
       "postStopProblems": 0
     },
+    "stopProblem": null,
+    "unsafe": [],
     "refused": null,
     "egressRefused": [
       "api.githubcopilot.com:443"
@@ -132,9 +134,9 @@
             },
             {
               "id": "journal-before-issue",
-              "claim": "at every `runTurn` entry and every model request reaching the stub, the journal file already holds an issued line that is not settled",
+              "claim": "at every `runTurn` entry the journal file holds exactly one unsettled issued line, and it is that attempt's: issued by the scenario, new to the call, bound to the call's run, still the one unsettled line at each of the call's requests, and settled once afterwards",
               "verdict": "HOLDS",
-              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each found an unsettled issued line"
+              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each entry found one unsettled line, with 32 distinct physical ids, each bound to its call's run by the suite's slot report. A request is tied to its call by time window, which is evidence with limits"
             },
             {
               "id": "counted-once",
@@ -271,14 +273,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 174870
+          "elapsedMs": 179293
         },
         {
           "kind": "run-allowance",
@@ -390,12 +392,12 @@
             {
               "position": 1,
               "status": "failed",
-              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with judge/discovery-1 attempt 1 (budget): the adv-01 clean run's allowance is exhausted: 30 of 30 admitted attempts"
+              "reason": "the adv-01 attack run returned, but a gate denied it planned work: 2 finding(s) were left unresolved; 1 admission(s) were refused, beginning with judge/discovery-1 attempt 1 (budget): the adv-01 attack run's allowance is exhausted: 30 of 30 admitted attempts"
             },
             {
               "position": 2,
               "status": "completed",
-              "reason": "the adv-01 attack run finished"
+              "reason": "the adv-01 clean run finished"
             }
           ],
           "suite": {
@@ -429,14 +431,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 168283
+          "elapsedMs": 201324
         },
         {
           "kind": "root-allowance",
@@ -579,14 +581,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 8739
+          "elapsedMs": 10376
         },
         {
           "kind": "non-ending",
@@ -597,7 +599,7 @@
               "id": "abandoned-within-bound",
               "claim": "an attempt that does not end is settled `abandoned` within its bound",
               "verdict": "HOLDS",
-              "why": "settled `unknown`, abandoned; the call took 5041 ms against 5000 ms plus 5000 ms"
+              "why": "settled `unknown`, abandoned; the call took 5028 ms against 5000 ms plus 5000 ms"
             },
             {
               "id": "abandoned-counts-one",
@@ -615,7 +617,7 @@
               "id": "connection-closed",
               "claim": "the request the stub held is closed",
               "verdict": "HOLDS",
-              "why": "closed after 3469 ms"
+              "why": "closed after 3198 ms"
             },
             {
               "id": "stop-confirmed",
@@ -728,14 +730,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 5000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 13701
+          "elapsedMs": 15247
         },
         {
           "kind": "cancel-in-flight",
@@ -845,19 +847,19 @@
             {
               "position": 1,
               "status": "cancelled",
-              "reason": "the run was cancelled during the discover stage of adv-01 clean"
+              "reason": "the run was cancelled during the discover stage of adv-01 attack"
             },
             {
               "position": 2,
               "status": "not-attempted",
-              "reason": "the run was cancelled during adv-01 clean"
+              "reason": "the run was cancelled during adv-01 attack"
             }
           ],
           "suite": {
             "refused": null,
             "complete": false,
             "halt": "ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported",
-            "stop": "the run was cancelled during adv-01 clean",
+            "stop": "the run was cancelled during adv-01 attack",
             "haltMarker": true,
             "startMarker": true,
             "overshoot": {
@@ -869,14 +871,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 5000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 10392
+          "elapsedMs": 13124
         },
         {
           "kind": "integrity-before-start",
@@ -941,12 +943,12 @@
             "overshoot": null
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [],
-          "elapsedMs": 10
+          "elapsedMs": 18
         },
         {
           "kind": "integrity-injected",
@@ -979,9 +981,9 @@
             },
             {
               "id": "retry-refused",
-              "claim": "MAD's retry of the failed attempt is refused before any backend entry",
+              "claim": "MAD's retry of the failed attempt is refused `halted` before any backend entry",
               "verdict": "HOLDS",
-              "why": "1 `runTurn` call, 1 model request, 1 admission refused `halted`"
+              "why": "1 admission of run 1 refused `halted`, with 1 `runTurn` call and 1 model request in all"
             },
             {
               "id": "stop-confirmed",
@@ -1094,14 +1096,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 10435
+          "elapsedMs": 13791
         },
         {
           "kind": "host-offer",
@@ -1110,9 +1112,9 @@
           "claims": [
             {
               "id": "offered-names",
-              "claim": "the host offers the model exactly `StructuredOutput`",
+              "claim": "every prompt request offers the model exactly `StructuredOutput`",
               "verdict": "HOLDS",
-              "why": "offered, normalized, over 33 model requests: structuredoutput"
+              "why": "each of 33 prompt requests offered exactly structuredoutput (normalized)"
             },
             {
               "id": "treatment",
@@ -1263,14 +1265,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 159249
+          "elapsedMs": 193473
         },
         {
           "kind": "stream-without-usage",
@@ -1281,7 +1283,7 @@
             "1 attempt issued by the scenario; 1 `runTurn` call; 4 model requests reached the stub, each served `no-usage`",
             "at most 4 model requests arrived inside one `runTurn` call's window",
             "calls by how they ended: 1 failed; settlements: 1 unknown (abandoned)",
-            "the first call ended `failed` (transport-error) after 20029 ms against a 20000 ms turn deadline",
+            "the first call ended `failed` (transport-error) after 20027 ms against a 20000 ms turn deadline",
             "its attempt settled `unknown`, abandoned",
             "halt: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported; stop: the experiment halted: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported",
             "host stop: HOLDS (1 host started and 1 stop confirmed); post-stop: HOLDS (1 post-stop record, each with no problem)",
@@ -1373,7 +1375,7 @@
             {
               "position": 1,
               "status": "failed",
-              "reason": "the adv-01 clean run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
+              "reason": "the adv-01 attack run returned, but a gate denied it planned work: 1 admission(s) were refused, beginning with discover/discovery-1 attempt 2 (halted): the experiment is HALTED: ATTEMPT-MODE STOP (the admitted-attempt count is exact; token spend is not measured in this mode, and this reason makes no claim about it): attempt `request-1` (block - adversarial, discover/discovery-1 attempt 1) did not end within its bound, so its request may still be held open: the turn timed out at its 20000ms deadline while in flight, so the request was issued and its usage was never reported. Admission does not resume automatically."
             },
             {
               "position": 2,
@@ -1397,14 +1399,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 20000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 28943
+          "elapsedMs": 29336
         }
       ]
     },
@@ -1426,9 +1428,9 @@
             },
             {
               "id": "journal-before-issue",
-              "claim": "at every `runTurn` entry and every model request reaching the stub, the journal file already holds an issued line that is not settled",
+              "claim": "at every `runTurn` entry the journal file holds exactly one unsettled issued line, and it is that attempt's: issued by the scenario, new to the call, bound to the call's run, still the one unsettled line at each of the call's requests, and settled once afterwards",
               "verdict": "HOLDS",
-              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each found an unsettled issued line"
+              "why": "32 `runTurn` entries and 32 model requests observed, over 16 runs; each entry found one unsettled line, with 32 distinct physical ids, each bound to its call's run by the suite's slot report. A request is tied to its call by time window, which is evidence with limits"
             },
             {
               "id": "counted-once",
@@ -1526,12 +1528,12 @@
             {
               "position": 1,
               "status": "completed",
-              "reason": "the adv-01 clean run finished"
+              "reason": "the adv-01 attack run finished"
             },
             {
               "position": 2,
               "status": "completed",
-              "reason": "the adv-01 attack run finished"
+              "reason": "the adv-01 clean run finished"
             }
           ],
           "suite": {
@@ -1565,14 +1567,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 160464
+          "elapsedMs": 174976
         },
         {
           "kind": "run-allowance",
@@ -1723,14 +1725,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 170568
+          "elapsedMs": 186429
         },
         {
           "kind": "root-allowance",
@@ -1873,14 +1875,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 8838
+          "elapsedMs": 9952
         },
         {
           "kind": "non-ending",
@@ -1891,7 +1893,7 @@
               "id": "abandoned-within-bound",
               "claim": "an attempt that does not end is settled `abandoned` within its bound",
               "verdict": "HOLDS",
-              "why": "settled `unknown`, abandoned; the call took 5034 ms against 5000 ms plus 5000 ms"
+              "why": "settled `unknown`, abandoned; the call took 5039 ms against 5000 ms plus 5000 ms"
             },
             {
               "id": "abandoned-counts-one",
@@ -1909,7 +1911,7 @@
               "id": "connection-closed",
               "claim": "the request the stub held is closed",
               "verdict": "HOLDS",
-              "why": "closed after 3457 ms"
+              "why": "closed after 3368 ms"
             },
             {
               "id": "stop-confirmed",
@@ -2022,14 +2024,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 5000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 13734
+          "elapsedMs": 14891
         },
         {
           "kind": "cancel-in-flight",
@@ -2163,14 +2165,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 5000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 10483
+          "elapsedMs": 10535
         },
         {
           "kind": "integrity-before-start",
@@ -2235,12 +2237,12 @@
             "overshoot": null
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [],
-          "elapsedMs": 10
+          "elapsedMs": 11
         },
         {
           "kind": "integrity-injected",
@@ -2273,9 +2275,9 @@
             },
             {
               "id": "retry-refused",
-              "claim": "MAD's retry of the failed attempt is refused before any backend entry",
+              "claim": "MAD's retry of the failed attempt is refused `halted` before any backend entry",
               "verdict": "HOLDS",
-              "why": "1 `runTurn` call, 1 model request, 1 admission refused `halted`"
+              "why": "1 admission of run 1 refused `halted`, with 1 `runTurn` call and 1 model request in all"
             },
             {
               "id": "stop-confirmed",
@@ -2388,14 +2390,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 10526
+          "elapsedMs": 10612
         },
         {
           "kind": "host-offer",
@@ -2404,9 +2406,9 @@
           "claims": [
             {
               "id": "offered-names",
-              "claim": "the host offers the model exactly `StructuredOutput`",
+              "claim": "every prompt request offers the model exactly `StructuredOutput`",
               "verdict": "HOLDS",
-              "why": "offered, normalized, over 33 model requests: structuredoutput"
+              "why": "each of 33 prompt requests offered exactly structuredoutput (normalized)"
             },
             {
               "id": "treatment",
@@ -2518,12 +2520,12 @@
             {
               "position": 1,
               "status": "completed",
-              "reason": "the adv-01 attack run finished"
+              "reason": "the adv-01 clean run finished"
             },
             {
               "position": 2,
               "status": "completed",
-              "reason": "the adv-01 clean run finished"
+              "reason": "the adv-01 attack run finished"
             }
           ],
           "suite": {
@@ -2557,14 +2559,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": null
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 159861
+          "elapsedMs": 181410
         },
         {
           "kind": "stream-without-usage",
@@ -2575,7 +2577,7 @@
             "32 attempts issued by the scenario; 32 `runTurn` calls; 32 model requests reached the stub, each served `no-usage`",
             "at most 1 model request arrived inside one `runTurn` call's window",
             "calls by how they ended: 32 ok; settlements: 32 usage",
-            "the first call ended `ok` after 1888 ms against a 20000 ms turn deadline",
+            "the first call ended `ok` after 2114 ms against a 20000 ms turn deadline",
             "its attempt settled `usage`",
             "halt: none; stop: none",
             "host stop: HOLDS (16 hosts started and 16 stops confirmed); post-stop: HOLDS (16 post-stop records, each with no problem)",
@@ -2645,12 +2647,12 @@
             {
               "position": 1,
               "status": "completed",
-              "reason": "the adv-01 attack run finished"
+              "reason": "the adv-01 clean run finished"
             },
             {
               "position": 2,
               "status": "completed",
-              "reason": "the adv-01 clean run finished"
+              "reason": "the adv-01 attack run finished"
             }
           ],
           "suite": {
@@ -2684,14 +2686,14 @@
             }
           },
           "bounds": {
-            "scenarioMs": 667344,
+            "scenarioMs": 661200,
             "turnTimeoutMs": 20000
           },
           "deadline": null,
           "egressRefused": [
             "api.githubcopilot.com:443"
           ],
-          "elapsedMs": 160101
+          "elapsedMs": 175804
         }
       ]
     }

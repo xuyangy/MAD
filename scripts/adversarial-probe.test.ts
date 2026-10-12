@@ -16,12 +16,14 @@ import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
 import { candidate } from "../core/test-support/fakes.ts"
 import {
   boundedStart,
+  calibrate,
   cancelClaims,
   claimsFor,
   EVIDENCE_FILE,
   extraRequests,
   frozenProtocolFixture,
   healthyClaims,
+  HostOwner,
   hostOfferClaims,
   hostStopClaims,
   integrityBeforeStartClaims,
@@ -30,6 +32,7 @@ import {
   manyFindings,
   nonEndingClaims,
   noUsageObservations,
+  offeredNamesClaim,
   parseProbeArgs,
   pathProblems,
   rootAllowanceClaims,
@@ -99,6 +102,9 @@ const call = (position: number, at: number, extra: Partial<CallFact> = {}): Call
   startedAt: at,
   endedAt: at + 50,
   unsettledAtEntry: 1,
+  entryId: null,
+  entryRunId: null,
+  entryPosition: null,
   disposition: "ok",
   failure: null,
   usageUnknown: false,
@@ -121,6 +127,7 @@ const request = (index: number, position: number, atMs: number, extra: Partial<R
   position,
   closedAfterMs: null,
   unsettledAtArrival: 1,
+  arrivalId: null,
   ...extra,
 })
 
@@ -147,6 +154,7 @@ function facts(kind: ScenarioKind, extra: Partial<ScenarioFacts> = {}): Scenario
     injected: null,
     cancelled: false,
     unofferedTool: null,
+    unsafe: [],
     deadline: null,
     turnTimeoutMs: null,
     egress: [],
@@ -163,9 +171,9 @@ function healthy(runs = 16, extra: Partial<ScenarioFacts> = {}): ScenarioFacts {
     slots: Array.from({ length: 16 }, (_unused, index) => ({ position: index + 1, status: index < runs ? "completed" : "not-attempted", reason: "" })),
     overshoot: { root: 0, suite: 0, runs: positions.map(() => 0) },
     issued: positions.map((position) => issuedLine(position, position)),
-    calls: positions.map((position) => call(position, position * 1000)),
+    calls: positions.map((position) => call(position, position * 1000, { entryId: `request-${position}`, entryRunId: `run-${position}`, entryPosition: position })),
     maxConcurrentCalls: 1,
-    requests: positions.map((position) => request(position, position, position * 1000 + 10)),
+    requests: positions.map((position) => request(position, position, position * 1000 + 10, { arrivalId: `request-${position}` })),
     hosts: { starts: runs, records: positions.flatMap((position) => hostRun(position)), unestablished: [], recordFailure: null },
     ...extra,
   })
@@ -201,6 +209,43 @@ describe("the healthy suite's claims", () => {
     const unread = healthy()
     unread.calls[2]!.unsettledAtEntry = null
     expect(whyOf(healthyClaims(unread, PIN), "journal-before-issue")).toContain("could not be read")
+  })
+
+  test("a count of one does not certify the line: a stale, reused, wrong-run, ambiguous or twice-settled line each fails", () => {
+    const why = (mutate: (seen: ScenarioFacts) => void) => {
+      const seen = healthy()
+      mutate(seen)
+      const claims = healthyClaims(seen, PIN)
+      expect(verdictOf(claims, "journal-before-issue")).toBe("FAILS")
+      return whyOf(claims, "journal-before-issue")
+    }
+    // Stale: one unsettled line, and it is not one this scenario issued.
+    expect(why((seen) => (seen.calls[3]!.entryId = "probe-seed-open"))).toContain("call 4 (run 4): the unsettled line at entry is not one this scenario issued")
+    // Reused: call 6 sees the line call 5 saw.
+    expect(why((seen) => (seen.calls[5]!.entryId = "request-5"))).toContain("call 6 (run 6): the unsettled line at entry was already call 5's (reused)")
+    // Wrong run: the line belongs to run 2, the call to run 7.
+    expect(why((seen) => (seen.calls[6]!.entryPosition = 2))).toContain("belongs to run 2, not to this call's run")
+    expect(why((seen) => (seen.calls[6]!.entryPosition = null))).toContain("belongs to no run the suite reported")
+    // Ambiguous: two unsettled lines, so no identity.
+    expect(
+      why((seen) => {
+        seen.calls[0]!.unsettledAtEntry = 2
+        seen.calls[0]!.entryId = null
+      }),
+    ).toContain("2 unsettled issued lines at entry, so which is this attempt's is ambiguous")
+    // The request found another line than its call did.
+    expect(why((seen) => (seen.requests[8]!.arrivalId = "request-1"))).toContain("request 9: the unsettled line when it reached the stub is not the one call 9 (run 9) saw at entry")
+    // The line was settled twice, or never.
+    expect(why((seen) => (seen.issued[10]!.settlements = 2))).toContain("its line has 2 settlements, not one")
+    // A request in no call's window is not identified.
+    expect(why((seen) => (seen.requests[2]!.atMs = 500_000))).toContain("request 3: it falls in no `runTurn` call's window")
+  })
+
+  test("the holding verdict says how many distinct lines it bound, and that request attribution has limits", () => {
+    const text = whyOf(healthyClaims(healthy(), PIN), "journal-before-issue")
+    expect(text).toContain("16 distinct physical ids")
+    expect(text).toContain("bound to its call's run by the suite's slot report")
+    expect(text).toContain("evidence with limits")
   })
 
   test("a repeated id, a missing settlement or a call count that disagrees fails counted-once", () => {
@@ -430,6 +475,18 @@ describe("the integrity rows", () => {
     expect(verdictOf(integrityInjectedClaims(injected({ issued: [issuedLine(1, 1, { kind: "unknown", abandoned: true, executionId: true })] })), "unknown-binds-id")).toBe("FAILS")
   })
 
+  test("retry-refused needs a halted refusal of that run: none, or only another run's, leaves it UNPROBED with the narrower observation", () => {
+    const none = integrityInjectedClaims(injected({ refusals: [] }))
+    expect(verdictOf(none, "retry-refused")).toBe("UNPROBED")
+    expect(whyOf(none, "retry-refused")).toContain("no second backend entry or request was observed")
+    expect(whyOf(none, "retry-refused")).toContain("no admission of run 1 was recorded refused `halted`")
+    const other = integrityInjectedClaims(injected({ refusals: [{ cause: "halted", position: 2 }] }))
+    expect(verdictOf(other, "retry-refused")).toBe("UNPROBED")
+    expect(whyOf(other, "retry-refused")).toContain("1 refusal recorded for other runs or causes")
+    expect(verdictOf(integrityInjectedClaims(injected({ refusals: [{ cause: "budget", position: 1 }] })), "retry-refused")).toBe("UNPROBED")
+    expect(whyOf(integrityInjectedClaims(injected()), "retry-refused")).toBe("1 admission of run 1 refused `halted`, with 1 `runTurn` call and 1 model request in all")
+  })
+
   test("reports that were never made fail the row with the reason, never UNPROBED", () => {
     const claims = integrityInjectedClaims(injected({ injected: { reported: false, why: "the HTTP 400 envelope carried a token figure" } }))
     expect(verdictOf(claims, "conflict-recorded")).toBe("FAILS")
@@ -486,6 +543,39 @@ describe("the host offer's claims (protocol v3 B8)", () => {
     wide.requests[1]!.offered = ["mcp_StructuredOutput", "mcp_Read"]
     expect(verdictOf(hostOfferClaims(wide), "offered-names")).toBe("FAILS")
     expect(verdictOf(hostOfferClaims(offer({ isError: true, namesUnavailableTool: true, canary: false }, { calls: [call(1, 0, { disposition: "failed", failure: "model-error" })] })), "structured-output-usable")).toBe("FAILS")
+  })
+
+  test("the offer is checked request by request: an empty offer on a prompt is not masked by another request's", () => {
+    // Request 1 offers the tool; request 2, a prompt continuation of the same call, offers nothing.
+    const masked = offer({ isError: true, namesUnavailableTool: true, canary: false })
+    masked.requests[1]!.offered = []
+    const claim = offeredNamesClaim(masked)
+    expect(claim.verdict).toBe("FAILS")
+    expect(claim.why).toContain("request 2 is a prompt that offered no tool")
+    // A prompt-stage request with an empty offer and no tool result fails too.
+    const bare = offer(undefined)
+    bare.requests[0]!.offered = []
+    expect(offeredNamesClaim(bare).why).toContain("request 1 is a prompt that offered no tool")
+    // A wider offer names the request and the tools.
+    const wide = offer({ isError: true, namesUnavailableTool: true, canary: false })
+    wide.requests[0]!.offered = ["mcp_StructuredOutput", "mcp_Bash"]
+    expect(offeredNamesClaim(wide).why).toContain("request 1 offered bash, structuredoutput")
+  })
+
+  test("a host-side request is outside the claim only beside a prompt of its call that carries the offer, and is counted apart", () => {
+    const withSide = facts("host-offer", {
+      calls: [call(1, 0, { endedAt: 400 })],
+      requests: [request(1, 1, 5), request(2, 1, 50, { offered: [], stage: "side", served: "side-text" })],
+    })
+    const held = offeredNamesClaim(withSide)
+    expect(held.verdict).toBe("HOLDS")
+    expect(held.why).toContain("each of 1 prompt request offered exactly structuredoutput")
+    expect(held.why).toContain("1 host-side request offered no tool")
+    // The same empty offer with no prompt of its call carrying the tool is a failure, not a side request.
+    const alone = facts("host-offer", { calls: [call(1, 0, { endedAt: 400 })], requests: [request(1, 1, 50, { offered: [], stage: "side", served: "side-text" })] })
+    expect(offeredNamesClaim(alone).verdict).toBe("FAILS")
+    expect(offeredNamesClaim(alone).why).toContain("no request of its call carried the offer")
+    expect(offeredNamesClaim(facts("host-offer")).verdict).toBe("UNPROBED")
   })
 
   test("usability and offered names stay visible when a later cleanup fails", () => {
@@ -681,12 +771,17 @@ describe("arguments, paths, the fixture and the bounds", () => {
 // ---------------------------------------------------------------------------
 
 /** A managed host that starts and stops as asked, with clean post-stop checks. */
-function standInHosts() {
+function standInHosts(script: { stop?: (index: number, pid: number) => Promise<StopOutcome> | StopOutcome | undefined } = {}) {
   const started: ManagedHostOptions[] = []
+  const stops: number[] = []
   const startHost = async (asked: ManagedHostOptions): Promise<ManagedHostStart> => {
     started.push(asked)
-    const pid = 4000 + started.length
-    const stop = async (): Promise<StopOutcome> => ({ confirmed: true, pid, how: "exited (status 143) after SIGTERM", postStop: { held: ["the OAuth store is empty"], problems: [] } })
+    const index = started.length
+    const pid = 4000 + index
+    const stop = async (): Promise<StopOutcome> => {
+      stops.push(index)
+      return (await script.stop?.(index, pid)) ?? { confirmed: true, pid, how: "exited (status 143) after SIGTERM", postStop: { held: ["the OAuth store is empty"], problems: [] } }
+    }
     asked.onSpawn?.({ pid, stop })
     return {
       ok: true,
@@ -704,7 +799,7 @@ function standInHosts() {
       },
     } as ManagedHostStart
   }
-  return { startHost, started }
+  return { startHost, started, stops }
 }
 
 /**
@@ -787,7 +882,7 @@ async function standInContext(extra: ProbeSeams = {}): Promise<{ context: ProbeC
     protocol: await frozenProtocolFixture(dir),
     proxy,
     signal: new AbortController().signal,
-    current: { stop: null },
+    owner: new HostOwner(extra.teardownMs ?? 2000),
     seams,
     clock: (await import("../core/ports/clock.ts")).systemClock(),
     codeRevision: { kind: "known", value: { commit: "abc123", dirty: false } },
@@ -799,8 +894,8 @@ async function standInContext(extra: ProbeSeams = {}): Promise<{ context: ProbeC
 
 async function observed(kind: ScenarioKind, extra: ProbeSeams = {}) {
   const { context, stub, hosts } = await standInContext(extra)
-  const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec(kind))
-  return { facts: seen, claims: claimsFor(seen, PIN), hosts, context }
+  const { facts: seen, startedAt } = await runScenario(context, ANTHROPIC, stub, spec(kind))
+  return { facts: seen, claims: claimsFor(seen, PIN, startedAt), hosts, context }
 }
 
 describe("the scenarios on stand-ins, through the real suite and journal", () => {
@@ -942,26 +1037,216 @@ describe("the scenarios on stand-ins, through the real suite and journal", () =>
     expect(seen.calls.length).toBeGreaterThanOrEqual(16)
   }, 120_000)
 
-  test("a host start that outlives its bound is refused, and the host it returns later is stopped", async () => {
-    const { context } = await standInContext({ hostStartMs: 30 })
-    let stopped = 0
-    context.seams.startHost = async (options) => {
-      await Bun.sleep(120)
-      return {
-        ok: true,
-        host: { url: "http://127.0.0.1:1", pid: 1, stop: async () => ((stopped += 1), { confirmed: true, pid: 1, how: "stopped" }) },
-      } as unknown as ManagedHostStart
+  test("a scenario whose host stop is UNCONFIRMED starts no further host, and says the probe must not go on", async () => {
+    const hosts = standInHosts({ stop: (index, pid) => (index === 1 ? { confirmed: false, pid, why: "SIGKILL was sent and the exit was not observed" } : undefined) })
+    const { context, stub } = await standInContext({ startHost: hosts.startHost })
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("healthy"))
+    expect(hosts.started).toHaveLength(1)
+    expect(hosts.stops).toEqual([1])
+    expect(seen.unsafe).toHaveLength(1)
+    expect(seen.unsafe[0]).toContain("the stop of process 4001")
+    expect(seen.unsafe[0]).toContain("UNCONFIRMED")
+    expect(verdictOf(claimsFor(seen, PIN), "stop-confirmed")).toBe("FAILS")
+    // The owner refuses the next start itself, whoever asks: a second scenario on the same probe starts nothing.
+    const again = await runScenario(context, ANTHROPIC, stub, spec("root-allowance"))
+    expect(hosts.started).toHaveLength(1)
+    expect(again.facts.hosts.records.find((record) => record.event === "start")?.detail).toContain("no further host starts while an earlier one is unresolved")
+  }, 120_000)
+
+  test("a confirmed stop whose post-stop check failed is disclosed and leaves the probe free to go on", async () => {
+    const hosts = standInHosts({ stop: (_index, pid) => ({ confirmed: true, pid, how: "exited", postStop: { held: [], problems: ["session=1"] } }) })
+    const { context, stub } = await standInContext({ startHost: hosts.startHost })
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("non-ending"))
+    expect(seen.unsafe).toEqual([])
+    expect(verdictOf(claimsFor(seen, PIN), "post-stop-clean")).toBe("FAILS")
+    expect(verdictOf(claimsFor(seen, PIN), "stop-confirmed")).toBe("HOLDS")
+  }, 120_000)
+
+  test("a suite stage that throws with a host up does not lose it: the owner stops it, with a known outcome, before the scenario returns", async () => {
+    const hosts = standInHosts()
+    const { context, stub } = await standInContext({ startHost: hosts.startHost })
+    let lifecycleStops = 0
+    // A stage that takes a host through the probe's own start seam, hands over a stop, and then throws.
+    context.seams.suiteStage = async (input) => {
+      input.ownStop(async () => {
+        lifecycleStops += 1
+      })
+      const started = await input.startHost!({ mode: "oauth", oauth: { dataDir: join(input.dataRoot, "run-1") }, signals: null } as unknown as ManagedHostOptions)
+      expect(started.ok).toBe(true)
+      throw new Error("the stage failed with its host up")
     }
-    const started = await boundedStart(context, "the managed host's start", { mode: "oauth" } as ManagedHostOptions)
-    expect(started.ok).toBe(false)
-    if (!started.ok) expect(started.reason).toContain("gave no answer within 30 ms")
-    await Bun.sleep(200)
-    expect(stopped).toBe(1)
-    // A start that rejects late is swallowed, and one inside the bound is returned as it is.
-    context.seams.startHost = async () => ({ ok: false, reason: "refused before the spawn", stopped: null })
-    expect(await boundedStart(context, "x", { mode: "oauth" } as ManagedHostOptions)).toEqual({ ok: false, reason: "refused before the spawn", stopped: null })
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("healthy"))
+    expect(seen.refused).toBe("the scenario threw: the stage failed with its host up")
+    // The lifecycle's own stop was asked for, and the owner stopped the host it had not.
+    expect(lifecycleStops).toBe(1)
+    expect(hosts.started).toHaveLength(1)
+    expect(hosts.stops).toEqual([1])
+    expect(context.owner.hosts).toHaveLength(1)
+    expect(context.owner.hosts[0]!.outcome).toMatchObject({ confirmed: true })
+    expect(seen.unsafe).toEqual([])
+  }, 120_000)
+
+  test("the same throw with a host whose stop is not confirmed leaves the scenario unsafe", async () => {
+    const hosts = standInHosts({ stop: (_index, pid) => ({ confirmed: false, pid, why: "the exit was not observed" }) })
+    const { context, stub } = await standInContext({ startHost: hosts.startHost })
+    context.seams.suiteStage = async (input) => {
+      await input.startHost!({ mode: "oauth", oauth: { dataDir: join(input.dataRoot, "run-1") }, signals: null } as unknown as ManagedHostOptions)
+      throw new Error("the stage failed with its host up")
+    }
+    const { facts: seen } = await runScenario(context, ANTHROPIC, stub, spec("healthy"))
+    expect(seen.unsafe).toHaveLength(1)
+    expect(seen.unsafe[0]).toContain("UNCONFIRMED")
+  }, 120_000)
+})
+
+describe("the host owner", () => {
+  const confirmed = (pid: number): StopOutcome => ({ confirmed: true, pid, how: "exited", postStop: { held: [], problems: [] } })
+
+  test("one stop per process: the spawn handle and the started host share it, and the fullest stop is the one called", async () => {
+    const owner = new HostOwner(500)
+    const calls: string[] = []
+    const first = owner.own("/data/run-1", 11, async () => (calls.push("spawn handle"), { confirmed: true, pid: 11, how: "killed" }))
+    const second = owner.own("/data/run-1", 11, async () => (calls.push("host"), confirmed(11)))
+    expect(second).toBe(first)
+    const [a, b] = await Promise.all([first.stop(), second.stop()])
+    expect(calls).toEqual(["host"])
+    expect(a).toBe(b)
+    expect(first.outcome).toEqual(confirmed(11))
+    expect(await owner.settle()).toEqual([])
   })
 
+  test("a stop that rejects, or that passes the teardown bound, is kept as an unconfirmed outcome and never dropped", async () => {
+    const owner = new HostOwner(40)
+    owner.own("/data/a", 21, async () => {
+      throw new Error("kill failed")
+    })
+    owner.own("/data/b", 22, () => new Promise<StopOutcome>(() => undefined))
+    const problems = await owner.settle()
+    expect(problems).toHaveLength(2)
+    expect(problems[0]).toContain("process 21")
+    expect(problems[0]).toContain("the stop rejected: kill failed")
+    expect(problems[1]).toContain("process 22")
+    expect(problems[1]).toContain("the stop gave no answer within 40 ms")
+    // Asking again does not send a second stop or change the answer.
+    expect(await owner.settle()).toEqual(problems)
+  })
+
+  test("settle stops a host nobody stopped", async () => {
+    const owner = new HostOwner(500)
+    let stopped = 0
+    owner.own("/data/a", 31, async () => ((stopped += 1), confirmed(31)))
+    expect(owner.unresolved()).toEqual(["process 31 (`/data/a`) was started and has not been stopped"])
+    expect(await owner.settle()).toEqual([])
+    expect(stopped).toBe(1)
+  })
+})
+
+describe("a host start that outlives its bound", () => {
+  const lateHost = (pid: number, stop: () => Promise<StopOutcome>): ManagedHostStart => ({ ok: true, host: { url: "http://127.0.0.1:1", pid, stop } }) as unknown as ManagedHostStart
+  const oauth = (dataDir: string) => ({ mode: "oauth", oauth: { dataDir } }) as unknown as ManagedHostOptions
+
+  test("it is refused and stays owned: the host it returns later is stopped, and its outcome is known before the probe goes on", async () => {
+    const { context } = await standInContext({ hostStartMs: 30 })
+    let stopped = 0
+    context.seams.startHost = async () => {
+      await Bun.sleep(120)
+      return lateHost(51, async () => ((stopped += 1), { confirmed: true, pid: 51, how: "stopped", postStop: { held: [], problems: [] } }))
+    }
+    const started = await boundedStart(context, "the managed host's start", oauth("/data/run-1"))
+    expect(started.ok).toBe(false)
+    if (!started.ok) expect(started.reason).toContain("gave no answer within 30 ms")
+    // Until the start returns, another host must not start.
+    expect(context.owner.unresolved().join("\n")).toContain("the start on `/data/run-1` outlived its bound and has not returned")
+    expect(await context.owner.settle()).toEqual([])
+    expect(stopped).toBe(1)
+    expect(context.owner.hosts[0]).toMatchObject({ key: "/data/run-1", pid: 51, outcome: { confirmed: true } })
+  })
+
+  test("a late host whose stop fails is reported, not dropped", async () => {
+    const { context } = await standInContext({ hostStartMs: 30 })
+    context.seams.startHost = async () => {
+      await Bun.sleep(80)
+      return lateHost(52, async () => {
+        throw new Error("the process would not die")
+      })
+    }
+    await boundedStart(context, "x", oauth("/data/run-2"))
+    const problems = await context.owner.settle()
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain("process 52")
+    expect(problems[0]).toContain("the stop rejected: the process would not die")
+  })
+
+  test("a late start that rejects, and one that never returns within the teardown bound, are each unresolved", async () => {
+    const rejecting = await standInContext({ hostStartMs: 30 })
+    rejecting.context.seams.startHost = async () => {
+      await Bun.sleep(80)
+      throw new Error("spawn failed late")
+    }
+    await boundedStart(rejecting.context, "x", oauth("/data/run-3"))
+    expect((await rejecting.context.owner.settle()).join("\n")).toContain("outlived its bound and then rejected (spawn failed late)")
+
+    const hanging = await standInContext({ hostStartMs: 30, teardownMs: 60 })
+    hanging.context.seams.startHost = () => new Promise<ManagedHostStart>(() => undefined)
+    await boundedStart(hanging.context, "x", oauth("/data/run-4"))
+    expect((await hanging.context.owner.settle()).join("\n")).toContain("the start on `/data/run-4` outlived its bound and has not returned")
+  })
+
+  test("a start inside the bound is returned with the owner's stop, and the caller's onSpawn gets that same stop", async () => {
+    const { context } = await standInContext()
+    const hosts = standInHosts()
+    context.seams.startHost = hosts.startHost
+    let spawnStop: (() => Promise<StopOutcome>) | undefined
+    const started = await boundedStart(context, "x", { ...oauth("/data/run-5"), onSpawn: (handle) => (spawnStop = handle.stop) } as ManagedHostOptions)
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    expect(started.host.stop).toBe(spawnStop!)
+    await Promise.all([started.host.stop(), spawnStop!()])
+    expect(hosts.stops).toEqual([1])
+    // A refusal before the spawn passes through, and a stop `startManagedHost` already made is recorded.
+    context.seams.startHost = async () => ({ ok: false, reason: "refused", stopped: { confirmed: false, pid: 77, why: "not observed" } })
+    await boundedStart(context, "x", oauth("/data/run-6"))
+    expect(context.owner.unresolved().join("\n")).toContain("process 77")
+  })
+})
+
+describe("the calibration host's stop", () => {
+  const calibrated = async (stop: (index: number, pid: number) => Promise<StopOutcome> | StopOutcome | undefined, extra: ProbeSeams = {}) => {
+    const hosts = standInHosts({ stop })
+    const { context, stub } = await standInContext({ startHost: hosts.startHost, ...extra })
+    return { record: await calibrate(context, ANTHROPIC, stub), hosts, context }
+  }
+
+  test("a clean stop leaves nothing to say", async () => {
+    const { record } = await calibrated(() => undefined)
+    expect(record).toMatchObject({ stopProblem: null, unsafe: [], stop: { confirmed: true, postStopProblems: 0 }, turn: { disposition: "ok" } })
+  })
+
+  test("an unconfirmed stop, a stop that throws, missing post-stop checks and a failed check each give a stop problem", async () => {
+    const unconfirmed = await calibrated((_index, pid) => ({ confirmed: false, pid, why: "the exit was not observed" }))
+    expect(unconfirmed.record.stopProblem).toContain("its stop is UNCONFIRMED (the exit was not observed)")
+    expect(unconfirmed.record.unsafe).toHaveLength(1)
+    const thrown = await calibrated(() => {
+      throw new Error("stop exploded")
+    })
+    expect(thrown.record.stopProblem).toContain("UNCONFIRMED (the stop rejected: stop exploded)")
+    expect(thrown.record.unsafe).toHaveLength(1)
+    const missing = await calibrated((_index, pid) => ({ confirmed: true, pid, how: "exited" }))
+    expect(missing.record.stopProblem).toContain("no post-stop checks")
+    expect(missing.record.stop).toEqual({ confirmed: true, postStopProblems: null })
+    expect(missing.record.unsafe).toEqual([])
+    const failed = await calibrated((_index, pid) => ({ confirmed: true, pid, how: "exited", postStop: { held: [], problems: ["session=1"] } }))
+    expect(failed.record.stopProblem).toContain("a post-stop check failed: session=1")
+  })
+
+  test("a stop past the teardown bound is unconfirmed, and the calibration returns", async () => {
+    const { record } = await calibrated(() => new Promise<StopOutcome>(() => undefined), { teardownMs: 50 })
+    expect(record.stopProblem).toContain("the stop gave no answer within 50 ms")
+    expect(record.unsafe).toHaveLength(1)
+  })
+})
+
+describe("the scenarios on stand-ins, their bounds", () => {
   test("a scenario past its bound aborts the suite, stops its host and fails its claims", async () => {
     const { context, stub } = await standInContext({ hangTurnMs: 60_000 })
     context.scenarioMs = 400
@@ -981,10 +1266,9 @@ describe("the scenarios on stand-ins, through the real suite and journal", () =>
 describe("main", () => {
   const SHIPPED = { exitCode: 1, output: SHIPPED_BARRIERS.map((barrier) => barrier.text).join("\n"), timedOut: false }
 
-  async function commandSeams(extra: ProbeSeams = {}) {
+  async function commandSeams(extra: ProbeSeams = {}, hosts = standInHosts()) {
     const dir = await tempDir()
     const stubFor = new Map<string, AdversarialStub>()
-    const hosts = standInHosts()
     const seams: ProbeSeams = {
       platform: "darwin",
       selfTest: async () => ({ ok: true, why: "stand-in self-test" }) as never,
@@ -1025,6 +1309,30 @@ describe("main", () => {
     expect(await main(argv, seams)).toBe(1)
     expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
   })
+
+  test("a calibration host whose stop is not established, or whose post-stop checks are missing, refuses before any scenario", async () => {
+    for (const stop of [
+      (_index: number, pid: number): StopOutcome => ({ confirmed: false, pid, why: "the exit was not observed" }),
+      (_index: number, pid: number): StopOutcome => ({ confirmed: true, pid, how: "exited" }),
+      (_index: number, pid: number): StopOutcome => ({ confirmed: true, pid, how: "exited", postStop: { held: [], problems: ["session=1"] } }),
+    ]) {
+      const hosts = standInHosts({ stop })
+      const { seams, argv, dir } = await commandSeams({}, hosts)
+      expect(await main(argv, seams)).toBe(1)
+      // The calibration host only: no scenario started another.
+      expect(hosts.started).toHaveLength(1)
+      expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
+    }
+  }, 120_000)
+
+  test("a scenario that leaves a host's termination unconfirmed ends the probe: no later scenario starts a host, and no evidence is written", async () => {
+    // Host 1 is the calibration's; host 2 is the first scenario's, and its stop is not confirmed.
+    const hosts = standInHosts({ stop: (index, pid) => (index === 2 ? { confirmed: false, pid, why: "the exit was not observed" } : undefined) })
+    const { seams, argv, dir } = await commandSeams({ scenarios: [spec("non-ending"), spec("root-allowance"), spec("integrity-injected")] }, hosts)
+    expect(await main(argv, seams)).toBe(1)
+    expect(hosts.started).toHaveLength(2)
+    expect(existsSync(join(dir, "out", EVIDENCE_FILE))).toBe(false)
+  }, 120_000)
 
   test("it writes evidence with per-claim verdicts, the calibration apart, the fixture's digests, and no path", async () => {
     const { seams, argv, dir } = await commandSeams()
