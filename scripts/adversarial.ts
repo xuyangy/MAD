@@ -44,10 +44,12 @@
  *
  * `<out>/adversarial/adversarial-hosts.jsonl` gets one line per start, verify,
  * stop and post-stop outcome, each with the schedule hash, the slot and its
- * position, so host starts outside the attempt count are disclosed. A line that
- * cannot be appended stops the runner: the current host is stopped, nothing
- * further starts, the exit is 1, and the record that could not be persisted is
- * named. No complete disclosure is claimed after that.
+ * position, so host starts outside the attempt count are disclosed. Each line's
+ * file is synced and then its directory. A line that cannot be appended, or
+ * whose directory sync could not be completed, stops the runner: the current
+ * host is stopped, nothing further starts, the exit is 1, and the record that
+ * could not be persisted is named. No complete disclosure is claimed after
+ * that.
  *
  * ## Signals
  *
@@ -91,6 +93,7 @@ import {
   type OAuthRoute,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
+import { syncDirectory } from "../ablation/journal.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { ADVERSARIAL_RUN, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
@@ -387,8 +390,19 @@ export interface HostRecord {
   detail: string
 }
 
-/** Appends one line and syncs it; returns why it could not, or `null`. */
-export async function appendHostRecord(file: string, line: HostRecord): Promise<string | null> {
+/**
+ * Appends one line, syncs the file, then syncs the file's directory, on every
+ * call. Returns `null` once the directory sync resolved, else why not.
+ *
+ * A line whose directory sync could not be completed stays in the file: it is
+ * not removed and not appended again, and the reason says the line is there.
+ * `syncDir` is the tests' seam.
+ */
+export async function appendHostRecord(
+  file: string,
+  line: HostRecord,
+  syncDir: (directory: string) => Promise<void> = syncDirectory,
+): Promise<string | null> {
   try {
     const handle = await open(file, "a", 0o600)
     try {
@@ -397,9 +411,15 @@ export async function appendHostRecord(file: string, line: HostRecord): Promise<
     } finally {
       await handle.close()
     }
-    return null
   } catch (error) {
     return `the host record \`${file}\` could not be appended: ${messageOf(error)}`
+  }
+  const directory = dirname(file)
+  try {
+    await syncDir(directory)
+    return null
+  } catch (error) {
+    return `the host record \`${file}\` has the line, but the persistence of its directory \`${directory}\` could not be established: ${messageOf(error)}`
   }
 }
 

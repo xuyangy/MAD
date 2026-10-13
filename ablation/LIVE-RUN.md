@@ -2041,9 +2041,13 @@ path is still injected through `opencodeTools`, independently of the host offer.
 
 **The host record.** `adversarial/adversarial-hosts.jsonl` gets one line per start, verify, stop
 and post-stop outcome, each with the schedule hash, the case, the side and the position, so the
-host starts, which are not admitted attempts, are disclosed. A line that cannot be appended is a
-runner stop: the current host is stopped, nothing further starts, the exit is 1 and the record that
-could not be persisted is named. No complete disclosure is claimed after that.
+host starts, which are not admitted attempts, are disclosed. After each line the file is synced and
+then the `adversarial/` directory is synced (story 2-7f4), on every append. This is the operating
+system's file and directory sync and nothing more is claimed for it. A line that cannot be
+appended, or whose directory sync could not be completed, is a runner stop: the current host is
+stopped, nothing further starts, the exit is 1 and the record that could not be persisted is named.
+In the second case the line stays in the file and is not appended again, and the reason says so.
+No complete disclosure is claimed after that.
 
 **The turn deadline (story 2-7f3).** Every backend the launcher builds is given a turn deadline of
 120,000 ms (`ADVERSARIAL_TURN_TIMEOUT_MS`, `scripts/adversarial.ts`; protocol v3 B6). No flag,

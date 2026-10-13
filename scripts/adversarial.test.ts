@@ -41,6 +41,7 @@ import {
   ADVERSARIAL_HOSTS_FILE,
   ADVERSARIAL_TURN_TIMEOUT_MS,
   adversarialRoster,
+  appendHostRecord,
   adversarialSuiteConfig,
   gitReservationSeam,
   hostRosterProblems,
@@ -559,6 +560,136 @@ describe("the run path: all sixteen worktrees, then one host per run", () => {
       expect(result.text).not.toContain("complete: true")
     }, 60_000)
   }
+})
+
+describe("the host record's directory is synced with every line", () => {
+  const lineFor = (position: number, event: HostRecord["event"] = "start"): HostRecord => ({
+    event,
+    ok: true,
+    at: "2026-10-13T00:00:00.000Z",
+    scheduleHash: "hash",
+    caseId: "case",
+    side: "treatment",
+    position,
+    dataDir: `/d/run-${position}`,
+    pid: 4242,
+    detail: "detail",
+  })
+  const linesOf = async (file: string) => (await readFile(file, "utf8")).split("\n").filter((text) => text.length > 0)
+  /** A directory sync that records where it was called and what the record file held at that call. */
+  const recordingSync = (file: string) => {
+    const calls: { directory: string; held: string[] }[] = []
+    return { calls, sync: async (directory: string) => void calls.push({ directory, held: await linesOf(file) }) }
+  }
+
+  test("the first append creates the file, and the directory sync is called once with its directory, the line already in the file", async () => {
+    const dir = await tempDir()
+    const file = join(dir, ADVERSARIAL_HOSTS_FILE)
+    const { calls, sync } = recordingSync(file)
+    expect(await appendHostRecord(file, lineFor(1), sync)).toBeNull()
+    expect(calls).toEqual([{ directory: dir, held: [JSON.stringify(lineFor(1))] }])
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1))])
+    expect((await lstat(file)).mode & 0o777).toBe(0o600)
+  })
+
+  test("a later append adds its line after the first, and the directory sync is called again", async () => {
+    const dir = await tempDir()
+    const file = join(dir, ADVERSARIAL_HOSTS_FILE)
+    const { calls, sync } = recordingSync(file)
+    expect(await appendHostRecord(file, lineFor(1), sync)).toBeNull()
+    expect(await appendHostRecord(file, lineFor(1, "verify"), sync)).toBeNull()
+    expect(calls.map((call) => call.directory)).toEqual([dir, dir])
+    expect(calls[1]!.held).toEqual([JSON.stringify(lineFor(1)), JSON.stringify(lineFor(1, "verify"))])
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1)), JSON.stringify(lineFor(1, "verify"))])
+  })
+
+  test("a directory sync that rejects: the reason names the directory and the cause and says the line is there; the line stays, once, and the next append adds only its own", async () => {
+    const dir = await tempDir()
+    const file = join(dir, ADVERSARIAL_HOSTS_FILE)
+    let attempts = 0
+    const failing = async () => {
+      attempts += 1
+      throw new Error("scripted EIO")
+    }
+    const reason = await appendHostRecord(file, lineFor(1), failing)
+    expect(reason).toBe(`the host record \`${file}\` has the line, but the persistence of its directory \`${dir}\` could not be established: scripted EIO`)
+    expect(reason).not.toContain("could not be appended")
+    // One attempt, and the line is neither removed nor written again.
+    expect(attempts).toBe(1)
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1))])
+
+    const { calls, sync } = recordingSync(file)
+    expect(await appendHostRecord(file, lineFor(2), sync)).toBeNull()
+    expect(calls).toHaveLength(1)
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1)), JSON.stringify(lineFor(2))])
+  })
+
+  test("a line that cannot be appended keeps its own reason, and the directory sync is not attempted", async () => {
+    const dir = await tempDir()
+    const file = join(dir, "missing", ADVERSARIAL_HOSTS_FILE)
+    const { calls, sync } = recordingSync(file)
+    const reason = await appendHostRecord(file, lineFor(1), sync)
+    expect(reason).toContain(`the host record \`${file}\` could not be appended: `)
+    expect(reason).not.toContain("has the line")
+    expect(calls).toEqual([])
+    expect(existsSync(file)).toBe(false)
+  })
+
+  test("with no sync given, the real directory sync runs and the append succeeds", async () => {
+    const dir = await tempDir()
+    const file = join(dir, ADVERSARIAL_HOSTS_FILE)
+    expect(await appendHostRecord(file, lineFor(1))).toBeNull()
+    expect(await appendHostRecord(file, lineFor(2))).toBeNull()
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1)), JSON.stringify(lineFor(2))])
+  })
+
+  // The superuser can open any directory, so the real sync would not fail there.
+  test.skipIf(process.getuid?.() === 0)("with no sync given, a directory that cannot be opened for reading: the line is written and the real directory sync's failure is the reason", async () => {
+    const dir = join(await tempDir(), "unreadable")
+    await mkdir(dir)
+    const file = join(dir, ADVERSARIAL_HOSTS_FILE)
+    // Write and search without read: the file can be created, the directory cannot be opened.
+    await chmod(dir, 0o300)
+    let reason: string | null
+    try {
+      reason = await appendHostRecord(file, lineFor(1))
+    } finally {
+      await chmod(dir, 0o700)
+    }
+    expect(reason).toContain(`the host record \`${file}\` has the line, but the persistence of its directory \`${dir}\` could not be established: `)
+    expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1))])
+  })
+
+  test("through the launcher: a rejected directory sync on an acquired start stops that host, starts nothing further, names the record and the directory, and exits 1", async () => {
+    const env = await setup()
+    const target = SLOTS[1]!.position
+    const { overrides, hosts } = await runnable(env)
+    const directory = adversarialDirectory(env.out)
+    const rejected: HostRecord[] = []
+    overrides.appendHostRecord = (file, line) =>
+      appendHostRecord(file, line, async (asked) => {
+        if (line.position !== target || line.event !== "start" || !line.ok) return
+        expect(asked).toBe(directory)
+        rejected.push(line)
+        throw new Error("scripted EIO")
+      })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(1)
+    expect(rejected).toHaveLength(1)
+    expect(startedPositions(hosts)).toEqual(SLOTS.slice(0, 2).map((slot) => slot.position))
+    expect(hosts.stops.get(target)).toBe(1)
+    expect(result.text).toContain("HOST RECORD INCOMPLETE")
+    expect(result.text).toContain(
+      `the start record of run ${target} (${SLOTS[1]!.caseId} ${SLOTS[1]!.side}) was not persisted: the host record \`${join(directory, ADVERSARIAL_HOSTS_FILE)}\` has the line, but the persistence of its directory \`${directory}\` could not be established: scripted EIO`,
+    )
+    expect(result.text).toContain("not a complete disclosure")
+    expect(result.text).not.toContain("complete: true")
+    // The line whose directory sync was rejected is in the file, once; the host's later lines followed it.
+    const records = await hostRecords(env.out)
+    expect(records.filter((line) => line.position === target && line.event === "start" && line.ok)).toEqual(rejected)
+    expect(records.filter((line) => line.position === target).map((line) => line.event)).toContain("postStop")
+    expect(records.some((line) => line.position > target)).toBe(false)
+  }, 60_000)
 })
 
 describe("SIGINT and SIGTERM are the launcher's", () => {
