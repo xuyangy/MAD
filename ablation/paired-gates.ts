@@ -24,11 +24,14 @@
  *
  * ## The adversarial phase (story 2-7e)
  *
- * Gates 10, 11 and 12 are required for `adversarial` on the oauth route. Gate
- * 12 is CLOSED; gates 10 and 11 are OPEN, and gate 11 is story 2-7f2's real-host
- * probe. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
+ * Gates 10, 11 and 12 are required for `adversarial` on the oauth route. Gates
+ * 11 and 12 are CLOSED and gate 10 is OPEN. Gate 11 is closed on story 2-7f2's
+ * zero-bill probe, and only for what that probe measured:
+ * `GATE_11_EVIDENCE_SCOPE` names the two `provider/model` pairs, the host build
+ * and the payload pins, and `gate11ScopeProblem` refuses a run pinned to any
+ * other pair. `ADVERSARIAL_RUN` names the one run gate 10 will cover; its
  * pins are `null` until they are chosen, and `adversarialRunProblem` refuses a
- * run with none. For this phase `gatePreflight` reports that problem, and consults
+ * run with none. For this phase `gatePreflight` reports both problems, and consults
  * `ADVERSARIAL_CANDIDATE_NON_GATES`, the record of the one prerequisite that may
  * turn out not to be a gate: while that record is unresolved, absent or
  * malformed the preflight refuses, and no list a caller supplies replaces it.
@@ -303,6 +306,11 @@ export const ADVERSARIAL_RUN: AdversarialRun = {
   prior: [],
 }
 
+/** Whether `pins` is exactly one `provider/model` pin, the one-slot roster's shape. */
+function onePin(pins: unknown): pins is readonly [string] {
+  return Array.isArray(pins) && pins.length === 1 && pins.every((pin) => typeof pin === "string" && /^[^/\s]+\/\S+$/.test(pin))
+}
+
 /**
  * Why `run` names no usable adversarial run, or `null`. Refused: a run whose
  * pins are not chosen, a reservation that is not the run's own, and a `prior`
@@ -317,7 +325,7 @@ export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): st
       "pin is fixed when protocol v3 is frozen or the schedule is sealed, by a reviewed change to this table"
     )
   }
-  if (!Array.isArray(run.pins) || run.pins.length !== 1 || !run.pins.every((pin) => typeof pin === "string" && /^[^/\s]+\/\S+$/.test(pin))) {
+  if (!onePin(run.pins)) {
     return `adversarial run ${run.run}'s pins ${JSON.stringify(run.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`
   }
   if (run.reservation !== adversarialReservation(run.run)) {
@@ -342,6 +350,66 @@ export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): st
     }
   }
   return null
+}
+
+/** Story 2-7f5 — one `provider/model` pair the zero-bill probe measured, and the API route the host served it over. */
+export interface Gate11MeasuredPair {
+  pin: string
+  route: "messages" | "chat-completions"
+}
+
+/**
+ * Story 2-7f5 — what gate 11's evidence covers, and nothing wider: the committed
+ * probe evidence, the opencode build it ran, the prepared payloads it ran with,
+ * and the exact `provider/model` pairs it measured. A pair is an exact string;
+ * another model on a measured provider is not covered by it.
+ *
+ * The build and the payload pins are the values of `MEASURED_HOST` and
+ * `OAUTH_PAYLOAD` (ablation/managed-host.ts), which the launcher's own checks
+ * refuse on. They are repeated here, and tests hold the three copies and the
+ * evidence file equal, so none of them moves without gate 11 being evidenced
+ * again. Covering another pair, build or payload takes new evidence and a
+ * reviewed change to this value.
+ */
+export const GATE_11_EVIDENCE_SCOPE: {
+  evidence: string
+  host: { version: string; sha256: string }
+  payload: { anthropicAuthTreeDigest: string; configSeedTreeDigest: string; catalogueSha256: string }
+  pairs: readonly Gate11MeasuredPair[]
+} = {
+  evidence: "ablation/evidence/adversarial-attempts-2026-10-12.json",
+  host: { version: "1.18.32", sha256: "5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e" },
+  payload: {
+    anthropicAuthTreeDigest: "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
+    configSeedTreeDigest: "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",
+    catalogueSha256: "ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3",
+  },
+  pairs: [
+    { pin: "anthropic/claude-sonnet-5", route: "messages" },
+    { pin: "github-copilot/gpt-5-mini", route: "chat-completions" },
+  ],
+}
+
+/** The scope's pairs as printed: each pin with its route. */
+function gate11Pairs(): string {
+  return GATE_11_EVIDENCE_SCOPE.pairs.map((pair) => `${pair.pin} (${pair.route})`).join(" and ")
+}
+
+/**
+ * Why `run`'s pin is outside gate 11's evidence, or `null`. A run whose pins
+ * are not chosen, or are not one `provider/model` pin, gets `null` here:
+ * `adversarialRunProblem` reports those. Nothing else about the run is read, so
+ * no other fault in it hides a pin the probe never measured.
+ */
+export function gate11ScopeProblem(run: AdversarialRun = ADVERSARIAL_RUN): string | null {
+  if (!onePin(run.pins)) return null
+  const pin = run.pins[0]
+  if (GATE_11_EVIDENCE_SCOPE.pairs.some((pair) => pair.pin === pin)) return null
+  return (
+    `adversarial run ${run.run}'s pin ${pin} is outside gate 11's evidence scope: \`GATE_11_EVIDENCE_SCOPE\` covers exactly ` +
+    `${gate11Pairs()}, the pairs measured in ${GATE_11_EVIDENCE_SCOPE.evidence}. Another pin needs its own evidence and a ` +
+    "reviewed change to that scope"
+  )
 }
 
 export const PAIRED_GATES: readonly PairedGate[] = [
@@ -579,12 +647,34 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "adversarial",
     routes: ["oauth"],
     owner: "story 2-7f2",
-    status: "OPEN",
+    status: "CLOSED",
     requires:
-      "story 2-7f2's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the " +
-      "suite's own root before it is issued and counted once, an admission refused on the run, suite or root allowance " +
-      "reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity " +
-      "failure halts. Paired and pilot evidence is reused only within its measured scope",
+      "mixed evidence on the adversarial path, for the pairs `GATE_11_EVIDENCE_SCOPE` names and no other. From story " +
+      "2-7f2's zero-bill probe on a real host: every attempt is journaled in the suite's own root before it is issued and " +
+      "counted once, an admission refused on the run or root allowance reaches no backend, an attempt that does not end " +
+      "within its bound is settled, stopped and recorded, and an integrity failure halts. From a scripted test at the gate: " +
+      "an admission refused on the suite allowance, which no valid journal reaches apart from the root's. Paired and pilot " +
+      "evidence is reused only within its measured scope",
+    evidence:
+      `story 2-7f5, on story 2-7f2's zero-bill probe evidence (${GATE_11_EVIDENCE_SCOPE.evidence}): 98 claims HOLD, 0 FAIL ` +
+      `and 3 are UNPROBED, for ${gate11Pairs()} on opencode ${GATE_11_EVIDENCE_SCOPE.host.version} (sha256 ` +
+      `${GATE_11_EVIDENCE_SCOPE.host.sha256}) with the prepared payloads \`GATE_11_EVIDENCE_SCOPE\` pins. Every provider was ` +
+      "a loopback stub and every sign-in a placeholder; no provider was reached. Measured at commit " +
+      "71b68aa01cfea1d8fde459dcb372f8503e1cfd8b with uncommitted changes, and accepted by the review channel on 2026-10-12 " +
+      "at commit b55ca97f7456a6dbe51e79ed6b1bb2c1d3933f67. Observed on that host, per pair: each attempt journaled in the " +
+      "suite's own root before `runTurn` and counted once; a refusal on the run's 30 and on the root's 480 reaching no " +
+      "backend; an attempt past a 5,000 ms turn deadline settled `abandoned`, the host stopped and the halt recorded; an " +
+      "integrity failure before the start and an injected one in a run each halting. UNPROBED and still unmeasured on a " +
+      "real host: the suite allowance's own refusal, which rests on the scripted gate test in ablation/governor.test.ts, " +
+      "and the `not-issued` release on each of the two transports, which rests on ablation/journal-adversarial.test.ts. " +
+      "`gate11ScopeProblem` refuses a run pinned outside the scope. Tests: ablation/paired-gates.test.ts, " +
+      "scripts/adversarial.test.ts, scripts/adversarial-probe.test.ts",
+    note:
+      "Not covered: openai on any model, github-copilot/gpt-6-luna and any other copilot model served over `/responses`, " +
+      "and any other pin, build or payload. The launcher's 120,000 ms turn deadline was not run on a real host, so neither " +
+      "its adequacy for the suite's turns nor whether the provider's work stops when the wait ends is established. The " +
+      "launcher changes of stories 2-7f3 and 2-7f4 came after the measurement and were not measured. Nothing here says what " +
+      "a real provider, account, cache or quota does",
   },
   {
     number: 12,
@@ -788,7 +878,9 @@ export interface GatePreflight {
  * RESOLVED (story 2-7e). `adversarialRunProblem()` is reported for `run`,
  * `ADVERSARIAL_RUN` unless a caller supplies another (as the launcher's test
  * seam does, beside its `gates`), so the phase cannot pass while its pins are
- * not chosen.
+ * not chosen. `gate11ScopeProblem()` is reported for the same run whatever gate
+ * 11's status in `gates`, so a chosen pin the probe never measured refuses even
+ * on a table whose every gate is CLOSED.
  * `ADVERSARIAL_CANDIDATE_NON_GATES` is consulted on every call for that phase,
  * and `candidates`, when a caller supplies one, is checked as well: it can add a
  * refusal and can never remove the canonical record's. Every other phase ignores
@@ -866,6 +958,8 @@ export function gatePreflight(
     const runProblem = adversarialRunProblem(run)
     lines.push(`adversarial run ${run.run} — pins ${run.pins === null ? "not yet chosen" : run.pins.join(", ")}`)
     if (runProblem !== null) problems.push(runProblem)
+    const scopeProblem = gate11ScopeProblem(run)
+    if (scopeProblem !== null) problems.push(scopeProblem)
     for (const entry of ADVERSARIAL_CANDIDATE_NON_GATES) {
       lines.push(`candidate non-gate ${entry.item} — ${entry.name} — validated by ${entry.validatedBy} — ${entry.status}`)
     }

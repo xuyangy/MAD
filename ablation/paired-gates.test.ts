@@ -4,8 +4,8 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { MEASURED_HOST } from "./managed-host.ts"
-import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
+import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
+import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, GATE_11_EVIDENCE_SCOPE, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
   gates.map((gate) => ({ ...gate, status: "CLOSED", evidence: gate.evidence ?? "a reviewed change" }))
@@ -38,7 +38,7 @@ describe("PAIRED_GATES", () => {
       [8, "OAuth pilot spend authorization", "authorization", "oauth-pilot", HUMAN_BUDGET_OWNER, "OPEN"],
       [9, "api-key evaluation spend authorization", "authorization", "evaluation", HUMAN_BUDGET_OWNER, "OPEN"],
       [10, "adversarial spend authorization", "authorization", "adversarial", HUMAN_BUDGET_OWNER, "OPEN"],
-      [11, "adversarial attempt accounting", "engineering", "adversarial", "story 2-7f2", "OPEN"],
+      [11, "adversarial attempt accounting", "engineering", "adversarial", "story 2-7f2", "CLOSED"],
       [12, "bounded materializer termination", "engineering", "adversarial", "story 2-7e2", "CLOSED"],
     ])
     // Routes: gates 1 and 9 cover the api-key route, gates 4, 7, 8 and 10 to 12 the oauth route, and every other gate both.
@@ -582,12 +582,12 @@ describe("gatePreflight refuses a malformed row (story 2-8b review)", () => {
 describe("the adversarial phase of the gate table", () => {
   const adversarial = PAIRED_GATES.filter((gate) => gate.phase === "adversarial")
 
-  test("`adversarial` is a phase, and gates 10, 11 and 12 are its gates: oauth-routed; 10 and 11 OPEN with no evidence, 12 CLOSED with evidence", () => {
+  test("`adversarial` is a phase, and gates 10, 11 and 12 are its gates: oauth-routed; 10 OPEN with no evidence, 11 and 12 CLOSED with evidence", () => {
     expect(GATE_PHASES).toEqual(["accounting-probe", "oauth-pilot", "evaluation", "adversarial"])
     expect(adversarial.map((gate) => gate.number)).toEqual([10, 11, 12])
     for (const gate of adversarial) expect(gate.routes).toEqual(["oauth"])
-    expect(adversarial.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "CLOSED"])
-    expect(adversarial.map((gate) => gate.evidence === undefined)).toEqual([true, true, false])
+    expect(adversarial.map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "CLOSED"])
+    expect(adversarial.map((gate) => gate.evidence === undefined)).toEqual([true, false, false])
   })
 
   test("gate 10 is the human-owned spend authorization in admitted attempts, and names the run it covers", () => {
@@ -599,13 +599,44 @@ describe("the adversarial phase of the gate table", () => {
     }
   })
 
-  test("gate 11 is 2-7f2's real-host probe on the adversarial path, and gate 12 is 2-7e2's materializer termination", () => {
+  test("gate 11 is closed on 2-7f2's probe as mixed evidence within its scope, and gate 12 is 2-7e2's materializer termination", () => {
     const eleven = PAIRED_GATES.find((entry) => entry.number === 11)!
     expect(eleven.owner).toBe("story 2-7f2")
-    expect(eleven.status).toBe("OPEN")
-    expect(eleven.evidence).toBeUndefined()
-    for (const text of ["story 2-7f2's zero-bill probe", "real host", "adversarial path", "reaches no backend"]) {
+    expect(eleven.status).toBe("CLOSED")
+    // The requirement is mixed evidence: the suite allowance is asked of a scripted test, never of a real host.
+    for (const text of [
+      "mixed evidence on the adversarial path, for the pairs `GATE_11_EVIDENCE_SCOPE` names and no other",
+      "From story 2-7f2's zero-bill probe on a real host",
+      "an admission refused on the run or root allowance reaches no backend",
+      "From a scripted test at the gate: an admission refused on the suite allowance, which no valid journal reaches apart from the root's",
+    ]) {
       expect(eleven.requires, text).toContain(text)
+    }
+    expect(eleven.requires).not.toContain("run, suite or root allowance")
+    // The evidence names the closing story, the counts, both revisions, the stubs, and what stays UNPROBED.
+    for (const text of [
+      "story 2-7f5, on story 2-7f2's zero-bill probe evidence (ablation/evidence/adversarial-attempts-2026-10-12.json)",
+      "98 claims HOLD, 0 FAIL and 3 are UNPROBED",
+      "anthropic/claude-sonnet-5 (messages) and github-copilot/gpt-5-mini (chat-completions)",
+      `opencode ${MEASURED_HOST.version} (sha256 ${MEASURED_HOST.sha256})`,
+      "Every provider was a loopback stub and every sign-in a placeholder; no provider was reached",
+      "Measured at commit 71b68aa01cfea1d8fde459dcb372f8503e1cfd8b with uncommitted changes",
+      "accepted by the review channel on 2026-10-12 at commit b55ca97f7456a6dbe51e79ed6b1bb2c1d3933f67",
+      "an attempt past a 5,000 ms turn deadline settled `abandoned`",
+      "UNPROBED and still unmeasured on a real host: the suite allowance's own refusal, which rests on the scripted gate test in ablation/governor.test.ts",
+      "the `not-issued` release on each of the two transports, which rests on ablation/journal-adversarial.test.ts",
+      "`gate11ScopeProblem` refuses a run pinned outside the scope",
+    ]) {
+      expect(eleven.evidence, text).toContain(text)
+    }
+    // The note names what the closure does not cover.
+    for (const text of [
+      "openai on any model, github-copilot/gpt-6-luna and any other copilot model served over `/responses`",
+      "The launcher's 120,000 ms turn deadline was not run on a real host",
+      "The launcher changes of stories 2-7f3 and 2-7f4 came after the measurement and were not measured",
+      "Nothing here says what a real provider, account, cache or quota does",
+    ]) {
+      expect(eleven.note, text).toContain(text)
     }
     const twelve = PAIRED_GATES.find((entry) => entry.number === 12)!
     expect(twelve.owner).toBe("story 2-7e2")
@@ -752,10 +783,11 @@ describe("gatePreflight for the adversarial phase", () => {
   const runProblem = adversarialRunProblem()!
   const chosen = { ...ADVERSARIAL_RUN, pins: ["anthropic/claude-sonnet-5"] }
 
-  test("the shipped table refuses on gates 10 and 11 and on the run whose pins are not chosen; the resolved candidate adds no refusal", () => {
+  test("the shipped table refuses on gate 10 and on the run whose pins are not chosen; gate 11 prints CLOSED and the resolved candidate adds no refusal", () => {
     const result = gatePreflight(PAIRED_GATES, "adversarial", "oauth")
     expect(result.ok).toBe(false)
-    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10", "gate 11", "adversarial run"])
+    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10", "adversarial run"])
+    expect(result.lines[10]).toContain("gate 11 — adversarial attempt accounting — engineering, required for adversarial on route oauth, owner story 2-7f2 — CLOSED — evidence: story 2-7f5")
     expect(runProblem).toContain("`ADVERSARIAL_RUN.pins` is null")
     expect(result.problems).toContain(runProblem)
     expect(result.problems).not.toContain(candidateProblem)
@@ -822,14 +854,12 @@ describe("gatePreflight for the adversarial phase", () => {
     const pairedClosed = PAIRED_GATES.map((gate) => (gate.phase === "adversarial" ? gate : { ...gate, status: "CLOSED" as const, evidence: gate.evidence ?? "a reviewed change" }))
     expect(gatePreflight(pairedClosed, "adversarial", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual([
       "gate 10",
-      "gate 11",
       "adversarial run",
     ])
     // Gate 12 ships CLOSED, so its own refusal is checked on a table that re-opens it.
     const twelveOpen = pairedClosed.map((gate) => (gate.number === 12 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
     expect(gatePreflight(twelveOpen, "adversarial", "oauth").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual([
       "gate 10",
-      "gate 11",
       "gate 12",
       "adversarial run",
     ])
@@ -858,5 +888,96 @@ describe("gatePreflight for the adversarial phase", () => {
       expect(gatePreflight(PAIRED_GATES, phase, route).problems).toEqual(gatePreflight(before, phase, route).problems)
       expect(gatePreflight(PAIRED_GATES, phase, route).lines.slice(0, before.length)).toEqual(gatePreflight(before, phase, route).lines)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Story 2-7f5 — gate 11's evidence scope: the two measured pairs, and what holds it to the evidence
+// ---------------------------------------------------------------------------
+
+describe("gate 11's evidence scope", () => {
+  const allClosed = closedAll(PAIRED_GATES)
+  const pinned = (pin: string) => ({ ...ADVERSARIAL_RUN, pins: [pin] })
+  const measured = ["anthropic/claude-sonnet-5", "github-copilot/gpt-5-mini"]
+  const unmeasured = ["openai/gpt-6-sol", "github-copilot/gpt-6-luna", "anthropic/claude-opus-5", "x/y"]
+  const scopeProblem = (pin: string, run = 1) =>
+    `adversarial run ${run}'s pin ${pin} is outside gate 11's evidence scope: \`GATE_11_EVIDENCE_SCOPE\` covers exactly ` +
+    "anthropic/claude-sonnet-5 (messages) and github-copilot/gpt-5-mini (chat-completions), the pairs measured in " +
+    "ablation/evidence/adversarial-attempts-2026-10-12.json. Another pin needs its own evidence and a reviewed change to that scope"
+
+  test("the scope is exactly the two measured pairs, each with its route", () => {
+    expect(GATE_11_EVIDENCE_SCOPE.pairs).toEqual([
+      { pin: "anthropic/claude-sonnet-5", route: "messages" },
+      { pin: "github-copilot/gpt-5-mini", route: "chat-completions" },
+    ])
+  })
+
+  test("with every gate CLOSED a run pinned to a measured pair passes", () => {
+    for (const pin of measured) {
+      expect(gate11ScopeProblem(pinned(pin)), pin).toBeNull()
+      expect(gatePreflight(allClosed, "adversarial", "oauth", undefined, pinned(pin)), pin).toMatchObject({ ok: true, problems: [] })
+    }
+  })
+
+  test("with every gate CLOSED a run pinned to any other pair refuses, naming the pin, both pairs and the evidence", () => {
+    for (const pin of unmeasured) {
+      expect(gate11ScopeProblem(pinned(pin)), pin).toBe(scopeProblem(pin))
+      expect(gatePreflight(allClosed, "adversarial", "oauth", undefined, pinned(pin)), pin).toMatchObject({ ok: false, problems: [scopeProblem(pin)] })
+    }
+  })
+
+  test("a pin that is not chosen or not well formed gets its own diagnostic and no scope problem", () => {
+    expect(gate11ScopeProblem()).toBeNull()
+    expect(gatePreflight(allClosed, "adversarial", "oauth").problems).toEqual([adversarialRunProblem()!])
+    for (const pins of [[], ["anthropic/claude-sonnet-5", "openai/gpt-6-sol"], ["no-slash"], [""]]) {
+      const run = { ...ADVERSARIAL_RUN, pins }
+      expect(gate11ScopeProblem(run), JSON.stringify(pins)).toBeNull()
+      expect(gatePreflight(allClosed, "adversarial", "oauth", undefined, run).problems, JSON.stringify(pins)).toEqual([adversarialRunProblem(run)!])
+    }
+  })
+
+  test("another fault in the run does not hide an unmeasured pin: both are reported", () => {
+    const run = { run: 2, pins: ["openai/gpt-6-sol"], reservation: adversarialReservation(2), prior: [] }
+    const problems = gatePreflight(allClosed, "adversarial", "oauth", undefined, run).problems
+    expect(problems).toEqual([adversarialRunProblem(run)!, scopeProblem("openai/gpt-6-sol", 2)])
+    expect(problems[0]).toContain("must list exactly its 1 earlier run(s)")
+  })
+
+  test("the scope is consulted when the supplied table has gate 11 OPEN", () => {
+    const elevenOpen = allClosed.map((gate) => (gate.number === 11 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    const problems = gatePreflight(elevenOpen, "adversarial", "oauth", undefined, pinned("openai/gpt-6-sol")).problems
+    expect(problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 11", "adversarial run"])
+    expect(problems[1]).toBe(scopeProblem("openai/gpt-6-sol"))
+  })
+
+  test("the scope's build and payload pins are the ones the launcher's own checks refuse on", () => {
+    expect(GATE_11_EVIDENCE_SCOPE.host).toEqual({ version: MEASURED_HOST.version, sha256: MEASURED_HOST.sha256 })
+    expect(GATE_11_EVIDENCE_SCOPE.payload).toEqual({
+      anthropicAuthTreeDigest: OAUTH_PAYLOAD.anthropicAuth.treeDigest,
+      configSeedTreeDigest: OAUTH_PAYLOAD.configSeed.treeDigest,
+      catalogueSha256: OAUTH_PAYLOAD.catalogue.sha256,
+    })
+  })
+
+  test("the scope, and the counts gate 11 cites, are the committed evidence file's", async () => {
+    const file = (await Bun.file(new URL(`../${GATE_11_EVIDENCE_SCOPE.evidence}`, import.meta.url)).json()) as {
+      host: { version: string; sha256: string; matchesMeasuredHost: boolean }
+      payloadPins: { anthropicAuth: { treeDigest: string }; configSeed: { treeDigest: string }; catalogue: { sha256: string } }
+      transports: { provider: string; model: string; format: string }[]
+      summary: { holds: number; fails: number; unprobed: number }
+      codeRevision: { value: { commit: string; dirty: boolean } }
+    }
+    expect(file.transports.map((entry) => ({ pin: `${entry.provider}/${entry.model}`, route: entry.format }))).toEqual([...GATE_11_EVIDENCE_SCOPE.pairs])
+    expect({ version: file.host.version, sha256: file.host.sha256 }).toEqual(GATE_11_EVIDENCE_SCOPE.host)
+    expect(file.host.matchesMeasuredHost).toBe(true)
+    expect({
+      anthropicAuthTreeDigest: file.payloadPins.anthropicAuth.treeDigest,
+      configSeedTreeDigest: file.payloadPins.configSeed.treeDigest,
+      catalogueSha256: file.payloadPins.catalogue.sha256,
+    }).toEqual(GATE_11_EVIDENCE_SCOPE.payload)
+    const eleven = PAIRED_GATES.find((gate) => gate.number === 11)!
+    expect(eleven.evidence).toContain(`${file.summary.holds} claims HOLD, ${file.summary.fails} FAIL and ${file.summary.unprobed} are UNPROBED`)
+    expect(file.codeRevision.value.dirty).toBe(true)
+    expect(eleven.evidence).toContain(`Measured at commit ${file.codeRevision.value.commit} with uncommitted changes`)
   })
 })

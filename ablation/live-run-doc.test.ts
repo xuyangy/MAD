@@ -59,6 +59,7 @@ import {
   ADVERSARIAL_RUN,
   CANDIDATE_CLAIM_WORDING,
   EVALUATION_RUN,
+  GATE_11_EVIDENCE_SCOPE,
   PAIRED_GATES,
   PAIRED_NON_GATES,
 } from "./paired-gates.ts"
@@ -392,7 +393,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     const prerequisites = [
       ["Host accounting", "NOT APPLICABLE ON THE OAUTH ROUTE"],
       ["Billing authorization", "OPEN"],
-      ["Verified shared gates", "OPEN"],
+      ["Verified shared gates", "CLOSED, for two pins only"],
       ["Bounded tool termination", "CLOSED"],
       ["Bounded observer writes", "CLOSED"],
       // A blocker a reader counting the numbered list does not count is one
@@ -410,12 +411,12 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // The list is the whole list — the property that makes counting it safe —
     // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
-    const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value === status ? [index + 1] : []))
-    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[2, 3], [4, 5, 6], [1], [7]])
+    const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value.startsWith(status) ? [index + 1] : []))
+    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[2], [3, 4, 5, 6], [1], [7]])
     expect(text).toContain(
-      "On the planned OAuth route two of the seven are open (2 and 3), three are closed (4, 5 and 6), one does not apply (1) and one is not a gate (7).",
+      "On the planned OAuth route one of the seven is open (2), four are closed (3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
     )
-    expect(text).toContain("**The live execution is still blocked.** (2) and (3) are open.")
+    expect(text).toContain("**The live execution is still blocked.** (2) is open, the run's pin is not chosen and protocol v3 is not frozen.")
     // And the honest headline: story 2-7c did not close every hang, and the
     // materializer's half closed with gate 12.
     expect(text).toContain("The live execution is still blocked")
@@ -452,12 +453,22 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // The api-key allowance is named only to say it authorizes nothing here.
     expect(item(2)).toContain("authorizes no OAuth work")
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
-    // Item 3 names the probe's evidence and its limits, and says no gate change has closed it.
-    expect(gate(11).status).toBe("OPEN")
-    expect(item(3)).toContain("Story 2-7f2's zero-bill probe exercised that gate on the measured host for two stubbed transports (`ablation/evidence/adversarial-attempts-2026-10-12.json`")
-    expect(item(3)).toContain("the suite's own refusal is unreachable apart from the root's")
-    expect(item(3)).toContain("The gate closes only by a reviewed change to the gate table on that evidence, and no such change has been made.")
-    expect(item(3)).toContain("OpenAI's transport and the copilot models served over `/responses` are unprobed.")
+    // Item 3 says what the closure covers, what it rests on, what stays unmeasured, and where a build outside it is refused.
+    expect(gate(11).status).toBe("CLOSED")
+    expect(item(3)).toContain("It is closed by story 2-7f5 on story 2-7f2's zero-bill probe")
+    expect(item(3)).toContain(`(\`${GATE_11_EVIDENCE_SCOPE.evidence}\``)
+    for (const pair of GATE_11_EVIDENCE_SCOPE.pairs) expect(item(3), pair.pin).toContain(`\`${pair.pin}\``)
+    for (const phrase of [
+      "`gatePreflight` refuses a run pinned to any other pair, whatever else is closed",
+      "another model on a measured provider are outside it",
+      "rests on a scripted test at the gate",
+      "Both stay UNPROBED on a real host.",
+      "The launcher's 120,000 ms turn deadline was not run on a real host.",
+      "the prepared payloads at stage 1, the host binary's hash after the reservation and before the host is spawned, and the host's reported version after the spawn and before it is used; `gatePreflight` checks neither",
+    ]) {
+      expect(item(3), phrase).toContain(phrase)
+    }
+    expect(item(3)).toContain("The suite's own refusal is unreachable apart from the root's on a valid journal")
     expect(item(6)).toContain(`Gate 12, owned by ${gate(12).owner}`)
     // Item 6 says the bound is implemented and accepted, and that a reviewed gate change closed it.
     expect(item(6)).toContain("Story 2-7e2 implements the bound")
@@ -756,10 +767,10 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
     expect(text).toContain(
-      "Gates 10 and 11 are OPEN and gate 12 is CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
+      "Gate 10 is OPEN and gates 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12])
-    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "CLOSED"])
+    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "CLOSED"])
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {
@@ -1496,7 +1507,7 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
     expect(text).toContain("Repetition alone does not establish a host retry, and neither result is workload or quota evidence.")
   })
 
-  test("it states its isolation, its fixture and that gate 11 stays OPEN", async () => {
+  test("it states its isolation, its fixture and that a probe run decides nothing about gate 11", async () => {
     const text = (await section()).replace(/\s+/g, " ")
     const file = await evidence()
     for (const phrase of [
@@ -1517,10 +1528,11 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       "MAD's retry was refused `halted` before any backend entry",
       "The evidence file records a launcher that passed no turn deadline.",
       "The launcher passes 120,000 ms (story 2-7f3), and no real host has been run to it.",
-      "Gate 11 stays OPEN: this evidence is for a separate, reviewed gate change and closes nothing.",
+      "A probe run closes no gate and gives no gate verdict: gate 11's status and scope are what `ablation/paired-gates.ts` records, and the evidence file of 2026-10-12 says OPEN because the gate was OPEN at the revision it measured.",
     ]) {
       expect(text, phrase).toContain(phrase)
     }
+    // The committed file is the measured revision's, when the gate was OPEN.
     expect(file.gate11).toContain("OPEN")
     expect(file.protocolFixture.label).toContain("SYNTHETIC FIXTURE")
     expect(file.calibration.label).toContain("CALIBRATION")

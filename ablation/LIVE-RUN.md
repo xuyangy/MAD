@@ -825,7 +825,7 @@ preflight. **With the shipped gate table the api-key route always refuses:** gat
 is required for the evaluation on that route, so the command prints every check and exits 1 before any
 host, client, schedule or start marker exists. Gate 3 is OPEN too; it is printed and not consulted for the
 evaluation. Gates 4 and 7 cover only the oauth route, so they are printed and not consulted for the api-key route. With `--provider-mode oauth` (see "The OAuth route" below) gate 4 refuses: runs 1 to 5 of its evaluation were used (runs 1 to 3 on 2026-10-02, run 4 on 2026-10-05, run 5 on 2026-10-07), and its note records all five. Gate 8 is OPEN too; it is required only for the OAuth pilot (see "OAuth pilot (story 2-8c5)"
-below), so it is printed and not consulted for the evaluation. Gates 10 and 11 are OPEN and gate 12 is
+below), so it is printed and not consulted for the evaluation. Gate 10 is OPEN and gates 11 and 12 are
 CLOSED; all three are required only for the adversarial suite on the oauth route (see "Before the sixteen live runs" below), so
 they too are printed and not consulted for the evaluation. Nothing in this section authorizes
 billing, and the command's existence is not authorization.
@@ -858,7 +858,7 @@ refused.
 8. **OAuth pilot spend authorization — OPEN.** Authorization, required for oauth-pilot on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes run 3 (`OAUTH_PILOT_RUN`, stories 2-8c7 and 2-8c8) of story 2-8c5's `bun run oauth-pilot --live`: at most 2 admitted attempts to openai/gpt-6-luna through the ChatGPT OAuth sign-in, with the exposure stated in _bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md (sha256 2a241e0125a49259daaac2c33480c7044f5f49983211322f6263ab8cb444ccfb; `--live` refuses if the file differs). One run only: before the reservation, `--live` checks the managed host's binary hash and prepared digests, refusing with the authorization unused on a mismatch; it then creates ablation/evidence/oauth-pilot-live-run-3.reservation exclusively before it starts a host or touches the auth target, the data directory or the network, and refuses while it exists, while an earlier run's committed reservation or evidence is missing, changed or malformed, or while any other oauth-pilot-live* file is committed, untracked or in ablation/evidence; nothing deletes it, and the budget owner re-opens this gate after the run. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing it never stands in for gate 4 or closes gate 7. Printed, and not consulted by this launcher; `bun run oauth-pilot --live` consults it alone. No story closes it. Note: The budget owner authorized run 1 on 2026-09-28. It is recorded in ablation/evidence/oauth-pilot-live-2026-09-28.json (FAILED: attempt 1 returned model-error without an answer and no further attempt ran), with its committed reservation at ablation/evidence/oauth-pilot-live.reservation; a later non-billing inspection of the host database WAL found a token-refresh 401 for that attempt (ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json). That authorization is spent. The budget owner authorized run 2 on 2026-09-29. It is recorded in ablation/evidence/oauth-pilot-live-run-2-2026-09-29.json (FAILED at host preflight: the installed opencode binary was not the measured build, so no host started and no attempt was admitted), with its committed reservation at ablation/evidence/oauth-pilot-live-run-2.reservation. That authorization is spent too. The budget owner authorized run 3 on 2026-09-30. It is recorded in ablation/evidence/oauth-pilot-live-run-3-2026-09-30.json (both attempts answered and settled usage; the third admission was refused inside the journal with 0 backend calls), with its committed reservation at ablation/evidence/oauth-pilot-live-run-3.reservation. That authorization is spent; no further live run is authorized.
 9. **api-key evaluation spend authorization — OPEN.** Authorization, required for evaluation on the api-key route only. Owner: the human budget owner. Requires: the budget owner authorizes the three paired blocks' spend on the api-key route in ledger tokens: the three blocks' token spend under PAIRED_ALLOWANCES, unchanged. Closing gate 4, which covers only the oauth route, never stands in for it. Printed, and not consulted for the oauth route. No story closes it.
 10. **adversarial spend authorization — OPEN.** Authorization, required for adversarial on the oauth route only. Owner: the human budget owner. Requires: the budget owner authorizes run 1 (`ADVERSARIAL_RUN`) of the sixteen adversarial runs on the oauth route in admitted attempts under a frozen protocol v3: 30 per run, 480 for the suite and 480 for the suite's own root, each an admission threshold and not a proven-adequate budget. An admitted attempt bounds neither the physical requests the host sends nor subscription quota. Closing gate 4 or gate 8 never stands in for it. Printed, and not consulted by this launcher.
-11. **adversarial attempt accounting — OPEN.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7f2. Requires: story 2-7f2's zero-bill probe evidence on a real host, on the adversarial path: every attempt is journaled in the suite's own root before it is issued and counted once, an admission refused on the run, suite or root allowance reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity failure halts. Paired and pilot evidence is reused only within its measured scope. Printed, and not consulted by this launcher.
+11. **adversarial attempt accounting — CLOSED.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7f2. Requires: mixed evidence on the adversarial path, for the pairs `GATE_11_EVIDENCE_SCOPE` names and no other. From story 2-7f2's zero-bill probe on a real host: every attempt is journaled in the suite's own root before it is issued and counted once, an admission refused on the run or root allowance reaches no backend, an attempt that does not end within its bound is settled, stopped and recorded, and an integrity failure halts. From a scripted test at the gate: an admission refused on the suite allowance, which no valid journal reaches apart from the root's. Paired and pilot evidence is reused only within its measured scope. Evidence: story 2-7f5, on story 2-7f2's zero-bill probe evidence (ablation/evidence/adversarial-attempts-2026-10-12.json): 98 claims HOLD, 0 FAIL and 3 are UNPROBED, for anthropic/claude-sonnet-5 (messages) and github-copilot/gpt-5-mini (chat-completions) on opencode 1.18.32 (sha256 5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e) with the prepared payloads `GATE_11_EVIDENCE_SCOPE` pins. Every provider was a loopback stub and every sign-in a placeholder; no provider was reached. Measured at commit 71b68aa01cfea1d8fde459dcb372f8503e1cfd8b with uncommitted changes, and accepted by the review channel on 2026-10-12 at commit b55ca97f7456a6dbe51e79ed6b1bb2c1d3933f67. Observed on that host, per pair: each attempt journaled in the suite's own root before `runTurn` and counted once; a refusal on the run's 30 and on the root's 480 reaching no backend; an attempt past a 5,000 ms turn deadline settled `abandoned`, the host stopped and the halt recorded; an integrity failure before the start and an injected one in a run each halting. UNPROBED and still unmeasured on a real host: the suite allowance's own refusal, which rests on the scripted gate test in ablation/governor.test.ts, and the `not-issued` release on each of the two transports, which rests on ablation/journal-adversarial.test.ts. `gate11ScopeProblem` refuses a run pinned outside the scope. Tests: ablation/paired-gates.test.ts, scripts/adversarial.test.ts, scripts/adversarial-probe.test.ts. Printed, and not consulted by this launcher. Note: Not covered: openai on any model, github-copilot/gpt-6-luna and any other copilot model served over `/responses`, and any other pin, build or payload. The launcher's 120,000 ms turn deadline was not run on a real host, so neither its adequacy for the suite's turns nor whether the provider's work stops when the wait ends is established. The launcher changes of stories 2-7f3 and 2-7f4 came after the measurement and were not measured. Nothing here says what a real provider, account, cache or quota does.
 12. **bounded materializer termination — CLOSED.** Engineering, required for adversarial on the oauth route only. Owner: story 2-7e2. Requires: the git calls that write each adversarial worktree (ablation/adversarial-materialize.ts) end within a bound: a call past its deadline is sent SIGKILL with no graceful period, its termination is confirmed or reported as unconfirmed, a descendant holding a pipe cannot stop the call returning, and a synthesized status is told apart from one git returned. Evidence: story 2-7e2, accepted by the review channel on 2026-10-09 at commit 9166c42: every production git call in ablation/adversarial-materialize.ts goes through `boundedGit()` over `runBoundedBlame` (adapters/opencode/blame-exec.ts). If the call has not completed when its nominal 60,000 ms event-loop deadline fires, the launcher attempts SIGKILL with no graceful period and uses a separate nominal 5,000 ms cleanup budget; a failed signal delivery is reported. Termination is confirmed only when the direct child is accounted for and both its pipes reach EOF; a descendant that closed the inherited pipes is not observed, and no process group is killed. A call that did not return is a `GitNotReturned` with `exitCode: null` and termination `not-started`, `confirmed` or `unconfirmed`; no status is synthesized. An `unconfirmed` call sets `terminationUnconfirmed`, and the runner quarantines the suite and retains the lock in both accounting modes. Budgets are validated under the materializer's own names before anything is launched. Scope: local tests over `sh` stand-in processes (a hang, a child that traps SIGTERM, a descendant holding a pipe, a kill that could not be sent, a refused launch, an unusable budget) and real git writing every case and side; no real host and no hung real git. The code is route-neutral and this gate covers the oauth route only; nothing here says api-key materialization is safe. Tests: ablation/adversarial-materialize.test.ts, ablation/adversarial.test.ts. Printed, and not consulted by this launcher. Note: Not covered: cancellation during materialization does not interrupt it; the runner observes it only after `materializeSide` returns. Each git call has nominal event-loop budgets of 60,000 ms for execution and 5,000 ms for cleanup. Materialization may finish its remaining git steps (five in total) and filesystem operations before returning; no cancellation-response or guaranteed wall-clock bound is established.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** `ablation/live-run-doc.test.ts` pins it against
@@ -2002,8 +2002,8 @@ and `--out`, the suite's own experiment root (absent or empty). `--provider-mode
 the two fresh roots, disjointness, the frozen protocol v3, the committed gate table,
 `gatePreflight(gates, "adversarial", "oauth")`, the OAuth route, the prepared digests, the
 authorized run (the pin is `ADVERSARIAL_RUN.pins`; `ADVERSARIAL_RUN.reservation` exists neither on
-disk nor at HEAD; every earlier run is committed) and the production Tools identity. Gates 10 and 11
-are OPEN, `ADVERSARIAL_RUN.pins` is `null` and v3 is a draft, so the command exits 1 before any
+disk nor at HEAD; every earlier run is committed) and the production Tools identity. Gate 10
+is OPEN, `ADVERSARIAL_RUN.pins` is `null` and v3 is a draft, so the command exits 1 before any
 reservation, worktree, start marker or host exists. Only once every check passes is the reservation
 created exclusively, stamped with the launcher's clock; it is never removed. An interrupt after it
 exits 130 with the reservation kept and no schedule, worktree or host. Immediately before the two
@@ -2068,7 +2068,8 @@ its own handler never exits first.
 **What it does not establish.** Fresh local data directories do not show isolation at the
 provider, account or cache level. Every test of this launcher runs on stand-in hosts and a scripted
 backend. What a real host does to the host offer and to the suite's attempt gate (gate 11) is
-observed by story 2-7f2's zero-bill probe, below, for two stubbed transports and no other.
+observed by story 2-7f2's zero-bill probe, below, for two stubbed transports and no other. Gate 11
+is closed on that evidence for those two pairs only, and the preflight refuses any other pin.
 
 ### The zero-bill probe (story 2-7f2): `bun run adversarial-probe`
 
@@ -2098,7 +2099,7 @@ ordinary `startManagedHost`, so every stop is held to the ordinary store guard; 
 builds the real `OpencodeModelBackend` from the options the lifecycle passes and counts its
 `runTurn` calls. Stages 1 and 2 of the launcher (the offline checks, the authorization and the
 reservation) are not run on a real host: one row runs the shipped command as a child process and
-records that it still refuses, naming gates 10 and 11, the null pin and the unfrozen protocol.
+records that it still refuses, naming gate 10, the null pin and the unfrozen protocol.
 
 The schedules are `provenance: "scripted"`, sealed against a private frozen-format copy of protocol
 v3 that the probe writes into its scratch. That copy is a fixture: it pre-registers nothing, it is
@@ -2177,9 +2178,10 @@ run, each in a root of its own.
 Every host also asked the refusing proxy for `api.githubcopilot.com:443`, on the anthropic-only
 hosts too. The sandbox denied it.
 
-**What it does not establish.** Gate 11 stays OPEN: this evidence is for a separate, reviewed gate
-change and closes nothing. It validates no other pin, model or build, and nothing about a real
-provider, account, cache or quota. The exit status is 0 only when every scenario ran and no claim
+**What it does not establish.** A probe run closes no gate and gives no gate verdict: gate 11's
+status and scope are what `ablation/paired-gates.ts` records, and the evidence file of 2026-10-12
+says OPEN because the gate was OPEN at the revision it measured. The evidence validates no other
+pin, model or build, and nothing about a real provider, account, cache or quota. The exit status is 0 only when every scenario ran and no claim
 FAILS; the evidence is written whatever the verdicts.
 
 ### Reading the result
@@ -2241,17 +2243,27 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    task: no code can satisfy it and no story closes it. **Owner: the human who owns the budget.**
    The api-key design's allowance of 400,000 ledger tokens is part of preserved protocol v1 and
    authorizes no OAuth work.
-3. **Verified shared gates — OPEN.** Gate 11, owned by story 2-7f2. The suite's attempt gate (run,
-   suite and root) is verified against a real host, on the adversarial path, before the first paid
-   request: a refused admission reaches no backend, and settlement, a timeout and an integrity
-   failure are each recorded. Story 2-7f2's zero-bill probe exercised that gate on the measured host
-   for two stubbed transports (`ablation/evidence/adversarial-attempts-2026-10-12.json`, and "The
-   zero-bill probe" above): the run and root refusals, settlement, a non-ending attempt and both
-   integrity rows hold there, and the suite's own refusal is unreachable apart from the root's. The
-   gate closes only by a reviewed change to the gate table on that evidence, and no such change has
-   been made. OpenAI's transport and the copilot models served over `/responses` are unprobed. Story
-   2-8c's probe and the paired and pilot evidence cover the Blocks admission only, and are reused
-   only within that scope.
+3. **Verified shared gates — CLOSED, for two pins only.** Gate 11, owned by story 2-7f2. It is
+   closed by story 2-7f5 on story 2-7f2's zero-bill probe
+   (`ablation/evidence/adversarial-attempts-2026-10-12.json`, and "The zero-bill probe" above). The
+   closure covers exactly `anthropic/claude-sonnet-5` on the Messages route and
+   `github-copilot/gpt-5-mini` on the chat-completions route, on the measured opencode build and the
+   pinned prepared payloads: `GATE_11_EVIDENCE_SCOPE` in `ablation/paired-gates.ts` names them, and
+   `gatePreflight` refuses a run pinned to any other pair, whatever else is closed. OpenAI on any
+   model, the copilot models served over `/responses`, and another model on a measured provider are
+   outside it; covering one takes its own evidence and a reviewed change to that scope. The evidence
+   is mixed. On the measured host, for both pairs: each attempt was journaled before it was issued
+   and counted once, a refusal on the run's or the root's allowance reached no backend, a non-ending
+   attempt was settled, stopped and recorded, and an integrity failure halted. The suite's own
+   refusal is unreachable apart from the root's on a valid journal and rests on a scripted test at
+   the gate; the `not-issued` release rests on a scripted journal test. Both stay UNPROBED on a real
+   host. Every provider was a loopback stub, so nothing here says what a real provider, account,
+   cache or quota does. The launcher's 120,000 ms turn deadline was not run on a real host. Where a
+   build or payload outside the scope is refused: the prepared payloads at stage 1, the host
+   binary's hash after the reservation and before the host is spawned, and the host's reported
+   version after the spawn and before it is used; `gatePreflight` checks neither. Story 2-8c's probe
+   and the paired and pilot evidence cover the Blocks admission only, and are reused only within
+   that scope.
 4. **Bounded tool termination — CLOSED.** The blame half closed on 2026-09-21 (story 2-7c). The
    materializer's half is (6), closed with gate 12. See below.
 5. **Bounded observer writes — CLOSED 2026-09-21 (story 2-7c).** See below.
@@ -2289,12 +2301,13 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    and nothing about the reads themselves; it reopens if the launcher, its factories or the suite
    ever read the reviewed change through the host shell's Repo port.
 
-**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** On the planned OAuth route two of the seven are open
-(2 and 3), three are closed (4, 5 and 6), one does not apply (1) and one is not a gate (7). Nothing
+**THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** On the planned OAuth route one of the seven is open
+(2), four are closed (3, 4, 5 and 6), one does not apply (1) and one is not a gate (7). Nothing
 that blocks the sixteen runs is recorded only in the prose below; the prose explains the entries, it
 does not add to them.
 
-**The live execution is still blocked.** (2) and (3) are open. (4)'s blame half is bounded;
+**The live execution is still blocked.** (2) is open, the run's pin is not chosen and protocol v3 is
+not frozen. (4)'s blame half is bounded;
 its materializer half is (6). Story 2-7e2 runs the git calls
 that write each worktree through the same bounded launcher as `blame`. Local tests over stand-in
 processes cover a hang, a child that traps SIGTERM (the deadline sends SIGKILL at once, so the

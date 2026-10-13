@@ -18,7 +18,7 @@
  *    every earlier run is committed) and the production Tools identity. Every
  *    check prints, and a failure refuses before anything is written: no
  *    reservation, worktree, start marker or host. With the shipped table this
- *    stage always refuses (gates 10 and 11 OPEN, `pins: null`, v3 a draft).
+ *    stage always refuses (gate 10 OPEN, `pins: null`, v3 a draft).
  * 2. **The reservation**, created exclusively only once every check passed.
  * 3. **The schedule**: immediately before the experiment root and the data
  *    root are created, each is checked again to be outside this repository and

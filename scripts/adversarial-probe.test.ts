@@ -11,6 +11,7 @@ import { startAdversarialStub, type AdversarialStub } from "../ablation/adversar
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { authLinkPaths } from "../ablation/oauth-payload.ts"
+import { PAIRED_GATES } from "../ablation/paired-gates.ts"
 import { readFrozenProtocol } from "../ablation/schedule.ts"
 import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
 import { candidate } from "../core/test-support/fakes.ts"
@@ -46,6 +47,7 @@ import {
   NO_USAGE_TURN_MS,
   SCENARIOS,
   seededAttempts,
+  gate11Statement,
   shippedClaims,
   SHIPPED_BARRIERS,
   SUITE_ALLOWANCE_CLAIM,
@@ -683,10 +685,32 @@ describe("the shipped command's claims", () => {
     expect(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false).every((entry) => entry.verdict === "HOLDS")).toBe(true)
   })
 
+  test("gate 11 is CLOSED, so it is no barrier and the claim does not say the refusal names it", () => {
+    expect(SHIPPED_BARRIERS.map((barrier) => barrier.name)).toEqual(["stage 1", "gate 10", "the null pin", "the unfrozen protocol v3"])
+    const [refuses] = shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false)
+    expect(refuses!.id).toBe("shipped-refuses")
+    expect(refuses!.claim).toContain("exits 1 at stage 1 naming gate 10, the null pin and the unfrozen protocol v3")
+    expect(refuses!.claim).not.toContain("gate 11")
+  })
+
+  test("the evidence's gate-11 statement reports the table's status and scope, and claims no closure by the probe", () => {
+    const eleven = PAIRED_GATES.find((gate) => gate.number === 11)!
+    expect(gate11Statement()).toBe(
+      `${eleven.status}, as ablation/paired-gates.ts records it, with an evidence scope of anthropic/claude-sonnet-5 (messages) and ` +
+        "github-copilot/gpt-5-mini (chat-completions). This probe run closes nothing and is no verdict on the gate; its status and " +
+        "scope change only by a reviewed change to that table.",
+    )
+    expect(gate11Statement()).toStartWith("CLOSED, as ablation/paired-gates.ts records it")
+    // The status is read, never asserted: a table that re-opens the gate is reported as OPEN.
+    const reopened = PAIRED_GATES.map((gate) => (gate.number === 11 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    expect(gate11Statement(reopened)).toStartWith("OPEN, as ablation/paired-gates.ts records it")
+    expect(gate11Statement(PAIRED_GATES.filter((gate) => gate.number !== 11))).toStartWith("NOT IN THE TABLE, as ablation/paired-gates.ts records it")
+  })
+
   test("a parse-time refusal is not the preflight: it names no gate and FAILS", () => {
     const claims = shippedClaims({ exitCode: 1, output: "REFUSED at stage 1\n--out must be an absolute path", timedOut: false }, [], false)
     expect(verdictOf(claims, "shipped-refuses")).toBe("FAILS")
-    expect(whyOf(claims, "shipped-refuses")).toContain("gate 10, gate 11, the null pin, the unfrozen protocol v3")
+    expect(whyOf(claims, "shipped-refuses")).toContain("not named: gate 10, the null pin, the unfrozen protocol v3")
   })
 
   test("exit 0, a timeout, a root left behind or a changed evidence directory each fail", () => {
@@ -1365,7 +1389,7 @@ describe("main", () => {
     expect(text).not.toContain(tmpdir())
     expect(text).toContain("<probe-out>")
     const evidence = JSON.parse(text) as Record<string, any>
-    expect(evidence.gate11).toContain("OPEN")
+    expect(evidence.gate11).toBe(gate11Statement())
     expect(evidence.calibration.label).toContain("CALIBRATION")
     expect(evidence.calibration.turn.disposition).toBe("ok")
     expect(evidence.protocolFixture.label).toContain("SYNTHETIC FIXTURE")

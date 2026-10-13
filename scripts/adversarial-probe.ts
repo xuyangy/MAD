@@ -112,6 +112,7 @@ import {
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, verifyPrepared } from "../ablation/oauth-payload.ts"
 import type { OAuthStubFormat } from "../ablation/oauth-stub.ts"
+import { GATE_11_EVIDENCE_SCOPE, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import { sha256 } from "../ablation/schedule.ts"
 import type { Candidate } from "../core/domain/roster.ts"
 import { systemClock, type Clock } from "../core/ports/clock.ts"
@@ -958,6 +959,19 @@ export const SUITE_ALLOWANCE_CLAIM: Claim = claim(
 // The shipped command
 // ---------------------------------------------------------------------------
 
+/**
+ * What an evidence file says about gate 11: the status and scope the gate table
+ * records, and that a probe run decides neither.
+ */
+export function gate11Statement(gates: readonly PairedGate[] = PAIRED_GATES): string {
+  const gate = gates.find((entry) => entry.number === 11)
+  const pairs = GATE_11_EVIDENCE_SCOPE.pairs.map((pair) => `${pair.pin} (${pair.route})`).join(" and ")
+  return (
+    `${gate?.status ?? "NOT IN THE TABLE"}, as ablation/paired-gates.ts records it, with an evidence scope of ${pairs}. ` +
+    "This probe run closes nothing and is no verdict on the gate; its status and scope change only by a reviewed change to that table."
+  )
+}
+
 export interface ShippedRun {
   exitCode: number | null
   output: string
@@ -968,7 +982,6 @@ export interface ShippedRun {
 export const SHIPPED_BARRIERS: readonly { name: string; text: string }[] = [
   { name: "stage 1", text: "REFUSED at stage 1" },
   { name: "gate 10", text: "gate 10 (adversarial spend authorization) is OPEN" },
-  { name: "gate 11", text: "gate 11 (adversarial attempt accounting) is OPEN" },
   { name: "the null pin", text: "`ADVERSARIAL_RUN.pins` is null" },
   { name: "the unfrozen protocol v3", text: "protocol v3 is not frozen" },
 ]
@@ -978,7 +991,7 @@ export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evi
   return [
     claim(
       "shipped-refuses",
-      "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10, gate 11, the null pin and the unfrozen protocol v3",
+      "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10, the null pin and the unfrozen protocol v3",
       !run.timedOut && run.exitCode === 1 && missing.length === 0 ? "HOLDS" : "FAILS",
       run.timedOut
         ? `the command did not end within ${SHIPPED_COMMAND_MS} ms`
@@ -2075,7 +2088,7 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
       note: "Counts of per-claim verdicts. They are not a verdict on gate 11, and a HOLDS on one transport says nothing about another.",
     },
     limitations: [...LIMITATIONS],
-    gate11: "OPEN. This file is evidence for a separate, reviewed gate change; it closes nothing.",
+    gate11: gate11Statement(),
   }
   const text = redactPaths(JSON.stringify(evidence, null, 2), [
     [args.out, "<probe-out>"],
@@ -2090,7 +2103,7 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
   ])
   await writeFile(join(args.out, EVIDENCE_FILE), `${text}\n`, "utf8")
   console.log(`\nevidence: ${join(args.out, EVIDENCE_FILE)}`)
-  console.log(`${evidence.summary.holds} HOLDS, ${evidence.summary.fails} FAILS, ${evidence.summary.unprobed} UNPROBED. Gate 11 stays OPEN.`)
+  console.log(`${evidence.summary.holds} HOLDS, ${evidence.summary.fails} FAILS, ${evidence.summary.unprobed} UNPROBED. Gate 11: ${evidence.gate11}`)
   for (const line of failing) console.log(`  FAILS — ${line}`)
   return failing.length === 0 ? 0 : 1
 }

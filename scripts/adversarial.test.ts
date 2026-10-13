@@ -305,7 +305,9 @@ describe("stage 1 on the shipped tree", () => {
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
     expect(diagnostic).toContain("protocol v3 is not frozen")
     expect(diagnostic).toContain("gate 10 (adversarial spend authorization) is OPEN")
-    expect(diagnostic).toContain("gate 11 (adversarial attempt accounting) is OPEN; owner: story 2-7f2")
+    // Gate 11 is CLOSED: it prints with its evidence and is no refusal.
+    expect(diagnostic).not.toContain("gate 11 (adversarial attempt accounting) is OPEN")
+    expect(result.text).toContain("gate 11 — adversarial attempt accounting — engineering, required for adversarial on route oauth, owner story 2-7f2 — CLOSED — evidence: story 2-7f5")
     expect(diagnostic).toContain("`ADVERSARIAL_RUN.pins` is null")
     // Item 7 is resolved, so it is no refusal.
     expect(diagnostic).not.toContain("candidate non-gate 7")
@@ -337,10 +339,49 @@ describe("stage 1 on the shipped tree", () => {
     const result = await captured(() => main(argvFor(env), overrides))
     expect(result.code).toBe(1)
     expect(result.text).toContain("is not the roster adversarial run 2 names: anthropic/other")
+    // The run's other faults do not hide that its pin was never measured.
+    expect(result.text).toContain("adversarial run 2's pin anthropic/other is outside gate 11's evidence scope")
     expect(result.text).toContain("run 1's evidence `ablation/evidence/adversarial-oauth-run-1-x.json` is not committed at HEAD")
     expect(result.text).toContain("is not empty (1 entries)")
     expect(hosts.started).toEqual([])
   })
+
+  const pinnedArgv = (env: Awaited<ReturnType<typeof setup>>, pin: string) =>
+    argvFor(env).map((arg) => (arg === PIN ? pin : arg === "anthropic" ? pin.slice(0, pin.indexOf("/")) : arg))
+
+  test("with every gate CLOSED a pin outside gate 11's evidence scope refuses at stage 1: no reservation, no host, nothing written", async () => {
+    for (const pin of ["openai/gpt-6-sol", "github-copilot/gpt-6-luna", "anthropic/claude-opus-5", "x/y"]) {
+      const env = await setup()
+      const { overrides, hosts } = await runnable(env, { adversarialRun: { ...ADVERSARIAL_RUN, pins: [pin] } })
+      const result = await captured(() => main(pinnedArgv(env, pin), overrides))
+      expect(result.code, pin).toBe(1)
+      expect(result.text, pin).toContain("FAIL  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)")
+      expect(result.text, pin).toContain(
+        `REFUSED: adversarial run 1's pin ${pin} is outside gate 11's evidence scope: \`GATE_11_EVIDENCE_SCOPE\` covers exactly ` +
+          "anthropic/claude-sonnet-5 (messages) and github-copilot/gpt-5-mini (chat-completions)",
+      )
+      expect(result.text, pin).toContain("REFUSED at stage 1 (offline checks).")
+      expect(result.text, pin).not.toContain("stage 2 of 4")
+      expect(hosts.started, pin).toEqual([])
+      for (const path of [env.out, env.dataRoot, env.reservationRoot]) expect(existsSync(path), `${pin} ${path}`).toBe(false)
+    }
+  })
+
+  test("with every gate CLOSED each pair inside gate 11's evidence scope passes stage 1 and is reserved", async () => {
+    for (const pin of ["anthropic/claude-sonnet-5", "github-copilot/gpt-5-mini"]) {
+      const env = await setup()
+      // Every host start is refused before a spawn, so the run ends once stages 1 and 2 are behind it.
+      const refusing = scriptedHosts({ preSpawn: () => "throw" })
+      const { overrides } = await runnable(env, { adversarialRun: { ...ADVERSARIAL_RUN, pins: [pin] }, startHost: refusing.startHost })
+      const result = await captured(() => main(pinnedArgv(env, pin), overrides))
+      expect(result.text, pin).toContain("PASS  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)")
+      expect(result.text, pin).toContain(`the pin ${pin} is adversarial run 1's roster`)
+      expect(result.text, pin).not.toContain("REFUSED at stage 1")
+      expect(result.text, pin).toContain(`reserved adversarial run 1: ${ADVERSARIAL_RUN.reservation} (never removed)`)
+      const reservation = JSON.parse(await readFile(join(env.reservationRoot, ADVERSARIAL_RUN.reservation), "utf8")) as { pins: string[] }
+      expect(reservation.pins, pin).toEqual([pin])
+    }
+  }, 120_000)
 
   test("the data root may not overlap --out, the prepared directory or the user's own store", async () => {
     const env = await setup()
