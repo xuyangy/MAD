@@ -692,6 +692,8 @@ async function passingHostCheck(
   reservation?: () => string,
   /** The hash every hash after the first returns: a binary replaced after the pre-check. */
   rehash?: string,
+  /** Awaited at the start of every hash: where a test holds an invocation inside its pre-check. */
+  beforeHash?: () => Promise<void>,
 ): Promise<{ prepared: string; hostCheck: HostCheckOptions; hashed: { path: string; reserved: boolean }[] }> {
   const { prepared, pins } = await fakePrepared(root)
   const hashed: { path: string; reserved: boolean }[] = []
@@ -702,6 +704,7 @@ async function passingHostCheck(
       binary: "/stand-in/opencode",
       resolveBinary: async (path) => path,
       hashFile: async (path) => {
+        await beforeHash?.()
         hashed.push({ path, reserved: reservation !== undefined && existsSync(reservation()) })
         return hashed.length > 1 && rehash !== undefined ? rehash : MEASURED_HOST.sha256
       },
@@ -710,18 +713,65 @@ async function passingHostCheck(
   }
 }
 
-async function captured<T>(run: () => Promise<T>): Promise<{ value: T; err: string; out: string }> {
+/** What a capture has collected so far. */
+type Seen = () => { err: string; out: string }
+
+let captureOpen = false
+
+/**
+ * Runs `run` with `console.error` and `console.log` collected instead of printed. The spies are process-global, so one
+ * capture owns the console at a time: a second one opened before the first has ended is refused, and work that runs
+ * concurrently shares its caller's capture.
+ */
+async function captured<T>(run: (seen: Seen) => Promise<T>): Promise<{ value: T; err: string; out: string }> {
+  if (captureOpen) throw new Error("captured: another capture is open; concurrent work shares one capture, opened by its caller")
+  captureOpen = true
   const errors: string[] = []
   const logs: string[] = []
-  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args.join(" ")))
-  const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => void logs.push(args.join(" ")))
+  const seen: Seen = () => ({ err: errors.join("\n"), out: logs.join("\n") })
+  const spies: { mockRestore(): void }[] = []
   try {
-    return { value: await run(), err: errors.join("\n"), out: logs.join("\n") }
+    spies.push(spyOn(console, "error").mockImplementation((...args: unknown[]) => void errors.push(args.join(" "))))
+    spies.push(spyOn(console, "log").mockImplementation((...args: unknown[]) => void logs.push(args.join(" "))))
+    return { value: await run(seen), ...seen() }
   } finally {
-    errSpy.mockRestore()
-    logSpy.mockRestore()
+    for (const spy of spies) spy.mockRestore()
+    captureOpen = false
   }
 }
+
+describe("one capture owns the console", () => {
+  test("a capture opened inside another is refused, and the outer one keeps collecting and restores the console", async () => {
+    const original = { error: console.error, log: console.log }
+    const outer = await captured(async () => {
+      console.error("before")
+      await expect(captured(async () => 1)).rejects.toThrow("another capture is open")
+      console.error("after")
+      console.log("logged")
+      return "outer"
+    })
+    expect(outer).toEqual({ value: "outer", err: "before\nafter", out: "logged" })
+    expect(console.error).toBe(original.error)
+    expect(console.log).toBe(original.log)
+  })
+
+  test("captured work that throws: the rejection propagates, the console is restored and the next capture opens", async () => {
+    const original = { error: console.error, log: console.log }
+    await expect(
+      captured(async () => {
+        console.error("lost with the throw")
+        throw new Error("the work failed")
+      }),
+    ).rejects.toThrow("the work failed")
+    expect(console.error).toBe(original.error)
+    expect(console.log).toBe(original.log)
+    const next = await captured(async () => {
+      console.error("collected")
+      return 2
+    })
+    expect(next).toEqual({ value: 2, err: "collected", out: "" })
+  })
+})
 
 describe("the live run is refused unless gate 8 is CLOSED in the committed table", () => {
   test("the shipped tree (the real table, this repository, the default git): exit 1, with no host, stat, connection or reservation change", async () => {
@@ -931,18 +981,22 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     statAuthTarget?: (path: string, count: number) => Promise<AuthTargetStat>
     repoRoot?: string
     rehash?: string
+    /** Run inside the caller's `captured`, opening none here; reading this run's `err` then throws. */
+    callersCapture?: true
+    /** Awaited at the start of every host-binary hash, the first of which precedes the reservation. */
+    beforeHash?: () => Promise<void>
   }) {
     const root = await temp()
     const repoRoot = options.repoRoot ?? (await liveRepo())
     const dataDir = join(root, "data")
     const home = join(root, "home")
     const out = join(root, "out")
-    const check = await passingHostCheck(root, () => join(repoRoot, OWN_RESERVATION), options.rehash)
+    const check = await passingHostCheck(root, () => join(repoRoot, OWN_RESERVATION), options.rehash, options.beforeHash)
     const requests: HostRequest[] = []
     const proxies: (readonly string[])[] = []
     const stats: string[] = []
     let statCount = 0
-    const run = await captured(() =>
+    const invoke = () =>
       main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", dataDir, "--oauth-prepared", check.prepared, "--out", out], {
         home,
         platform: "darwin",
@@ -964,11 +1018,11 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
           return { lstat: facts(statCount === 1 ? 5n : 6n), stat: facts(statCount === 1 ? 5n : 6n) }
         },
         sandboxDenials: async () => options.denials ?? { ok: true, source: "stand-in", entries: [] },
-      }),
-    )
+      })
+    const run = options.callersCapture ? { value: await invoke(), err: "", out: "" } : await captured(invoke)
     const text = existsSync(join(out, EVIDENCE_FILE)) ? await readFile(join(out, EVIDENCE_FILE), "utf8") : null
     const partialText = existsSync(join(out, PARTIAL_EVIDENCE_FILE)) ? await readFile(join(out, PARTIAL_EVIDENCE_FILE), "utf8") : null
-    return {
+    const result = {
       ...run,
       requests,
       proxies,
@@ -985,6 +1039,14 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
       out,
       repoRoot,
     }
+    if (options.callersCapture) {
+      // The error text is the caller's capture's, for both invocations together: an empty string here would pass a `not.toContain`.
+      const unread = (): never => {
+        throw new Error("this invocation ran inside its caller's capture: read the console text from that capture")
+      }
+      Object.defineProperty(result, "err", { get: unread, enumerable: true })
+    }
+    return result
   }
 
   test("two answered attempts, the third refused with 0 backend calls, the auth target recorded as flags; exit 0", async () => {
@@ -1342,20 +1404,76 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
 
     test("two concurrent invocations: exactly one reservation and one refusal", async () => {
       const repoRoot = await liveRepo()
-      const [a, b] = await Promise.all([
-        liveRun({ backend: scriptedBackend([answer, answer]), repoRoot }),
-        liveRun({ backend: scriptedBackend([answer, answer]), repoRoot }),
-      ])
+      // One capture for both: the spies are process-global, and it ends only after both invocations have.
+      const {
+        value: [a, b],
+        err,
+      } = await captured(() =>
+        Promise.all([
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true }),
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true }),
+        ]),
+      )
       expect([a.value, b.value].sort()).toEqual([0, 1])
       const loser = a.value === 1 ? a : b
       const winner = a.value === 0 ? a : b
-      // Both runs spy on the same console concurrently, so a refusal may land in either capture.
-      expect(`${a.err}\n${b.err}`).toMatch(/REFUSED: run 3's reservation `ablation\/evidence\/oauth-pilot-live-run-3\.reservation` already exists/)
+      expect(() => loser.err).toThrow("read the console text from that capture")
+      const refusals = err.split("\n").filter((line) => line.includes("REFUSED"))
+      expect(refusals).toHaveLength(1)
+      expect(refusals[0]).toMatch(/^REFUSED: run 3's reservation `ablation\/evidence\/oauth-pilot-live-run-3\.reservation` already exists/)
       expect(loser.requests).toEqual([])
       expect(loser.stats).toEqual([])
       expect(loser.proxies).toEqual([])
       const written = JSON.parse(await readFile(join(repoRoot, OWN_RESERVATION), "utf8")) as { out: string; run: number }
       expect(written.run).toBe(3)
+      expect(written.out).toBe(winner.out)
+    })
+
+    test("a refusal printed after the winning invocation has ended is still captured", async () => {
+      const repoRoot = await liveRepo()
+      const gate = () => {
+        let open = () => {}
+        const opened = new Promise<void>((resolve) => (open = resolve))
+        return { open, opened }
+      }
+      // Both pass the authorization before either reserves; then the loser waits in its pre-check for the winner's end.
+      const loserInPreCheck = gate()
+      const winnerEnded = gate()
+      let errAtWinnersEnd: string | null = null
+      const {
+        value: [winner, loser],
+        err,
+      } = await captured((seen) =>
+        Promise.all([
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true, beforeHash: () => loserInPreCheck.opened }).then((run) => {
+            errAtWinnersEnd = seen().err
+            winnerEnded.open()
+            return run
+          }),
+          liveRun({
+            backend: scriptedBackend([answer, answer]),
+            repoRoot,
+            callersCapture: true,
+            beforeHash: () => {
+              loserInPreCheck.open()
+              return winnerEnded.opened
+            },
+          }),
+        ]),
+      )
+      expect(winner.value).toBe(0)
+      expect(loser.value).toBe(1)
+      expect(errAtWinnersEnd).not.toBeNull()
+      expect(errAtWinnersEnd!).not.toContain("REFUSED")
+      // The loser's pre-check ran with the reservation already on disk, and its own exclusive creation lost.
+      expect(loser.hashed).toEqual([{ path: "/stand-in/opencode", reserved: true }])
+      const refusals = err.split("\n").filter((line) => line.includes("REFUSED"))
+      expect(refusals).toHaveLength(1)
+      expect(refusals[0]).toMatch(/^REFUSED: run 3's reservation `ablation\/evidence\/oauth-pilot-live-run-3\.reservation` already exists: another `--live` reserved run 3 first/)
+      expect(loser.requests).toEqual([])
+      expect(loser.stats).toEqual([])
+      expect(loser.proxies).toEqual([])
+      const written = JSON.parse(await readFile(join(repoRoot, OWN_RESERVATION), "utf8")) as { out: string; run: number }
       expect(written.out).toBe(winner.out)
     })
 
