@@ -38,13 +38,22 @@
  * count `runTurn` calls and read the journal at each entry.
  *
  * The launcher's stages 1 and 2 (the offline preflight, the authorization and
- * the reservation) are not run on a real host. One row runs the shipped command
- * as a child process and records that it still refuses.
+ * the reservation) are not run on a real host. One row is about the shipped
+ * command, `bun run adversarial --live --provider-mode oauth`, which is the
+ * live run itself once nothing refuses it. `shippedDecision` therefore reads
+ * the committed gate table, the run it names and the protocol file first, by
+ * the rules the launcher's stage 1 applies. The probe starts that command as a
+ * child process only when one of them establishes a refusal, and records that
+ * it refused. When none does, or when that cannot be established, the probe
+ * starts nothing and both of the row's claims read UNPROBED. A reservation is
+ * never a reason to start it. The check is one reading of the checkout, which
+ * the child reads again: the checkout must not change while the row runs.
  *
  * The schedules are `provenance: "scripted"`, and they are sealed against a
- * private copy of protocol v3 stamped frozen by the file's own hash rule
- * (`frozenProtocolFixture`). The copy is a fixture: it pre-registers nothing
- * and freezes nothing, and the repository's protocol file is never written.
+ * private copy of protocol v3 re-stamped by the file's own hash rule
+ * (`frozenProtocolFixture`). The copy is a fixture: it is not the frozen
+ * protocol, it pre-registers nothing, and the repository's protocol file is
+ * never written.
  *
  * ## Host ownership
  *
@@ -112,8 +121,8 @@ import {
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, verifyPrepared } from "../ablation/oauth-payload.ts"
 import type { OAuthStubFormat } from "../ablation/oauth-stub.ts"
-import { GATE_11_EVIDENCE_SCOPE, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
-import { sha256 } from "../ablation/schedule.ts"
+import { ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
+import { readFrozenProtocol, sha256 } from "../ablation/schedule.ts"
 import type { Candidate } from "../core/domain/roster.ts"
 import { systemClock, type Clock } from "../core/ports/clock.ts"
 import type { ModelBackend } from "../core/ports/model-backend.ts"
@@ -978,19 +987,74 @@ export interface ShippedRun {
   timedOut: boolean
 }
 
-/** What the shipped command must name when it refuses at stage 1. */
-export const SHIPPED_BARRIERS: readonly { name: string; text: string }[] = [
-  { name: "stage 1", text: "REFUSED at stage 1" },
-  { name: "gate 10", text: "gate 10 (adversarial spend authorization) is OPEN" },
-  { name: "the null pin", text: "`ADVERSARIAL_RUN.pins` is null" },
-]
+/** One reason the shipped command refuses offline: a short name, the text its stage 1 prints, and the reason in full. */
+export interface ShippedBarrier {
+  name: string
+  text: string
+  why: string
+}
 
-export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evidenceChanged: boolean): Claim[] {
-  const missing = SHIPPED_BARRIERS.filter((barrier) => !run.output.includes(barrier.text)).map((barrier) => barrier.name)
+/** Whether the probe may start the shipped command: against the barriers that make it refuse, or not at all, and why. */
+export type ShippedDecision = { spawn: true; barriers: readonly ShippedBarrier[] } | { spawn: false; why: string }
+
+/** What `shippedDecision` reads. Every default is what the shipped command itself reads. */
+export interface ShippedDecisionInputs {
+  gates?: readonly PairedGate[]
+  run?: AdversarialRun
+  protocolFile?: string
+  readProtocol?: typeof readFrozenProtocol
+}
+
+/**
+ * Whether the shipped command is established to refuse at stage 1, from the
+ * gate table, the run and the protocol file alone, by stage 1's own rules:
+ * `gatePreflight` for the adversarial phase on the oauth route, and
+ * `readFrozenProtocol` with the version-3 check. With no such refusal the
+ * command is authorized and would start the live run, so the answer is not to
+ * start it; a check that throws gives the same answer. Nothing else is read: a
+ * reservation, an earlier run or a flag is never a reason to start it.
+ */
+export async function shippedDecision(inputs: ShippedDecisionInputs = {}): Promise<ShippedDecision> {
+  try {
+    const barriers: ShippedBarrier[] = []
+    const run = inputs.run ?? ADVERSARIAL_RUN
+    for (const problem of gatePreflight(inputs.gates ?? PAIRED_GATES, "adversarial", "oauth", undefined, run).problems) {
+      const text = problem.split(/[;:]/)[0]!
+      barriers.push({ name: text.split(" ").slice(0, 2).join(" "), text, why: problem })
+    }
+    const protocol = await (inputs.readProtocol ?? readFrozenProtocol)(inputs.protocolFile ?? PROTOCOL_V3_FILE)
+    if (!protocol.ok) barriers.push({ name: "the protocol file", text: "protocol v3 is not frozen", why: protocol.reason })
+    else if (protocol.version !== 3) {
+      barriers.push({
+        name: "the protocol version",
+        text: "the adversarial suite on the OAuth route needs protocol v3",
+        why: `the frozen protocol read is ${protocol.id} v${protocol.version}`,
+      })
+    }
+    if (barriers.length === 0) {
+      return {
+        spawn: false,
+        why:
+          `no offline refusal is established: every adversarial gate is CLOSED, adversarial run ${run.run} is pinned to ` +
+          `${(run.pins ?? []).join(", ")} and protocol v3 is frozen. The command is authorized, and starting it would use run ` +
+          `${run.run}'s one authorization and start the live run, so the probe did not start it`,
+      }
+    }
+    return { spawn: true, barriers: [{ name: "stage 1", text: "REFUSED at stage 1", why: "the refusal is stage 1's" }, ...barriers] }
+  } catch (error) {
+    return { spawn: false, why: `whether the shipped command would refuse could not be established (${messageOf(error)}), so the probe did not start it` }
+  }
+}
+
+const SHIPPED_COMMAND = "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override"
+
+export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evidenceChanged: boolean, barriers: readonly ShippedBarrier[]): Claim[] {
+  const missing = barriers.filter((barrier) => !run.output.includes(barrier.text)).map((barrier) => barrier.name)
+  const named = barriers.filter((barrier) => barrier.name !== "stage 1").map((barrier) => barrier.name)
   return [
     claim(
       "shipped-refuses",
-      "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10 and the null pin",
+      `${SHIPPED_COMMAND}, exits 1 at stage 1 naming ${named.join(", ")}`,
       !run.timedOut && run.exitCode === 1 && missing.length === 0 ? "HOLDS" : "FAILS",
       run.timedOut
         ? `the command did not end within ${SHIPPED_COMMAND_MS} ms`
@@ -1002,6 +1066,14 @@ export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evi
       leftovers.length === 0 && !evidenceChanged ? "HOLDS" : "FAILS",
       leftovers.length === 0 && !evidenceChanged ? "neither root exists and the evidence directory's listing is unchanged" : `${leftovers.join("; ") || "nothing left in the roots"}${evidenceChanged ? "; the evidence directory's listing changed" : ""}`,
     ),
+  ]
+}
+
+/** The shipped row when the command was not started: neither claim was observed. */
+export function shippedUnprobedClaims(why: string): Claim[] {
+  return [
+    claim("shipped-refuses", `${SHIPPED_COMMAND}, exits 1 at stage 1`, "UNPROBED", why),
+    claim("shipped-writes-nothing", "the refused command leaves nothing under its --out, its data root or ablation/evidence", "UNPROBED", why),
   ]
 }
 
@@ -1029,6 +1101,7 @@ export interface ProbeSeams {
   createClient?: (init: { baseUrl: string; directory: string }) => unknown
   enumerate?: (client: unknown) => Promise<Candidate[]>
   shipped?: (argv: readonly string[]) => Promise<ShippedRun>
+  shippedDecision?: () => Promise<ShippedDecision>
   codeRevision?: () => Promise<Maybe<CodeRevision>>
   clock?: Clock
   transports?: readonly Transport[]
@@ -1070,9 +1143,9 @@ export interface ProtocolFixture {
 }
 
 /**
- * A private copy of protocol v3 stamped frozen by the file's own hash rule, in
- * `directory`. A fixture: it pre-registers nothing and is no freeze. The source
- * file is read and never written.
+ * A private copy of protocol v3 re-stamped by the file's own hash rule, in
+ * `directory`. A fixture: it is not the frozen protocol and pre-registers
+ * nothing. The source file is read and never written.
  */
 export async function frozenProtocolFixture(directory: string, source: string = PROTOCOL_V3_FILE): Promise<ProtocolFixture> {
   const draft = await readFile(source, "utf8")
@@ -1915,9 +1988,10 @@ export interface ProbeEvidence {
 export const LIMITATIONS: readonly string[] = [
   "Every result holds for its exact provider, model and route on opencode " + `${MEASURED_HOST.version} (sha256 ${MEASURED_HOST.sha256}); it validates no other pin, model or build.`,
   "Sign-ins were placeholders and every provider was a loopback stub: nothing here shows what a real provider, account, cache or quota does.",
-  "The launcher's stages 1 and 2 (offline preflight, authorization, reservation) were not run on a real host; only the shipped command's refusal was observed. " +
-    "That command ran as the user would run it, so its stage 1 resolved the path of the user's opencode store for its disjointness check; it opens nothing there.",
-  "The schedules were sealed with `provenance: \"scripted\"` against a private frozen-format copy of protocol v3. That copy is a fixture: protocol v3 is a draft, and nothing here is pre-registered or frozen.",
+  "The launcher's stages 1 and 2 (offline preflight, authorization, reservation) were not run on a real host. The shipped command's row says whether that command was started: " +
+    "it is started only when the gate table, the run or the protocol file establishes that it refuses, and then it runs as the user would run it, so its stage 1 " +
+    "resolves the path of the user's opencode store for its disjointness check and opens nothing there.",
+  "The schedules were sealed with `provenance: \"scripted\"` against a private copy of protocol v3 re-stamped by the file's own hash rule. That copy is a fixture: it is not the frozen protocol, and nothing here is pre-registered.",
   `The non-ending and stream-without-usage rows shorten the turn deadline through the backend seam, to ${HANG_TURN_MS} ms and ${NO_USAGE_TURN_MS} ms. ` +
     `Every other row runs on the shipped launcher's own ${ADVERSARIAL_TURN_TIMEOUT_MS} ms, which no row here waited out.`,
   "The in-run integrity failure was injected by the probe through the late-usage reporter. No spontaneous integrity failure of a real host was observed or is claimed.",
@@ -1990,10 +2064,26 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
   const listing = async () => (await readdir(evidenceDir).catch(() => [] as string[])).sort().join("\n")
   const before = await listing()
   console.log("\nthe shipped command (no override): bun run adversarial --live --provider-mode oauth …")
-  const shipped = await (seams.shipped ?? runShippedCommand)(shippedArgv)
-  const leftovers: string[] = []
-  for (const [name, path] of [["--out", shippedOut], ["--oauth-data-root", shippedData]] as const) if (await exists(path)) leftovers.push(`${name} exists after the refusal`)
-  const shippedResult = shippedClaims(shipped, leftovers, (await listing()) !== before)
+  let decision: ShippedDecision
+  try {
+    decision = await (seams.shippedDecision ?? shippedDecision)()
+  } catch (error) {
+    decision = { spawn: false, why: `whether the shipped command would refuse could not be established (${messageOf(error)}), so the probe did not start it` }
+  }
+  // A stand-in decision is no evidence that the real command refuses, so it starts only a stand-in command.
+  const startShipped = seams.shipped ?? (seams.shippedDecision === undefined ? runShippedCommand : null)
+  let shippedResult: Claim[]
+  if (decision.spawn && startShipped !== null) {
+    const shipped = await startShipped(shippedArgv)
+    const leftovers: string[] = []
+    for (const [name, path] of [["--out", shippedOut], ["--oauth-data-root", shippedData]] as const) if (await exists(path)) leftovers.push(`${name} exists after the refusal`)
+    shippedResult = shippedClaims(shipped, leftovers, (await listing()) !== before, decision.barriers)
+  } else {
+    console.log("  NOT STARTED")
+    shippedResult = shippedUnprobedClaims(
+      decision.spawn ? "the decision to start the shipped command was a stand-in's, and a stand-in decision never starts the real command" : decision.why,
+    )
+  }
   for (const entry of shippedResult) console.log(`  ${entry.verdict.padEnd(8)} ${entry.id}: ${entry.why}`)
 
   // ---- calibration: one host, under the outer bounds ----
@@ -2059,7 +2149,7 @@ export async function probeBody(args: ProbeArgs, seams: ProbeSeams, live: { scra
     payloadPins: OAUTH_PAYLOAD,
     signIns: "placeholders: every data directory's auth.json is a symlink to one placeholder file under the probe's scratch; the user's store was never linked, opened or named in a route",
     protocolFixture: {
-      label: "SYNTHETIC FIXTURE — a private frozen-format copy of the draft protocol v3; it pre-registers nothing and is no freeze. The repository's protocol v3 was read and not written.",
+      label: "SYNTHETIC FIXTURE — a private copy of protocol v3 re-stamped by the file's own hash rule; it is not the frozen protocol and pre-registers nothing. The repository's protocol v3 was read and not written.",
       draftSha256: protocol.draftSha256,
       fixtureFrozenHash: protocol.fixtureHash,
     },

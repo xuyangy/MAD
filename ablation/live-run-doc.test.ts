@@ -56,10 +56,12 @@ import {
 import { TOOL_TRACE_FILE } from "./tool-trace.ts"
 import {
   ADVERSARIAL_CANDIDATE_NON_GATES,
+  ADVERSARIAL_PROTOCOL,
   ADVERSARIAL_RUN,
   CANDIDATE_CLAIM_WORDING,
   EVALUATION_RUN,
   GATE_11_EVIDENCE_SCOPE,
+  gatePreflight,
   PAIRED_GATES,
   PAIRED_NON_GATES,
 } from "./paired-gates.ts"
@@ -90,13 +92,14 @@ describe("LIVE-RUN.md names the cross-arm case set that is actually in force", (
    * must be the CURRENT one: every `sha256:` literal in the document has to be an
    * identity in force, so a re-sealed set cannot leave a stale hash behind.
    */
-  test("every sha256 in the document is a current seal identity", async () => {
+  test("every sha256 in the document is a current seal identity, or the frozen protocol v3 hash gate 10 names", async () => {
     const current = new Set([
       LABELLED_CHANGE_SEAL.materialHash,
       CROSS_ARM_PAIRS_SEAL.datasetHash,
       CROSS_ARM_PAIRS_SEAL.sourceDiffHash,
       ADVERSARIAL_SEAL.materialHash,
       ADVERSARIAL_SEAL.assertionsHash,
+      ADVERSARIAL_PROTOCOL.frozenHash,
     ])
     const named = [...(await liveRunDoc()).matchAll(/sha256:[0-9a-f]{64}/g)].map((match) => match[0])
     expect(named.length).toBeGreaterThan(0)
@@ -392,7 +395,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // ambiguous about.
     const prerequisites = [
       ["Host accounting", "NOT APPLICABLE ON THE OAUTH ROUTE"],
-      ["Billing authorization", "OPEN"],
+      ["Billing authorization", "CLOSED, for run 1 only"],
       ["Verified shared gates", "CLOSED, for two pins only"],
       ["Bounded tool termination", "CLOSED"],
       ["Bounded observer writes", "CLOSED"],
@@ -412,14 +415,14 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
     const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value.startsWith(status) ? [index + 1] : []))
-    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[2], [3, 4, 5, 6], [1], [7]])
+    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[], [2, 3, 4, 5, 6], [1], [7]])
     expect(text).toContain(
-      "On the planned OAuth route one of the seven is open (2), four are closed (3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
+      "On the planned OAuth route none of the seven is open: five are closed (2, 3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
     )
-    expect(text).toContain("**The live execution is still blocked.** (2) is open and the run's pin is not chosen; protocol v3 is frozen (2026-10-13).")
+    expect(text).toContain("**The live execution is authorized and has not run.** (2) is closed for run 1, the run's pin is chosen and protocol v3 is frozen (2026-10-13).")
+    expect(text).toContain("The run is one invocation of `bun run adversarial`, made once; its outcome, complete or not, is what gets published.")
     // And the honest headline: story 2-7c did not close every hang, and the
     // materializer's half closed with gate 12.
-    expect(text).toContain("The live execution is still blocked")
     expect(text).toContain("Materializer termination is implemented and accepted, and gate 12 is CLOSED.")
     expect(text).toContain("Story 2-7c does not close every hang")
     expect(text).not.toContain("remains unverified")
@@ -448,8 +451,10 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(2)).toContain("in admitted attempts")
     const figure = ADVERSARIAL_ATTEMPT_ALLOWANCES
     expect(item(2)).toContain(`${figure.run} per run, ${figure.suite} for the suite and ${figure.global} for the suite's root`)
-    expect(item(2)).toContain("`pins: null`")
-    expect(ADVERSARIAL_RUN.pins).toBeNull()
+    expect(item(2)).toContain("run 1, pinned to `anthropic/claude-sonnet-5`, which is also `small_model`")
+    expect(ADVERSARIAL_RUN).toMatchObject({ run: 1, pins: ["anthropic/claude-sonnet-5"] })
+    expect(item(2)).toContain("The authorization covers one start: the launcher's reservation refuses every later one")
+    expect(item(2)).toContain("Nothing bounds the physical requests, host re-sends or side requests a host makes, or subscription quota")
     // The api-key allowance is named only to say it authorizes nothing here.
     expect(item(2)).toContain("authorizes no OAuth work")
     expect(item(3)).toContain(`Gate 11, owned by ${gate(11).owner}.`)
@@ -565,6 +570,21 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(v3).toContain("frozen_on: 2026-10-13")
   })
 
+  test("story 2-7g — the probe's shipped-command row is documented: started only on an established refusal, and not on the shipped tree", async () => {
+    const text = between((await section()).replace(/\s+/g, " "), "### The zero-bill probe (story 2-7f2): `bun run adversarial-probe`", " ### ", "the probe section")
+    for (const phrase of [
+      "One row is about the shipped command, which is the live run once nothing refuses it.",
+      "(`shippedDecision`, by `gatePreflight` and `readFrozenProtocol` with the version-3 check, the rules stage 1 applies)",
+      "starts the command as a child process only when one of them establishes that it refuses",
+      "**On the shipped tree none does, so the probe does not start it** and both of the row's claims read UNPROBED",
+      "a check that cannot be completed gives the same result, and a reservation is never a reason to start it",
+      "the checkout must not change while the row runs",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    expect(gatePreflight(PAIRED_GATES, "adversarial", "oauth").ok).toBe(true)
+  })
+
   test("story 2-7f — the launcher is documented: the command, stage 1's refusal, per-run isolation, the host record and signals", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth launcher (story 2-7f): `bun run adversarial`", " ### ", "the launcher section")
     const pkg = JSON.parse(await Bun.file(new URL("../package.json", import.meta.url)).text()) as { scripts: Record<string, string> }
@@ -572,7 +592,9 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).toContain("bun run adversarial --live --provider-mode oauth")
     for (const flag of ["--oauth-provider", "--pin", "--oauth-prepared", "--oauth-data-root", "--out"]) expect(text, flag).toContain(flag)
     expect(text).toContain("`--provider-mode api-key`, `--server`, `--target` and `--directory` are refused at parse")
-    expect(text).toContain("**Stage 1 refuses on the shipped tree, and writes nothing.**")
+    expect(text).toContain("**Stage 1 passes on the shipped tree for the authorized pin, and a refusal writes nothing.**")
+    expect(text).toContain("With `--oauth-provider anthropic --pin anthropic/claude-sonnet-5` the command is the live run of the sixteen adversarial cases: run 1, once.")
+    expect(text).toContain("Gates 10, 11 and 12 are CLOSED, `ADVERSARIAL_RUN.pins` is `anthropic/claude-sonnet-5` and protocol v3 is frozen, so on the shipped tree none of those refuses.")
     expect(text).toContain("`gatePreflight(gates, \"adversarial\", \"oauth\")`")
     expect(ADVERSARIAL_HOST_TOOLS).toEqual({ "*": false, StructuredOutput: true })
     expect(text).toContain('`ADVERSARIAL_HOST_TOOLS` (`{ "*": false, StructuredOutput: true }`')
@@ -766,10 +788,10 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
     expect(text).toContain(
-      "Gate 10 is OPEN and gates 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
+      "Gates 10, 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12])
-    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "CLOSED"])
+    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["CLOSED", "CLOSED", "CLOSED"])
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {

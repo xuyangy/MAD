@@ -11,7 +11,7 @@ import { startAdversarialStub, type AdversarialStub } from "../ablation/adversar
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { authLinkPaths } from "../ablation/oauth-payload.ts"
-import { PAIRED_GATES } from "../ablation/paired-gates.ts"
+import { ADVERSARIAL_RUN, PAIRED_GATES, type AdversarialRun } from "../ablation/paired-gates.ts"
 import { readFrozenProtocol } from "../ablation/schedule.ts"
 import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
 import { candidate } from "../core/test-support/fakes.ts"
@@ -40,7 +40,6 @@ import {
   rosterClaim,
   runAllowanceClaims,
   runScenario,
-  runShippedCommand,
   scenarioBound,
   HANG_TURN_MS,
   LIMITATIONS,
@@ -49,7 +48,8 @@ import {
   seededAttempts,
   gate11Statement,
   shippedClaims,
-  SHIPPED_BARRIERS,
+  shippedDecision,
+  shippedUnprobedClaims,
   SUITE_ALLOWANCE_CLAIM,
   TRANSPORTS,
   UNPROBED_TRANSPORTS,
@@ -58,6 +58,7 @@ import {
   type HostFact,
   type IssuedFact,
   type ProbeContext,
+  type ShippedBarrier,
   type ProbeSeams,
   type RequestFact,
   type ScenarioFacts,
@@ -66,6 +67,7 @@ import {
   type Transport,
 } from "./adversarial-probe.ts"
 import { ADVERSARIAL_TURN_TIMEOUT_MS, PROTOCOL_V3_FILE } from "./adversarial.ts"
+import { REPO_ROOT } from "./paired.ts"
 import { placeholderAuth } from "./oauth-probe.ts"
 
 const scratch: string[] = []
@@ -652,44 +654,99 @@ describe("extra requests, and the observation row", () => {
   })
 })
 
-describe("the shipped command, run for real", () => {
-  test("with valid flags and no override it exits 1 at stage 1 naming every barrier, and writes nothing", async () => {
+/** Barriers a table with gate 10 OPEN and no pin gives; a stand-in for what the command would print. */
+const BARRIERS: readonly ShippedBarrier[] = [
+  { name: "stage 1", text: "REFUSED at stage 1", why: "the refusal is stage 1's" },
+  { name: "gate 10", text: "gate 10 (adversarial spend authorization) is OPEN", why: "gate 10 is OPEN" },
+  { name: "adversarial run", text: "adversarial run 1 has no roster pin", why: "the pin is null" },
+]
+
+describe("whether the shipped command may be started", () => {
+  const gate10Open = PAIRED_GATES.map((gate) => (gate.number === 10 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+  const unpinned: AdversarialRun = { ...ADVERSARIAL_RUN, pins: null }
+  const names = (decision: Awaited<ReturnType<typeof shippedDecision>>) => (decision.spawn ? decision.barriers.map((barrier) => barrier.name) : null)
+
+  test("on the committed table, run and protocol nothing refuses, so it is not started", async () => {
+    const decision = await shippedDecision()
+    expect(decision.spawn).toBe(false)
+    if (!decision.spawn) {
+      expect(decision.why).toContain("no offline refusal is established")
+      expect(decision.why).toContain(`adversarial run ${ADVERSARIAL_RUN.run} is pinned to ${PIN}`)
+      expect(decision.why).toContain("would use run 1's one authorization and start the live run, so the probe did not start it")
+    }
+  })
+
+  test("gate 10 OPEN, or a run with no pin, is a barrier taken from the preflight's own problem", async () => {
+    const open = await shippedDecision({ gates: gate10Open })
+    expect(names(open)).toEqual(["stage 1", "gate 10"])
+    if (open.spawn) expect(open.barriers[1]!.text).toBe("gate 10 (adversarial spend authorization) is OPEN")
+    const noPin = await shippedDecision({ run: unpinned })
+    expect(names(noPin)).toEqual(["stage 1", "adversarial run"])
+    if (noPin.spawn) expect(noPin.barriers[1]!.text).toBe("adversarial run 1 has no roster pin")
+    expect(names(await shippedDecision({ gates: gate10Open, run: unpinned }))).toEqual(["stage 1", "gate 10", "adversarial run"])
+    // A pin outside gate 11's evidence refuses too.
+    expect(names(await shippedDecision({ run: { ...ADVERSARIAL_RUN, pins: ["openai/gpt-6-sol"] } }))).toEqual(["stage 1", "adversarial run"])
+  })
+
+  test("a protocol file that is unreadable, edited, malformed or not version 3 is a barrier with the reader's reason", async () => {
     const dir = await tempDir()
-    await mkdir(join(dir, "prepared"))
-    const run = await runShippedCommand([
-      "--live",
-      "--provider-mode",
-      "oauth",
-      "--oauth-provider",
-      "anthropic",
-      "--pin",
-      PIN,
-      "--oauth-prepared",
-      join(dir, "prepared"),
-      "--oauth-data-root",
-      join(dir, "data"),
-      "--out",
-      join(dir, "out"),
-    ])
-    const leftovers = [join(dir, "data"), join(dir, "out")].filter((path) => existsSync(path))
-    expect(shippedClaims(run, leftovers, false).map((entry) => `${entry.id}:${entry.verdict}`)).toEqual(["shipped-refuses:HOLDS", "shipped-writes-nothing:HOLDS"])
-    // A flag the parser refuses still ends at stage 1, with every gate barrier printed beside it.
-    expect(run.output).toContain("REFUSED at stage 1")
-  }, 60_000)
+    const frozen = await readFile(PROTOCOL_V3_FILE, "utf8")
+    const edited = join(dir, "edited.md")
+    await writeFile(edited, frozen.replace("## B3. Allowances", "## B3. Allowances, edited"))
+    const malformed = join(dir, "malformed.md")
+    await writeFile(malformed, frozen.replace(/^status: frozen$/m, "status: draft"))
+    const noVersion = join(dir, "no-version.md")
+    await writeFile(noVersion, frozen.replace(/^version: 3$/m, "version: three"))
+    for (const [protocolFile, why] of [
+      [join(dir, "absent.md"), "could not be read"],
+      [edited, "the frozen artefact was edited"],
+      [malformed, "is not a frozen protocol"],
+      [noVersion, "is not a frozen protocol"],
+    ] as const) {
+      const decision = await shippedDecision({ protocolFile })
+      expect(names(decision), protocolFile).toEqual(["stage 1", "the protocol file"])
+      if (decision.spawn) {
+        expect(decision.barriers[1]!.text).toBe("protocol v3 is not frozen")
+        expect(decision.barriers[1]!.why, protocolFile).toContain(why)
+      }
+    }
+    const v2 = await shippedDecision({ protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") })
+    expect(names(v2)).toEqual(["stage 1", "the protocol version"])
+    if (v2.spawn) {
+      expect(v2.barriers[1]!.text).toBe("the adversarial suite on the OAuth route needs protocol v3")
+      expect(v2.barriers[1]!.why).toBe("the frozen protocol read is PROTOCOL-mad-evaluation-v2 v2")
+    }
+  })
+
+  test("a check that throws starts nothing, whatever else would have refused", async () => {
+    const decision = await shippedDecision({
+      gates: gate10Open,
+      readProtocol: async () => {
+        throw new Error("EIO")
+      },
+    })
+    expect(decision).toEqual({ spawn: false, why: "whether the shipped command would refuse could not be established (EIO), so the probe did not start it" })
+  })
+
+  test("the row of a command that was not started is UNPROBED twice, with the reason", () => {
+    const claims = shippedUnprobedClaims("not started, because")
+    expect(claims.map((entry) => `${entry.id}:${entry.verdict}`)).toEqual(["shipped-refuses:UNPROBED", "shipped-writes-nothing:UNPROBED"])
+    expect(claims.every((entry) => entry.why === "not started, because")).toBe(true)
+  })
 })
 
 describe("the shipped command's claims", () => {
-  const refusal = SHIPPED_BARRIERS.map((barrier) => barrier.text).join("\n")
+  const refusal = BARRIERS.map((barrier) => barrier.text).join("\n")
+  const shippedClaimsFor = (run: Parameters<typeof shippedClaims>[0], leftovers: readonly string[], evidenceChanged: boolean) => shippedClaims(run, leftovers, evidenceChanged, BARRIERS)
 
   test("exit 1 naming every barrier, with nothing written, holds", () => {
-    expect(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false).every((entry) => entry.verdict === "HOLDS")).toBe(true)
+    expect(shippedClaimsFor({ exitCode: 1, output: refusal, timedOut: false }, [], false).every((entry) => entry.verdict === "HOLDS")).toBe(true)
   })
 
-  test("gate 11 is CLOSED, so it is no barrier and the claim does not say the refusal names it", () => {
-    expect(SHIPPED_BARRIERS.map((barrier) => barrier.name)).toEqual(["stage 1", "gate 10", "the null pin"])
-    const [refuses] = shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false)
+  test("the claim names the barriers it was given, and gate 11 is none of them", () => {
+    const [refuses] = shippedClaimsFor({ exitCode: 1, output: refusal, timedOut: false }, [], false)
     expect(refuses!.id).toBe("shipped-refuses")
-    expect(refuses!.claim).toContain("exits 1 at stage 1 naming gate 10 and the null pin")
+    expect(refuses!.claim).toContain("exits 1 at stage 1 naming gate 10, adversarial run")
     expect(refuses!.claim).not.toContain("gate 11")
   })
 
@@ -708,16 +765,16 @@ describe("the shipped command's claims", () => {
   })
 
   test("a parse-time refusal is not the preflight: it names no gate and FAILS", () => {
-    const claims = shippedClaims({ exitCode: 1, output: "REFUSED at stage 1\n--out must be an absolute path", timedOut: false }, [], false)
+    const claims = shippedClaimsFor({ exitCode: 1, output: "REFUSED at stage 1\n--out must be an absolute path", timedOut: false }, [], false)
     expect(verdictOf(claims, "shipped-refuses")).toBe("FAILS")
-    expect(whyOf(claims, "shipped-refuses")).toContain("not named: gate 10, the null pin")
+    expect(whyOf(claims, "shipped-refuses")).toContain("not named: gate 10, adversarial run")
   })
 
   test("exit 0, a timeout, a root left behind or a changed evidence directory each fail", () => {
-    expect(verdictOf(shippedClaims({ exitCode: 0, output: refusal, timedOut: false }, [], false), "shipped-refuses")).toBe("FAILS")
-    expect(verdictOf(shippedClaims({ exitCode: null, output: refusal, timedOut: true }, [], false), "shipped-refuses")).toBe("FAILS")
-    expect(verdictOf(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, ["--out exists after the refusal"], false), "shipped-writes-nothing")).toBe("FAILS")
-    expect(verdictOf(shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], true), "shipped-writes-nothing")).toBe("FAILS")
+    expect(verdictOf(shippedClaimsFor({ exitCode: 0, output: refusal, timedOut: false }, [], false), "shipped-refuses")).toBe("FAILS")
+    expect(verdictOf(shippedClaimsFor({ exitCode: null, output: refusal, timedOut: true }, [], false), "shipped-refuses")).toBe("FAILS")
+    expect(verdictOf(shippedClaimsFor({ exitCode: 1, output: refusal, timedOut: false }, ["--out exists after the refusal"], false), "shipped-writes-nothing")).toBe("FAILS")
+    expect(verdictOf(shippedClaimsFor({ exitCode: 1, output: refusal, timedOut: false }, [], true), "shipped-writes-nothing")).toBe("FAILS")
   })
 })
 
@@ -1312,7 +1369,7 @@ describe("the scenarios on stand-ins, their bounds", () => {
 // ---------------------------------------------------------------------------
 
 describe("main", () => {
-  const SHIPPED = { exitCode: 1, output: SHIPPED_BARRIERS.map((barrier) => barrier.text).join("\n"), timedOut: false }
+  const SHIPPED = { exitCode: 1, output: BARRIERS.map((barrier) => barrier.text).join("\n"), timedOut: false }
 
   async function commandSeams(extra: ProbeSeams = {}, hosts = standInHosts()) {
     const dir = await tempDir()
@@ -1330,6 +1387,8 @@ describe("main", () => {
       createClient: (init) => ({ fake: init }),
       enumerate: async () => [candidate(ANTHROPIC.providerId, ANTHROPIC.modelId)],
       shipped: async () => SHIPPED,
+      // A stand-in decision: no real command is started here, and no table is read.
+      shippedDecision: async () => ({ spawn: true, barriers: BARRIERS }),
       codeRevision: async () => ({ kind: "known", value: { commit: "abc123", dirty: false } }),
       transports: [ANTHROPIC],
       scenarios: [spec("integrity-before-start"), spec("root-allowance"), spec("integrity-injected")],
@@ -1413,6 +1472,46 @@ describe("main", () => {
     expect(await main(argv, seams)).toBe(1)
     const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
     expect(evidence.summary.failing).toContain("shipped command: shipped-refuses")
+  }, 120_000)
+
+  test("with no offline refusal, or a decision that throws, the shipped command is never started and its row is UNPROBED", async () => {
+    for (const [shippedDecisionSeam, why] of [
+      [undefined, "no offline refusal is established"],
+      [
+        async () => {
+          throw new Error("table unreadable")
+        },
+        "could not be established (table unreadable)",
+      ],
+    ] as const) {
+      let started = 0
+      const { seams, argv, dir } = await commandSeams({
+        shippedDecision: shippedDecisionSeam,
+        shipped: async () => {
+          started += 1
+          return SHIPPED
+        },
+        scenarios: [spec("integrity-before-start")],
+      })
+      expect(await main(argv, seams), why).toBe(0)
+      expect(started, why).toBe(0)
+      const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
+      expect(evidence.shippedCommand.claims.map((entry: Claim) => `${entry.id}:${entry.verdict}`)).toEqual(["shipped-refuses:UNPROBED", "shipped-writes-nothing:UNPROBED"])
+      expect(evidence.shippedCommand.claims[0].why, why).toContain(why)
+      // Nothing of the shipped command's exists: neither root, and no reservation under the stand-in repository.
+      for (const path of [join(dir, "out", "shipped", "out"), join(dir, "out", "shipped", "data"), join(dir, "repo", ADVERSARIAL_RUN.reservation)]) expect(existsSync(path), path).toBe(false)
+      expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+    }
+  }, 240_000)
+
+  test("a stand-in decision to start, with no stand-in command, starts nothing: the real command is never its fallback", async () => {
+    const { seams, argv, dir } = await commandSeams({ shipped: undefined, scenarios: [spec("integrity-before-start")] })
+    expect(await main(argv, seams)).toBe(0)
+    const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
+    expect(evidence.shippedCommand.claims.map((entry: Claim) => entry.verdict)).toEqual(["UNPROBED", "UNPROBED"])
+    expect(evidence.shippedCommand.claims[0].why).toContain("a stand-in decision never starts the real command")
+    for (const path of [join(dir, "out", "shipped", "out"), join(dir, "out", "shipped", "data")]) expect(existsSync(path), path).toBe(false)
+    expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
   }, 120_000)
 
   test("a probe past its own deadline writes no evidence and exits 1", async () => {

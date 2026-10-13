@@ -17,8 +17,9 @@
  *    `ADVERSARIAL_RUN.pins`, its reservation exists neither on disk nor at HEAD,
  *    every earlier run is committed) and the production Tools identity. Every
  *    check prints, and a failure refuses before anything is written: no
- *    reservation, worktree, start marker or host. With the shipped table this
- *    stage always refuses (gate 10 OPEN, `pins: null`).
+ *    reservation, worktree, start marker or host. With the shipped table, run
+ *    and protocol this stage passes for `--pin anthropic/claude-sonnet-5`, the
+ *    one run gate 10 authorizes, so the command is the live run.
  * 2. **The reservation**, created exclusively only once every check passed.
  * 3. **The schedule**: immediately before the experiment root and the data
  *    root are created, each is checked again to be outside this repository and
