@@ -983,7 +983,6 @@ export const SHIPPED_BARRIERS: readonly { name: string; text: string }[] = [
   { name: "stage 1", text: "REFUSED at stage 1" },
   { name: "gate 10", text: "gate 10 (adversarial spend authorization) is OPEN" },
   { name: "the null pin", text: "`ADVERSARIAL_RUN.pins` is null" },
-  { name: "the unfrozen protocol v3", text: "protocol v3 is not frozen" },
 ]
 
 export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evidenceChanged: boolean): Claim[] {
@@ -991,7 +990,7 @@ export function shippedClaims(run: ShippedRun, leftovers: readonly string[], evi
   return [
     claim(
       "shipped-refuses",
-      "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10, the null pin and the unfrozen protocol v3",
+      "`bun run adversarial --live --provider-mode oauth`, with valid flags and paths and no override, exits 1 at stage 1 naming gate 10 and the null pin",
       !run.timedOut && run.exitCode === 1 && missing.length === 0 ? "HOLDS" : "FAILS",
       run.timedOut
         ? `the command did not end within ${SHIPPED_COMMAND_MS} ms`

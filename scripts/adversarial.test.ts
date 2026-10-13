@@ -292,7 +292,7 @@ describe("stage 1 on the shipped tree", () => {
       "PASS  experiment root",
       "PASS  OAuth data root",
       "PASS  disjoint directories",
-      "FAIL  frozen protocol v3",
+      "PASS  frozen protocol v3",
       "gate table committed",
       "FAIL  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)",
       "PASS  OAuth route",
@@ -303,7 +303,7 @@ describe("stage 1 on the shipped tree", () => {
       expect(result.text, check).toContain(check)
     }
     const diagnostic = result.text.slice(result.text.indexOf("REFUSED at stage 1 (offline checks)."))
-    expect(diagnostic).toContain("protocol v3 is not frozen")
+    expect(diagnostic).not.toContain("protocol v3 is not frozen")
     expect(diagnostic).toContain("gate 10 (adversarial spend authorization) is OPEN")
     // Gate 11 is CLOSED: it prints with its evidence and is no refusal.
     expect(diagnostic).not.toContain("gate 11 (adversarial attempt accounting) is OPEN")

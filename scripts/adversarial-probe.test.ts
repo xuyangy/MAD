@@ -686,10 +686,10 @@ describe("the shipped command's claims", () => {
   })
 
   test("gate 11 is CLOSED, so it is no barrier and the claim does not say the refusal names it", () => {
-    expect(SHIPPED_BARRIERS.map((barrier) => barrier.name)).toEqual(["stage 1", "gate 10", "the null pin", "the unfrozen protocol v3"])
+    expect(SHIPPED_BARRIERS.map((barrier) => barrier.name)).toEqual(["stage 1", "gate 10", "the null pin"])
     const [refuses] = shippedClaims({ exitCode: 1, output: refusal, timedOut: false }, [], false)
     expect(refuses!.id).toBe("shipped-refuses")
-    expect(refuses!.claim).toContain("exits 1 at stage 1 naming gate 10, the null pin and the unfrozen protocol v3")
+    expect(refuses!.claim).toContain("exits 1 at stage 1 naming gate 10 and the null pin")
     expect(refuses!.claim).not.toContain("gate 11")
   })
 
@@ -710,7 +710,7 @@ describe("the shipped command's claims", () => {
   test("a parse-time refusal is not the preflight: it names no gate and FAILS", () => {
     const claims = shippedClaims({ exitCode: 1, output: "REFUSED at stage 1\n--out must be an absolute path", timedOut: false }, [], false)
     expect(verdictOf(claims, "shipped-refuses")).toBe("FAILS")
-    expect(whyOf(claims, "shipped-refuses")).toContain("not named: gate 10, the null pin, the unfrozen protocol v3")
+    expect(whyOf(claims, "shipped-refuses")).toContain("not named: gate 10, the null pin")
   })
 
   test("exit 0, a timeout, a root left behind or a changed evidence directory each fail", () => {
@@ -758,7 +758,8 @@ describe("arguments, paths, the fixture and the bounds", () => {
     const before = await readFile(PROTOCOL_V3_FILE, "utf8")
     const fixture = await frozenProtocolFixture(dir)
     expect(await readFile(PROTOCOL_V3_FILE, "utf8")).toBe(before)
-    expect(before).not.toMatch(/^status: frozen$/m)
+    // The repository's protocol is frozen under its own hash; the fixture is a re-stamped copy and not that freeze.
+    expect(/^frozen_hash: (.*)$/m.exec(before)?.[1]).not.toBe(fixture.fixtureHash)
     expect(fixture.file.startsWith(dir)).toBe(true)
     const read = await readFrozenProtocol(fixture.file)
     expect(read).toMatchObject({ ok: true, version: 3, hash: fixture.fixtureHash })

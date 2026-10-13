@@ -416,7 +416,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).toContain(
       "On the planned OAuth route one of the seven is open (2), four are closed (3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
     )
-    expect(text).toContain("**The live execution is still blocked.** (2) is open, the run's pin is not chosen and protocol v3 is not frozen.")
+    expect(text).toContain("**The live execution is still blocked.** (2) is open and the run's pin is not chosen; protocol v3 is frozen (2026-10-13).")
     // And the honest headline: story 2-7c did not close every hang, and the
     // materializer's half closed with gate 12.
     expect(text).toContain("The live execution is still blocked")
@@ -501,8 +501,8 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
   test("attempt mode is documented: the opt-in, the figures, the root, the scope, the halts and the exposure report", async () => {
     const text = between((await section()).replace(/\s+/g, " "), "### Attempt mode on the OAuth route (story 2-7e)", " ### ", "the attempt-mode section")
     expect(text).toContain("`accounting: \"attempts\"` and `route: \"oauth\"`")
-    expect(text).toContain("**It bills nothing by itself, only `bun run adversarial` runs it, and protocol v3 is a draft.**")
-    expect(text).toContain("The v3 draft, v1 and v2 are each refused by name")
+    expect(text).toContain("**It bills nothing by itself, only `bun run adversarial` runs it, and protocol v3 is frozen (2026-10-13).**")
+    expect(text).toContain("v1 and v2 are each refused by name, with no coin tossed, and so is a v3 file that is not frozen or whose hash does not reproduce.")
     expect(text).toContain("`tokenCap: null`, `stopOnUnknownUsage: false`")
     const figure = ADVERSARIAL_ATTEMPT_ALLOWANCES
     expect(text).toContain(`${figure.run} per run, ${figure.suite} for the suite and ${figure.global} for the suite's root (\`ADVERSARIAL_ATTEMPT_ALLOWANCES\`)`)
@@ -535,7 +535,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).not.toContain("400,000")
   })
 
-  test("story 2-7f3 — the turn deadline is the constant's, in the launcher section and in the draft protocol v3, with what it does not bound", async () => {
+  test("story 2-7f3 — the turn deadline is the constant's, in the launcher section and in protocol v3, with what it does not bound", async () => {
     const figure = `${ADVERSARIAL_TURN_TIMEOUT_MS.toLocaleString("en-US")} ms`
     expect(figure).toBe("120,000 ms")
     const text = between((await section()).replace(/\s+/g, " "), "### The OAuth launcher (story 2-7f): `bun run adversarial`", " ### ", "the launcher section")
@@ -561,9 +561,8 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     ]) {
       expect(b6, phrase).toContain(phrase)
     }
-    // The protocol is still a draft: naming the bound freezes nothing.
-    expect(v3).toContain("status: draft")
-    expect(v3).toContain("frozen_on: null")
+    expect(v3).toContain("status: frozen")
+    expect(v3).toContain("frozen_on: 2026-10-13")
   })
 
   test("story 2-7f — the launcher is documented: the command, stage 1's refusal, per-run isolation, the host record and signals", async () => {

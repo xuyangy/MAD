@@ -959,6 +959,27 @@ describe("gate 11's evidence scope", () => {
     })
   })
 
+  test("frozen protocol v3 B1 records the measured build, the pinned payloads and one pin of the scope", async () => {
+    const v3 = (await Bun.file(new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v3.md", import.meta.url)).text()).replace(/\s+/g, " ")
+    const start = v3.indexOf("- **Fixed at this freeze, as values:**")
+    const end = v3.indexOf("- **Every rule v3 changes names what it replaces**")
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const fixed = v3.slice(start, end)
+    for (const value of [
+      `version ${MEASURED_HOST.version}, binary sha256 \`${MEASURED_HOST.sha256}\``,
+      `the Anthropic auth tree digest \`${OAUTH_PAYLOAD.anthropicAuth.treeDigest}\``,
+      `the config seed tree digest \`${OAUTH_PAYLOAD.configSeed.treeDigest}\``,
+      `catalogue sha256 \`${OAUTH_PAYLOAD.catalogue.sha256}\``,
+      "a fresh OAuth data directory per run, never reused",
+    ]) {
+      expect(fixed, value).toContain(value)
+    }
+    const pin = "anthropic/claude-sonnet-5"
+    expect(fixed).toContain(`the roster's one pin, \`${pin}\`, and the \`small_model\` it implies, the same \`${pin}\` (B7)`)
+    expect(GATE_11_EVIDENCE_SCOPE.pairs.map((pair) => pair.pin)).toContain(pin)
+  })
+
   test("the scope, and the counts gate 11 cites, are the committed evidence file's", async () => {
     const file = (await Bun.file(new URL(`../${GATE_11_EVIDENCE_SCOPE.evidence}`, import.meta.url)).json()) as {
       host: { version: string; sha256: string; matchesMeasuredHost: boolean }

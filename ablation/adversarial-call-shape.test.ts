@@ -4,7 +4,7 @@
  * `runAdversarialSuite` and the production `review()` pipeline. In this fixture
  * every invocation is an issued attempt, and the journal's recorded requests are
  * checked against them. It is the evidence protocol v3 B4 cites for its call
- * shape, and it also pins that v3 is refused while it is a draft, that v3's hash
+ * shape, and it also pins that v3 reads frozen at the hash it records, that v3's hash
  * rule reproduces, and that v1 and v2 are unchanged.
  *
  * EVIDENCE OF THE PIPELINE'S STRUCTURE, NOT VERIFICATION OF THE ATTEMPT-MODE
@@ -356,19 +356,13 @@ describe("retries: a failed turn issues at most 2 attempts, so planned turns and
 })
 
 describe("protocol v3's state, and v1 and v2 unchanged", () => {
-  test("readFrozenProtocol refuses v3 while it is a draft, and verifies it once it is frozen", async () => {
+  test("readFrozenProtocol verifies v3 at the hash it records, frozen on 2026-10-13", async () => {
     const text = await readFile(PROTOCOL_V3, "utf8")
-    const status = /^status: (.*)$/m.exec(text)?.[1]?.trim()
-    expect(["draft", "frozen"]).toContain(status!)
-    const read = await readFrozenProtocol(PROTOCOL_V3)
-    if (status === "draft") {
-      expect(read.ok).toBe(false)
-      if (!read.ok) expect(read.reason).toContain("is not a frozen protocol")
-      expect(text).toMatch(/^frozen_on: null$/m)
-      expect(text).toMatch(/^frozen_hash: null$/m)
-    } else {
-      expect(read).toMatchObject({ ok: true, version: 3 })
-    }
+    expect(text).toMatch(/^status: frozen$/m)
+    expect(text).toMatch(/^frozen_on: 2026-10-13$/m)
+    const recorded = /^frozen_hash: (sha256:[0-9a-f]{64})$/m.exec(text)?.[1]
+    expect(recorded).toBeDefined()
+    expect(await readFrozenProtocol(PROTOCOL_V3)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v3", version: 3, hash: recorded! })
   })
 
   test("v3's hash rule reproduces: a temporary copy frozen by v2's rule verifies", async () => {

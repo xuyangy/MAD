@@ -295,8 +295,8 @@ export function adversarialReservation(run: number): string {
  * Story 2-7e — the one OAuth adversarial run gate 10 will authorize: its run, its
  * roster pin and its reservation, with every earlier run. No run has happened.
  *
- * `pins` is `null`: protocol v3 B1 fixes the pin, and the `small_model` it
- * implies, at freeze or seal, and neither has happened. A launcher asks
+ * `pins` is `null`: frozen protocol v3 B1 names the pin and the `small_model` it
+ * implies, and this table does not carry it yet. A launcher asks
  * `adversarialRunProblem` and refuses while it is `null`.
  */
 export const ADVERSARIAL_RUN: AdversarialRun = {
@@ -322,7 +322,7 @@ export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): st
   if (run.pins === null) {
     return (
       `adversarial run ${run.run} has no roster pin: \`ADVERSARIAL_RUN.pins\` is null, which means not yet chosen. The ` +
-      "pin is fixed when protocol v3 is frozen or the schedule is sealed, by a reviewed change to this table"
+      "pin protocol v3 B1 names is set here by a reviewed change to this table"
     )
   }
   if (!onePin(run.pins)) {

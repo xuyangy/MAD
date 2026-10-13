@@ -1911,10 +1911,11 @@ sent, and a run that sent no request records delivery as unshown, with the reaso
 Everything above describes the token mode, protocol v1's. A config that also says
 `accounting: "attempts"` and `route: "oauth"` selects protocol v3's accounting instead. The two fields
 are one choice: either alone is refused, and so is any other value of either. **It bills nothing by
-itself, only `bun run adversarial` runs it, and protocol v3 is a draft.**
+itself, only `bun run adversarial` runs it, and protocol v3 is frozen (2026-10-13).**
 
 - **The protocol.** `createAdversarialSchedule` and `verifyAdversarialSchedule` need a frozen version-3
-  protocol. The v3 draft, v1 and v2 are each refused by name, with no coin tossed. The sealed config
+  protocol. v1 and v2 are each refused by name, with no coin tossed, and so is a v3 file that is
+  not frozen or whose hash does not reproduce. The sealed config
   carries `tokenCap: null`, `stopOnUnknownUsage: false` and the attempt allowances.
 - **The unit and the allowances.** One admitted attempt is one `runTurn` that passed its stage's
   ledger gate and the journal's gate and was issued, retries included. The thresholds are 30 per run,
@@ -2003,7 +2004,7 @@ the two fresh roots, disjointness, the frozen protocol v3, the committed gate ta
 `gatePreflight(gates, "adversarial", "oauth")`, the OAuth route, the prepared digests, the
 authorized run (the pin is `ADVERSARIAL_RUN.pins`; `ADVERSARIAL_RUN.reservation` exists neither on
 disk nor at HEAD; every earlier run is committed) and the production Tools identity. Gate 10
-is OPEN, `ADVERSARIAL_RUN.pins` is `null` and v3 is a draft, so the command exits 1 before any
+is OPEN and `ADVERSARIAL_RUN.pins` is `null`, so the command exits 1 before any
 reservation, worktree, start marker or host exists. Only once every check passes is the reservation
 created exclusively, stamped with the launcher's clock; it is never removed. An interrupt after it
 exits 130 with the reservation kept and no schedule, worktree or host. Immediately before the two
@@ -2099,7 +2100,7 @@ ordinary `startManagedHost`, so every stop is held to the ordinary store guard; 
 builds the real `OpencodeModelBackend` from the options the lifecycle passes and counts its
 `runTurn` calls. Stages 1 and 2 of the launcher (the offline checks, the authorization and the
 reservation) are not run on a real host: one row runs the shipped command as a child process and
-records that it still refuses, naming gate 10, the null pin and the unfrozen protocol.
+records that it still refuses, naming gate 10 and the null pin.
 
 The schedules are `provenance: "scripted"`, sealed against a private frozen-format copy of protocol
 v3 that the probe writes into its scratch. That copy is a fixture: it pre-registers nothing, it is
@@ -2306,8 +2307,8 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
 that blocks the sixteen runs is recorded only in the prose below; the prose explains the entries, it
 does not add to them.
 
-**The live execution is still blocked.** (2) is open, the run's pin is not chosen and protocol v3 is
-not frozen. (4)'s blame half is bounded;
+**The live execution is still blocked.** (2) is open and the run's pin is not chosen; protocol v3 is
+frozen (2026-10-13). (4)'s blame half is bounded;
 its materializer half is (6). Story 2-7e2 runs the git calls
 that write each worktree through the same bounded launcher as `blame`. Local tests over stand-in
 processes cover a hang, a child that traps SIGTERM (the deadline sends SIGKILL at once, so the

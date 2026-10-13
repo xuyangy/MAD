@@ -275,10 +275,15 @@ describe("createAdversarialSchedule in attempt mode", () => {
     expect((await readFile(PROTOCOL_V3_FILE)).equals(draft)).toBe(true)
   })
 
-  test("the v3 draft, v2 and v1 are each refused by name, with nothing tossed and nothing written", async () => {
-    const draft = await readFile(PROTOCOL_V3_FILE, "utf8")
+  test("a v3 copy that is not frozen, v2 and v1 are each refused by name, with nothing tossed and nothing written", async () => {
+    const holder = await experimentRoot(scratch)
+    await mkdir(holder, { recursive: true })
+    const unfrozen = join(holder, "evaluation-protocol-v3.md")
+    const frozen = await readFile(PROTOCOL_V3_FILE, "utf8")
+    expect(frozen).toMatch(/^status: frozen$/m)
+    await writeFile(unfrozen, frozen.replace(/^status: frozen$/m, "status: draft"))
     for (const [protocolFile, why] of [
-      ...(/^status: draft$/m.test(draft) ? [[PROTOCOL_V3_FILE, "is not a frozen protocol"] as const] : []),
+      [unfrozen, "is not a frozen protocol"],
       [PROTOCOL_V2_FILE, "the protocol handed in is PROTOCOL-mad-evaluation-v2 version 2"],
       [PROTOCOL_FILE, "the protocol handed in is PROTOCOL-mad-evaluation-v1 version 1"],
     ] as const) {

@@ -1,9 +1,9 @@
 ---
 id: PROTOCOL-mad-evaluation-v3
-status: draft
+status: frozen
 version: 3
-frozen_on: null
-frozen_hash: null
+frozen_on: 2026-10-13
+frozen_hash: sha256:07d89e17fafd248f1c204ca121cedae4beadf9985f9fa5a47e6e37913941f7ac
 amends_on_freeze: "for an adversarial schedule sealed for the OAuth route only: PROTOCOL-mad-evaluation-v1 §4 (unit, adversarial allowance, per-run cap, shared ledger, unknown-usage stop) and §5 (delivery scope, observation path); PROTOCOL-mad-evaluation-v2 A7 and A11 replaced, A6, A9 and A10 reused by reference (B1)"
 governs: Epic 2, FR9 (the adversarial suite on the OAuth route)
 companion_of: SPEC.md
@@ -13,33 +13,41 @@ decided_by:
   - "2026-10-08 — review channel (window 2, deciding in the human's place): approved the
     planning proposal `planning-artifacts/sprint-change-proposal-2026-10-08.md` only. Freezing
     this protocol and any spend remain the human's decisions."
+  - "2026-10-13 — the human, typed as the argument of `/bmad-build` in the Claude Code session
+    of 2026-10-13: \"2-7g — I close gate 10, pin anthropic/claude-sonnet-5, and freeze
+    evaluation-protocol-v3.md; proceed with the sixteen live adversarial runs\". This file
+    records the freeze and the pin, with the values B1 fixes and the exposure statement in B9
+    current at that date. The freeze authorizes no spend; gate 10 is a separate record."
 ---
 
-# Evaluation protocol — Epic 2, version 3 (DRAFT)
+# Evaluation protocol — Epic 2, version 3
 
-> **This is a DRAFT. It is not frozen and it pre-registers nothing.** Protocol v1
+> **This is a pre-registration, and it is FROZEN at version 3 as of 2026-10-13.** Protocol v1
 > (`evaluation-protocol.md`, frozen 2026-09-10) and protocol v2 (`evaluation-protocol-v2.md`,
-> frozen 2026-10-02) stay in force, unchanged, and every schedule sealed so far binds one of
-> them. This document proposes a third version that governs only the adversarial suite on the
-> OAuth route. Every number and rule in it is a proposal for the human's freeze. Freezing is a
-> human decision, made in a commit of its own, and it authorizes no spend.
+> frozen 2026-10-02) are preserved, unchanged, and every schedule sealed under one of them stays
+> under it. This version governs only the adversarial suite on the OAuth route. The human froze
+> it, with every number and rule as drafted. The freeze authorizes no spend: the suite's spend is
+> gate 10's (`ablation/paired-gates.ts`), a separate decision recorded in a commit of its own.
 >
-> **v3 must not be frozen before stories 2-7e, 2-7f, 2-7f2 and 2-7f3 have landed and been reviewed.** The
-> rules this draft leaves to them are: the implementation and verification of the outstanding-work
-> accounting whose meaning B2 fixes (B2);
-> serial admission and the absence of overshoot (B3); the root's layout and the enforcement of
-> its isolation (B5); and the host-tool and permission verification (B8). A freeze never
-> certifies machinery that is not implemented.
+> **What the freeze does not certify.** Stories 2-7e, 2-7f, 2-7f2 and 2-7f3 landed and were
+> reviewed before it. What each rule below rests on is stated where the rule is: an
+> implementation, a scripted test, or story 2-7f2's zero-bill probe on a real managed host with
+> loopback stubs and placeholder sign-ins
+> (`ablation/evidence/adversarial-attempts-2026-10-12.json`), which measured
+> `anthropic/claude-sonnet-5` and `github-copilot/gpt-5-mini` only. No real provider, account,
+> cache or quota was reached in that evidence, and whether the allowances (B3) and the turn
+> deadline (B6) are adequate for a live run is unmeasured. A freeze never certifies machinery
+> beyond what was measured.
 >
 > **What freezing is.** The reader (`readFrozenProtocol`, `ablation/schedule.ts:304-328`) checks
-> `status: frozen`, the `id`, the `version` and the `frozen_hash` only. Filling `frozen_on`,
-> refreshing the exposure statement (B9) and recording the values B1 names as fixed at
-> freeze or seal are human freeze steps the reader does not enforce. The `frozen_hash` is
+> `status: frozen`, the `id`, the `version` and the `frozen_hash` only. `frozen_on`, the exposure
+> statement (B9) and the values B1 fixes are recorded here by the freeze, and the reader does not
+> enforce them. The `frozen_hash` is
 > reproduced by v1's rule, as v2's is (v2 :25-34): the `frozen_hash:` line replaced by the literal
-> `frozen_hash: PENDING`, nothing else altered, hashed with SHA-256. Any mismatch means the
+> `frozen_hash: sha256:800de18f35833e9a39e7b8156ee9b34c8f34254982cdd672bedc3f69cf6969fd`, nothing else altered, hashed with SHA-256. Any mismatch means the
 > frozen artefact was edited; amending it means a new version, never an edit in place.
 >
-> This draft numbers its own sections B1–B9 so they never collide with v1's or v2's. A citation
+> This version numbers its own sections B1–B9 so they never collide with v1's or v2's. A citation
 > of v1 reads "v1 §n" and of v2 "v2 An".
 
 ## B1. Scope: what this version binds, and what it does not
@@ -83,10 +91,22 @@ v3 binds **only an adversarial schedule sealed for the OAuth route**: story 2.7'
   | A10, the halt and the runner stop | **Reused by reference**, and extended to the suite by B6 |
   | A11, freezing and data exposure | **Replaced** by this banner and B9; its risk statements are carried by B9 |
 
-- **Fixed at freeze or seal, not here.** The freeze or the sealed schedule records, as values:
-  the roster's pins (provider and model id, and the `small_model` the first pin implies, B7);
-  the opencode version and binary hash; the prepared payload digests; and the data-directory
-  rule (B9). This draft names them; it fixes none of them.
+- **Fixed at this freeze, as values:**
+  - the roster's one pin, `anthropic/claude-sonnet-5`, and the `small_model` it implies, the
+    same `anthropic/claude-sonnet-5` (B7);
+  - the opencode build: version 1.18.32, binary sha256
+    `5c944e90c2b3ac6bf6c9425b40b670b9950a0d4a3c0e6775470b93afc6c3dd6e` (`MEASURED_HOST`,
+    `ablation/managed-host.ts`);
+  - the prepared payloads (`OAUTH_PAYLOAD`, the same file): the Anthropic auth tree digest
+    `bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a`, the config seed tree
+    digest `ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151` and the model
+    catalogue sha256 `ee798d480fee862e04e092674720a3ccea5291852ba49ed9f524b0c17e8fc6e3`;
+  - the data-directory rule: a fresh OAuth data directory per run, never reused (B9).
+
+  These are the build, payloads and one of the two pins story 2-7f2's probe measured
+  (`GATE_11_EVIDENCE_SCOPE`, `ablation/paired-gates.ts`). **No schedule is sealed by the
+  freeze.** The launcher seals the live schedule at execution, after the run's reservation and
+  before any worktree or host, and that seal is retained whatever follows it.
 - **Every rule v3 changes names what it replaces**, in the section that changes it: B2 to B6
   replace v1 §4's token accounting for this suite, and B7 to B9 add to or narrow v1 §5.
 
@@ -114,8 +134,10 @@ passed its stage's ledger gate and the experiment's admission and was issued, re
     plus this request, stay within it. The same admission is never counted twice.
   - This is v2's all-issued-state accounting carried to the new root, with the `not-issued`
     treatment made explicit.
-  - Story 2-7e implements it, story 2-7f wires it through the launcher, and story 2-7f2 verifies
-    it on a real managed host. None of them chooses a weaker count after freeze.
+  - Story 2-7e implemented it and story 2-7f wired it through the launcher. Story 2-7f2 measured
+    it on a real managed host with loopback stubs, for the two pairs the banner names. The
+    `not-issued` release was not reached on that host and rests on a scripted journal test
+    (`ablation/journal-adversarial.test.ts`). Nothing chooses a weaker count after freeze.
 - **Physical requests, host retries and subscription quota are never attempts.** One attempt
   can become several physical requests (`ablation/LIVE-RUN.md`, residual risk 3), and no
   attempt is equated with any number of tokens.
@@ -131,9 +153,9 @@ Replaces v1 §4's adversarial allowance (400,000 tokens, :225) and per-run cap (
 | Suite (16 runs) | 480 |
 | Global, this root | 480 |
 
-- **These are chosen admission thresholds, proposed for the human to accept or change at
-  freeze.** They are not measured workload, not derived from B4's call shape, and not proven
-  adequate. B4 shows a plausible run that retries can take past 30.
+- **These are chosen admission thresholds, accepted by the human at freeze as drafted.** They
+  are not measured workload, not derived from B4's call shape, and not proven adequate. B4 shows
+  a plausible run that retries can take past 30.
 - **The global equals the suite total, 480, and counts only this suite's root** (B5): the issued
   MAD attempts of this new root. It is not a project-wide ceiling, and it neither includes nor
   limits v1 or v2 work.
@@ -142,7 +164,7 @@ Replaces v1 §4's adversarial allowance (400,000 tokens, :225) and per-run cap (
 - **Retries, as v1 §4 (:311-327):** at most two attempts per model request, the initial attempt
   and one retry after a failed, non-cancelled response. Cancellation, budget refusal and
   unknown usage never authorize a retry. Every attempt counts against its run's cap.
-- **Overshoot.** Under serial admission (concurrency 1, which story 2-7e has still to prove) an
+- **Overshoot.** Under serial admission (concurrency 1) an
   admission over a cap is refused rather than overshot, so no overshoot is expected. Any
   overshoot that does occur is reported, never borrowed, and overshoot on one run can exhaust
   the global. A refusal on the global is a **runner stop** (B6): every later run is recorded
@@ -151,11 +173,14 @@ Replaces v1 §4's adversarial allowance (400,000 tokens, :225) and per-run cap (
   Host-reported tokens are unverified and unquantified diagnostics, excluded from admission,
   caps and completeness. The ordinary token code (`core/budget/ledger.ts`) is unchanged; the
   stop rule is simply not turned on.
-- **No serial-admission or no-overshoot claim is made here.** Any such claim waits for its
-  proof: implementation in stories 2-7e and 2-7f, real-host verification in story 2-7f2.
+- **Serial admission and no overshoot are measured for the probed pairs only.** Story 2-7f2's
+  zero-bill probe observed, on each of its two pairs, never two attempts in flight and an
+  overshoot of 0 for the root, the suite and every run. The suite allowance's own refusal is not
+  reachable on a valid journal apart from the root's and rests on a scripted gate test
+  (`ablation/governor.test.ts`). Nothing here is a claim about a live run.
 - **Realized-exposure reporting (replaces v1 §4's bill obligation for this suite).**
   - **Scope and comparison.** Reported per run, per clean/attack side, and as suite and root
-    totals. Each reports newly issued MAD attempts against the proposed thresholds.
+    totals. Each reports newly issued MAD attempts against the thresholds above.
   - **What is reported separately:**
     - retries;
     - the dispositions: settled, in flight, uncertain, `not-issued` and refused;
@@ -233,7 +258,7 @@ that implements it (`EXPERIMENT_ROOT_MARKERS` and `sharedLedgerProblem`,
 - The suite has an **experiment root of its own**, neither above nor below any v1 or v2 root,
   with its own attempt-mode journal, lock and halt marker.
 - Prior exposure (B9) is retained separately and is never read from this root's journal.
-- Story 2-7e chooses the layout and must enforce the isolation; v3 states the rule, not the
+- Story 2-7e chose the layout and enforces the isolation; v3 states the rule, not the
   mechanism.
 
 ## B6. Halt, stop and completion
@@ -283,13 +308,13 @@ uncertain and never counted as sent.
 
 - **Not established:** whether the host sends title or summary side requests, what they carry,
   actual delivery to the model, and the model's attention.
-- **Proposed choice for freeze: accepted residual exposure, with the first pinned model as
-  `small_model`.** It is disclosed in the freeze exposure statement, in the spend proposal and in
-  the publication. The pin and the `small_model` it implies are fixed at freeze or seal (B1).
+- **Chosen at freeze: accepted residual exposure, with the first pinned model as
+  `small_model`.** Both are `anthropic/claude-sonnet-5` (B1). The choice is disclosed in the
+  exposure statement (B9), in gate 10's record and in the publication.
 - Pinning `small_model` to another model is **not a mitigation**: it only moves any unobserved
   traffic to another model or provider, and it changes consent and exposure.
-- Any other choice is a separate future design. It needs design review, and an updated
-  pre-freeze draft and exposure statement.
+- Any other choice is a separate future design. It needs design review, and a new protocol
+  version with its own exposure statement.
 
 ## B8. The host-tool offer: `StructuredOutput` only
 
@@ -305,8 +330,10 @@ Narrows v1 §5's observation path (:401-402) for this suite.
 - AD-13's host-tool route is reported **unavailable or unobserved**, never scored as zero and
   never as resistance.
 - A blame observation never implies read or grep coverage.
-- Story 2-7f implements the offer; story 2-7f2 verifies the real host's permission behaviour. A
-  planned offer is not proof.
+- Story 2-7f implemented the offer. Story 2-7f2 observed, on the measured host with a loopback
+  stub and for its two pairs, that every prompt request offered exactly `StructuredOutput` and
+  that a call to a tool the host did not offer was not executed. That is one scripted call on a
+  stub; it is not evidence of what a real model asks for or of how the host treats it.
 
 ## B9. Host state, exposure and limits
 
@@ -343,5 +370,39 @@ Adds to v1 §5, and carries the risk statements of v2 A9–A11 to this suite.
   - Prior live traffic in this project is disclosed: the paired OAuth evaluation's runs 1–5
     (2026-10-02 to 2026-10-07), on the sealed labelled change, and the OpenAI OAuth pilot's
     runs 1–3 (2026-09-28 to 2026-09-30). Neither ran an adversarial case.
-- **Freezing needs a refreshed exposure statement and a newly sealed schedule.** No adversarial
-  schedule is sealed under v3 before it is frozen.
+- **Data exposure at freezing (2026-10-13):**
+  - **The search, repeated.** On 2026-10-13 the same command over the same three roots printed
+    175 paths: 56 `adversarial-start.json`, 63 `adversarial-schedule.json` and 56
+    `adversarial-bill.json`. It reported the same one directory it could not read. `MAD_ARTIFACTS`
+    was unset. In this session `find` resolves to `bfs`.
+  - **What the hits are.** Every path is under one scratch directory of the 2026-10-12 probe
+    session, `/private/tmp/claude-501/-Users-xuyangy-trash-git2-MAD/59c832bb-37ca-4b22-9cf0-5feea1e75e56/scratchpad`,
+    in the `--out` roots of five invocations of `bun run adversarial-probe` (`out1`, `out2`,
+    `probe-out`, `probe-out-fix`, `probe-out-final`). All 63 schedules are dated 2026-10-12, are
+    sealed with `provenance: "scripted"` on the oauth route, and record the protocol hash
+    `sha256:e20af1104bb5f83812ddd9b54488fb2c296971bfbff6dafad1e4d041d33b1a0a`: the probe's private
+    frozen-format fixture, which is not this file and not a freeze. None is a live run, and none
+    is a schedule sealed under frozen v3.
+  - **What the probe drove.** `ablation/evidence` now holds
+    `adversarial-attempts-2026-10-12.json`, the committed evidence of one of those
+    invocations. The probe ran the launcher's suite composition, the sixteen sealed slots
+    included, on real managed hosts of the build B1 names, inside a sandbox that refused every
+    external connection. Every provider was a loopback stub and every sign-in a placeholder, on
+    `anthropic/claude-sonnet-5` (Messages) and `github-copilot/gpt-5-mini` (chat-completions).
+    The sealed cases' text was therefore sent to local stubs and to no provider. The hosts and
+    the suite left session data, dumps, manifests and worktrees in that private scratch; they are
+    retained there and are not committed. The stub answers were scripted, so no model's outcome on any
+    endpoint here was observed.
+  - **Two measured limits, carried.** On the Messages route, one attempt whose stream left the
+    usage figures out became several model requests at the stub until its shortened deadline;
+    the cause in the host is not established. Every host the probe started tried to connect to
+    `api.githubcopilot.com:443` at startup, on both pairs, and the sandbox denied it. Neither is
+    a claim about provider exposure in the probe. On a live run nothing denies that connection,
+    and what it carries was not observed.
+  - **Its reach.** As at drafting: this machine's searched roots only. It says nothing about
+    other machines, CI, or the provider and account side. No recorded live adversarial execution
+    was found in that evidence and those paths; beyond them, exposure is **not established**.
+  - Prior live traffic is as stated at drafting: the paired OAuth evaluation's runs 1–5 and the
+    OpenAI OAuth pilot's runs 1–3. Neither ran an adversarial case, and none has run since.
+- **No adversarial schedule was sealed under v3 before it was frozen**, and the freeze seals none
+  (B1). The live schedule is the launcher's, sealed at execution.
