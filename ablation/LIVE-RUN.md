@@ -2045,6 +2045,17 @@ host starts, which are not admitted attempts, are disclosed. A line that cannot 
 runner stop: the current host is stopped, nothing further starts, the exit is 1 and the record that
 could not be persisted is named. No complete disclosure is claimed after that.
 
+**The turn deadline (story 2-7f3).** Every backend the launcher builds is given a turn deadline of
+120,000 ms (`ADVERSARIAL_TURN_TIMEOUT_MS`, `scripts/adversarial.ts`; protocol v3 B6). No flag,
+variable or file changes it. An attempt that passes it stays counted, is settled `abandoned` and
+halts the suite: MAD's own retry is refused before it reaches a backend, the host is stopped and
+its post-stop checks recorded, no later host starts, and every remaining slot is `not-attempted`
+with the halt as its reason. The figure is an operational choice, the one the OAuth pilot used; no
+latency of this suite was measured to set it. It bounds MAD's wait for a turn. It does not bound
+the physical requests a host sends inside one attempt or subscription quota, and the end of the
+wait does not show that the provider's work stopped. The tests of this path run on stand-in hosts
+with the real journal; the adapter's own deadline is tested with a shortened wait.
+
 **Signals.** SIGINT and SIGTERM are the launcher's for its whole life. During the suite they abort
 the run through its signal and stop the current host; the suite records every remaining slot and
 writes its bill before the launcher exits 1. Each managed host is started with `signals: null`, so
@@ -2133,8 +2144,8 @@ run, each in a root of its own.
 - **A non-ending attempt.** With the turn deadline shortened to 5,000 ms through the backend seam,
   the attempt was settled `abandoned` within its bound and counted once, the suite halted and wrote
   its marker, the held request was closed, the host's stop was confirmed and its post-stop checks
-  were clean, and nothing followed. The shipped launcher passes no turn deadline, so its bound is
-  the backend's default.
+  were clean, and nothing followed. The evidence file records a launcher that passed no turn
+  deadline. The launcher passes 120,000 ms (story 2-7f3), and no real host has been run to it.
 - **A cancellation in flight.** The attempt in flight still counted one and the suite halted. No
   `not-issued` settlement occurred, so its release is UNPROBED here: it arises only when the signal
   has fired by the time admission resolves, and then no host is reached

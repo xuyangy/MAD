@@ -17,7 +17,7 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink,
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
-import type { OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
+import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import { worktreeFor } from "../ablation/adversarial.ts"
 import { spawnGit, type RunGit } from "../ablation/adversarial-materialize.ts"
 import { frozenV3Copy, scriptedAdversarialBackend, type ScriptedAdversarial } from "../ablation/adversarial-read.fixture.ts"
@@ -30,6 +30,8 @@ import {
 } from "../ablation/adversarial-schedule.ts"
 import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
+import { HALT_MARKER_FILE } from "../ablation/governor.ts"
+import { JOURNAL_FILE } from "../ablation/journal.ts"
 import { ADVERSARIAL_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { CoinFace } from "../ablation/schedule.ts"
 import { candidate, fakeClock } from "../core/test-support/fakes.ts"
@@ -37,6 +39,7 @@ import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import {
   ADVERSARIAL_HOST_TOOLS,
   ADVERSARIAL_HOSTS_FILE,
+  ADVERSARIAL_TURN_TIMEOUT_MS,
   adversarialRoster,
   adversarialSuiteConfig,
   gitReservationSeam,
@@ -387,6 +390,8 @@ describe("the run path: all sixteen worktrees, then one host per run", () => {
     // The offer each backend is given is the sealed config's, exactly.
     const sealed = JSON.parse(await readFile(join(adversarialDirectory(env.out), "adversarial-schedule.json"), "utf8")) as { config: { hostTools: unknown } }
     for (const options of backends) expect(options.tools).toEqual(sealed.config.hostTools as Record<string, boolean>)
+    // Every run's backend is given the launcher's turn deadline.
+    expect(backends.map((options) => options.timeoutMs)).toEqual(Array.from({ length: 16 }, () => ADVERSARIAL_TURN_TIMEOUT_MS))
     expect(sealed.config.hostTools).toEqual({ "*": false, StructuredOutput: true })
     expect(ADVERSARIAL_HOST_TOOLS).toEqual({ "*": false, StructuredOutput: true })
     // One host record per start, verify, stop and post-stop outcome, each naming the schedule and the slot.
@@ -1166,4 +1171,117 @@ describe("the suite's config and its stage, shared with the zero-bill probe", ()
     expect(recordFile).toBe(join(adversarialDirectory(env.out), ADVERSARIAL_HOSTS_FILE))
     expect(hosts.started).toHaveLength(0)
   })
+})
+
+describe("the turn deadline (protocol v3 B6)", () => {
+  const first = SLOTS[0]!
+  /** Run 1's first turn returns what the adapter returns for a turn past its deadline. */
+  const pastTheBound: ScriptedAdversarial = { fault: (context, _stage, index) => (context.position === first.position && index === 0 ? "abandoned" : undefined) }
+  const journal = async (out: string) =>
+    (await readFile(join(out, JOURNAL_FILE), "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { type: string; physicalId: string; attempt?: number; settlement?: { kind: string; abandoned?: boolean } })
+
+  test("it is 120,000 ms, and no flag or environment variable reaches it", async () => {
+    expect(ADVERSARIAL_TURN_TIMEOUT_MS).toBe(120_000)
+    for (const flag of ["--turn-timeout", "--timeout", "--turn-timeout-ms"]) {
+      expect(parseAdversarialFlags(argvFor({ prepared: "/p", dataRoot: "/d", out: "/o" }, [flag, "5"])).problems.join("\n"), flag).toContain(`\`${flag}\` is not a flag this command knows`)
+    }
+    // The launcher reads no environment variable at all, so none can carry a deadline.
+    expect(await readFile(join(REPO_ROOT, "scripts", "adversarial.ts"), "utf8")).not.toMatch(/process\.env|Bun\.env/)
+  })
+
+  test("an attempt past the bound: counted once, settled abandoned, the suite halted, the host stopped and checked, nothing retried and no later host", async () => {
+    const env = await setup()
+    const named = ["ADVERSARIAL_TURN_TIMEOUT_MS", "MAD_TURN_TIMEOUT_MS"] as const
+    for (const name of named) process.env[name] = "5"
+    try {
+      const { overrides, hosts, backends, calls } = await runnable(env, { script: pastTheBound })
+      const result = await captured(() => main(argvFor(env), overrides))
+      expect(result.code).toBe(1)
+      // The backend was built with the launcher's bound, whatever the environment says.
+      expect(backends.map((options) => options.timeoutMs)).toEqual([ADVERSARIAL_TURN_TIMEOUT_MS])
+      // One attempt reached the backend. The stage's retry was refused by the halt before any backend entry.
+      expect(calls).toHaveLength(1)
+      const lines = await journal(env.out)
+      expect(lines.map((line) => line.type)).toEqual(["issued", "settled"])
+      expect(lines[0]).toMatchObject({ physicalId: "request-1", attempt: 1 })
+      expect(lines[1]).toMatchObject({ physicalId: "request-1", settlement: { kind: "unknown", abandoned: true } })
+      expect(result.text).toContain("Attempts: 1 journaled; halt: ATTEMPT-MODE STOP")
+      expect(result.text).toContain("did not end within its bound")
+      expect(JSON.parse(await readFile(join(env.out, HALT_MARKER_FILE), "utf8"))).toMatchObject({ halted: true, accounting: "attempts", scope: "adversarial" })
+      // The one host was stopped once and its post-stop checks recorded; no other host started.
+      expect(startedPositions(hosts)).toEqual([first.position])
+      expect(hosts.stops.get(first.position)).toBe(1)
+      expect((await hostRecords(env.out)).map((line) => `${line.position} ${line.event} ${line.ok}`)).toEqual(
+        ["start", "verify", "stop", "postStop"].map((event) => `${first.position} ${event} true`),
+      )
+      expect(result.text).not.toContain("HOST STOP NOT ESTABLISHED")
+      // The record is incomplete and keeps every remaining run, with its reason.
+      expect(result.text).not.toContain("complete: true")
+      expect(result.text).toContain(`${first.position} ${first.caseId} ${first.side}: failed`)
+      for (const slot of SLOTS.slice(1)) expect(result.text).toContain(`${slot.position} ${slot.caseId} ${slot.side}: not-attempted — the experiment halted`)
+    } finally {
+      for (const name of named) delete process.env[name]
+    }
+  }, 60_000)
+
+  test("past the bound with a stop that is not established: the halt stands, and the host is named with its pid and data directory", async () => {
+    const env = await setup()
+    const { overrides, calls } = await runnable(env, { script: pastTheBound })
+    const pid = 9000 + first.position
+    const scripted = scriptedHosts({ stop: (position) => (position === first.position ? { confirmed: false, pid, why: "it did not exit after SIGKILL" } : undefined) })
+    overrides.startHost = scripted.startHost
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(startedPositions(scripted)).toEqual([first.position])
+    expect(result.text).toContain("Attempts: 1 journaled; halt: ATTEMPT-MODE STOP")
+    expect(result.text).toContain("HOST STOP NOT ESTABLISHED")
+    expect(result.text).toContain(`the stop of process ${pid} is UNCONFIRMED`)
+    expect(result.text).toContain(join(env.dataRoot, `run-${first.position}`))
+    // The data directory is retained.
+    expect(existsSync(join(env.dataRoot, `run-${first.position}`, "opencode", "auth.json"))).toBe(true)
+    expect((await journal(env.out)).map((line) => line.type)).toEqual(["issued", "settled"])
+    expect(existsSync(join(env.out, HALT_MARKER_FILE))).toBe(true)
+  }, 60_000)
+
+  test("the real adapter on a client that never answers, through the launcher: its own timed-out envelope is settled abandoned and halts the suite", async () => {
+    const env = await setup()
+    const { overrides, hosts } = await runnable(env)
+    const given: OpencodeBackendOptions[] = []
+    let prompts = 0
+    const client = {
+      session: {
+        create: async () => ({ data: { id: "ses_test" } }),
+        prompt: () => {
+          prompts += 1
+          return new Promise(() => {})
+        },
+        delete: async () => ({ data: true }),
+      },
+    }
+    // The lifecycle's own options, with only the wait shortened and the client replaced.
+    overrides.createBackend = (options) => {
+      given.push(options)
+      return new OpencodeModelBackend({ ...options, timeoutMs: 25, client: client as never })
+    }
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(1)
+    expect(given.map((options) => options.timeoutMs)).toEqual([ADVERSARIAL_TURN_TIMEOUT_MS])
+    // One prompt reached the client: the stage's retry was refused before the adapter was entered again.
+    expect(prompts).toBe(1)
+    const lines = (await readFile(join(env.out, JOURNAL_FILE), "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { type: string; settlement?: { kind: string; why?: string; abandoned?: boolean } })
+    expect(lines.map((line) => line.type)).toEqual(["issued", "settled"])
+    expect(lines[1]!.settlement).toMatchObject({ kind: "unknown", abandoned: true })
+    expect(lines[1]!.settlement!.why).toContain("timed out at its 25ms deadline")
+    expect(result.text).toContain("Attempts: 1 journaled; halt: ATTEMPT-MODE STOP")
+    expect(existsSync(join(env.out, HALT_MARKER_FILE))).toBe(true)
+    expect(startedPositions(hosts)).toEqual([first.position])
+    expect(hosts.stops.get(first.position)).toBe(1)
+  }, 60_000)
 })

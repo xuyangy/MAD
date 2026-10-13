@@ -41,6 +41,9 @@ import {
   runScenario,
   runShippedCommand,
   scenarioBound,
+  HANG_TURN_MS,
+  LIMITATIONS,
+  NO_USAGE_TURN_MS,
   SCENARIOS,
   seededAttempts,
   shippedClaims,
@@ -60,7 +63,7 @@ import {
   type ScenarioSpec,
   type Transport,
 } from "./adversarial-probe.ts"
-import { PROTOCOL_V3_FILE } from "./adversarial.ts"
+import { ADVERSARIAL_TURN_TIMEOUT_MS, PROTOCOL_V3_FILE } from "./adversarial.ts"
 import { placeholderAuth } from "./oauth-probe.ts"
 
 const scratch: string[] = []
@@ -953,6 +956,26 @@ describe("the scenarios on stand-ins, through the real suite and journal", () =>
     expect(seen.turnTimeoutMs).toBe(300)
     expect(seen.hosts.starts).toBe(1)
   }, 120_000)
+
+  test("the turn deadline each row's backend is given: the hang and no-usage rows their own, every other row the launcher's", async () => {
+    expect([HANG_TURN_MS, NO_USAGE_TURN_MS]).toEqual([5_000, 20_000])
+    const given = async (kind: ScenarioKind): Promise<(number | undefined)[]> => {
+      const seen: (number | undefined)[] = []
+      const { context, stub } = await standInContext()
+      context.seams.createBackend = (options) => {
+        seen.push(options.timeoutMs)
+        return standInBackend(stub, options)
+      }
+      await runScenario(context, ANTHROPIC, stub, spec(kind))
+      return [...new Set(seen)]
+    }
+    // The stand-in context sets both shortened deadlines to 300 ms.
+    expect(await given("non-ending")).toEqual([300])
+    expect(await given("stream-without-usage")).toEqual([300])
+    expect(await given("host-offer")).toEqual([ADVERSARIAL_TURN_TIMEOUT_MS])
+    expect(await given("run-allowance")).toEqual([ADVERSARIAL_TURN_TIMEOUT_MS])
+    expect(LIMITATIONS.join("\n")).toContain(`to 5000 ms and 20000 ms. Every other row runs on the shipped launcher's own 120000 ms, which no row here waited out.`)
+  }, 240_000)
 
   test("cancel in flight: the signal set at the stub request halts the suite and the attempt counts one", async () => {
     const { facts: seen, claims } = await observed("cancel-in-flight", { hangTurnMs: 5000 })

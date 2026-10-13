@@ -146,6 +146,19 @@ export const ADVERSARIAL_HOST_TOOLS: Readonly<Record<string, boolean>> = ADVERSA
 /** The host record, under `<out>/adversarial/`. */
 export const ADVERSARIAL_HOSTS_FILE = "adversarial-hosts.jsonl"
 
+/**
+ * Protocol v3 B6 — how long MAD waits for one adversarial turn before its
+ * attempt is settled abandoned, which halts the suite. Every backend the
+ * launcher builds is given this value; no flag, variable or file changes it.
+ *
+ * It is an operational choice, the same figure as the OAuth pilot's
+ * (`PILOT_TURN_TIMEOUT_MS`), and not a measured latency. It bounds MAD's wait
+ * only: the physical requests the host sends inside one attempt, subscription
+ * quota, and whether the provider's work stops when the wait ends are outside
+ * it. Without it a turn would wait the adapter's default of 600,000 ms.
+ */
+export const ADVERSARIAL_TURN_TIMEOUT_MS = 120_000
+
 // ---------------------------------------------------------------------------
 // The authorized run
 // ---------------------------------------------------------------------------
@@ -665,6 +678,7 @@ export function oauthHostLifecycle(options: OAuthHostLifecycleOptions): {
             slots: options.roster.slots,
             lateUsage,
             executionIdPrefix: `run-${context.position}/`,
+            timeoutMs: ADVERSARIAL_TURN_TIMEOUT_MS,
             tools: { ...hostTools },
           }),
         stop,

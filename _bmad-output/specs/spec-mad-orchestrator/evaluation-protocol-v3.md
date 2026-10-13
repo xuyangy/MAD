@@ -24,7 +24,7 @@ decided_by:
 > OAuth route. Every number and rule in it is a proposal for the human's freeze. Freezing is a
 > human decision, made in a commit of its own, and it authorizes no spend.
 >
-> **v3 must not be frozen before stories 2-7e, 2-7f and 2-7f2 have landed and been reviewed.** The
+> **v3 must not be frozen before stories 2-7e, 2-7f, 2-7f2 and 2-7f3 have landed and been reviewed.** The
 > rules this draft leaves to them are: the implementation and verification of the outstanding-work
 > accounting whose meaning B2 fixes (B2);
 > serial admission and the absence of overshoot (B3); the root's layout and the enforcement of
@@ -247,6 +247,16 @@ Replaces v1 §4's stop rule on unknown usage (:332-339) for this suite, and reus
   - an attempt that did not end within its bound: a deadline, a cancellation after the attempt
     was issued, or a `runTurn` that threw, any of which can leave work open. A thrown `runTurn`
     is never retried. A cancellation after issue halts the whole suite, not only its run.
+- **The deadline is 120,000 ms per turn.** The launcher gives it to every backend it builds
+  (`ADVERSARIAL_TURN_TIMEOUT_MS`, `scripts/adversarial.ts`), and no flag, variable or file changes
+  it. An attempt that passes it stays counted, is settled abandoned and halts as above; the
+  host's stop and post-stop checks follow through the per-run lifecycle (B9). The figure is an
+  operational choice, the one the OAuth pilot used, and no latency of this suite was measured
+  to set it. It bounds how long MAD waits for a turn. It does not bound the physical requests a
+  host sends inside one attempt or subscription quota (B2), and the end of the wait is not
+  evidence that the provider's work stopped. No real host has been run to this deadline: the
+  zero-bill probe's non-ending attempt (`ablation/evidence/adversarial-attempts-2026-10-12.json`)
+  was abandoned at 5,000 ms, on a launcher that then passed no deadline of its own.
 - Each halt is worded operationally and never implies unknown spend.
 - **A failed persistence of an admission or a settlement is a runner stop**, as in v1 and v2: it
   admits nothing further in that invocation and names the failure, and it is not a halt.

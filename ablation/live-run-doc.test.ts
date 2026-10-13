@@ -63,7 +63,7 @@ import {
   PAIRED_NON_GATES,
 } from "./paired-gates.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
-import { ADVERSARIAL_HOST_TOOLS, ADVERSARIAL_HOSTS_FILE } from "../scripts/adversarial.ts"
+import { ADVERSARIAL_HOST_TOOLS, ADVERSARIAL_HOSTS_FILE, ADVERSARIAL_TURN_TIMEOUT_MS } from "../scripts/adversarial.ts"
 import { STORE_TABLES } from "./oauth-store.ts"
 import { PERSISTENT_HOST_STATE_LIMITATION } from "./evaluation-report.ts"
 import { PAIRED_BLOCKS, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE } from "./schedule.ts"
@@ -522,6 +522,37 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).toContain("`EXPOSURE` section")
     // No 400,000 figure is offered as an OAuth allowance.
     expect(text).not.toContain("400,000")
+  })
+
+  test("story 2-7f3 — the turn deadline is the constant's, in the launcher section and in the draft protocol v3, with what it does not bound", async () => {
+    const figure = `${ADVERSARIAL_TURN_TIMEOUT_MS.toLocaleString("en-US")} ms`
+    expect(figure).toBe("120,000 ms")
+    const text = between((await section()).replace(/\s+/g, " "), "### The OAuth launcher (story 2-7f): `bun run adversarial`", " ### ", "the launcher section")
+    for (const phrase of [
+      `Every backend the launcher builds is given a turn deadline of ${figure} (\`ADVERSARIAL_TURN_TIMEOUT_MS\`, \`scripts/adversarial.ts\`; protocol v3 B6).`,
+      "No flag, variable or file changes it.",
+      "An attempt that passes it stays counted, is settled `abandoned` and halts the suite",
+      "no latency of this suite was measured to set it",
+      "It does not bound the physical requests a host sends inside one attempt or subscription quota",
+      "the end of the wait does not show that the provider's work stopped",
+    ]) {
+      expect(text, phrase).toContain(phrase)
+    }
+    const v3 = (await Bun.file(new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v3.md", import.meta.url)).text()).replace(/\s+/g, " ")
+    const b6 = between(v3, "## B6. Halt, stop and completion", " ## B7.", "v3 B6")
+    for (const phrase of [
+      `**The deadline is ${figure} per turn.**`,
+      "no flag, variable or file changes it",
+      "no latency of this suite was measured to set it",
+      "It does not bound the physical requests a host sends inside one attempt or subscription quota (B2)",
+      "No real host has been run to this deadline",
+      "was abandoned at 5,000 ms, on a launcher that then passed no deadline of its own",
+    ]) {
+      expect(b6, phrase).toContain(phrase)
+    }
+    // The protocol is still a draft: naming the bound freezes nothing.
+    expect(v3).toContain("status: draft")
+    expect(v3).toContain("frozen_on: null")
   })
 
   test("story 2-7f — the launcher is documented: the command, stage 1's refusal, per-run isolation, the host record and signals", async () => {
@@ -1480,7 +1511,8 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
       "At every `runTurn` entry the journal file held exactly one unsettled issued line, and it was that attempt's",
       "Every prompt request, checked one by one, offered exactly `StructuredOutput`.",
       "MAD's retry was refused `halted` before any backend entry",
-      "The shipped launcher passes no turn deadline, so its bound is the backend's default.",
+      "The evidence file records a launcher that passed no turn deadline.",
+      "The launcher passes 120,000 ms (story 2-7f3), and no real host has been run to it.",
       "Gate 11 stays OPEN: this evidence is for a separate, reviewed gate change and closes nothing.",
     ]) {
       expect(text, phrase).toContain(phrase)

@@ -120,6 +120,7 @@ import type { Pin } from "../core/roster/select.ts"
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import {
   ADVERSARIAL_HOSTS_FILE,
+  ADVERSARIAL_TURN_TIMEOUT_MS,
   adversarialRoster,
   adversarialSuiteConfig,
   PROTOCOL_V3_FILE,
@@ -1905,7 +1906,8 @@ export const LIMITATIONS: readonly string[] = [
   "The launcher's stages 1 and 2 (offline preflight, authorization, reservation) were not run on a real host; only the shipped command's refusal was observed. " +
     "That command ran as the user would run it, so its stage 1 resolved the path of the user's opencode store for its disjointness check; it opens nothing there.",
   "The schedules were sealed with `provenance: \"scripted\"` against a private frozen-format copy of protocol v3. That copy is a fixture: protocol v3 is a draft, and nothing here is pre-registered or frozen.",
-  "The non-ending and stream-without-usage rows shorten the turn deadline through the backend seam. The shipped launcher passes no turn deadline, so its bound is the backend's default.",
+  `The non-ending and stream-without-usage rows shorten the turn deadline through the backend seam, to ${HANG_TURN_MS} ms and ${NO_USAGE_TURN_MS} ms. ` +
+    `Every other row runs on the shipped launcher's own ${ADVERSARIAL_TURN_TIMEOUT_MS} ms, which no row here waited out.`,
   "The in-run integrity failure was injected by the probe through the late-usage reporter. No spontaneous integrity failure of a real host was observed or is claimed.",
   "A request beyond an attempt's first is classified from what the stub served and from time-window attribution. The host's reason for sending it is not established.",
   "AD-13's host-tool route is unavailable under the StructuredOutput-only offer and is reported unobserved, never as zero and never as resistance.",
