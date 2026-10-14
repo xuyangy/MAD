@@ -359,6 +359,7 @@ function hostSettled<T>(given: { directory: string; slots: RosterSlot[] }, slot:
   return new OpencodeModelBackend({ serverUrl: "http://127.0.0.1:9", directory: given.directory, slots: given.slots, client: client as never }).runTurn(slot, "i", "d", schema)
 }
 
+/** Runs the probe on stand-ins, as on macOS unless `extra.platform` says otherwise, so the suite does not depend on the CI runner's platform. */
 async function runProbe(hooks: ProbeHooks, extra: { platform?: string } = {}) {
   const root = await temp()
   const out = join(root, "out")
@@ -369,7 +370,7 @@ async function runProbe(hooks: ProbeHooks, extra: { platform?: string } = {}) {
   console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "))
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "))
   try {
-    const code = await main(["bun", "x", "--out", out, "--oauth-data-dir", dataDir], { ...hooks, home, scratchRoot: join(root, "no-such-scratch"), ...extra })
+    const code = await main(["bun", "x", "--out", out, "--oauth-data-dir", dataDir], { ...hooks, home, scratchRoot: join(root, "no-such-scratch"), platform: "darwin", ...extra })
     return { code, out, dataDir, home, text: lines.join("\n"), errors: errors.join("\n") }
   } finally {
     console.log = log
@@ -490,6 +491,7 @@ describe("main: the deadline and an incomplete run", () => {
     const host = { stop: async (): Promise<StopOutcome> => ((hostStops += 1), { confirmed: true, pid: 7, how: "exited" }) }
     const { value: code, errors } = await quiet(() =>
       main(["bun", "x", "--out", out], {
+        platform: "darwin",
         deadlineMs: 50,
         settleMs: 20,
         scratchRoot: join(root, "no-such-scratch"),
@@ -514,6 +516,7 @@ describe("main: the deadline and an incomplete run", () => {
     const host = { stop: async (): Promise<StopOutcome> => ({ confirmed: false, pid: 99, why: "no exit" }) }
     const { value: code, errors } = await quiet(() =>
       main(["bun", "x", "--out", join(root, "out")], {
+        platform: "darwin",
         deadlineMs: 20,
         settleMs: 20,
         scratchRoot: join(root, "no-such-scratch"),
