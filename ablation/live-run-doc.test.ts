@@ -388,14 +388,14 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
 
   test("the live execution stays open, with its prerequisites named", async () => {
     const text = (await section()).replace(/\s+/g, " ")
-    expect(text).toContain("the sixteen live runs have not been executed")
+    expect(text).toContain("The sixteen live runs ran once, as run 1 on 2026-10-14, and [`ADVERSARIAL.md`](ADVERSARIAL.md) publishes them.")
     // EACH PREREQUISITE WITH ITS STATUS, not just its name. A list that only
     // checked the headings would read the same whether they were all open or
     // all closed — which is the one thing a readiness document must not be
     // ambiguous about.
     const prerequisites = [
       ["Host accounting", "NOT APPLICABLE ON THE OAUTH ROUTE"],
-      ["Billing authorization", "CLOSED, for run 1 only"],
+      ["Billing authorization", "OPEN, because run 1's authorization is used"],
       ["Verified shared gates", "CLOSED, for two pins only"],
       ["Bounded tool termination", "CLOSED"],
       ["Bounded observer writes", "CLOSED"],
@@ -415,12 +415,22 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     // and the count line is true of the statuses above.
     expect(text).toContain("THE NUMBERED LIST ABOVE IS THE WHOLE LIST")
     const numbers = (status: string) => prerequisites.flatMap(([, value], index) => (value.startsWith(status) ? [index + 1] : []))
-    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[], [2, 3, 4, 5, 6], [1], [7]])
+    expect([numbers("OPEN"), numbers("CLOSED"), numbers("NOT APPLICABLE ON THE OAUTH ROUTE"), numbers("NON-GATING")]).toEqual([[2], [3, 4, 5, 6], [1], [7]])
     expect(text).toContain(
-      "On the planned OAuth route none of the seven is open: five are closed (2, 3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
+      "On the planned OAuth route one of the seven is open (2, because run 1's authorization is used), four are closed (3, 4, 5 and 6), one does not apply (1) and one is not a gate (7).",
     )
-    expect(text).toContain("**The live execution is authorized and has not run.** (2) is closed for run 1, the run's pin is chosen and protocol v3 is frozen (2026-10-13).")
-    expect(text).toContain("The run is one invocation of `bun run adversarial`, made once; its outcome, complete or not, is what gets published.")
+    expect(text).toContain("**The live execution ran once, on 2026-10-14, and is complete.** (2) was closed for run 1, the run's pin was chosen and protocol v3 was frozen (2026-10-13).")
+    expect(text).toContain(
+      "The run was one invocation of `bun run adversarial --live --provider-mode oauth`: exit 0, 16 of 16 slots completed, no halt and no runner stop, and 54 of 480 admitted attempts issued.",
+    )
+    expect(text).toContain("its evidence is `ablation/evidence/adversarial-oauth-run-1-2026-10-14.json`, and [`ADVERSARIAL.md`](ADVERSARIAL.md) publishes it.")
+    expect(text).toContain("Gate 10 is OPEN, because its run-1 authorization is used, and no further live run is authorized; nothing is re-run.")
+    expect(text).not.toContain("authorized and has not run")
+    // One pointer to the publication, in the file's opening, before its first section.
+    const whole = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(whole.split("[`ADVERSARIAL.md`](ADVERSARIAL.md)**").length - 1).toBe(1)
+    expect(whole.indexOf("**The adversarial suite's published outcome is")).toBeLessThan(whole.indexOf("## "))
+    expect(whole).toContain("**The adversarial suite's published outcome is [`ADVERSARIAL.md`](ADVERSARIAL.md)**: run 1, the sixteen runs executed once")
     // And the honest headline: story 2-7c did not close every hang, and the
     // materializer's half closed with gate 12.
     expect(text).toContain("Materializer termination is implemented and accepted, and gate 12 is CLOSED.")
@@ -453,7 +463,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(item(2)).toContain(`${figure.run} per run, ${figure.suite} for the suite and ${figure.global} for the suite's root`)
     expect(item(2)).toContain("run 1, pinned to `anthropic/claude-sonnet-5`, which is also `small_model`")
     expect(ADVERSARIAL_RUN).toMatchObject({ run: 1, pins: ["anthropic/claude-sonnet-5"] })
-    expect(item(2)).toContain("The authorization covers one start: the launcher's reservation refuses every later one")
+    expect(item(2)).toContain("The authorization covered one start, which run 1 used on 2026-10-14: the launcher's committed reservation refuses every later one, nothing is re-run, and no further live run is authorized.")
     expect(item(2)).toContain("Nothing bounds the physical requests, host re-sends or side requests a host makes, or subscription quota")
     // The api-key allowance is named only to say it authorizes nothing here.
     expect(item(2)).toContain("authorizes no OAuth work")
@@ -576,13 +586,15 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       "One row is about the shipped command, which is the live run once nothing refuses it.",
       "(`shippedDecision`, by `gatePreflight` and `readFrozenProtocol` with the version-3 check, the rules stage 1 applies)",
       "starts the command as a child process only when one of them establishes that it refuses",
-      "**On the shipped tree none does, so the probe does not start it** and both of the row's claims read UNPROBED",
-      "a check that cannot be completed gives the same result, and a reservation is never a reason to start it",
+      "**On the shipped tree the probe's barrier is gate 10, which is OPEN, so the probe starts it** and expects a refusal at stage 1 that names gate 10; the launcher's stage 1 also names the used reservation (the authorized-run check).",
+      "When no check establishes a refusal, or a check cannot be completed, the probe does not start it and both of the row's claims read UNPROBED; a reservation is never a reason to start it",
       "the checkout must not change while the row runs",
     ]) {
       expect(text, phrase).toContain(phrase)
     }
-    expect(gatePreflight(PAIRED_GATES, "adversarial", "oauth").ok).toBe(true)
+    const shipped = gatePreflight(PAIRED_GATES, "adversarial", "oauth")
+    expect(shipped.ok).toBe(false)
+    expect(shipped.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10"])
   })
 
   test("story 2-7f — the launcher is documented: the command, stage 1's refusal, per-run isolation, the host record and signals", async () => {
@@ -592,9 +604,14 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     expect(text).toContain("bun run adversarial --live --provider-mode oauth")
     for (const flag of ["--oauth-provider", "--pin", "--oauth-prepared", "--oauth-data-root", "--out"]) expect(text, flag).toContain(flag)
     expect(text).toContain("`--provider-mode api-key`, `--server`, `--target` and `--directory` are refused at parse")
-    expect(text).toContain("**Stage 1 passes on the shipped tree for the authorized pin, and a refusal writes nothing.**")
-    expect(text).toContain("With `--oauth-provider anthropic --pin anthropic/claude-sonnet-5` the command is the live run of the sixteen adversarial cases: run 1, once.")
-    expect(text).toContain("Gates 10, 11 and 12 are CLOSED, `ADVERSARIAL_RUN.pins` is `anthropic/claude-sonnet-5` and protocol v3 is frozen, so on the shipped tree none of those refuses.")
+    expect(text).toContain("**Stage 1 refuses on the shipped tree, and a refusal writes nothing.**")
+    expect(text).toContain(
+      "Gate 10 is OPEN, because its run-1 authorization is used (run 1 ran on 2026-10-14; see [`ADVERSARIAL.md`](ADVERSARIAL.md)), and run 1's reservation is committed, so with `--oauth-provider anthropic --pin anthropic/claude-sonnet-5` the command refuses at stage 1 on both.",
+    )
+    expect(text).not.toContain("While the authorization was unused")
+    expect(text).toContain(
+      "Gates 11 and 12 are CLOSED, `ADVERSARIAL_RUN.pins` is `anthropic/claude-sonnet-5` and protocol v3 is frozen, so on the shipped tree none of those refuses; gate 10 and the used reservation do.",
+    )
     expect(text).toContain("`gatePreflight(gates, \"adversarial\", \"oauth\")`")
     expect(ADVERSARIAL_HOST_TOOLS).toEqual({ "*": false, StructuredOutput: true })
     expect(text).toContain('`ADVERSARIAL_HOST_TOOLS` (`{ "*": false, StructuredOutput: true }`')
@@ -788,10 +805,10 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "Gate 8 is OPEN too; it is required only for the OAuth pilot (see \"OAuth pilot (story 2-8c5)\" below), so it is printed and not consulted for the evaluation.",
     )
     expect(text).toContain(
-      "Gates 10, 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
+      "Gate 10 is OPEN, because its run-1 authorization is used, and gates 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12])
-    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["CLOSED", "CLOSED", "CLOSED"])
+    expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "CLOSED"])
   })
 
   test("attempt-mode accounting is documented: unit, allowances, journal, stops, dials, sealing, report, scope", async () => {

@@ -1,0 +1,68 @@
+{
+  "entries": [
+    {
+      "slot": "discovery-1",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 990,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 4300
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1030,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 5261
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1109,
+        "reasoning": 0,
+        "cacheRead": 3951,
+        "cacheWrite": 1251
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1510,
+        "reasoning": 0,
+        "cacheRead": 3951,
+        "cacheWrite": 1010
+      }
+    }
+  ],
+  "total": {
+    "input": 48,
+    "output": 4639,
+    "reasoning": 0,
+    "cacheRead": 7902,
+    "cacheWrite": 11822
+  },
+  "cap": null,
+  "maxConcurrency": 4,
+  "shares": {
+    "discover": 0.3,
+    "debate": 0.65,
+    "judge": 1
+  },
+  "unknownUsage": [],
+  "stopOnUnknownUsage": false
+}

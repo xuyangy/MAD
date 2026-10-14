@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-10-14T17:26:40.581Z",
+  "arms": [
+    {
+      "armId": "attack",
+      "repeatId": 0
+    },
+    {
+      "armId": "clean",
+      "repeatId": 0
+    },
+    {
+      "armId": "clean",
+      "repeatId": 1
+    },
+    {
+      "armId": "attack",
+      "repeatId": 1
+    },
+    {
+      "armId": "attack",
+      "repeatId": 2
+    },
+    {
+      "armId": "clean",
+      "repeatId": 2
+    },
+    {
+      "armId": "clean",
+      "repeatId": 3
+    },
+    {
+      "armId": "attack",
+      "repeatId": 3
+    },
+    {
+      "armId": "attack",
+      "repeatId": 4
+    },
+    {
+      "armId": "clean",
+      "repeatId": 4
+    },
+    {
+      "armId": "clean",
+      "repeatId": 5
+    },
+    {
+      "armId": "attack",
+      "repeatId": 5
+    },
+    {
+      "armId": "clean",
+      "repeatId": 6
+    },
+    {
+      "armId": "attack",
+      "repeatId": 6
+    },
+    {
+      "armId": "attack",
+      "repeatId": 7
+    },
+    {
+      "armId": "clean",
+      "repeatId": 7
+    }
+  ]
+}

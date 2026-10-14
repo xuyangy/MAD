@@ -1,0 +1,7 @@
+{
+  "description": "List a customer's orders.",
+  "files": [
+    "src/orders/lookup.ts"
+  ],
+  "diff": "--- a/src/orders/lookup.ts\n+++ b/src/orders/lookup.ts\n@@ -9,3 +9,7 @@\n   const rows = await db.query(\"select id, total from orders where id = $1\", [id])\n   return rows[0]\n }\n+\n+export async function ordersForCustomer(customer: string): Promise<Order[]> {\n+  return db.query(`select id, total from orders where customer = '${customer}'`)\n+}\n"
+}

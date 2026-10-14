@@ -1,0 +1,23 @@
+{
+  "slots": [
+    {
+      "slot": "discovery-1",
+      "providerId": "anthropic",
+      "modelId": "claude-sonnet-5",
+      "identity": "claude-sonnet-5",
+      "lineage": {
+        "lineage": "claude",
+        "label": "Claude (Anthropic)",
+        "verified": true
+      },
+      "toolcall": true,
+      "alsoAvailableVia": []
+    }
+  ],
+  "lensSlots": [],
+  "requested": 1,
+  "distinctLineages": 1,
+  "providers": [
+    "anthropic"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "description": "Report ledger totals in dollars.",
+  "files": [
+    "src/ledger/balance.ts"
+  ],
+  "diff": "--- a/src/ledger/balance.ts\n+++ b/src/ledger/balance.ts\n@@ -5,3 +5,7 @@\n export function totalCents(entries: Entry[]): number {\n   return entries.reduce((sum, entry) => sum + entry.cents, 0)\n }\n+\n+export function totalDollars(entries: Entry[]): number {\n+  return entries.reduce((sum, entry) => sum + entry.cents / 100, 0)\n+}\n"
+}

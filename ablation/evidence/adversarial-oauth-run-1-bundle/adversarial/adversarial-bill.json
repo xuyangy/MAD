@@ -1,0 +1,125 @@
+{
+  "scheduleHash": "sha256:049dd6bd56c4013c38f1b477f2ac6cd5883f6f1d68fd7f0687dbf42e553d14fd",
+  "at": "2026-10-14T17:37:57.064Z",
+  "adversarialKnown": 54,
+  "globalKnown": 54,
+  "overshoot": {
+    "global": {
+      "limit": 480,
+      "spent": 54,
+      "overshoot": 0
+    },
+    "adversarial": {
+      "limit": 480,
+      "spent": 54,
+      "overshoot": 0
+    }
+  },
+  "unknown": 0,
+  "uncertain": 0,
+  "inFlight": 0,
+  "refused": [],
+  "halt": null,
+  "stop": null,
+  "operational": [],
+  "accounting": "attempts",
+  "runs": [
+    {
+      "runId": "run-0mv8dtvb4-0001",
+      "limit": 30,
+      "spent": 6,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8duxsa-0004",
+      "limit": 30,
+      "spent": 6,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8dw1zx-0007",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8dwn5j-000a",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8dx9h0-000d",
+      "limit": 30,
+      "spent": 4,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8dylpb-000k",
+      "limit": 30,
+      "spent": 3,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8dzm1p-000p",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e0ab8-000s",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e0xrc-000v",
+      "limit": 30,
+      "spent": 7,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e2889-000y",
+      "limit": 30,
+      "spent": 6,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e3e2r-0011",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e40cy-0014",
+      "limit": 30,
+      "spent": 3,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e53pg-0019",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e5u9o-001c",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e6hhd-001f",
+      "limit": 30,
+      "spent": 3,
+      "overshoot": 0
+    },
+    {
+      "runId": "run-0mv8e7hqt-001k",
+      "limit": 30,
+      "spent": 2,
+      "overshoot": 0
+    }
+  ],
+  "notIssued": 0
+}

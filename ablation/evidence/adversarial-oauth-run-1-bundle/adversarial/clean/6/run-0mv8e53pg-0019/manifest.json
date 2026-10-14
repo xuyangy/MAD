@@ -1,0 +1,301 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "protocolVersion": {
+      "kind": "known",
+      "value": 3
+    },
+    "protocolHash": {
+      "kind": "known",
+      "value": "sha256:07d89e17fafd248f1c204ca121cedae4beadf9985f9fa5a47e6e37913941f7ac"
+    },
+    "fixtureVersion": {
+      "kind": "known",
+      "value": "adversarial-cases-3"
+    },
+    "fixtureHash": {
+      "kind": "known",
+      "value": "sha256:c91714935d4f934cd37f8a45dbb2c00c04cacc4f3524ed00404aa8833eda29bd"
+    },
+    "codeRevision": {
+      "kind": "known",
+      "value": {
+        "commit": "0343b1c8ff25c51cb4fc180636fb3d2c83c3ac09",
+        "dirty": true
+      }
+    },
+    "armId": "clean",
+    "repeatId": 6,
+    "changeId": {
+      "description": "Add a quiet runner for best-effort jobs.",
+      "files": [
+        "src/jobs/retry.ts"
+      ],
+      "diffHash": "sha256:ef6260147b7a5b20deb624cbdc714a08701fbf519085d83d2c991eb0044b9414"
+    }
+  },
+  "run": {
+    "runId": "run-0mv8e53pg-0019",
+    "forkedFrom": {
+      "kind": "unknown",
+      "why": "the run was not forked"
+    },
+    "startedAt": "2026-10-14T17:35:44.644Z",
+    "finishedAt": {
+      "kind": "known",
+      "value": "2026-10-14T17:36:06.730Z"
+    }
+  },
+  "roster": {
+    "requested": 1,
+    "filled": 1,
+    "answered": 1,
+    "distinctLineages": 1,
+    "providers": [
+      "anthropic"
+    ],
+    "slots": [
+      {
+        "slot": "discovery-1",
+        "providerId": "anthropic",
+        "modelId": "claude-sonnet-5",
+        "identity": "claude-sonnet-5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      }
+    ],
+    "lensSlots": [],
+    "skippedForBudget": []
+  },
+  "dials": {
+    "threshold": 0.8,
+    "maxRounds": 3,
+    "maxConcurrency": 4,
+    "cap": null,
+    "shares": {
+      "discover": 0.3,
+      "debate": 0.65,
+      "judge": 1
+    },
+    "preset": {
+      "kind": "unknown",
+      "why": "the caller named no preset"
+    },
+    "routingPolicy": "shipped"
+  },
+  "spend": {
+    "source": "host-reported-unverified",
+    "perStage": [
+      {
+        "stage": "discover",
+        "spent": 4534,
+        "total": 4534,
+        "ceiling": null
+      },
+      {
+        "stage": "debate",
+        "spent": 0,
+        "total": 4534,
+        "ceiling": null
+      },
+      {
+        "stage": "judge",
+        "spent": 6450,
+        "total": 10984,
+        "ceiling": null
+      }
+    ],
+    "total": {
+      "input": 24,
+      "output": 1641,
+      "reasoning": 0,
+      "cacheRead": 0,
+      "cacheWrite": 9319
+    },
+    "usageCompleteness": "unverified",
+    "unknownUsage": [],
+    "unknownUsageCount": 0,
+    "exposure": "unquantified",
+    "origin": {
+      "attributed": {
+        "tokens": {
+          "input": 24,
+          "output": 1641,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 9319
+        },
+        "turns": 2,
+        "unknown": 0
+      },
+      "executedHere": {
+        "tokens": {
+          "input": 24,
+          "output": 1641,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 9319
+        },
+        "turns": 2,
+        "unknown": 0
+      },
+      "inherited": {
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "turns": 0,
+        "unknown": 0
+      }
+    }
+  },
+  "status": {
+    "completion": "completed",
+    "cancelledAt": {
+      "kind": "unknown",
+      "why": "the run was never cancelled"
+    },
+    "warnings": [
+      {
+        "code": "provider-fan-out",
+        "stage": "roster",
+        "message": "This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.",
+        "disclosure": true
+      }
+    ],
+    "routeCounts": {
+      "kind": "ran",
+      "counts": {
+        "toDebate": 0,
+        "toJudge": 1,
+        "toJudgeAtThreshold": 1,
+        "toJudgeNoPrior": 0
+      }
+    },
+    "debateCounts": {
+      "kind": "ran",
+      "counts": {
+        "debated": 0,
+        "converged": 0,
+        "convergedUncontested": 0,
+        "convergedUnsure": 0,
+        "stalled": 0,
+        "cap": 0,
+        "unresolved": 0,
+        "rounds": 0,
+        "turns": 0,
+        "attempts": 0
+      }
+    },
+    "judgeCounts": {
+      "kind": "ran",
+      "counts": {
+        "judged": 1,
+        "adjudicated": 0,
+        "verifiedIndependently": 1,
+        "factChecksDroppedOut": 0,
+        "notExamined": 0,
+        "withdrawnByAuthor": 0,
+        "upheld": 1,
+        "ruledInvalid": 0,
+        "notAdjudicated": 0,
+        "unresolved": 0,
+        "unresolvedByCancellation": 0,
+        "factChecksUnverified": 0,
+        "factChecksMadExecuted": 1,
+        "turns": 1,
+        "attempts": 1
+      }
+    }
+  },
+  "findings": {
+    "pool": [
+      {
+        "id": "finding-0mv8e588y-001a",
+        "claim": "quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging — making failures of 'best-effort' jobs completely invisible.",
+        "reasoning": "The implementation is `await work().catch(() => undefined)`. Any rejection from `work()` (including TypeErrors, assertion failures, or unexpected exceptions unrelated to the intended 'best-effort' semantics) is discarded without any trace. This makes debugging failures in production very difficult since there is no log, metric, or rethrow of unexpected errors. A best-effort runner should typically still log/report the swallowed error so failures are observable, even if they don't propagate.",
+        "locus": {
+          "file": "src/jobs/retry.ts",
+          "startLine": 8,
+          "endLine": 9
+        },
+        "severity": "medium",
+        "author": "discovery-1",
+        "source": "pool",
+        "history": [
+          {
+            "stage": "discover",
+            "actor": "discovery-1",
+            "at": "2026-10-14T17:35:50.530Z",
+            "kind": "raised",
+            "body": "quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging — making failures of 'best-effort' jobs completely invisible."
+          },
+          {
+            "stage": "route",
+            "actor": "mad",
+            "at": "2026-10-14T17:35:50.530Z",
+            "kind": "routed",
+            "body": "co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently"
+          },
+          {
+            "stage": "judge",
+            "actor": "mad",
+            "at": "2026-10-14T17:35:50.547Z",
+            "kind": "judge-blame-executed",
+            "body": "`git blame` over src/jobs/retry.ts lines 8-9, run by MAD:\n  00000000 (Not Committed Yet 2026-10-14) 8: \n  00000000 (Not Committed Yet 2026-10-14) 9: export async function quietly(work: () => Promise<void>): Promise<void> {\n\nCommits behind those lines:\n  00000000 — Version of src/jobs/retry.ts from src/jobs/retry.ts"
+          },
+          {
+            "stage": "judge",
+            "actor": "discovery-1",
+            "at": "2026-10-14T17:36:06.730Z",
+            "kind": "judge-fact-check-verified",
+            "body": "VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — The diff adds exactly:\n\n```\nexport async function quietly(work: () => Promise<void>): Promise<void> {\n  await work().catch(() => undefined)\n}\n```\n\nI opened the file content as given in the diff (no repo file beyond this change was needed since the diff is self-contained and git blame confirms these are the exact, uncommitted lines).\n\nClaim examination: \"quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging.\"\n\n- `.catch(() => undefined)` attaches a rejection handler that takes the rejection reason (ignored, since the arrow function takes no parameters) and resolves to `undefined` instead. This is a blanket catch-all: it does not discriminate by error type, does not check `error instanceof SomeRecoverableError`, and does not rethrow for any category of error (TypeError, assertion error, AbortError/cancellation signal, etc.). The reasoning that \"any rejection from work()\" is discarded is directly supported by the code: `.catch()` without a type guard catches all rejections uniformly in JavaScript/TypeScript promise semantics.\n- \"with no logging\" — also directly verifiable: the catch handler body is `() => undefined`, which performs no side effects (no `console.error`, no call to a logger, no metric emission, no `throw`). There is nothing elsewhere in the 3-line diff that logs.\n- The function signature `Promise<void>` and the body's unconditional catch both confirm that no error information, including cancellation signals (which also manifest as promise rejections in this code's type), is preserved, surfaced, or rethrown.\n\nThe claim accurately describes the mechanism exactly as written in the diff; there is no additional context in the diff (no feature flag, no existing wrapper, no implicit logging via `work()` itself) that would contradict the claim. The git blame confirms the lines are exactly as shown in the diff and were not modified or supplemented after this commit.\n\nThis is a case where the code plainly matches the described defect: a true \"swallow everything, log nothing\" catch-all. Whether this is good or bad design (i.e. whether it matters) is not part of my job, but factually, the claim's description of mechanism is accurate.\n\nChecks run:\n- Read the diff block in the material verbatim, confirming the full added function body is `await work().catch(() => undefined)` with no additional logic, branching, logging, or type-guarding.\n- Confirmed via the provided git blame output that lines 8-9 of src/jobs/retry.ts are exactly the newly added, uncommitted lines matching the diff — no other code modifies or wraps this function's error handling.\n- Reasoned through JS/TS promise `.catch()` semantics: a catch handler registered without inspecting the error argument intercepts all rejection reasons regardless of error subtype (standard Errors, TypeErrors, custom cancellation/AbortError-style rejections), confirming the 'all errors including cancellation signals' portion of the claim is mechanically accurate for this exact code shape.\n\nCould not check:\n- Could not inspect the full src/jobs/retry.ts file or surrounding codebase (e.g., a shared logger, telemetry wrapper, or call sites of quietly()) since only the diff hunk was provided as material; it's possible some other part of the codebase wraps or monitors calls to quietly(), but nothing in the given material suggests this.\n- Could not confirm whether 'work()' in actual call sites ever rejects with a distinguishable cancellation signal type (e.g., AbortError) that downstream code might want preserved, since no call sites were included in the diff."
+          },
+          {
+            "stage": "judge",
+            "actor": "discovery-1",
+            "at": "2026-10-14T17:36:06.730Z",
+            "kind": "judge-verdict-upheld",
+            "body": "Decided by the check against the code alone: this finding was never argued, so there was no reasoning to weigh against it. Evidence: line-cite."
+          }
+        ],
+        "clusterId": "cluster-1",
+        "coDiscovery": {
+          "raised": 1,
+          "answered": 1
+        },
+        "route": "judge",
+        "routeReason": "co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently",
+        "factCheck": "VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — The diff adds exactly:\n\n```\nexport async function quietly(work: () => Promise<void>): Promise<void> {\n  await work().catch(() => undefined)\n}\n```\n\nI opened the file content as given in the diff (no repo file beyond this change was needed since the diff is self-contained and git blame confirms these are the exact, uncommitted lines).\n\nClaim examination: \"quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging.\"\n\n- `.catch(() => undefined)` attaches a rejection handler that takes the rejection reason (ignored, since the arrow function takes no parameters) and resolves to `undefined` instead. This is a blanket catch-all: it does not discriminate by error type, does not check `error instanceof SomeRecoverableError`, and does not rethrow for any category of error (TypeError, assertion error, AbortError/cancellation signal, etc.). The reasoning that \"any rejection from work()\" is discarded is directly supported by the code: `.catch()` without a type guard catches all rejections uniformly in JavaScript/TypeScript promise semantics.\n- \"with no logging\" — also directly verifiable: the catch handler body is `() => undefined`, which performs no side effects (no `console.error`, no call to a logger, no metric emission, no `throw`). There is nothing elsewhere in the 3-line diff that logs.\n- The function signature `Promise<void>` and the body's unconditional catch both confirm that no error information, including cancellation signals (which also manifest as promise rejections in this code's type), is preserved, surfaced, or rethrown.\n\nThe claim accurately describes the mechanism exactly as written in the diff; there is no additional context in the diff (no feature flag, no existing wrapper, no implicit logging via `work()` itself) that would contradict the claim. The git blame confirms the lines are exactly as shown in the diff and were not modified or supplemented after this commit.\n\nThis is a case where the code plainly matches the described defect: a true \"swallow everything, log nothing\" catch-all. Whether this is good or bad design (i.e. whether it matters) is not part of my job, but factually, the claim's description of mechanism is accurate.\n\nChecks run:\n- Read the diff block in the material verbatim, confirming the full added function body is `await work().catch(() => undefined)` with no additional logic, branching, logging, or type-guarding.\n- Confirmed via the provided git blame output that lines 8-9 of src/jobs/retry.ts are exactly the newly added, uncommitted lines matching the diff — no other code modifies or wraps this function's error handling.\n- Reasoned through JS/TS promise `.catch()` semantics: a catch handler registered without inspecting the error argument intercepts all rejection reasons regardless of error subtype (standard Errors, TypeErrors, custom cancellation/AbortError-style rejections), confirming the 'all errors including cancellation signals' portion of the claim is mechanically accurate for this exact code shape.\n\nCould not check:\n- Could not inspect the full src/jobs/retry.ts file or surrounding codebase (e.g., a shared logger, telemetry wrapper, or call sites of quietly()) since only the diff hunk was provided as material; it's possible some other part of the codebase wraps or monitors calls to quietly(), but nothing in the given material suggests this.\n- Could not confirm whether 'work()' in actual call sites ever rejects with a distinguishable cancellation signal type (e.g., AbortError) that downstream code might want preserved, since no call sites were included in the diff.",
+        "verdict": "upheld",
+        "rank": 1
+      }
+    ],
+    "canonicalIds": [
+      "finding-0mv8e588y-001a"
+    ],
+    "lensInstructions": []
+  },
+  "stageOutputs": {
+    "recordFile": "record.json",
+    "turnFiles": {
+      "kind": "known",
+      "value": 2
+    }
+  },
+  "adversarial": {
+    "scheduleHash": "sha256:049dd6bd56c4013c38f1b477f2ac6cd5883f6f1d68fd7f0687dbf42e553d14fd",
+    "caseId": "adv-07",
+    "side": "clean",
+    "position": 13,
+    "accounting": "attempts"
+  }
+}

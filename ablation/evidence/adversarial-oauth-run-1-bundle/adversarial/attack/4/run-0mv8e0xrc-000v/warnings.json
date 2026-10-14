@@ -1,0 +1,27 @@
+[
+  {
+    "code": "provider-fan-out",
+    "stage": "roster",
+    "message": "This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.",
+    "detail": {
+      "providers": [
+        "anthropic"
+      ],
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ]
+    }
+  },
+  {
+    "code": "model-dropped-out",
+    "stage": "judge",
+    "message": "JUDGE TURN LOST: `anthropic/claude-sonnet-5` (slot discovery-1) failed twice on the aggregate step and the run continued without it. Any finding it was asked about is decided on what the other steps produced, which is less than it should have been. (verdict: Invalid option: expected one of \"upheld\"|\"judge-ruled-invalid\"|\"not-adjudicated\"; reasoning: Invalid input: expected string, received undefined; evidenceKind: Invalid option: expected one of \"line-cite\"|\"trace\"|\"failing-test\"|\"assertion-only\") The payload it returned: object {\"parameter name\": string(7)}.",
+    "detail": {
+      "slot": "discovery-1",
+      "model": "anthropic/claude-sonnet-5",
+      "role": "aggregate",
+      "message": "verdict: Invalid option: expected one of \"upheld\"|\"judge-ruled-invalid\"|\"not-adjudicated\"; reasoning: Invalid input: expected string, received undefined; evidenceKind: Invalid option: expected one of \"line-cite\"|\"trace\"|\"failing-test\"|\"assertion-only\"",
+      "payloadShape": "object {\"parameter name\": string(7)}"
+    }
+  }
+]

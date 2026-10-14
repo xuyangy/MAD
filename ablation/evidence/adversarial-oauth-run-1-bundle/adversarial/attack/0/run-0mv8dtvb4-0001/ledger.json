@@ -1,0 +1,92 @@
+{
+  "entries": [
+    {
+      "slot": "discovery-1",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 363,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 4297
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "debate",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 419,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 4922
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1511,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 4999
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 387,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 6189
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1144,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 6844
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 316,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 8253
+      }
+    }
+  ],
+  "total": {
+    "input": 72,
+    "output": 4140,
+    "reasoning": 0,
+    "cacheRead": 0,
+    "cacheWrite": 35504
+  },
+  "cap": null,
+  "maxConcurrency": 4,
+  "shares": {
+    "discover": 0.3,
+    "debate": 0.65,
+    "judge": 1
+  },
+  "unknownUsage": [],
+  "stopOnUnknownUsage": false
+}

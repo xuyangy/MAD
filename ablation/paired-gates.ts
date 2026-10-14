@@ -24,11 +24,11 @@
  *
  * ## The adversarial phase (story 2-7e)
  *
- * Gates 10, 11 and 12 are required for `adversarial` on the oauth route, and all
- * three are CLOSED. Gate 10 is the budget owner's authorization of the one run
- * `ADVERSARIAL_RUN` names, under the protocol `ADVERSARIAL_PROTOCOL` names; it
- * covers that run once, and the launcher's reservation is what makes a second
- * start refuse. Gate 11 is closed on story 2-7f2's
+ * Gates 10, 11 and 12 are required for `adversarial` on the oauth route. Gates
+ * 11 and 12 are CLOSED. Gate 10 is the budget owner's authorization of the one
+ * run `ADVERSARIAL_RUN` names, under the protocol `ADVERSARIAL_PROTOCOL` names; it
+ * covered that run once, and the launcher's reservation is what makes a second
+ * start refuse. Run 1 used it, so gate 10 is OPEN. Gate 11 is closed on story 2-7f2's
  * zero-bill probe, and only for what that probe measured:
  * `GATE_11_EVIDENCE_SCOPE` names the two `provider/model` pairs, the host build
  * and the payload pins, and `gate11ScopeProblem` refuses a run pinned to any
@@ -304,8 +304,10 @@ export const ADVERSARIAL_PROTOCOL = {
 } as const
 
 /**
- * Story 2-7e — the one OAuth adversarial run gate 10 authorizes: its run, its
- * roster pin and its reservation, with every earlier run. No run has happened.
+ * Story 2-7e — the one OAuth adversarial run gate 10 authorized: its run, its
+ * roster pin and its reservation, with every earlier run. Run 1 ran on
+ * 2026-10-14 and its reservation is committed; gate 10 is OPEN, because its
+ * run-1 authorization is used.
  *
  * The pin is the one frozen protocol v3 B1 fixes, chosen by the budget owner on
  * 2026-10-13; it is also `small_model`. A launcher asks `adversarialRunProblem`
@@ -645,27 +647,30 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "adversarial",
     routes: ["oauth"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "CLOSED",
+    status: "OPEN",
     requires:
       `the budget owner authorizes run ${ADVERSARIAL_RUN.run} (\`ADVERSARIAL_RUN\`) of the sixteen adversarial runs on the oauth ` +
       "route in admitted attempts under a frozen protocol v3: 30 per run, 480 for the suite and 480 for the suite's own root, " +
       "each an admission threshold and not a proven-adequate budget. An admitted attempt bounds neither the physical requests " +
       "the host sends nor subscription quota. Closing gate 4 or gate 8 never stands in for it",
-    evidence:
-      "the human budget owner's instruction of 2026-10-13, typed by them as the argument of `/bmad-build` in the implementing " +
-      "session and quoted here in full: \"2-7g — I close gate 10, pin anthropic/claude-sonnet-5, and freeze " +
-      "evaluation-protocol-v3.md; proceed with the sixteen live adversarial runs\". It is the human's decision, recorded by " +
-      "that session; the review channel decided none of it. It authorizes adversarial run " +
-      `${ADVERSARIAL_RUN.run}, once, on the one-slot roster ${(ADVERSARIAL_RUN.pins ?? []).join(", ")} (also \`small_model\`), ` +
-      `under protocol v3 frozen on 2026-10-13 (${ADVERSARIAL_PROTOCOL.path}, frozen_hash ${ADVERSARIAL_PROTOCOL.frozenHash}), ` +
-      "whose B9 holds the exposure statement current at the freeze. Exposure: at most 480 admitted attempts, 30 per run, each " +
-      "an admission threshold and not a budget shown to be adequate; no bound on the physical requests, host re-sends or side " +
-      "requests the host makes inside or beside an attempt, or on subscription quota; `small_model` traffic goes to the same " +
-      "pin; and up to sixteen host starts, with their read-only verifications, fall outside the attempt count. Tests: " +
-      "ablation/paired-gates.test.ts, scripts/adversarial.test.ts",
     note:
-      `No run has happened. The launcher creates ${ADVERSARIAL_RUN.reservation} exclusively before it starts a host, and that ` +
-      "file, on disk or at HEAD, refuses every later start whether the run succeeded, failed or was interrupted; nothing is re-run",
+      `Run ${ADVERSARIAL_RUN.run} was authorized on 2026-10-13 by the human budget owner's instruction, typed by them as the ` +
+      "argument of `/bmad-build` in the implementing session: \"2-7g — I close gate 10, pin anthropic/claude-sonnet-5, and " +
+      "freeze evaluation-protocol-v3.md; proceed with the sixteen live adversarial runs\". It was the human's decision; the " +
+      `review channel decided none of it. It covered run ${ADVERSARIAL_RUN.run}, once, on the one-slot roster ` +
+      `${(ADVERSARIAL_RUN.pins ?? []).join(", ")} (also \`small_model\`), under protocol v3 frozen on 2026-10-13 ` +
+      `(${ADVERSARIAL_PROTOCOL.path}, frozen_hash ${ADVERSARIAL_PROTOCOL.frozenHash}), whose B9 holds the exposure ` +
+      "statement current at the freeze. The exposure authorized: at most 480 admitted attempts, 30 per run, 480 for the " +
+      "suite and 480 for the suite's own root, each an admission threshold and not a budget shown to be adequate; no bound " +
+      "on the physical requests, host re-sends or side requests the host makes inside or beside an attempt, or on " +
+      "subscription quota; `small_model` traffic goes to the same pin; and up to sixteen host starts, with their read-only " +
+      `verifications, fall outside the attempt count. Run ${ADVERSARIAL_RUN.run} ran on 2026-10-14 and is recorded in ` +
+      "ablation/evidence/adversarial-oauth-run-1-2026-10-14.json (COMPLETE: 16 of 16 slots completed, no halt and no runner " +
+      "stop; 54 of 480 admitted attempts issued, all settled, 1 of them a retry; overshoot 0) and published in " +
+      `ablation/ADVERSARIAL.md. Its reservation ${ADVERSARIAL_RUN.reservation} is committed, so stage 1 refuses every ` +
+      "start of the current `ADVERSARIAL_RUN` and no authorization can close this gate again for it; a further run needs " +
+      "a new run in a reviewed change. The authorization is spent; no further live run is authorized. Tests: " +
+      "ablation/paired-gates.test.ts, scripts/adversarial.test.ts",
   },
   {
     number: 11,

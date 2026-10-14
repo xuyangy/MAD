@@ -1,0 +1,73 @@
+MAD review — run run-0mv8dylpb-000k
+============================================================
+
+ROSTER
+  discovery-1: anthropic/claude-sonnet-5 — Claude (Anthropic)
+  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1
+
+WARNINGS: none — this run is clean.
+
+DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.
+
+ROUTING (co-discovery threshold 80%): 0 to debate, 2 straight to the judge.
+  2 of those met or beat the threshold; skipping debate is not
+  skipping scrutiny — they are judged verify-independently instead.
+  Critical severity is debated at any threshold.
+
+DEBATE (round cap 3, no token cap): 0 contested finding(s), 0 batched round(s), 0 turn(s) spent.
+  Nothing was contested, so no debate turn was spent.
+
+JUDGE: 2 finding(s) reached — 0 adjudicated after a debate, 2 in verify-independently mode, 0 withdrawn by whoever raised it.
+  Verdicts: 2 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.
+  2 finding(s) carry a `git blame` MAD RAN ITSELF over the
+  lines they cite. That part is executed evidence, not a check a model reported running.
+  2 turn(s) requested while judging, each billed once.
+
+FINDINGS (2)
+
+  #1  [high]  src/cache/store.ts:9
+      co-discovery: 1/1   verdict: upheld   evidence: assertion only
+      raised by: discovery-1  (source: pool)
+      route: judge (verify-independently) — co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently
+      judge: checked against the code, `git blame` RUN BY MAD over the cited lines — Decided by the check against the code alone: this finding was never argued, so there was no reasoning to weigh against it. Evidence: line-cite.
+
+      The function is named startSweeper and described as sweeping the cache, but it does not actually sweep/evict any expired or stale entries — it just calls store.get("sweep"), which looks up a literal key named "sweep" and discards the result.
+
+      `store.get("sweep")` invokes the existing Map-based getter (`return this.items.get(key)`) with the literal string "sweep" as the key. This does not iterate over cache entries, check TTLs, or remove anything from `this.items`. The function name and its placement in a change titled 'Sweep the cache store once a second' strongly implies it should evict expired items, but as written it performs a no-op lookup of a possibly nonexistent key every second. This contradicts the evident intent of the change and provides no actual cache-sweeping behavior.
+
+      CHECKED AGAINST THE CODE
+      VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — Claim: `startSweeper` is named/described as sweeping the cache but does not actually evict or sweep any entries — it just calls `store.get(\\"sweep\\")`, a no-op lookup.\\n\\nThe diff adds exactly this code:\\n```\\nexport function startSweeper(store: Store): void {\\n  setInterval(() => store.get(\\"sweep\\"), 1000)\\n}\\n```\\nand the pre-existing `get` method (shown in diff context just above) is:\\n```\\n    return this.items.get(key)\\n  }\\n}\\n```\\nconfirming `get` is a direct `Map.get` passthrough with no side effects, no TTL logic, and no iteration over `this.items`.\\n\\nThe body of `startSweeper` calls `store.get(\\"sweep\\")` every 1000ms. This:\\n- passes the literal string `\\"sweep\\"` as a cache key, not a loop variable or timestamp comparison,\\n- invokes `Map.get`, which only reads and returns a value, never deletes,\\n- does not reference `this.items.delete`, `this.items.entries()`, `this.items.keys()`, or any expiry/TTL field anywhere in the diff.\\n\\nThere is nothing in the diff, in the pre-existing `Store` class as shown, or in the git blame record that supplies sweeping/eviction behavior elsewhere. Git blame for line 9 shows only that the line is uncommitted, with no evidence of a separate eviction mechanism hooked in. The code as written performs a no-op read on a (likely nonexistent) key called \\"sweep\\" every second and discards the return value — it does not sweep, evict, or otherwise clean the cache. The claim is fully supported by the code."\n\nChecks run:\n- Opened the diff provided in the material for src/cache/store.ts and read the full added block (lines 8-11 of the new file).\n- Read the existing Store.get method shown in the diff context: `return this.items.get(key)` inside a class, confirming it is a plain Map.get lookup keyed by the string argument.\n- Searched the diff for any iteration, deletion, or TTL-check logic (e.g. .delete, .forEach, Date.now, expiry, ttl) in startSweeper's body - none present.\n- Reviewed git blame output supplied for lines 9 of store.ts; it only attributes the line to an uncommitted change with no additional implementation detail, nothing contradicting the diff content.\n\nCould not check:\n- Whether `Store` has any other methods (e.g. delete, evict, sweep) defined elsewhere in the file outside the shown diff context — the diff only shows 3 lines of pre-existing context, so a sweep/evict method could theoretically exist elsewhere in store.ts, but nothing in the provided material indicates this, and startSweeper does not call any such method even if it existed.\n- Whether any TTL/expiry metadata is stored alongside cache entries elsewhere in the codebase — not shown in the diff or git blame material provided.
+
+      GIT BLAME — RUN BY MAD, NOT REPORTED BY A MODEL
+      `git blame` over src/cache/store.ts lines 9-9, run by MAD:
+        00000000 (Not Committed Yet 2026-10-14) 9: export function startSweeper(store: Store): void {
+
+      Commits behind those lines:
+        00000000 — Version of src/cache/store.ts from src/cache/store.ts
+
+  #2  [medium]  src/cache/store.ts:8-9
+      co-discovery: 1/1   verdict: upheld   evidence: assertion only
+      raised by: discovery-1  (source: pool)
+      route: judge (verify-independently) — co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently
+      judge: checked against the code, `git blame` RUN BY MAD over the cited lines — Decided by the check against the code alone: this finding was never argued, so there was no reasoning to weigh against it. Evidence: line-cite.
+
+      startSweeper creates an interval that is never cleared, and the function discards the handle returned by setInterval, causing a resource leak and preventing the sweeper from ever being stopped.
+
+      setInterval(() => store.get("sweep"), 1000) returns a timer handle (NodeJS.Timeout), but startSweeper has a `void` return type and the handle is not captured, stored, or returned. There is no corresponding clearInterval anywhere in the file. Any caller of startSweeper has no way to stop the sweeping, so if the store is ever supposed to be torn down (e.g., in tests, or when a server shuts down, or if multiple stores are created in a long-running process), the interval keeps firing forever, keeping the process alive and leaking a reference to `store` (preventing garbage collection) and the closure forever.
+
+      CHECKED AGAINST THE CODE
+      VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — The diff adds exactly one function to src/cache/store.ts:\n\n```\nexport function startSweeper(store: Store): void {\n  setInterval(() => store.get("sweep"), 1000)\n}\n```\n\nClaim examination:\n\n1. "setInterval(...) returns a timer handle ... but startSweeper has a `void` return type and the handle is not captured, stored, or returned." — Confirmed by reading the diff directly: `setInterval(() => store.get("sweep"), 1000)` is called as a bare statement; its return value (the Timeout handle) is not assigned to any variable, not stored on `store`, and not returned from `startSweeper` (whose signature is declared `: void`). This part of the claim is straightforwardly true from the code as written.\n\n2. "There is no corresponding clearInterval anywhere in the file." — The diff only adds these two lines to the file; no clearInterval call appears anywhere in the diff or in the pre-existing code shown (the file's only other content is the class with a `get` method, visible in the 3 lines of context above the hunk). There's no evidence of a clearInterval elsewhere in the file.\n\n3. "Any caller of startSweeper has no way to stop the sweeping... the interval keeps firing forever, leaking a reference to `store`... forever." — This is a direct, necessary consequence of (1) and (2): since the handle is discarded and the function signature provides no mechanism to retrieve it, no caller anywhere (regardless of how they call this function) could ever call `clearInterval` on this timer. The `store` reference is captured in the arrow-function closure passed to `setInterval`, and since the interval is never cleared, that closure (and therefore `store`) remains reachable by the timer's internal reference for the lifetime of the process (or event loop), which is an accurate description of a classic unreturned-setInterval leak.\n\nI checked whether `Store` or anything elsewhere in the file might expose a way to stop it (e.g., some sweeper-registration field), but the diff shows no such mechanism and the file is tiny (the pre-change file was only the class with `get`). There is nothing in the material contradicting the claim.\n\n`git blame` output confirms these lines are uncommitted/new (added in this change), consistent with the diff; it does not contradict any part of the finding.\n\nConclusion: the code exactly matches the claim. The setInterval call result is discarded, there's no clearInterval, and no caller has any path to stop the timer — a genuine resource leak / inability to tear down the sweeper.\n\nChecks run:\n- Read the diff in the material for src/cache/store.ts, specifically the added startSweeper function (lines +8/+9: 'export function startSweeper(store: Store): void {' and 'setInterval(() => store.get("sweep"), 1000)')\n- Inspected the full diff context (3 lines of pre-existing code) to confirm the file contains no pre-existing clearInterval or handle-storage mechanism that would contradict the claim\n- Reviewed the git blame output provided for lines 8-9, confirming they are uncommitted new lines matching the diff, with no indication of any other modifying commit that might add a clearInterval elsewhere\n\nCould not check:\n- Did not have direct filesystem access to src/cache/store.ts to run git blame or view the full file myself (relied on the diff and the git blame text supplied in the material); could not verify there isn't additional file content outside the diff's visible context that provides a teardown path, though the diff format (3 lines of context above a 'first hunk' plus nothing below) strongly implies the shown context is the entire pre-existing file
+
+      GIT BLAME — RUN BY MAD, NOT REPORTED BY A MODEL
+      `git blame` over src/cache/store.ts lines 8-9, run by MAD:
+        00000000 (Not Committed Yet 2026-10-14) 8: 
+        00000000 (Not Committed Yet 2026-10-14) 9: export function startSweeper(store: Store): void {
+
+      Commits behind those lines:
+        00000000 — Version of src/cache/store.ts from src/cache/store.ts
+
+UNRESOLVED — YOU DECIDE (0)
+  Nothing was left undecided.
+
+TOKENS — turns: 3 | in: 36 | out: 3105 | reasoning: 0 | cache r/w: 3951/10470
+PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).

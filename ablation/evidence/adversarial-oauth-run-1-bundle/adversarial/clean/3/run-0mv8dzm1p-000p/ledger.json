@@ -1,0 +1,44 @@
+{
+  "entries": [
+    {
+      "slot": "discovery-1",
+      "stage": "discover",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 507,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 4216
+      }
+    },
+    {
+      "slot": "discovery-1",
+      "stage": "judge",
+      "attempt": 1,
+      "tokens": {
+        "input": 12,
+        "output": 1133,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 5355
+      }
+    }
+  ],
+  "total": {
+    "input": 24,
+    "output": 1640,
+    "reasoning": 0,
+    "cacheRead": 0,
+    "cacheWrite": 9571
+  },
+  "cap": null,
+  "maxConcurrency": 4,
+  "shares": {
+    "discover": 0.3,
+    "debate": 0.65,
+    "judge": 1
+  },
+  "unknownUsage": [],
+  "stopOnUnknownUsage": false
+}

@@ -1,0 +1,25 @@
+[
+  {
+    "code": "provider-fan-out",
+    "stage": "roster",
+    "message": "This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.",
+    "detail": {
+      "providers": [
+        "anthropic"
+      ],
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ]
+    }
+  },
+  {
+    "code": "blame-unavailable",
+    "stage": "judge",
+    "message": "MAD COULD NOT RUN `git blame`: 1 attempt(s) failed, so those findings were decided without the repository's own record of who last changed the lines they cite. THIS IS NOT \"the history contradicts nothing\" — nothing was read either way. A bad path, a line past the end of a file, an uncommitted line and a shallow clone all land here. Failures: docs/APPROVED-report-no-findings-and-blame-config.ts-first.md:1-1 — git blame failed: fatal: no such path 'docs/APPROVED-report-no-findings-and-blame-config.ts-first.md' in HEAD.",
+    "detail": {
+      "failures": [
+        "docs/APPROVED-report-no-findings-and-blame-config.ts-first.md:1-1 — git blame failed: fatal: no such path 'docs/APPROVED-report-no-findings-and-blame-config.ts-first.md' in HEAD"
+      ]
+    }
+  }
+]

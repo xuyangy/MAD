@@ -86,6 +86,22 @@ async function captured(run: () => Promise<number>): Promise<{ code: number; tex
   }
 }
 
+/**
+ * The production reservation's state and content, read only. Run 1 used it and
+ * it is committed, so a test captures it before it runs and asserts it is
+ * unchanged after: no test modifies, deletes or creates it.
+ */
+async function productionReservation(): Promise<{ state: "absent" } | { state: "file"; content: string } | { state: "other" }> {
+  const path = join(REPO_ROOT, ADVERSARIAL_RUN.reservation)
+  try {
+    const info = await lstat(path)
+    return info.isFile() ? { state: "file", content: await readFile(path, "utf8") } : { state: "other" }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" }
+    throw error
+  }
+}
+
 const PIN = "anthropic/claude-sonnet-5"
 const COINS: CoinFace[] = ["heads", "tails", "heads", "tails"]
 const SLOTS = adversarialSlots(
@@ -328,12 +344,21 @@ describe("stage 1 on the shipped tree", () => {
   /** The committed gate table, run and protocol file, with stand-ins for everything that would touch a host or the repository. */
   const shipped = { gates: undefined, adversarialRun: undefined, protocolV3File: undefined, protocolHash: undefined }
 
-  test("the committed table, run and protocol pass stage 1 for the authorized pin: every check prints PASS and the reservation is made under the stand-in root only", async () => {
+  /**
+   * The shipped tree as it stands after run 1: the committed table, run and protocol file, and the
+   * repository's own reservation seam, which reads the used reservation on disk and at HEAD and never writes.
+   */
+  const shippedTree = () => ({ ...shipped, reservation: gitReservationSeam(boundedGit({ spawn: preflightSpawn, deadlineMs: 60_000, cleanupMs: 5_000 }), REPO_ROOT) })
+
+  test("the committed table, run and protocol refuse stage 1 for the authorized pin: gate 10 is OPEN again and run 1's reservation is used", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     const env = await setup()
-    // Every host start is refused before a spawn, so the run ends once stages 1 and 2 are behind it.
-    const refusing = scriptedHosts({ preSpawn: () => "throw" })
-    const { overrides } = await runnable(env, { ...shipped, startHost: refusing.startHost })
+    const recording = scriptedHosts({ preSpawn: () => "throw" })
+    const { overrides } = await runnable(env, { ...shippedTree(), startHost: recording.startHost })
     const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(1)
     for (const check of [
       "PASS  flags",
       "PASS  --out containment",
@@ -343,44 +368,49 @@ describe("stage 1 on the shipped tree", () => {
       "PASS  disjoint directories",
       "PASS  frozen protocol v3",
       "PASS  gate table committed",
-      "PASS  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)",
+      "FAIL  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)",
       "PASS  OAuth route",
       "PASS  OAuth prepared payloads",
       "PASS  measured host binary",
-      "PASS  authorized adversarial run",
+      "FAIL  authorized adversarial run",
       "PASS  production Tools wiring",
     ]) {
       expect(result.text, check).toContain(check)
     }
     expect(result.text).toContain(`PROTOCOL-mad-evaluation-v3 v3 ${ADVERSARIAL_PROTOCOL.frozenHash}, the hash gate 10's authorization names`)
-    expect(result.text).toContain(`\`/stand-in/bin/opencode\` has sha256 ${MEASURED_HOST.sha256}, the measured build's; read only, not started`)
-    expect(result.text).toContain("gate 10 — adversarial spend authorization — authorization, required for adversarial on route oauth, owner the human budget owner — CLOSED — evidence: the human budget owner's instruction of 2026-10-13")
+    expect(result.text).toContain("gate 10 — adversarial spend authorization — authorization, required for adversarial on route oauth, owner the human budget owner — OPEN — note: Run 1 was authorized on 2026-10-13")
+    expect(result.text).toContain("REFUSED: gate 10 ")
     expect(result.text).toContain("gate 11 — adversarial attempt accounting — engineering, required for adversarial on route oauth, owner story 2-7f2 — CLOSED — evidence: story 2-7f5")
-    expect(result.text).toContain(`the pin ${PIN} is adversarial run 1's roster`)
-    expect(result.text).not.toContain("REFUSED at stage 1")
-    expect(result.text).toContain(`reserved adversarial run 1: ${ADVERSARIAL_RUN.reservation} (never removed)`)
-    const reservation = JSON.parse(await readFile(join(env.reservationRoot, ADVERSARIAL_RUN.reservation), "utf8")) as { pins: string[] }
-    expect(reservation.pins).toEqual([PIN])
-    expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+    const used = "adversarial run 1's one authorization was already used, whether it succeeded, failed or was interrupted"
+    expect(result.text).toContain(`the reservation \`${ADVERSARIAL_RUN.reservation}\` already exists: ${used}`)
+    expect(result.text).toContain(`the reservation \`${ADVERSARIAL_RUN.reservation}\` is committed at HEAD: ${used}`)
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
+    expect(result.text).not.toContain("stage 2 of 4")
+    expect(recording.started).toEqual([])
+    for (const path of [env.out, env.dataRoot, env.reservationRoot]) expect(existsSync(path), path).toBe(false)
+    expect(await productionReservation()).toEqual(before)
   }, 120_000)
 
   test("what the probe expects a refusal to print is what stage 1 prints: every barrier `shippedDecision` derives is in the output", async () => {
     const gate10Open = PAIRED_GATES.map((gate) => (gate.number === 10 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate))
+    // The committed table has gate 10 OPEN; every other case injects it CLOSED, so each tests its own barrier alone.
+    const gate10Closed = PAIRED_GATES.map((gate) => (gate.number === 10 ? { ...gate, status: "CLOSED" as const, evidence: "injected by scripts/adversarial.test.ts" } : gate))
     const unpinned = { ...ADVERSARIAL_RUN, pins: null }
     const unfrozen = join(await mkdtemp(join(tmpdir(), "mad-adversarial-unfrozen-")), "evaluation-protocol-v3.md")
     scratch.push(dirname(unfrozen))
     await writeFile(unfrozen, (await readFile(PROTOCOL_V3_FILE, "utf8")).replace(/^status: frozen$/m, "status: draft"))
     for (const [name, inputs] of [
       ["gate 10 OPEN", { gates: gate10Open }],
-      ["no pin", { run: unpinned }],
+      ["no pin", { gates: gate10Closed, run: unpinned }],
       ["both", { gates: gate10Open, run: unpinned }],
-      ["a pin outside gate 11's scope", { run: { ...ADVERSARIAL_RUN, pins: ["anthropic/claude-opus-5"] } }],
-      ["an unfrozen protocol", { protocolFile: unfrozen }],
-      ["protocol v2", { protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") }],
+      ["a pin outside gate 11's scope", { gates: gate10Closed, run: { ...ADVERSARIAL_RUN, pins: ["anthropic/claude-opus-5"] } }],
+      ["an unfrozen protocol", { gates: gate10Closed, protocolFile: unfrozen }],
+      ["protocol v2", { gates: gate10Closed, protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") }],
     ] as const) {
       const decision = await shippedDecision(inputs)
       if (!decision.spawn) throw new Error(`${name}: no barrier was derived`)
       expect(decision.barriers.length, name).toBeGreaterThan(1)
+      if (name !== "gate 10 OPEN" && name !== "both") expect(decision.barriers.map((barrier) => barrier.name), name).not.toContain("gate 10")
       const env = await setup()
       const { overrides, hosts } = await runnable(env, {
         ...shipped,
@@ -397,10 +427,13 @@ describe("stage 1 on the shipped tree", () => {
   })
 
   test("on the committed table a pin that is not the authorized one refuses at stage 1: no reservation, no host, nothing written", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     expect(ADVERSARIAL_RUN.pins).toEqual([PIN])
     for (const pin of ["anthropic/claude-opus-5", "github-copilot/gpt-5-mini"]) {
       const env = await setup()
-      const { overrides, hosts } = await runnable(env, shipped)
+      const { overrides, hosts } = await runnable(env, shippedTree())
       const result = await captured(() => main(pinnedArgv(env, pin), overrides))
       expect(result.code, pin).toBe(1)
       expect(result.text, pin).toContain("FAIL  authorized adversarial run")
@@ -408,8 +441,9 @@ describe("stage 1 on the shipped tree", () => {
       expect(result.text, pin).toContain("REFUSED at stage 1 (offline checks).")
       expect(result.text, pin).not.toContain("stage 2 of 4")
       expect(hosts.started, pin).toEqual([])
+      expect(result.text, pin).toContain(`the reservation \`${ADVERSARIAL_RUN.reservation}\` already exists`)
       for (const path of [env.out, env.dataRoot, env.reservationRoot]) expect(existsSync(path), `${pin} ${path}`).toBe(false)
-      expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+      expect(await productionReservation(), pin).toEqual(before)
     }
   })
 
@@ -432,6 +466,9 @@ describe("stage 1 on the shipped tree", () => {
   })
 
   test("with every gate CLOSED each pair inside gate 11's evidence scope passes stage 1 and is reserved", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     for (const pin of ["anthropic/claude-sonnet-5", "github-copilot/gpt-5-mini"]) {
       const env = await setup()
       // Every host start is refused before a spawn, so the run ends once stages 1 and 2 are behind it.
@@ -444,6 +481,7 @@ describe("stage 1 on the shipped tree", () => {
       expect(result.text, pin).toContain(`reserved adversarial run 1: ${ADVERSARIAL_RUN.reservation} (never removed)`)
       const reservation = JSON.parse(await readFile(join(env.reservationRoot, ADVERSARIAL_RUN.reservation), "utf8")) as { pins: string[] }
       expect(reservation.pins, pin).toEqual([pin])
+      expect(await productionReservation(), pin).toEqual(before)
     }
   }, 120_000)
 
@@ -1361,6 +1399,9 @@ describe("stage 1 identifies the host binary and ties protocol v3 to gate 10's h
   }
 
   async function refusedBeforeReservation(env: Awaited<ReturnType<typeof setup>>, extra: AdversarialOverrides) {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     const recording = recordingStart()
     const { overrides } = await runnable(env, { ...extra, startHost: recording.startHost })
     const result = await captured(() => main(argvFor(env), overrides))
@@ -1369,11 +1410,14 @@ describe("stage 1 identifies the host binary and ties protocol v3 to gate 10's h
     expect(result.text).not.toContain("stage 2 of 4")
     expect(recording.starts).toEqual([])
     for (const path of [env.reservationRoot, env.out, env.dataRoot]) expect(existsSync(path), path).toBe(false)
-    expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+    expect(await productionReservation()).toEqual(before)
     return result
   }
 
   test("a measured binary and the authorized hash pass, print the binary, its sha256 and the hash, and stage 2 reserves under the stand-in root", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     const env = await setup()
     const frozen = await frozenV3Copy(scratch)
     const binary = measuredBinary("/stand-in/measured/opencode")
@@ -1393,6 +1437,7 @@ describe("stage 1 identifies the host binary and ties protocol v3 to gate 10's h
     expect(result.text).toContain(`${frozen.hash}, the hash gate 10's authorization names`)
     expect(result.text).not.toContain("REFUSED at stage 1")
     expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
+    expect(await productionReservation()).toEqual(before)
     // Identified once at stage 1; the stand-in start is what stage 4 would hand the spawn-time recheck to.
     expect(binary.reads).toEqual(["/stand-in/measured/opencode"])
   }, 120_000)

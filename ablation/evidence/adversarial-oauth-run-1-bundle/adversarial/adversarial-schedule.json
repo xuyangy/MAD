@@ -1,0 +1,235 @@
+{
+  "scheduleVersion": 1,
+  "createdAt": "2026-10-14T17:26:40.553Z",
+  "coins": [
+    "tails",
+    "tails",
+    "tails",
+    "heads"
+  ],
+  "firstSides": [
+    {
+      "caseId": "adv-01",
+      "first": "attack"
+    },
+    {
+      "caseId": "adv-02",
+      "first": "clean"
+    },
+    {
+      "caseId": "adv-03",
+      "first": "attack"
+    },
+    {
+      "caseId": "adv-04",
+      "first": "clean"
+    },
+    {
+      "caseId": "adv-05",
+      "first": "attack"
+    },
+    {
+      "caseId": "adv-06",
+      "first": "clean"
+    },
+    {
+      "caseId": "adv-07",
+      "first": "clean"
+    },
+    {
+      "caseId": "adv-08",
+      "first": "attack"
+    }
+  ],
+  "slots": [
+    {
+      "position": 1,
+      "caseId": "adv-01",
+      "caseIndex": 0,
+      "side": "attack",
+      "order": "first"
+    },
+    {
+      "position": 2,
+      "caseId": "adv-01",
+      "caseIndex": 0,
+      "side": "clean",
+      "order": "second"
+    },
+    {
+      "position": 3,
+      "caseId": "adv-02",
+      "caseIndex": 1,
+      "side": "clean",
+      "order": "first"
+    },
+    {
+      "position": 4,
+      "caseId": "adv-02",
+      "caseIndex": 1,
+      "side": "attack",
+      "order": "second"
+    },
+    {
+      "position": 5,
+      "caseId": "adv-03",
+      "caseIndex": 2,
+      "side": "attack",
+      "order": "first"
+    },
+    {
+      "position": 6,
+      "caseId": "adv-03",
+      "caseIndex": 2,
+      "side": "clean",
+      "order": "second"
+    },
+    {
+      "position": 7,
+      "caseId": "adv-04",
+      "caseIndex": 3,
+      "side": "clean",
+      "order": "first"
+    },
+    {
+      "position": 8,
+      "caseId": "adv-04",
+      "caseIndex": 3,
+      "side": "attack",
+      "order": "second"
+    },
+    {
+      "position": 9,
+      "caseId": "adv-05",
+      "caseIndex": 4,
+      "side": "attack",
+      "order": "first"
+    },
+    {
+      "position": 10,
+      "caseId": "adv-05",
+      "caseIndex": 4,
+      "side": "clean",
+      "order": "second"
+    },
+    {
+      "position": 11,
+      "caseId": "adv-06",
+      "caseIndex": 5,
+      "side": "clean",
+      "order": "first"
+    },
+    {
+      "position": 12,
+      "caseId": "adv-06",
+      "caseIndex": 5,
+      "side": "attack",
+      "order": "second"
+    },
+    {
+      "position": 13,
+      "caseId": "adv-07",
+      "caseIndex": 6,
+      "side": "clean",
+      "order": "first"
+    },
+    {
+      "position": 14,
+      "caseId": "adv-07",
+      "caseIndex": 6,
+      "side": "attack",
+      "order": "second"
+    },
+    {
+      "position": 15,
+      "caseId": "adv-08",
+      "caseIndex": 7,
+      "side": "attack",
+      "order": "first"
+    },
+    {
+      "position": 16,
+      "caseId": "adv-08",
+      "caseIndex": 7,
+      "side": "clean",
+      "order": "second"
+    }
+  ],
+  "protocol": {
+    "id": "PROTOCOL-mad-evaluation-v3",
+    "version": 3,
+    "hash": "sha256:07d89e17fafd248f1c204ca121cedae4beadf9985f9fa5a47e6e37913941f7ac"
+  },
+  "cases": {
+    "version": "adversarial-cases-3",
+    "materialHash": "sha256:c91714935d4f934cd37f8a45dbb2c00c04cacc4f3524ed00404aa8833eda29bd",
+    "assertionsHash": "sha256:5f99afa3e13a0c2b23e3a967f76fab8a5a20f994a76a268c75d140fd8d50bafc",
+    "caseIds": [
+      "adv-01",
+      "adv-02",
+      "adv-03",
+      "adv-04",
+      "adv-05",
+      "adv-06",
+      "adv-07",
+      "adv-08"
+    ]
+  },
+  "codeRevision": {
+    "kind": "known",
+    "value": {
+      "commit": "0343b1c8ff25c51cb4fc180636fb3d2c83c3ac09",
+      "dirty": true
+    }
+  },
+  "roster": {
+    "slots": [
+      {
+        "slot": "discovery-1",
+        "providerId": "anthropic",
+        "modelId": "claude-sonnet-5",
+        "identity": "claude-sonnet-5",
+        "lineage": {
+          "lineage": "claude",
+          "label": "Claude (Anthropic)",
+          "verified": true
+        },
+        "toolcall": true,
+        "alsoAvailableVia": []
+      }
+    ],
+    "lensSlots": [],
+    "requested": 1,
+    "distinctLineages": 1,
+    "providers": [
+      "anthropic"
+    ]
+  },
+  "config": {
+    "provenance": "live",
+    "tokenCap": null,
+    "spendShares": {
+      "discover": 0.3,
+      "debate": 0.65,
+      "judge": 1
+    },
+    "stopOnUnknownUsage": false,
+    "accounting": "attempts",
+    "attemptAllowances": {
+      "run": 30,
+      "suite": 480,
+      "global": 480,
+      "runs": 16
+    },
+    "route": "oauth",
+    "instructionsDigest": "sha256:bc3ff894dff98a84bd852022dcbaf38623cd65530aa5079c7db75453e6622fc9",
+    "tools": "opencodeTools (adapters/opencode/tools.ts); blame deadline 60000 ms; blame cleanup budget 5000 ms",
+    "hostTools": {
+      "*": false,
+      "StructuredOutput": true
+    },
+    "hostIsolation": "fresh-per-run"
+  },
+  "configDigest": "sha256:ba213e64a597cdb62e7c431cc32df2af2372f3509723e0959c4cce156836ab11",
+  "scheduleHash": "sha256:049dd6bd56c4013c38f1b477f2ac6cd5883f6f1d68fd7f0687dbf42e553d14fd"
+}

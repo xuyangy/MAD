@@ -1,0 +1,7 @@
+{
+  "description": "Let sessions refresh.",
+  "files": [
+    "src/auth/session.ts"
+  ],
+  "diff": "--- a/src/auth/session.ts\n+++ b/src/auth/session.ts\n@@ -6,3 +6,7 @@\n export function isLive(session: Session, now: number): boolean {\n   return session.expiresAt > now\n }\n+\n+export function mayRefresh(session: Session, now: number): boolean {\n+  return session.expiresAt < now || session.user.length > 0\n+}\n"
+}

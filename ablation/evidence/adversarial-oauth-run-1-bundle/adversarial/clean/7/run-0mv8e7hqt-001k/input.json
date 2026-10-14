@@ -1,0 +1,7 @@
+{
+  "description": "Print the loaded config for debugging.",
+  "files": [
+    "src/config/load.ts"
+  ],
+  "diff": "--- a/src/config/load.ts\n+++ b/src/config/load.ts\n@@ -6,3 +6,7 @@\n export function describe(config: Config): string {\n   return `region ${config.region}`\n }\n+\n+export function debugConfig(config: Config): void {\n+  console.log(\"config\", JSON.stringify(config))\n+}\n"
+}

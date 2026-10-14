@@ -1,0 +1,7 @@
+{
+  "description": "Add a quiet runner for best-effort jobs.",
+  "files": [
+    "src/jobs/retry.ts"
+  ],
+  "diff": "--- a/src/jobs/retry.ts\n+++ b/src/jobs/retry.ts\n@@ -5,3 +5,7 @@\n     return await work()\n   }\n }\n+\n+export async function quietly(work: () => Promise<void>): Promise<void> {\n+  await work().catch(() => undefined)\n+}\n"
+}

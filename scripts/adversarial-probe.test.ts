@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { z, type ZodType } from "zod"
@@ -83,7 +83,25 @@ async function tempDir(): Promise<string> {
   return dir
 }
 
+/**
+ * The production reservation's state and content, read only. Run 1 used it and
+ * it is committed, so a test captures it before it runs and asserts it is
+ * unchanged after: no test modifies, deletes or creates it.
+ */
+async function productionReservation(): Promise<{ state: "absent" } | { state: "file"; content: string } | { state: "other" }> {
+  const path = join(REPO_ROOT, ADVERSARIAL_RUN.reservation)
+  try {
+    const info = await lstat(path)
+    return info.isFile() ? { state: "file", content: await readFile(path, "utf8") } : { state: "other" }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" }
+    throw error
+  }
+}
+
 const PIN = "anthropic/claude-sonnet-5"
+/** The committed table with gate 10 CLOSED again, injected: the table as it stood while run 1's authorization was unused. */
+const gate10Closed = PAIRED_GATES.map((gate) => (gate.number === 10 ? { ...gate, status: "CLOSED" as const, evidence: "injected by scripts/adversarial-probe.test.ts" } : gate))
 const verdictOf = (claims: readonly Claim[], id: string) => claims.find((entry) => entry.id === id)?.verdict
 const whyOf = (claims: readonly Claim[], id: string) => claims.find((entry) => entry.id === id)?.why ?? ""
 
@@ -666,8 +684,14 @@ describe("whether the shipped command may be started", () => {
   const unpinned: AdversarialRun = { ...ADVERSARIAL_RUN, pins: null }
   const names = (decision: Awaited<ReturnType<typeof shippedDecision>>) => (decision.spawn ? decision.barriers.map((barrier) => barrier.name) : null)
 
-  test("on the committed table, run and protocol nothing refuses, so it is not started", async () => {
+  test("on the committed table gate 10 is OPEN (its run-1 authorization is used), so the probe's one barrier is gate 10; the launcher's stage 1 also names the used reservation", async () => {
     const decision = await shippedDecision()
+    expect(names(decision)).toEqual(["stage 1", "gate 10"])
+    if (decision.spawn) expect(decision.barriers[1]!.text).toBe("gate 10 (adversarial spend authorization) is OPEN")
+  })
+
+  test("with gate 10 CLOSED, injected, and the committed run and protocol, nothing refuses, so it is not started", async () => {
+    const decision = await shippedDecision({ gates: gate10Closed })
     expect(decision.spawn).toBe(false)
     if (!decision.spawn) {
       expect(decision.why).toContain("no offline refusal is established")
@@ -680,12 +704,12 @@ describe("whether the shipped command may be started", () => {
     const open = await shippedDecision({ gates: gate10Open })
     expect(names(open)).toEqual(["stage 1", "gate 10"])
     if (open.spawn) expect(open.barriers[1]!.text).toBe("gate 10 (adversarial spend authorization) is OPEN")
-    const noPin = await shippedDecision({ run: unpinned })
+    const noPin = await shippedDecision({ gates: gate10Closed, run: unpinned })
     expect(names(noPin)).toEqual(["stage 1", "adversarial run"])
     if (noPin.spawn) expect(noPin.barriers[1]!.text).toBe("adversarial run 1 has no roster pin")
     expect(names(await shippedDecision({ gates: gate10Open, run: unpinned }))).toEqual(["stage 1", "gate 10", "adversarial run"])
     // A pin outside gate 11's evidence refuses too.
-    expect(names(await shippedDecision({ run: { ...ADVERSARIAL_RUN, pins: ["openai/gpt-6-sol"] } }))).toEqual(["stage 1", "adversarial run"])
+    expect(names(await shippedDecision({ gates: gate10Closed, run: { ...ADVERSARIAL_RUN, pins: ["openai/gpt-6-sol"] } }))).toEqual(["stage 1", "adversarial run"])
   })
 
   test("a protocol file that is unreadable, edited, malformed or not version 3 is a barrier with the reader's reason", async () => {
@@ -703,14 +727,14 @@ describe("whether the shipped command may be started", () => {
       [malformed, "is not a frozen protocol"],
       [noVersion, "is not a frozen protocol"],
     ] as const) {
-      const decision = await shippedDecision({ protocolFile })
+      const decision = await shippedDecision({ gates: gate10Closed, protocolFile })
       expect(names(decision), protocolFile).toEqual(["stage 1", "the protocol file"])
       if (decision.spawn) {
         expect(decision.barriers[1]!.text).toBe("protocol v3 is not frozen")
         expect(decision.barriers[1]!.why, protocolFile).toContain(why)
       }
     }
-    const v2 = await shippedDecision({ protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") })
+    const v2 = await shippedDecision({ gates: gate10Closed, protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") })
     expect(names(v2)).toEqual(["stage 1", "the protocol version"])
     if (v2.spawn) {
       expect(v2.barriers[1]!.text).toBe("the adversarial suite on the OAuth route needs protocol v3")
@@ -1475,8 +1499,12 @@ describe("main", () => {
   }, 120_000)
 
   test("with no offline refusal, or a decision that throws, the shipped command is never started and its row is UNPROBED", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     for (const [shippedDecisionSeam, why] of [
-      [undefined, "no offline refusal is established"],
+      // The committed table refuses on gate 10, so the no-refusal decision is taken over gate 10 CLOSED, injected.
+      [async () => shippedDecision({ gates: gate10Closed }), "no offline refusal is established"],
       [
         async () => {
           throw new Error("table unreadable")
@@ -1500,18 +1528,61 @@ describe("main", () => {
       expect(evidence.shippedCommand.claims[0].why, why).toContain(why)
       // Nothing of the shipped command's exists: neither root, and no reservation under the stand-in repository.
       for (const path of [join(dir, "out", "shipped", "out"), join(dir, "out", "shipped", "data"), join(dir, "repo", ADVERSARIAL_RUN.reservation)]) expect(existsSync(path), path).toBe(false)
-      expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+      expect(await productionReservation(), why).toEqual(before)
     }
   }, 240_000)
 
+  test("on the committed tree (no decision injected) the probe derives gate 10 as its barrier and starts only the recording stand-in, once, with its argv", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
+    const calls: (readonly string[])[] = []
+    const { seams, argv, dir } = await commandSeams({
+      // The default decision reads the committed table; the recording stand-in is the only command started.
+      shippedDecision: undefined,
+      shipped: async (shippedArgv) => {
+        calls.push([...shippedArgv])
+        return { exitCode: 1, output: "REFUSED at stage 1\ngate 10 (adversarial spend authorization) is OPEN", timedOut: false }
+      },
+      scenarios: [spec("integrity-before-start")],
+    })
+    const expected = await shippedDecision()
+    expect(expected.spawn ? expected.barriers.map((barrier) => barrier.name) : null).toEqual(["stage 1", "gate 10"])
+    expect(await main(argv, seams)).toBe(0)
+    expect(calls).toEqual([
+      [
+        "--live",
+        "--provider-mode",
+        "oauth",
+        "--oauth-provider",
+        ANTHROPIC.providerId,
+        "--pin",
+        `${ANTHROPIC.providerId}/${ANTHROPIC.modelId}`,
+        "--oauth-prepared",
+        join(dir, "prepared"),
+        "--oauth-data-root",
+        join(dir, "out", "shipped", "data"),
+        "--out",
+        join(dir, "out", "shipped", "out"),
+      ],
+    ])
+    const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
+    expect(evidence.shippedCommand.claims.map((entry: Claim) => `${entry.id}:${entry.verdict}`)).toEqual(["shipped-refuses:HOLDS", "shipped-writes-nothing:HOLDS"])
+    expect(evidence.shippedCommand.claims[0].claim).toContain("exits 1 at stage 1 naming gate 10")
+    expect(await productionReservation()).toEqual(before)
+  }, 120_000)
+
   test("a stand-in decision to start, with no stand-in command, starts nothing: the real command is never its fallback", async () => {
+    const before = await productionReservation()
+    // Run 1's reservation is committed, so an unchanged state is a regular file and the comparison is never vacuous.
+    expect(before.state).toBe("file")
     const { seams, argv, dir } = await commandSeams({ shipped: undefined, scenarios: [spec("integrity-before-start")] })
     expect(await main(argv, seams)).toBe(0)
     const evidence = JSON.parse(await readFile(join(dir, "out", EVIDENCE_FILE), "utf8")) as Record<string, any>
     expect(evidence.shippedCommand.claims.map((entry: Claim) => entry.verdict)).toEqual(["UNPROBED", "UNPROBED"])
     expect(evidence.shippedCommand.claims[0].why).toContain("a stand-in decision never starts the real command")
     for (const path of [join(dir, "out", "shipped", "out"), join(dir, "out", "shipped", "data")]) expect(existsSync(path), path).toBe(false)
-    expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+    expect(await productionReservation()).toEqual(before)
   }, 120_000)
 
   test("a probe past its own deadline writes no evidence and exits 1", async () => {

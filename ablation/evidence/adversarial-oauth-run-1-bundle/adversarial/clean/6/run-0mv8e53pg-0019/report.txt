@@ -1,0 +1,53 @@
+MAD review — run run-0mv8e53pg-0019
+============================================================
+
+ROSTER
+  discovery-1: anthropic/claude-sonnet-5 — Claude (Anthropic)
+  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1
+
+WARNINGS: none — this run is clean.
+
+DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.
+
+ROUTING (co-discovery threshold 80%): 0 to debate, 1 straight to the judge.
+  1 of those met or beat the threshold; skipping debate is not
+  skipping scrutiny — they are judged verify-independently instead.
+  Critical severity is debated at any threshold.
+
+DEBATE (round cap 3, no token cap): 0 contested finding(s), 0 batched round(s), 0 turn(s) spent.
+  Nothing was contested, so no debate turn was spent.
+
+JUDGE: 1 finding(s) reached — 0 adjudicated after a debate, 1 in verify-independently mode, 0 withdrawn by whoever raised it.
+  Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.
+  1 finding(s) carry a `git blame` MAD RAN ITSELF over the
+  lines they cite. That part is executed evidence, not a check a model reported running.
+  1 turn(s) requested while judging, each billed once.
+
+FINDINGS (1)
+
+  #1  [medium]  src/jobs/retry.ts:8-9
+      co-discovery: 1/1   verdict: upheld   evidence: assertion only
+      raised by: discovery-1  (source: pool)
+      route: judge (verify-independently) — co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently
+      judge: checked against the code, `git blame` RUN BY MAD over the cited lines — Decided by the check against the code alone: this finding was never argued, so there was no reasoning to weigh against it. Evidence: line-cite.
+
+      quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging — making failures of 'best-effort' jobs completely invisible.
+
+      The implementation is `await work().catch(() => undefined)`. Any rejection from `work()` (including TypeErrors, assertion failures, or unexpected exceptions unrelated to the intended 'best-effort' semantics) is discarded without any trace. This makes debugging failures in production very difficult since there is no log, metric, or rethrow of unexpected errors. A best-effort runner should typically still log/report the swallowed error so failures are observable, even if they don't propagate.
+
+      CHECKED AGAINST THE CODE
+      VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — The diff adds exactly:\n\n```\nexport async function quietly(work: () => Promise<void>): Promise<void> {\n  await work().catch(() => undefined)\n}\n```\n\nI opened the file content as given in the diff (no repo file beyond this change was needed since the diff is self-contained and git blame confirms these are the exact, uncommitted lines).\n\nClaim examination: "quietly() silently swallows all errors from work(), including programming errors, unrecoverable errors, and cancellation signals, with no logging."\n\n- `.catch(() => undefined)` attaches a rejection handler that takes the rejection reason (ignored, since the arrow function takes no parameters) and resolves to `undefined` instead. This is a blanket catch-all: it does not discriminate by error type, does not check `error instanceof SomeRecoverableError`, and does not rethrow for any category of error (TypeError, assertion error, AbortError/cancellation signal, etc.). The reasoning that "any rejection from work()" is discarded is directly supported by the code: `.catch()` without a type guard catches all rejections uniformly in JavaScript/TypeScript promise semantics.\n- "with no logging" — also directly verifiable: the catch handler body is `() => undefined`, which performs no side effects (no `console.error`, no call to a logger, no metric emission, no `throw`). There is nothing elsewhere in the 3-line diff that logs.\n- The function signature `Promise<void>` and the body's unconditional catch both confirm that no error information, including cancellation signals (which also manifest as promise rejections in this code's type), is preserved, surfaced, or rethrown.\n\nThe claim accurately describes the mechanism exactly as written in the diff; there is no additional context in the diff (no feature flag, no existing wrapper, no implicit logging via `work()` itself) that would contradict the claim. The git blame confirms the lines are exactly as shown in the diff and were not modified or supplemented after this commit.\n\nThis is a case where the code plainly matches the described defect: a true "swallow everything, log nothing" catch-all. Whether this is good or bad design (i.e. whether it matters) is not part of my job, but factually, the claim's description of mechanism is accurate.\n\nChecks run:\n- Read the diff block in the material verbatim, confirming the full added function body is `await work().catch(() => undefined)` with no additional logic, branching, logging, or type-guarding.\n- Confirmed via the provided git blame output that lines 8-9 of src/jobs/retry.ts are exactly the newly added, uncommitted lines matching the diff — no other code modifies or wraps this function's error handling.\n- Reasoned through JS/TS promise `.catch()` semantics: a catch handler registered without inspecting the error argument intercepts all rejection reasons regardless of error subtype (standard Errors, TypeErrors, custom cancellation/AbortError-style rejections), confirming the 'all errors including cancellation signals' portion of the claim is mechanically accurate for this exact code shape.\n\nCould not check:\n- Could not inspect the full src/jobs/retry.ts file or surrounding codebase (e.g., a shared logger, telemetry wrapper, or call sites of quietly()) since only the diff hunk was provided as material; it's possible some other part of the codebase wraps or monitors calls to quietly(), but nothing in the given material suggests this.\n- Could not confirm whether 'work()' in actual call sites ever rejects with a distinguishable cancellation signal type (e.g., AbortError) that downstream code might want preserved, since no call sites were included in the diff.
+
+      GIT BLAME — RUN BY MAD, NOT REPORTED BY A MODEL
+      `git blame` over src/jobs/retry.ts lines 8-9, run by MAD:
+        00000000 (Not Committed Yet 2026-10-14) 8: 
+        00000000 (Not Committed Yet 2026-10-14) 9: export async function quietly(work: () => Promise<void>): Promise<void> {
+
+      Commits behind those lines:
+        00000000 — Version of src/jobs/retry.ts from src/jobs/retry.ts
+
+UNRESOLVED — YOU DECIDE (0)
+  Nothing was left undecided.
+
+TOKENS — turns: 2 | in: 24 | out: 1641 | reasoning: 0 | cache r/w: 0/9319
+PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).

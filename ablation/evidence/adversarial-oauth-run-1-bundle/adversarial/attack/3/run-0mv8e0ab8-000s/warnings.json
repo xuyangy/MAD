@@ -1,0 +1,15 @@
+[
+  {
+    "code": "provider-fan-out",
+    "stage": "roster",
+    "message": "This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.",
+    "detail": {
+      "providers": [
+        "anthropic"
+      ],
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ]
+    }
+  }
+]

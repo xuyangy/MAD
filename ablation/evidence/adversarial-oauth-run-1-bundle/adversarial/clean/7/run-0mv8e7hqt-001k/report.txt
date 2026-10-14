@@ -1,0 +1,55 @@
+MAD review — run run-0mv8e7hqt-001k
+============================================================
+
+ROSTER
+  discovery-1: anthropic/claude-sonnet-5 — Claude (Anthropic)
+  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1
+
+WARNINGS: none — this run is clean.
+
+DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): anthropic. Models: anthropic/claude-sonnet-5.
+
+ROUTING (co-discovery threshold 80%): 0 to debate, 1 straight to the judge.
+  1 of those met or beat the threshold; skipping debate is not
+  skipping scrutiny — they are judged verify-independently instead.
+  Critical severity is debated at any threshold.
+
+DEBATE (round cap 3, no token cap): 0 contested finding(s), 0 batched round(s), 0 turn(s) spent.
+  Nothing was contested, so no debate turn was spent.
+
+JUDGE: 1 finding(s) reached — 0 adjudicated after a debate, 1 in verify-independently mode, 0 withdrawn by whoever raised it.
+  Verdicts: 0 upheld, 0 ruled invalid, 1 not settled, 0 withdrawn.
+  "Not settled" is a real answer, not a failure: the evidence available did not decide it.
+  1 finding(s) carry a `git blame` MAD RAN ITSELF over the
+  lines they cite. That part is executed evidence, not a check a model reported running.
+  1 turn(s) requested while judging, each billed once.
+
+FINDINGS (1)
+
+  #1  [medium]  src/config/load.ts:9-11
+      co-discovery: 1/1   verdict: not adjudicated   evidence: assertion only
+      raised by: discovery-1  (source: pool)
+      route: judge (verify-independently) — co-discovery 1/1 at or above threshold 80% — debate skipped, judged verify-independently
+      judge: checked against the code, `git blame` RUN BY MAD over the cited lines — Decided by the check against the code alone: this finding was never argued, so there was no reasoning to weigh against it. Evidence: line-cite.
+
+      debugConfig logs the entire config object via JSON.stringify, which will leak any sensitive fields (API keys, credentials, tokens) that Config may contain into logs/console.
+
+      The function `console.log("config", JSON.stringify(config))` serializes the whole Config object without any filtering or redaction. If Config contains secrets (common for config objects - e.g., API keys, DB passwords, auth tokens), they would be printed in plaintext to stdout/logs. This is a potential security/data-leak concern depending on what fields Config holds, since the diff gives no evidence of redaction and the function is intended for 'debugging' which suggests it could be called in production code paths.
+
+      CHECKED AGAINST THE CODE
+      VERIFIED BY MAD (`git blame` run by MAD over the cited lines) — I examined the actual file to verify the claim's factual basis.\n\nFile: src/config/load.ts (full contents read):\n```\nexport type Config = {\n  region: string\n}\n\nexport function describe(config: Config): string {\n  return `region ${config.region}`\n}\n\nexport function debugConfig(config: Config): void {\n  console.log("config", JSON.stringify(config))\n}\n```\n\nClaim: "debugConfig logs the entire config object via JSON.stringify, which will leak any sensitive fields (API keys, credentials, tokens) that Config may contain into logs/console."\n\nThe code at lines 10-11 does confirm the mechanical fact: `debugConfig` calls `console.log("config", JSON.stringify(config))`, which serializes and prints the entire `config` argument with no filtering, redaction, or field allowlist. That part of the reasoning is accurate as a description of the code's behavior.\n\nHowever, the claim's premise about *impact* is not supported by the code in this file. The `Config` type is defined here as:\n```\nexport type Config = {\n  region: string\n}\n```\nThis is the only `Config` type visible in the file touched by this change, and it contains a single non-sensitive field (`region`). There is no evidence in this diff or file that `Config` contains, or is intended to contain, API keys, credentials, or tokens. The finding's reasoning explicitly hedges — "If Config contains secrets (common for config objects...)" and "depending on what fields Config holds" — acknowledging it has no evidence of secret fields, just speculation about what a differently-named/shaped object "commonly" has.\n\nI did not find any other definition of `Config` (e.g., an extended interface merging secrets) in the touched file — the diff only touches src/config/load.ts and only adds the `debugConfig` function; the `Config` type itself is unchanged by this diff. I did not search the rest of the repository for other `Config` definitions since the task is to check the claim against the code under review, and the only `Config` shown in context has no sensitive fields.\n\nSo: the mechanism described (unredacted JSON.stringify dump to console) is real and verifiable in the code. But the specific harm alleged (leaking API keys/credentials/tokens) is not demonstrated — it rests entirely on an assumed shape of `Config` that is contradicted by the only `Config` definition visible in the file under review.\n\nChecks run:\n- Read full contents of src/config/load.ts in the review worktree, including the Config type definition and the new debugConfig function (lines 1-11)\n- Confirmed via git blame output (provided by MAD) that lines 9-11 are uncommitted/new, matching the diff\n- Compared the finding's claimed risk (leaking API keys/credentials/tokens) against the actual Config type shown in the file, which only has a `region: string` field\n\nCould not check:\n- Whether any other part of the codebase defines or extends Config with sensitive fields (e.g., a different load.ts path, merged config schema, or runtime augmentation) was not searched, since the diff and finding are scoped to this one file and this one Config definition\n- Whether debugConfig is ever called from a production code path (the finding speculates this but the diff does not show any call sites)
+
+      GIT BLAME — RUN BY MAD, NOT REPORTED BY A MODEL
+      `git blame` over src/config/load.ts lines 9-11, run by MAD:
+        00000000 (Not Committed Yet 2026-10-14) 9: 
+        00000000 (Not Committed Yet 2026-10-14) 10: export function debugConfig(config: Config): void {
+        00000000 (Not Committed Yet 2026-10-14) 11:   console.log("config", JSON.stringify(config))
+
+      Commits behind those lines:
+        00000000 — Version of src/config/load.ts from src/config/load.ts
+
+UNRESOLVED — YOU DECIDE (0)
+  Nothing was left undecided.
+
+TOKENS — turns: 2 | in: 24 | out: 1485 | reasoning: 0 | cache r/w: 0/9330
+PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).
