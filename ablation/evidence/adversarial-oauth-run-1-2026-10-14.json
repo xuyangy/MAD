@@ -2,7 +2,7 @@
  "kind": "MEASURED RUNTIME CASE — story 2-7g's sixteen live adversarial runs on the oauth route, run 1: every slot completed with no halt and no runner stop; complete",
  "story": "2-7g",
  "run": 1,
- "status": "COMPLETE (no halt, no stop): 16 of 16 slots completed; the launcher exited 0 and printed `complete: true` (console); 54 of 480 admitted attempts issued, all settled; nothing re-run",
+ "status": "COMPLETE (no halt, no stop): 16 of 16 slots completed; the launcher printed `complete: true` and the execution harness reported exit status 0 (console); 54 of 480 admitted attempts issued, all settled; nothing re-run",
  "authorization": "gate 10, CLOSED at fe896aa on the human budget owner's instruction of 2026-10-13, typed by them as the argument of `/bmad-build`: \"2-7g — I close gate 10, pin anthropic/claude-sonnet-5, and freeze evaluation-protocol-v3.md; proceed with the sixteen live adversarial runs\"; under protocol v3 (_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v3.md, frozen_hash sha256:07d89e17fafd248f1c204ca121cedae4beadf9985f9fa5a47e6e37913941f7ac); gate table blob fb79d8e6337388139b15bdc4e36c2baa9bf6ca3a, as the reservation records it. The authorization covered run 1 once and is spent; gate 10 is OPEN again",
  "reservation": {
   "path": "ablation/evidence/adversarial-oauth-run-1.reservation",
@@ -14,7 +14,7 @@
   "path": "ablation/evidence/adversarial-oauth-run-1-console.txt",
   "sha256": "241c5d5ee7de2571b1ce8fc1948535a7255580ae18ac1e27ec45aaa051c88182",
   "lines": 78,
-  "what": "the live run's stdout and stderr, copied byte for byte; its first line is the package script's echo of the argv above. It is the source for the exit status and for `complete: true`",
+  "what": "the execution console transcript, copied byte for byte: its first line is the package script's echo of the argv above; the launcher's stdout and stderr follow, including its `complete: true` status line; its last line is the exit status the execution harness reported, which is harness metadata, not launcher output",
   "preparedPayloads": {
    "anthropicAuthTree": "bdced1b7417dceae5b74e4c935b8794dc738c80416aa8ffc88cf70d16cf27f1a",
    "configSeedTree": "ed93593910767097b1e6ffd2e4ae6ce9958b7333e536d2f168f6ec9c553d7151",

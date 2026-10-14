@@ -478,7 +478,8 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       "another model on a measured provider are outside it",
       "rests on a scripted test at the gate",
       "Both stay UNPROBED on a real host.",
-      "The launcher's 120,000 ms turn deadline was not run on a real host.",
+      "Gate 11's zero-bill probe used a shortened 5,000 ms deadline; it did not exercise expiry of the launcher's 120,000 ms deadline.",
+      "Run 1 used the configured 120,000 ms limit and completed without a deadline stop; that does not establish behaviour when that limit expires or whether the provider's work stops when the wait ends.",
       "the prepared payloads and the host binary's hash at stage 1, before the reservation, the binary's hash again before each spawn, and the host's reported version after the spawn and before it is used; `gatePreflight` checks none of them",
     ]) {
       expect(item(3), phrase).toContain(phrase)

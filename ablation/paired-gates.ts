@@ -703,8 +703,10 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "scripts/adversarial.test.ts, scripts/adversarial-probe.test.ts",
     note:
       "Not covered: openai on any model, github-copilot/gpt-6-luna and any other copilot model served over `/responses`, " +
-      "and any other pin, build or payload. The launcher's 120,000 ms turn deadline was not run on a real host, so neither " +
-      "its adequacy for the suite's turns nor whether the provider's work stops when the wait ends is established. The " +
+      "and any other pin, build or payload. Gate 11's zero-bill probe used a shortened 5,000 ms deadline; it did not exercise " +
+      "expiry of the launcher's 120,000 ms deadline. Run 1 used the configured 120,000 ms limit and completed without a " +
+      "deadline stop; that does not establish behaviour when that limit expires or whether the provider's work stops when " +
+      "the wait ends. The " +
       "launcher changes of stories 2-7f3 and 2-7f4 came after the measurement and were not measured. Nothing here says what " +
       "a real provider, account, cache or quota does",
   },

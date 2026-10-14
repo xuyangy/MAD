@@ -681,7 +681,8 @@ describe("the adversarial phase of the gate table", () => {
     // The note names what the closure does not cover.
     for (const text of [
       "openai on any model, github-copilot/gpt-6-luna and any other copilot model served over `/responses`",
-      "The launcher's 120,000 ms turn deadline was not run on a real host",
+      "Gate 11's zero-bill probe used a shortened 5,000 ms deadline; it did not exercise expiry of the launcher's 120,000 ms deadline",
+      "Run 1 used the configured 120,000 ms limit and completed without a deadline stop",
       "The launcher changes of stories 2-7f3 and 2-7f4 came after the measurement and were not measured",
       "Nothing here says what a real provider, account, cache or quota does",
     ]) {

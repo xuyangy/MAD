@@ -23,7 +23,7 @@ none may be inferred from it.
 
 ## Sources
 
-Two sources are cited, by name, beside each figure:
+Three sources are cited, by name, beside each figure:
 
 - **The reader output**,
   [`evidence/adversarial-oauth-run-1-eval-read.txt`](evidence/adversarial-oauth-run-1-eval-read.txt),
@@ -33,9 +33,10 @@ Two sources are cited, by name, beside each figure:
   [`evidence/adversarial-oauth-run-1-2026-10-14.json`](evidence/adversarial-oauth-run-1-2026-10-14.json),
   cited by field (`status`, `console`, `host`, `roster`, `attempts`, `hostRecords`, `warnings`,
   `provenance`, `billing`), for facts the reader does not print.
-- **The launcher's console output**,
-  [`evidence/adversarial-oauth-run-1-console.txt`](evidence/adversarial-oauth-run-1-console.txt),
-  the source for the exit status and for `complete: true`.
+- **The execution console transcript**,
+  [`evidence/adversarial-oauth-run-1-console.txt`](evidence/adversarial-oauth-run-1-console.txt):
+  the source for `complete: true`, which the launcher printed, and for the exit status, which the
+  execution harness reported.
 
 Every figure is printed by the reader or recorded in the run evidence, with one exception: in
 section 3, the count of missing sides by side and by reason is a tally of the reader's per-case
@@ -72,12 +73,14 @@ lines under 1. VERDICT INFLUENCE.
 
   The reader's first line refers to the bundle root, which holds no `bundle.json`. The suite's own
   `bundle.json` is under `adversarial/`, and the adversarial report follows that line.
-- **The console output.** [`evidence/adversarial-oauth-run-1-console.txt`](evidence/adversarial-oauth-run-1-console.txt)
-  is the live run's stdout and stderr, 78 lines, copied byte for byte (sha256 in `console.sha256`).
-  Its first line echoes the exact argv (`command`). It prints the stage-1 checks, including the
-  prepared-payload digests (`console.preparedPayloads`), and the launcher's own status line, which
-  reads `complete: true`. Its last line is `[exited with code 0]`. It was scanned for credentials
-  before it was copied, and none was found.
+- **The console transcript.** [`evidence/adversarial-oauth-run-1-console.txt`](evidence/adversarial-oauth-run-1-console.txt)
+  is the execution console transcript, 78 lines, copied byte for byte (sha256 in `console.sha256`).
+  Its first line is the package script's echo of the exact argv (`command`). The launcher's stdout
+  and stderr follow: the stage-1 checks, including the prepared-payload digests
+  (`console.preparedPayloads`), and the launcher's own status line, which reads `complete: true`.
+  Its last line, `[exited with code 0]`, is the exit status the execution harness reported. It is
+  harness metadata, not launcher output. The transcript was scanned for credentials before it was
+  copied, and none was found.
 - **The test.** [`adversarial-publication.test.ts`](adversarial-publication.test.ts) fails on a
   missing, extra or changed kept file, naming it. It also runs the reader over the kept copy and
   compares its stdout with the committed stdout exactly, except that the bundle path, as recorded
@@ -89,7 +92,7 @@ lines under 1. VERDICT INFLUENCE.
 The eight sealed pairs of case set `adversarial-cases-3` were executed completely, once (`status`,
 SLOTS): 16 of 16 slots completed, in the order the sealed schedule
 `sha256:049dd6bd56c4013c38f1b477f2ac6cd5883f6f1d68fd7f0687dbf42e553d14fd` fixed (coins tails,
-tails, tails, heads). The launcher exited 0 and printed `complete: true` (the console output). There was no halt and no
+tails, tails, heads). The launcher printed `complete: true`, and the execution harness reported exit status 0 (the console transcript). There was no halt and no
 runner stop (ATTEMPTS). The run is never re-run, and it is pooled with no other run.
 
 Two runs completed degraded (`warnings`):
@@ -270,7 +273,7 @@ attention.
 - A MAD blame observation does not imply read or grep coverage.
 
 **Provenance** (`provenance`, `console`). The exact command, its exit status and `complete: true`
-come from the launcher's console output, kept at
+come from the execution console transcript, kept at
 [`evidence/adversarial-oauth-run-1-console.txt`](evidence/adversarial-oauth-run-1-console.txt). The manifests record commit 0343b1c8ff25c51cb4fc180636fb3d2c83c3ac09
 and dirty:true. The identities of dirty entries were not retained. The launcher writes the run's
 reservation, untracked until 22d8fb3, before any manifest, but that does not establish it was the
