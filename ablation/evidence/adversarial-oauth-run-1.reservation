@@ -1,0 +1,11 @@
+{
+  "run": 1,
+  "story": "2-7f",
+  "createdAt": "2026-10-14T17:26:40.520Z",
+  "gateTableBlob": "fb79d8e6337388139b15bdc4e36c2baa9bf6ca3a",
+  "pins": [
+    "anthropic/claude-sonnet-5"
+  ],
+  "out": "/Users/xuyangy/trash/mad-runs/adversarial-run-1/out",
+  "dataRoot": "/Users/xuyangy/trash/mad-runs/adversarial-run-1/data"
+}
