@@ -1999,17 +1999,28 @@ and `--out`, the suite's own experiment root (absent or empty). `--provider-mode
 `--server`, `--target` and `--directory` are refused at parse. The real paths of the data root,
 `--out`, the prepared directory and the user's own opencode store must be disjoint.
 
-**Stage 1 passes on the shipped tree for the authorized pin, and a refusal writes nothing.** With
+**Stage 1 passes on the shipped tree for the authorized pin, and a refusal writes nothing.** It
+passes only with the measured `opencode` first on PATH. With
 `--oauth-provider anthropic --pin anthropic/claude-sonnet-5` the command is the live run of the
 sixteen adversarial cases: run 1, once. Every check prints: flags, containment,
-the two fresh roots, disjointness, the frozen protocol v3, the committed gate table,
+the two fresh roots, disjointness, the frozen protocol v3 (its hash must be
+`ADVERSARIAL_PROTOCOL.frozenHash`, the hash gate 10's authorization names; a v3 frozen under any
+other hash refuses, naming both), the committed gate table,
 `gatePreflight(gates, "adversarial", "oauth")`, the OAuth route, the prepared digests, the
+measured host binary, the
 authorized run (the pin is `ADVERSARIAL_RUN.pins`; `ADVERSARIAL_RUN.reservation` exists neither on
-disk nor at HEAD; every earlier run is committed) and the production Tools identity. Gates 10,
+disk nor at HEAD; every earlier run is committed) and the production Tools identity. The binary
+check is `identifyBinary` with `startManagedHost`'s defaults: it resolves `opencode` on PATH to its
+real path and reads only that file's contents, hashed against `MEASURED_HOST`; it never starts it,
+reads the auth target or a data directory, or connects anywhere. Gates 10,
 11 and 12 are CLOSED, `ADVERSARIAL_RUN.pins` is `anthropic/claude-sonnet-5` and protocol v3 is
 frozen, so on the shipped tree none of those refuses. A check that fails, such as another pin, a
-prepared directory that does not verify or a reservation that already exists, exits 1 before any
-reservation, worktree, start marker or host exists. Only once every check passes is the reservation
+prepared directory that does not verify, a missing or unreadable `opencode` binary, or one whose
+sha256 is not `MEASURED_HOST`'s, or a reservation that already exists, exits 1 before any
+reservation, worktree, start marker or host exists. The early binary check narrows the window
+before the spawn and does not make check and use atomic: stage 4 resolves `opencode` on PATH and
+hashes it again before each spawn (`startManagedHost`), so a binary swapped after stage 1 is
+refused there, after the reservation. Only once every check passes is the reservation
 created exclusively, stamped with the launcher's clock; it is never removed. An interrupt after it
 exits 130 with the reservation kept and no schedule, worktree or host. Immediately before the two
 roots are created, each is checked again to be outside this repository and not to contain it
@@ -2277,9 +2288,9 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    the gate; the `not-issued` release rests on a scripted journal test. Both stay UNPROBED on a real
    host. Every provider was a loopback stub, so nothing here says what a real provider, account,
    cache or quota does. The launcher's 120,000 ms turn deadline was not run on a real host. Where a
-   build or payload outside the scope is refused: the prepared payloads at stage 1, the host
-   binary's hash after the reservation and before the host is spawned, and the host's reported
-   version after the spawn and before it is used; `gatePreflight` checks neither. Story 2-8c's probe
+   build or payload outside the scope is refused: the prepared payloads and the host binary's hash at
+   stage 1, before the reservation, the binary's hash again before each spawn, and the host's
+   reported version after the spawn and before it is used; `gatePreflight` checks none of them. Story 2-8c's probe
    and the paired and pilot evidence cover the Blocks admission only, and are reused only within
    that scope.
 4. **Bounded tool termination — CLOSED.** The blame half closed on 2026-09-21 (story 2-7c). The

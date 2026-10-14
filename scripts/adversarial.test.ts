@@ -28,7 +28,7 @@ import {
   adversarialSlots,
   readAdversarialSlotStatuses,
 } from "../ablation/adversarial-schedule.ts"
-import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
+import { MEASURED_HOST, type BinaryIdentityOptions, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { HALT_MARKER_FILE } from "../ablation/governor.ts"
 import { JOURNAL_FILE } from "../ablation/journal.ts"
@@ -187,6 +187,20 @@ function signalSource(): SignalSource & { emit(signal: "SIGINT" | "SIGTERM"): vo
   }
 }
 
+/** A stand-in opencode binary that resolves to `path` and hashes to the measured build's sha256; nothing is read or started. Each identification is recorded. */
+function measuredBinary(path = "/stand-in/bin/opencode", sha256: string = MEASURED_HOST.sha256): BinaryIdentityOptions & { reads: string[] } {
+  const reads: string[] = []
+  return {
+    reads,
+    binary: path,
+    resolveBinary: async (input) => input,
+    hashFile: async (file) => {
+      reads.push(file)
+      return sha256
+    },
+  }
+}
+
 /** Everything a run that gets past stage 1 needs, all stand-ins, with the backends each run was given. */
 async function runnable(env: Awaited<ReturnType<typeof setup>>, extra: AdversarialOverrides & { script?: ScriptedAdversarial } = {}) {
   const { script, ...rest } = extra
@@ -194,10 +208,13 @@ async function runnable(env: Awaited<ReturnType<typeof setup>>, extra: Adversari
   const backends: OpencodeBackendOptions[] = []
   const hosts = scriptedHosts()
   const signals = signalSource()
+  const frozen = await frozenV3Copy(scratch)
   const overrides: AdversarialOverrides = {
     gates: closedGates,
     adversarialRun: { ...ADVERSARIAL_RUN, pins: [PIN] },
-    protocolV3File: (await frozenV3Copy(scratch)).file,
+    protocolV3File: frozen.file,
+    protocolHash: frozen.hash,
+    hostBinary: measuredBinary(),
     payloadPins: env.pins,
     home: env.home,
     startHost: hosts.startHost,
@@ -309,7 +326,7 @@ describe("stage 1 on the shipped tree", () => {
     argvFor(env).map((arg) => (arg === PIN ? pin : arg === "anthropic" ? pin.slice(0, pin.indexOf("/")) : arg))
 
   /** The committed gate table, run and protocol file, with stand-ins for everything that would touch a host or the repository. */
-  const shipped = { gates: undefined, adversarialRun: undefined, protocolV3File: undefined }
+  const shipped = { gates: undefined, adversarialRun: undefined, protocolV3File: undefined, protocolHash: undefined }
 
   test("the committed table, run and protocol pass stage 1 for the authorized pin: every check prints PASS and the reservation is made under the stand-in root only", async () => {
     const env = await setup()
@@ -329,12 +346,14 @@ describe("stage 1 on the shipped tree", () => {
       "PASS  adversarial gates (ablation/paired-gates.ts, phase adversarial, route oauth)",
       "PASS  OAuth route",
       "PASS  OAuth prepared payloads",
+      "PASS  measured host binary",
       "PASS  authorized adversarial run",
       "PASS  production Tools wiring",
     ]) {
       expect(result.text, check).toContain(check)
     }
-    expect(result.text).toContain(`PROTOCOL-mad-evaluation-v3 v3 ${ADVERSARIAL_PROTOCOL.frozenHash}`)
+    expect(result.text).toContain(`PROTOCOL-mad-evaluation-v3 v3 ${ADVERSARIAL_PROTOCOL.frozenHash}, the hash gate 10's authorization names`)
+    expect(result.text).toContain(`\`/stand-in/bin/opencode\` has sha256 ${MEASURED_HOST.sha256}, the measured build's; read only, not started`)
     expect(result.text).toContain("gate 10 — adversarial spend authorization — authorization, required for adversarial on route oauth, owner the human budget owner — CLOSED — evidence: the human budget owner's instruction of 2026-10-13")
     expect(result.text).toContain("gate 11 — adversarial attempt accounting — engineering, required for adversarial on route oauth, owner story 2-7f2 — CLOSED — evidence: story 2-7f5")
     expect(result.text).toContain(`the pin ${PIN} is adversarial run 1's roster`)
@@ -1324,10 +1343,136 @@ describe("item 7: the launcher's full closure never reaches the review-path read
   })
 })
 
+// ---------------------------------------------------------------------------
+// Stage 1's identity checks (story 2-7f6): the host binary and the authorized protocol hash
+// ---------------------------------------------------------------------------
+
+describe("stage 1 identifies the host binary and ties protocol v3 to gate 10's hash, before the reservation", () => {
+  const WRONG_SHA = "0".repeat(64)
+
+  /** A host start that records every call and then throws, so a call that the launcher swallows is still seen. */
+  function recordingStart() {
+    const starts: ManagedHostOptions[] = []
+    const startHost = async (asked: ManagedHostOptions): Promise<ManagedHostStart> => {
+      starts.push(asked)
+      throw new Error("startHost was called, and a stage 1 refusal must start no host")
+    }
+    return { starts, startHost }
+  }
+
+  async function refusedBeforeReservation(env: Awaited<ReturnType<typeof setup>>, extra: AdversarialOverrides) {
+    const recording = recordingStart()
+    const { overrides } = await runnable(env, { ...extra, startHost: recording.startHost })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
+    expect(result.text).not.toContain("stage 2 of 4")
+    expect(recording.starts).toEqual([])
+    for (const path of [env.reservationRoot, env.out, env.dataRoot]) expect(existsSync(path), path).toBe(false)
+    expect(existsSync(join(REPO_ROOT, ADVERSARIAL_RUN.reservation))).toBe(false)
+    return result
+  }
+
+  test("a measured binary and the authorized hash pass, print the binary, its sha256 and the hash, and stage 2 reserves under the stand-in root", async () => {
+    const env = await setup()
+    const frozen = await frozenV3Copy(scratch)
+    const binary = measuredBinary("/stand-in/measured/opencode")
+    // Every host start is refused before a spawn, so the run ends once stages 1 and 2 are behind it.
+    const refusing = scriptedHosts({ preSpawn: () => "throw" })
+    const { overrides } = await runnable(env, { protocolV3File: frozen.file, protocolHash: frozen.hash, hostBinary: binary, startHost: refusing.startHost })
+    const result = await captured(() => main(argvFor(env), overrides))
+    const stage2 = result.text.indexOf("stage 2 of 4")
+    expect(stage2).toBeGreaterThan(-1)
+    for (const check of ["PASS  measured host binary", "PASS  frozen protocol v3"]) {
+      const at = result.text.indexOf(check)
+      expect(at, check).toBeGreaterThan(-1)
+      expect(at, check).toBeLessThan(stage2)
+    }
+    expect(result.text).toContain(`\`/stand-in/measured/opencode\` has sha256 ${MEASURED_HOST.sha256}, the measured build's; read only, not started`)
+    expect(result.text).toContain("PASS  frozen protocol v3")
+    expect(result.text).toContain(`${frozen.hash}, the hash gate 10's authorization names`)
+    expect(result.text).not.toContain("REFUSED at stage 1")
+    expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
+    // Identified once at stage 1; the stand-in start is what stage 4 would hand the spawn-time recheck to.
+    expect(binary.reads).toEqual(["/stand-in/measured/opencode"])
+  }, 120_000)
+
+  test("a binary that is not the measured build refuses at stage 1 with `identifyBinary`'s reason, and the check never calls startHost", async () => {
+    const env = await setup()
+    const binary = measuredBinary("/stand-in/other/opencode", WRONG_SHA)
+    const result = await refusedBeforeReservation(env, { hostBinary: binary })
+    expect(result.text).toContain("FAIL  measured host binary")
+    expect(result.text).toContain(`measured host binary failed: the host is not the measured build (binary sha256 ${WRONG_SHA}`)
+    expect(result.text).toContain(`the binary \`/stand-in/other/opencode\` has sha256 ${WRONG_SHA}; the measured build's is ${MEASURED_HOST.sha256}`)
+    expect(binary.reads).toEqual(["/stand-in/other/opencode"])
+  })
+
+  test("a binary that is missing or unreadable refuses at stage 1 as one that could not be identified", async () => {
+    // The missing row's hasher records and rejects: `resolveBinary` rejects first, so neither it nor the default hasher is reached.
+    const missingHashed: string[] = []
+    for (const [name, hostBinary] of [
+      [
+        "missing",
+        {
+          binary: "/stand-in/missing/opencode",
+          resolveBinary: async () => Promise.reject(new Error("ENOENT: no such file or directory")),
+          hashFile: async (file: string) => {
+            missingHashed.push(file)
+            return Promise.reject(new Error("the missing binary was hashed"))
+          },
+        },
+      ],
+      ["unreadable", { binary: "/stand-in/locked/opencode", resolveBinary: async (input: string) => input, hashFile: async () => Promise.reject(new Error("EACCES: permission denied")) }],
+    ] as const) {
+      const env = await setup()
+      const result = await refusedBeforeReservation(env, { hostBinary })
+      expect(result.text, name).toContain("FAIL  measured host binary")
+      expect(result.text, name).toContain("measured host binary failed: the opencode binary could not be identified: ")
+      expect(result.text, name).toContain(name === "missing" ? "ENOENT" : "EACCES")
+    }
+    expect(missingHashed).toEqual([])
+  })
+
+  test("a re-frozen v3, frozen under its own hash and not the one gate 10 names, refuses at stage 1 naming both hashes", async () => {
+    const env = await setup()
+    const refrozen = await frozenV3Copy(scratch)
+    expect(refrozen.hash).not.toBe(ADVERSARIAL_PROTOCOL.frozenHash)
+    const result = await refusedBeforeReservation(env, { protocolV3File: refrozen.file, protocolHash: undefined })
+    expect(result.text).toContain("FAIL  frozen protocol v3")
+    expect(result.text).toContain(
+      `frozen protocol v3 failed: the frozen protocol v3 read has hash ${refrozen.hash}, and gate 10's authorization names ${ADVERSARIAL_PROTOCOL.frozenHash}`,
+    )
+  })
+
+  test("the shipped protocol file passes the hash check against the default expectation", async () => {
+    const env = await setup()
+    // A wrong binary keeps the run at stage 1, so the protocol check is read alone.
+    const recording = recordingStart()
+    const { overrides } = await runnable(env, { protocolV3File: undefined, protocolHash: undefined, hostBinary: measuredBinary(undefined, WRONG_SHA), startHost: recording.startHost })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(recording.starts).toEqual([])
+    expect(result.text).toContain("PASS  frozen protocol v3")
+    expect(result.text).toContain(`PROTOCOL-mad-evaluation-v3 v3 ${ADVERSARIAL_PROTOCOL.frozenHash}, the hash gate 10's authorization names`)
+  })
+
+  test("a wrong binary and a re-frozen v3 together are both listed in the one refusal, before any reservation", async () => {
+    const env = await setup()
+    const refrozen = await frozenV3Copy(scratch)
+    const result = await refusedBeforeReservation(env, {
+      protocolV3File: refrozen.file,
+      protocolHash: undefined,
+      hostBinary: measuredBinary("/stand-in/other/opencode", WRONG_SHA),
+    })
+    const refusal = result.text.slice(result.text.indexOf("REFUSED at stage 1"))
+    expect(refusal).toContain(`  - frozen protocol v3 failed: the frozen protocol v3 read has hash ${refrozen.hash}, and gate 10's authorization names ${ADVERSARIAL_PROTOCOL.frozenHash}`)
+    expect(refusal).toContain(`  - measured host binary failed: the host is not the measured build (binary sha256 ${WRONG_SHA}`)
+  })
+})
+
 // The start marker and worktrees are never touched on refusal; `ADVERSARIAL_START_MARKER_FILE` names the file checked.
 test("a refused stage 1 leaves no start marker anywhere under --out", async () => {
   const env = await setup()
-  const result = await captured(() => main(argvFor(env, ["--server", "http://x"]), { signals: signalSource(), payloadPins: env.pins, home: env.home }))
+  const result = await captured(() => main(argvFor(env, ["--server", "http://x"]), { signals: signalSource(), payloadPins: env.pins, home: env.home, hostBinary: measuredBinary() }))
   expect(result.code).toBe(1)
   expect(existsSync(join(adversarialDirectory(env.out), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
   expect(existsSync(env.out)).toBe(false)

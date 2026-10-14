@@ -469,7 +469,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
       "rests on a scripted test at the gate",
       "Both stay UNPROBED on a real host.",
       "The launcher's 120,000 ms turn deadline was not run on a real host.",
-      "the prepared payloads at stage 1, the host binary's hash after the reservation and before the host is spawned, and the host's reported version after the spawn and before it is used; `gatePreflight` checks neither",
+      "the prepared payloads and the host binary's hash at stage 1, before the reservation, the binary's hash again before each spawn, and the host's reported version after the spawn and before it is used; `gatePreflight` checks none of them",
     ]) {
       expect(item(3), phrase).toContain(phrase)
     }

@@ -11,15 +11,22 @@
  * `ablation/adversarial.ts`) on the OAuth route, each run on a managed host and
  * an OAuth data directory of its own (v3 B9), in this order:
  *
- * 1. **Offline checks.** Flags, containment, the frozen protocol v3, the
- *    committed gate table, `gatePreflight(gates, "adversarial", "oauth")`, the
- *    OAuth route and the prepared digests, the authorized run (the pin is
- *    `ADVERSARIAL_RUN.pins`, its reservation exists neither on disk nor at HEAD,
- *    every earlier run is committed) and the production Tools identity. Every
- *    check prints, and a failure refuses before anything is written: no
- *    reservation, worktree, start marker or host. With the shipped table, run
- *    and protocol this stage passes for `--pin anthropic/claude-sonnet-5`, the
- *    one run gate 10 authorizes, so the command is the live run.
+ * 1. **Offline checks.** Flags, containment, the frozen protocol v3 (its hash
+ *    must be `ADVERSARIAL_PROTOCOL.frozenHash`, the one gate 10's authorization
+ *    names), the committed gate table, `gatePreflight(gates, "adversarial",
+ *    "oauth")`, the OAuth route and the prepared digests, the measured host
+ *    binary (`identifyBinary` with `startManagedHost`'s defaults: `opencode` on
+ *    PATH, its real path hashed against `MEASURED_HOST`; read, never started),
+ *    the authorized run (the pin is `ADVERSARIAL_RUN.pins`, its reservation
+ *    exists neither on disk nor at HEAD, every earlier run is committed) and the
+ *    production Tools identity. Every check prints, and a failure refuses
+ *    before anything is written: no reservation, worktree, start marker or
+ *    host. With the shipped table, run and protocol and the measured binary on
+ *    PATH this stage passes for `--pin anthropic/claude-sonnet-5`, the one run
+ *    gate 10 authorizes, so the command is the live run. The binary check
+ *    narrows the window before the spawn and does not close it: stage 4
+ *    resolves and hashes the binary again before each spawn, so a binary
+ *    swapped after stage 1 is refused there, with the reservation spent.
  * 2. **The reservation**, created exclusively only once every check passed.
  * 3. **The schedule**: immediately before the experiment root and the data
  *    root are created, each is checked again to be outside this repository and
@@ -85,9 +92,11 @@ import type { RunGit as MaterializeGit } from "../ablation/adversarial-materiali
 import { ADVERSARIAL_HOST_OFFER, adversarialDirectory, createAdversarialSchedule, FRESH_PER_RUN, type AdversarialConfig } from "../ablation/adversarial-schedule.ts"
 import { codeRevisionFrom } from "../ablation/bundle.ts"
 import {
+  identifyBinary,
   OAUTH_PAYLOAD,
   oauthRouteProblems,
   startManagedHost,
+  type BinaryIdentityOptions,
   type ManagedHost,
   type ManagedHostOptions,
   type ManagedHostStart,
@@ -97,7 +106,7 @@ import {
 import { syncDirectory } from "../ablation/journal.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
-import { ADVERSARIAL_RUN, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
+import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
 import { canonicalJson, readFrozenProtocol, type CoinFace } from "../ablation/schedule.ts"
 import type { Candidate, Roster } from "../core/domain/roster.ts"
 import { systemClock, type Clock } from "../core/ports/clock.ts"
@@ -822,6 +831,10 @@ export interface AdversarialOverrides {
   adversarialRun?: AdversarialRun
   /** Test-only: the protocol file. Defaults to `PROTOCOL_V3_FILE`. */
   protocolV3File?: string
+  /** Test-only: the hash the frozen protocol v3 must carry. Defaults to `ADVERSARIAL_PROTOCOL.frozenHash`, the hash gate 10's authorization names. */
+  protocolHash?: string
+  /** Test-only: how stage 1 finds and identifies the opencode binary. Defaults to `identifyBinary`'s own, which are `startManagedHost`'s. */
+  hostBinary?: BinaryIdentityOptions
   /** Test-only: the pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
   payloadPins?: PayloadPins
   /** Test-only: the home the auth symlinks point into. Defaults to `os.homedir()`. */
@@ -990,6 +1003,7 @@ async function launch(
   const home = overrides.home ?? homedir()
   const payloadPins = overrides.payloadPins ?? OAUTH_PAYLOAD
   const protocolFile = overrides.protocolV3File ?? PROTOCOL_V3_FILE
+  const protocolHash = overrides.protocolHash ?? ADVERSARIAL_PROTOCOL.frozenHash
   const git = boundedGit({
     spawn: overrides.spawnGit ?? preflightSpawn,
     deadlineMs: overrides.gitDeadlineMs ?? PREFLIGHT_GIT_DEADLINE_MS,
@@ -1049,9 +1063,15 @@ async function launch(
     await guarded("frozen protocol v3", async () => {
       const protocol = await readFrozenProtocol(protocolFile)
       if (!protocol.ok) return fail("frozen protocol v3", [`protocol v3 is not frozen: ${protocol.reason}`])
-      return protocol.version === 3
-        ? pass("frozen protocol v3", [`${protocol.id} v${protocol.version} ${protocol.hash}`])
-        : fail("frozen protocol v3", [`the adversarial suite on the OAuth route needs protocol v3, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
+      if (protocol.version !== 3) {
+        return fail("frozen protocol v3", [`the adversarial suite on the OAuth route needs protocol v3, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
+      }
+      return protocol.hash === protocolHash
+        ? pass("frozen protocol v3", [`${protocol.id} v${protocol.version} ${protocol.hash}, the hash gate 10's authorization names`])
+        : fail("frozen protocol v3", [
+            `the frozen protocol v3 read has hash ${protocol.hash}, and gate 10's authorization names ${protocolHash} ` +
+              "(`ADVERSARIAL_PROTOCOL.frozenHash`); a re-frozen v3 is not the protocol the run was authorized under",
+          ])
     }),
   )
 
@@ -1098,6 +1118,16 @@ async function launch(
     checks.push(payloads)
     if (problems.length === 0 && payloads.state === "pass") route = candidate
   }
+
+  // The binary stage 4 would spawn, identified as `startManagedHost` identifies it: read, hashed, never started.
+  checks.push(
+    await guarded("measured host binary", async () => {
+      const identified = await identifyBinary(overrides.hostBinary ?? {})
+      return identified.ok
+        ? pass("measured host binary", [`\`${identified.binary}\` has sha256 ${identified.sha256}, the measured build's; read only, not started`])
+        : fail("measured host binary", [identified.reason])
+    }),
+  )
 
   const reservationSeam: AdversarialReservationSeam = overrides.reservation ?? gitReservationSeam(git, REPO_ROOT)
   const pinName = pin === undefined ? undefined : `${pin.providerId}/${pin.modelId}`
