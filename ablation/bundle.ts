@@ -404,6 +404,19 @@ export const lstatPathKind: PathKind = async (path) => {
   }
 }
 
+/** U+FFFD, the character a decoder puts in place of bytes it could not decode. */
+const REPLACEMENT = "\uFFFD"
+
+/**
+ * Why a name carrying U+FFFD is refused. git prints raw bytes and the runner
+ * decodes them as UTF-8, so a name that is not valid UTF-8 arrives changed and
+ * an existing file could look absent. A name that really contains U+FFFD is
+ * refused too: the two cannot be told apart.
+ */
+const MISDECODED =
+  "which contains U+FFFD: a name that is not valid UTF-8 is changed when decoded, so the file it names cannot be " +
+  "identified (a name that really contains U+FFFD is refused the same way)"
+
 /**
  * AC4 — the code revision, or an explicit unknown WITH ITS REASON.
  *
@@ -415,8 +428,12 @@ export const lstatPathKind: PathKind = async (path) => {
  * the status says). A path git lists twice, such as a staged deletion with a
  * new untracked file at the same path, gives two entries. Entries are sorted by
  * path, then status, then source path, and are written on a clean tree too, as
- * `[]`. With `entries`, the revision can be checked against a later checkout
- * with git alone.
+ * `[]`. Each entry's blob can be compared with a later checkout by git's own
+ * hashing, within limits: gitignored files are not listed by the status and so
+ * are not recorded, and a symlink, submodule or other non-regular entry makes
+ * the revision unknown rather than recorded. Untracked file names are recorded
+ * too, so they are published in any committed evidence that carries the
+ * revision.
  *
  * Porcelain paths are relative to the repository root, so each one is resolved
  * against `git rev-parse --show-toplevel` and hashed by its absolute path; the
@@ -425,8 +442,9 @@ export const lstatPathKind: PathKind = async (path) => {
  * EVERY FAILURE IS AN UNKNOWN, NEVER A GUESS. No git, a non-zero exit, empty
  * output, a directory that is not a repository, an unparseable status, a path
  * that is a symlink, a directory or any other non-regular file, a path that
- * cannot be inspected, a failed `hash-object`: each returns `{ kind: "unknown",
- * why }` for the whole revision. A symlink is never identified by its target's
+ * cannot be inspected, a failed `hash-object`, a path or toplevel that carries
+ * U+FFFD: each returns `{ kind: "unknown", why }` for the whole revision. Paths
+ * in a reason are JSON-quoted. A symlink is never identified by its target's
  * bytes. A manifest that recorded `""`, a stale default or a partial entry list
  * here would be a traceability claim MAD cannot support, which is the one thing
  * FR1 exists to prevent.
@@ -455,6 +473,7 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
     if (top.exitCode !== 0) return unestablished(`\`git rev-parse --show-toplevel\` exited ${top.exitCode}: ${top.stderr.trim()}`)
     toplevel = top.stdout.replace(/\r?\n$/, "")
     if (toplevel.length === 0) return unestablished("`git rev-parse --show-toplevel` produced no output")
+    if (toplevel.includes(REPLACEMENT)) return unestablished(`\`git rev-parse --show-toplevel\` printed ${JSON.stringify(toplevel)}, ${MISDECODED}`)
   } catch (error) {
     return unestablished(`\`git rev-parse --show-toplevel\` could not be run (${messageOf(error)})`)
   }
@@ -484,11 +503,17 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
     if (/[RC]/.test(status)) {
       const sourcePath = fields[index + 1]
       if (sourcePath === undefined || sourcePath.length === 0) {
-        return unestablished(`${statusCommand} printed the ${status} record for \`${path}\` with no source path`)
+        return unestablished(`${statusCommand} printed the ${JSON.stringify(status)} record for ${JSON.stringify(path)} with no source path`)
       }
       records.push({ status, path, sourcePath })
       index += 1
     } else records.push({ status, path })
+  }
+
+  for (const record of records) {
+    for (const name of [record.path, record.sourcePath]) {
+      if (name?.includes(REPLACEMENT)) return unestablished(`${statusCommand} printed the path ${JSON.stringify(name)}, ${MISDECODED}`)
+    }
   }
 
   const entries: DirtyEntry[] = []
@@ -498,14 +523,14 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
     try {
       kind = await pathKind(absolute)
     } catch (error) {
-      return unestablished(`\`${record.path}\` could not be inspected (${messageOf(error)})`)
+      return unestablished(`${JSON.stringify(record.path)} could not be inspected (${messageOf(error)})`)
     }
     let blob: string | null = null
     if (kind !== "absent") {
       if (kind !== "file") {
-        return unestablished(`\`${record.path}\` is a ${kind.other}, not a regular file, and only a regular file's content is recorded`)
+        return unestablished(`${JSON.stringify(record.path)} is a ${kind.other}, not a regular file, and only a regular file's content is recorded`)
       }
-      const command = `\`git hash-object -- ${absolute}\``
+      const command = `\`git hash-object -- ${JSON.stringify(absolute)}\``
       try {
         const hashed = await run("git", ["hash-object", "--", absolute])
         if (hashed.exitCode !== 0) return unestablished(`${command} exited ${hashed.exitCode}: ${hashed.stderr.trim()}`)
@@ -519,4 +544,19 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
   }
   entries.sort(compareDirtyEntries)
   return known({ commit, dirty: entries.length > 0, entries })
+}
+
+/** The code revision as stage 1 prints it: the commit and every dirty entry, or the reason it is unknown. */
+export function codeRevisionLines(revision: Maybe<CodeRevision>): string[] {
+  if (revision.kind === "unknown") return [`code revision: unknown (${revision.why})`]
+  const { commit, dirty, entries = [] } = revision.value
+  if (!dirty) return [`code revision: ${commit}, worktree clean`]
+  return [
+    `code revision: ${commit}, worktree dirty (${entries.length} entr${entries.length === 1 ? "y" : "ies"} recorded)`,
+    ...entries.map(
+      (entry) =>
+        `  ${JSON.stringify(entry.status)} ${JSON.stringify(entry.path)}${entry.sourcePath === undefined ? "" : ` (from ${JSON.stringify(entry.sourcePath)})`}: ` +
+        (entry.blob === null ? "no file" : `blob ${entry.blob}`),
+    ),
+  ]
 }

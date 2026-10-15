@@ -405,7 +405,7 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   const revision = maybeOf(
     identity.codeRevision,
     (payload) => isRecord(payload) && isText(payload.commit) && typeof payload.dirty === "boolean",
-    "`{ commit: string, dirty: boolean }`",
+    "`{ commit: string, dirty: boolean, entries?: [...] }`",
   )
   if (revision !== undefined) return fail(`has a malformed \`identity.codeRevision\`: ${revision}`)
   const entries = dirtyEntriesProblem(identity.codeRevision)
@@ -891,7 +891,8 @@ function maybeOf(
 
 /**
  * Why a known code revision's `entries` are not what `codeRevisionFrom` writes,
- * or `undefined`. Absent entries are the legacy shape and pass here; the cohort
+ * or `undefined`. A field other than `commit`, `dirty` and `entries` is refused.
+ * Absent entries are the legacy shape and pass here; the cohort
  * key decides what they mean. A clean revision carries no entries; each entry is
  * `{status, path, sourcePath?, blob}` with a porcelain XY status, a `sourcePath`
  * exactly when the status names a rename or copy, and a blob id or `null`. Two
@@ -901,6 +902,9 @@ function maybeOf(
 function dirtyEntriesProblem(wrapper: unknown): string | undefined {
   if (!isRecord(wrapper) || wrapper.kind !== "known" || !isRecord(wrapper.value)) return undefined
   const revision = wrapper.value
+  // A misspelt field must not read as an absent one: `entires` would otherwise make a dirty revision legacy.
+  const unrecognised = Object.keys(revision).filter((key) => !["commit", "dirty", "entries"].includes(key))
+  if (unrecognised.length > 0) return `it carries unrecognised field(s) ${unrecognised.map((key) => JSON.stringify(key)).join(", ")}`
   if (!("entries" in revision) || revision.entries === undefined) return undefined
   const entries = revision.entries
   if (!Array.isArray(entries)) return "`entries` is not an array"

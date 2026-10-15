@@ -490,7 +490,7 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
       const git = stubbed({ status: " M fine.ts\0?? odd\0", files: { "/repo/fine.ts": "file", "/repo/odd": { other } }, blobs: { "/repo/fine.ts": BLOB_A } })
       const revision = await codeRevisionFrom(git.run, git.pathKind)
       if (revision.kind !== "unknown") throw new Error(`${other} was recorded`)
-      expect(revision.why).toContain("`odd`")
+      expect(revision.why).toContain('"odd"')
       expect(revision.why).toContain(other)
       expect(revision.why).toContain("13eadc6e51d1")
     }
@@ -500,7 +500,7 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
     const git = stubbed({ status: "?? locked\0", files: { "/repo/locked": "throw" } })
     const revision = await codeRevisionFrom(git.run, git.pathKind)
     if (revision.kind !== "unknown") throw new Error("recorded")
-    expect(revision.why).toContain("`locked`")
+    expect(revision.why).toContain('"locked"')
     expect(revision.why).toContain("EACCES")
   })
 
@@ -508,7 +508,7 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
     const hashing = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": { exitCode: 128, stderr: "fatal: cannot open" } } })
     const hashed = await codeRevisionFrom(hashing.run, hashing.pathKind)
     if (hashed.kind !== "unknown") throw new Error("recorded")
-    expect(hashed.why).toContain("git hash-object -- /repo/x.ts")
+    expect(hashed.why).toContain('git hash-object -- "/repo/x.ts"')
     expect(hashed.why).toContain("fatal: cannot open")
 
     const junk = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": "not-a-blob" } })
@@ -523,10 +523,33 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
   })
 
   test("status output that is not NUL-terminated `XY PATH` records, or a rename with no source, is unknown", async () => {
-    for (const status of [" M x.ts", "XYZ\0", "?? \0", "R  c\0"]) {
+    for (const status of [" M x.ts", "XYZ\0", "?? \0", "R  c\0", "   x.ts\0"]) {
       const git = stubbed({ status, files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": BLOB_A } })
       expect((await codeRevisionFrom(git.run, git.pathKind)).kind, JSON.stringify(status)).toBe("unknown")
     }
+  })
+
+  test("a path, a rename source or the toplevel carrying U+FFFD is unknown, naming it JSON-quoted; a mis-decoded name could make an existing file look absent", async () => {
+    for (const [status, toplevel] of [
+      ["?? caf\uFFFD.txt\0", undefined],
+      ["R  new.txt\0ol\uFFFDd.txt\0", undefined],
+      ["", ok("/re\uFFFDpo\n")],
+    ] as const) {
+      const git = stubbed({ status, files: { "/repo/new.txt": "file" }, blobs: { "/repo/new.txt": BLOB_A }, ...(toplevel === undefined ? {} : { toplevel }) })
+      const revision = await codeRevisionFrom(git.run, git.pathKind)
+      if (revision.kind !== "unknown") throw new Error(`${JSON.stringify(status)} was recorded`)
+      expect(revision.why).toContain("U+FFFD")
+      expect(revision.why).toContain('\uFFFD')
+      expect(git.calls.some((args) => args[0] === "hash-object")).toBe(false)
+    }
+  })
+
+  test("a path with a quote or a newline is JSON-quoted in the reason", async () => {
+    const git = stubbed({ status: '?? we"ird\nname\0', files: { '/repo/we"ird\nname': { other: "symlink" } } })
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "unknown") throw new Error("recorded")
+    expect(revision.why).toContain(JSON.stringify('we"ird\nname'))
+    expect(revision.why).not.toContain("\n")
   })
 
   test("no git at all is an unknown that says why, never an empty string", async () => {
@@ -645,7 +668,7 @@ describe("the code revision over real git", () => {
     await symlink("a", join(root, "link"))
     const revision = await codeRevisionFrom(gitIn(root))
     if (revision.kind !== "unknown") throw new Error("a symlink was recorded")
-    expect(revision.why).toContain("`link`")
+    expect(revision.why).toContain('"link"')
     expect(revision.why).toContain("symlink")
   })
 
@@ -683,6 +706,22 @@ describe("the code revision over real git", () => {
     if ("error" in read) throw new Error(read.error)
     expect(read.segregated).toEqual([])
     expect(read.comparable).toHaveLength(2)
+  })
+
+  test("a worktree deletion and a staged `git rm`, through the default lstat, are known entries with `blob: null`", async () => {
+    const root = await repository()
+    await rm(join(root, "a"))
+    await sh(root, "rm", "-q", "b")
+    const revision = await codeRevisionFrom(gitIn(root))
+    if (revision.kind !== "known") throw new Error(revision.why)
+    expect(revision.value).toEqual({
+      commit: await sh(root, "rev-parse", "HEAD"),
+      dirty: true,
+      entries: [
+        { status: " D", path: "a", blob: null },
+        { status: "D ", path: "b", blob: null },
+      ],
+    })
   })
 
   test("called from a nested directory, porcelain paths are resolved against the toplevel and the right file is hashed", async () => {

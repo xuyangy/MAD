@@ -22,7 +22,7 @@ import type { BlameExecOutcome, SpawnBlame, SpawnedBlame } from "../adapters/ope
 import type { OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import type { OpencodeToolsOptions } from "../adapters/opencode/tools.ts"
 import { codeRevisionFrom, type RunCommand } from "../ablation/bundle.ts"
-import { known } from "../ablation/manifest.ts"
+import { known, unknownValue } from "../ablation/manifest.ts"
 import {
   hostConfig,
   MEASURED_HOST,
@@ -2291,5 +2291,91 @@ describe("the code revision is read before the reservation is written (retro ite
     expect(await sh("status", "--porcelain", "--untracked-files=all")).toContain(`?? ${EVALUATION_RUN.reservation}`)
     // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean.
     expect(await codeRevisionFrom(gitIn)).toMatchObject({ kind: "known", value: { commit: head, dirty: true } })
+  })
+})
+
+describe("an unknown code revision refuses at stage 1 (retro item 1, review loop 1)", () => {
+  for (const [name, codeRevision] of [
+    ["returned unknown", async () => unknownValue("`git rev-parse HEAD` exited 128: fatal: not a git repository")],
+    [
+      "a seam that throws",
+      async () => {
+        throw new Error("the bounded git did not return")
+      },
+    ],
+  ] as const) {
+    test(`the OAuth route, ${name}: exit 1 naming the reason; no reservation, no host, nothing scheduled`, async () => {
+      const env = await oauthSetup()
+      const root = join(env.parent, "reservation-root")
+      const host = oauthHost()
+      const { overrides } = oauthOverrides(env, host, {
+        gates: closedGates,
+        protocolV2File: await frozenV2(env.parent),
+        evaluationReservation: { root, committed: priorRunsOnly },
+        codeRevision,
+      })
+      const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+      expect(result.text).toContain(name === "a seam that throws" ? "the code revision could not be read: the bounded git did not return" : "fatal: not a git repository")
+      expect(result.text).not.toContain("stage 2 of 4")
+      expect(existsSync(join(root, EVALUATION_RUN.reservation))).toBe(false)
+      expect(host.started).toEqual([])
+      await nothingScheduled(env.out, env.scratchParent)
+    })
+  }
+
+  test("the api-key route refuses an unknown revision the same way, before any host", async () => {
+    const env = await setup()
+    const { overrides, host } = overridesFor(env, { gates: closedGates, codeRevision: async () => unknownValue("git was unavailable") })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("the code revision is unknown: git was unavailable")
+    expect(host.started).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("SIGINT while the revision is read: the interruption's own refusal, exit 130, even when the read is unknown; no reservation or host", async () => {
+    const env = await oauthSetup()
+    const root = join(env.parent, "reservation-root")
+    const host = oauthHost()
+    const signals = fakeSignals()
+    const exits: number[] = []
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root, committed: priorRunsOnly },
+      signals: signals.source,
+      exit: (code) => {
+        exits.push(code)
+      },
+      codeRevision: async () => {
+        signals.fire("SIGINT")
+        return unknownValue("git was interrupted")
+      },
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(130)
+    expect(exits).toEqual([130])
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
+    expect(result.text).toContain("the preflight was interrupted")
+    expect(result.text).not.toContain("stage 1 (code revision)")
+    expect(existsSync(join(root, EVALUATION_RUN.reservation))).toBe(false)
+    expect(host.started).toEqual([])
+  })
+
+  test("stage 1 prints the revision it read, entries JSON-quoted", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      codeRevision: async () => known({ commit: "abc123", dirty: true, entries: [{ status: "??", path: 'we"ird', blob: null }] }),
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    const printed = result.text.indexOf("code revision: abc123, worktree dirty (1 entry recorded)")
+    expect(printed).toBeGreaterThan(-1)
+    expect(printed).toBeLessThan(result.text.indexOf("stage 2 of 4"))
+    expect(result.text).toContain(`"??" ${JSON.stringify('we"ird')}: no file`)
   })
 })

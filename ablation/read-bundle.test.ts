@@ -673,7 +673,7 @@ describe("recheck — validation reaches inside the arrays", () => {
     )
     const result = await readBundle(root)
     if ("error" in result) throw new Error(result.error)
-    expect(result.unreadable[0]!.reason).toContain("{ commit: string, dirty: boolean }")
+    expect(result.unreadable[0]!.reason).toContain("{ commit: string, dirty: boolean, entries?: [...] }")
   })
 
   test("the malformed shapes above are still PER-ARM", async () => {
@@ -1572,6 +1572,9 @@ describe("the code revision's dirty entries decide what its commit identifies", 
       [{ commit: "13eadc6", dirty: true, entries: [{ ...good, path: "" }] }, "carries no non-empty `path`"],
       [{ commit: "13eadc6", dirty: true, entries: [{ ...good, extra: 1 }] }, "unrecognised field(s) `extra`"],
       [{ commit: "13eadc6", dirty: true, entries: "a.ts" }, "`entries` is not an array"],
+      [{ commit: "13eadc6", dirty: true, entires: [good] }, 'unrecognised field(s) "entires"'],
+      [{ commit: "13eadc6", dirty: false, entries: [], note: "x" }, 'unrecognised field(s) "note"'],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, status: "  " }] }, "which is not a porcelain XY status"],
     ] as const) {
       const result = await read(await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0, codeRevision: known(revision) }]))
       expect(result.comparable, expected).toEqual([])

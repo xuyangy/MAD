@@ -22,7 +22,7 @@ Two sources are cited, by name, beside each figure:
 - **The reader output**,
   [`evidence/paired-oauth-evaluation-run-5-eval-read.txt`](evidence/paired-oauth-evaluation-run-5-eval-read.txt),
   cited by the section heading it prints (EXECUTION COVERAGE, COST, MAD LABELLED RECALL and so on).
-  From commit `3fba92d` the reader withholds run 5's cohort, because its manifests record `dirty: true` with no entries ([`evidence/paired-oauth-evaluation-run-5-eval-read-2026-10-15.txt`](evidence/paired-oauth-evaluation-run-5-eval-read-2026-10-15.txt)); the published figures come from the record at `c66b069`.
+  The current reader withholds run 5's cohort and reproduces none of its comparative figures ([`evidence/paired-oauth-evaluation-run-5-eval-read-2026-10-15.txt`](evidence/paired-oauth-evaluation-run-5-eval-read-2026-10-15.txt)); this publication retains the record at `c66b069`.
 - **The run record**,
   [`evidence/paired-oauth-evaluation-run-5-2026-10-07.json`](evidence/paired-oauth-evaluation-run-5-2026-10-07.json),
   cited by field (`host`, `roster`, `anthropic`, `attempts`), for facts the reader does not print.

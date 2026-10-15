@@ -107,10 +107,14 @@ Four things worth knowing before you use it:
   compared.
 - **The code revision is established, not assumed.** It comes from
   `git rev-parse HEAD` plus `git status --porcelain=v1 -z --untracked-files=all`,
-  and each dirty entry is recorded with its status, path and git blob id. If any
-  step fails, or an entry is not a regular file or absent, the manifest records
-  an unknown carrying the reason. The reader treats a `dirty: true` revision
-  with no recorded entries as unknown.
+  and each dirty entry is recorded with its status, path and git blob id; an
+  entry with no file at its path, such as a deletion, is recorded with
+  `blob: null`. If any step fails, or an entry is a symlink, submodule or other
+  non-regular file, the revision is an unknown carrying the reason. Gitignored
+  files are not recorded, and untracked file names are. The paired and
+  adversarial launchers refuse at stage 1, before any reservation, when the
+  revision is unknown. The reader treats a `dirty: true` revision with no
+  recorded entries as unknown.
 - **Each arm is written as it finishes, and a failed write STOPS the run.** If a
   dump cannot be written — no space, a refused path — the evaluation raises and
   no report is printed, so nothing further bills and no untraceable number is

@@ -137,10 +137,8 @@ describe("the retained run-5 bundle against its SHA256SUMS", () => {
 
 /**
  * Each committed reader output is a header line naming the reader commit, then
- * the reader's stdout verbatim. Emitted paths are never rewritten in such a file;
- * here the checkout root it was produced under, when it prints one, and this
- * checkout's, are both read as one token, so a replay at another checkout path
- * compares equal when only path text differs.
+ * the reader's stdout verbatim. Emitted paths are never rewritten in such a file.
+ * The current output prints no checkout root, so the replay compares it exactly.
  *
  * The replay pins the reader to the current output file. Neither file is ever
  * regenerated: `paired-oauth-evaluation-run-5-eval-read.txt` is the record at
@@ -162,9 +160,8 @@ describe("the committed reader output", () => {
     expect(committed.slice(0, newline)).toBe(`eval-read at commit ${READER_COMMIT}; every line after this one is its stdout, verbatim`)
     const recorded = committed.slice(newline + 1)
     expect(recorded.startsWith(`MAD evaluation bundle — ${BUNDLE_PATH}\n`)).toBe(true)
-    const recordedRoot = new RegExp(`([^\\s\`]*)/${BUNDLE_PATH}/`).exec(recorded)?.[1]
-    expect(recordedRoot).not.toBe("")
-    expect(recordedRoot).not.toBe("/")
+    // This reader withholds run 5's cohort and paired contrast, so it prints no record path under the bundle and no checkout root.
+    expect(new RegExp(`([^\\s\`]*)/${BUNDLE_PATH}/`).exec(recorded)).toBeNull()
 
     const reader = Bun.spawn([process.execPath, "run", "scripts/eval-read.ts", "--bundle", BUNDLE_PATH], {
       cwd: REPO_ROOT,
@@ -178,9 +175,7 @@ describe("the committed reader output", () => {
     ])
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
 
-    const asToken = (text: string, root: string | undefined) => (root === undefined ? text : text.split(`${root}/`).join("<checkout>/"))
-    const replay = asToken(stdout, recordedRoot === undefined ? undefined : REPO_ROOT)
-    if (replay !== asToken(recorded, recordedRoot)) {
+    if (stdout !== recorded) {
       throw new Error(
         "The reader no longer prints the committed run-5 output. That file is the reader's output at " +
           `${READER_COMMIT} and is never regenerated: publish a later reader's output as a NEW dated ` +

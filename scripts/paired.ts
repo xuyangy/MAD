@@ -121,7 +121,7 @@ import {
   type BlameCleanupUnresolved,
   type OpencodeToolsOptions,
 } from "../adapters/opencode/tools.ts"
-import { codeRevisionFrom } from "../ablation/bundle.ts"
+import { codeRevisionFrom, codeRevisionLines } from "../ablation/bundle.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { runPairedBlocks, type PairedPhaseContext } from "../ablation/paired.ts"
 import {
@@ -1103,7 +1103,7 @@ export function printCheck(check: Check): void {
  * states what THIS invocation did not do, and names any runner file that was
  * already in the bundle root and left untouched.
  */
-function refusal(stage: string, reasons: string[], next: string, preexisting: string[] = []): number {
+function refusal(stage: string, reasons: string[], next: string, preexisting: string[] = [], code = 1): number {
   console.log(
     `\nREFUSED at ${stage}.\n` +
       reasons.map((reason) => `  - ${reason}\n`).join("") +
@@ -1112,7 +1112,7 @@ function refusal(stage: string, reasons: string[], next: string, preexisting: st
       (preexisting.length === 0 ? "" : `Already in the bundle root, and left untouched: ${preexisting.join(", ")}.\n`) +
       `Next step: ${next}`,
   )
-  return 1
+  return code
 }
 
 /** The next step for a `createSchedule` refusal, matched to its reason. */
@@ -1508,6 +1508,17 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       codeRevision = await (overrides.codeRevision ?? (() => codeRevisionFrom((_command, args) => git(REPO_ROOT, args))))()
     } catch (error) {
       codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
+    }
+    for (const line of codeRevisionLines(codeRevision)) console.log(`  ${line}`)
+    if (interrupted) return refusal("stage 1 (offline checks)", ["the preflight was interrupted"], "run the command again when ready.", preexisting, 130)
+    // A run whose code is not identified would produce a bundle no reader can compare; no flag overrides this.
+    if (codeRevision.kind === "unknown") {
+      return refusal(
+        "stage 1 (code revision)",
+        [`the code revision is unknown: ${codeRevision.why}`],
+        "fix what made the code revision unknown (it is named above) and run the command again.",
+        preexisting,
+      )
     }
 
     // Story 2-8d: the OAuth route uses gate 4's one authorization here, before any host or network activity.

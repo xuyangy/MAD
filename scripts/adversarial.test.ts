@@ -1755,7 +1755,7 @@ describe("the code revision is read before the reservation is written (retro ite
     const printed = result.text.indexOf("code revision: abc123, worktree dirty (1 entry recorded)")
     expect(printed).toBeGreaterThan(-1)
     expect(printed).toBeLessThan(result.text.indexOf("stage 2 of 4"))
-    expect(result.text).toContain(`" M" core/x.ts: blob ${"e".repeat(40)}`)
+    expect(result.text).toContain(`" M" "core/x.ts": blob ${"e".repeat(40)}`)
     expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
   }, 120_000)
 
@@ -1801,4 +1801,48 @@ describe("the code revision is read before the reservation is written (retro ite
     // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean.
     expect(await codeRevisionFrom(gitIn)).toMatchObject({ kind: "known", value: { commit: head, dirty: true } })
   }, 120_000)
+})
+
+describe("an unknown code revision refuses at stage 1 (retro item 1, review loop 1)", () => {
+  for (const [name, codeRevision, expected] of [
+    ["returned unknown", async () => ({ kind: "unknown" as const, why: "`git rev-parse HEAD` exited 128: fatal: not a git repository" }), "`git rev-parse HEAD` exited 128: fatal: not a git repository"],
+    [
+      "a seam that throws",
+      async (): Promise<never> => {
+        throw new Error("the bounded git did not return")
+      },
+      "the code revision could not be read: the bounded git did not return",
+    ],
+  ] as const) {
+    test(`${name}: exit 1 naming the reason; no reservation, no host, nothing written`, async () => {
+      const env = await setup()
+      const before = await productionReservation()
+      const { overrides, hosts } = await runnable(env, { codeRevision })
+      const result = await captured(() => main(argvFor(env), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+      expect(result.text).toContain(`the code revision is unknown: ${expected}`)
+      expect(result.text).not.toContain("stage 2 of 4")
+      for (const path of [env.reservationRoot, env.out, env.dataRoot]) expect(existsSync(path), path).toBe(false)
+      expect(hosts.started).toEqual([])
+      expect(await productionReservation()).toEqual(before)
+    })
+  }
+
+  test("an interrupt during a read that comes back unknown keeps the interruption's refusal, exit 130", async () => {
+    const env = await setup()
+    const signals = signalSource()
+    const { overrides } = await runnable(env, {
+      signals,
+      codeRevision: async () => {
+        signals.emit("SIGINT")
+        return { kind: "unknown", why: "git was interrupted" }
+      },
+    })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(130)
+    expect(result.text).toContain("the launcher was interrupted")
+    expect(result.text).not.toContain("stage 1 (code revision)")
+    expect(existsSync(env.reservationRoot)).toBe(false)
+  })
 })

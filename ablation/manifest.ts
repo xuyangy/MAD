@@ -221,8 +221,8 @@ export interface DirtyEntry {
   blob: string | null
 }
 
-/** A porcelain v1 XY status: two characters, each a status letter or a space. */
-export const DIRTY_STATUS = /^[ MTADRCU?!]{2}$/
+/** A porcelain v1 XY status: two characters, each a status letter or a space, not both spaces. */
+export const DIRTY_STATUS = /^(?!  )[ MTADRCU?!]{2}$/
 
 /** A git blob id, SHA-1 or SHA-256. */
 export const GIT_BLOB = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
@@ -246,6 +246,12 @@ export function compareDirtyEntries(a: DirtyEntry, b: DirtyEntry): number {
  * The code the run was produced by. `dirty` is a fact about the worktree, not a
  * warning. `entries` says what made it dirty; a dirty revision without them
  * does not identify the code, and the reader treats it as unknown.
+ *
+ * The entries identify the code within limits: gitignored files are not listed
+ * by `git status` and are not recorded, and a symlink, submodule or other
+ * non-regular entry makes the revision unknown rather than recorded. Untracked
+ * file names are recorded, so committed evidence carrying the revision
+ * publishes them.
  */
 export interface CodeRevision {
   commit: string

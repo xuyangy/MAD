@@ -97,7 +97,7 @@ import {
   type AdversarialAuthorization,
   type AdversarialConfig,
 } from "../ablation/adversarial-schedule.ts"
-import { codeRevisionFrom } from "../ablation/bundle.ts"
+import { codeRevisionFrom, codeRevisionLines } from "../ablation/bundle.ts"
 import {
   identifyBinary,
   OAUTH_PAYLOAD,
@@ -742,8 +742,9 @@ export function oauthHostLifecycle(options: OAuthHostLifecycleOptions): {
  * The config every schedule of this launcher is sealed with (protocol v3 B2,
  * B8 and B9): attempts on the oauth route, the `StructuredOutput`-only host
  * offer, and a host of its own per run. `provenance` is `live` for the
- * launcher; the zero-bill probe (`scripts/adversarial-probe.ts`) seals the same
- * config as `scripted`.
+ * launcher, which also declares the `authorization` its stage 1 checked; the
+ * zero-bill probe (`scripts/adversarial-probe.ts`) seals the config as
+ * `scripted` and declares no authorization.
  */
 export function adversarialSuiteConfig(
   provenance: AdversarialConfig["provenance"],
@@ -761,20 +762,6 @@ export function adversarialSuiteConfig(
   }
 }
 
-/** The code revision as stage 1 prints it: the commit and every dirty entry, or the reason it is unknown. */
-export function codeRevisionLines(revision: Maybe<CodeRevision>): string[] {
-  if (revision.kind === "unknown") return [`code revision: unknown (${revision.why})`]
-  const { commit, dirty, entries = [] } = revision.value
-  if (!dirty) return [`code revision: ${commit}, worktree clean`]
-  return [
-    `code revision: ${commit}, worktree dirty (${entries.length} entr${entries.length === 1 ? "y" : "ies"} recorded)`,
-    ...entries.map(
-      (entry) =>
-        `  ${JSON.stringify(entry.status)} ${entry.path}${entry.sourcePath === undefined ? "" : ` (from ${entry.sourcePath})`}: ` +
-        (entry.blob === null ? "no file" : `blob ${entry.blob}`),
-    ),
-  ]
-}
 
 /** What stage 4 runs on: a sealed schedule's inputs, the OAuth route, and the seams whose defaults are the shipped behaviour. */
 export interface SuiteStageInput {
@@ -1219,6 +1206,14 @@ async function launch(
   }
   for (const line of codeRevisionLines(codeRevision)) console.log(`  ${line}`)
   if (interrupted()) return refusal("stage 1 (offline checks)", ["the launcher was interrupted"], "run the command again when ready.", 130)
+  // A run whose code is not identified would spend the authorization on a bundle no reader can compare; no flag overrides this.
+  if (codeRevision.kind === "unknown") {
+    return refusal(
+      "stage 1 (code revision)",
+      [`the code revision is unknown: ${codeRevision.why}`],
+      "fix what made the code revision unknown (it is named above) and run the command again.",
+    )
+  }
 
   // ---- STAGE 2: the reservation, before anything else is written ----
   console.log(`\nbun run adversarial — stage 2 of 4: reserve adversarial run ${run.run}`)
