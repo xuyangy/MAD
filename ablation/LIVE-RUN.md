@@ -39,11 +39,15 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
 6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every route) and
    `bun run adversarial` read MAD's own code revision at stage 1, before any reservation, and refuse
    unless it is known and clean. Every entry `git status` lists refuses, whether staged, unstaged or
-   untracked and not ignored, and the refusal names each one with its path JSON-quoted. There is no
-   override and no list of allowed paths. Commit or remove every such file first, untracked ones
-   included. This holds every value a launch is authorized or shaped by to HEAD, in any file: the gate
-   table, the attempt allowances (`ablation/governor.ts`), the measured host and the payload pins
-   (`ablation/managed-host.ts`). `bun run adversarial` also has the stage-1 check "gate 11 evidence
+   untracked and not ignored, and the refusal names each one with its path JSON-quoted (the first 50,
+   then a count of the rest). There is no override and no list of allowed paths. Commit or remove
+   every such file first, untracked ones included. This holds to HEAD every value held in a
+   git-visible file of the checkout, such as the gate table, the attempt allowances
+   (`ablation/governor.ts`), the measured host and the payload pins (`ablation/managed-host.ts`).
+   It does not hold to HEAD: ignored files; the opencode binary resolved on PATH, which is checked
+   separately, by its hash against `MEASURED_HOST`; the prepared and data directories and the output
+   root, which live outside the repository; the environment and the flags; and any change made after
+   stage 1 reads the checkout. `bun run adversarial` also has the stage-1 check "gate 11 evidence
    scope pins". It compares `MEASURED_HOST`'s version and sha256, and the anthropic-auth, config-seed
    and catalogue digests of the payload pins the run uses, with `GATE_11_EVIDENCE_SCOPE`, field by
    field. A pin committed without a matching scope change refuses there. Neither check covers ignored
@@ -1220,8 +1224,9 @@ run into any bundle root is refused, and of two concurrent invocations only one 
 deletes it: a run that fails or is interrupted after the reservation has used the authorization. A
 stage-1 refusal reserves nothing. A further run needs the budget owner's new authorization in a reviewed
 change. The launcher reads the code revision before it creates the reservation, so the reservation is
-not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`. Any other
-entry refuses at stage 1 (item 6 of "Before anything bills"). Commit the reservation after the run, as
+not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`. The
+reservation does not exist when the revision is read, and every entry the revision records refuses
+at stage 1 (item 6 of "Before anything bills"). Commit the reservation after the run, as
 the pilot's were.
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.

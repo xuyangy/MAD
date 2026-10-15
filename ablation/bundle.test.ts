@@ -12,7 +12,12 @@ import {
   BUNDLE_FILE,
   PREFIX_FILE,
   armDirectory,
+  boundedCodeRevisionLines,
   codeRevisionFrom,
+  codeRevisionLines,
+  DIRTY_REASON_LIMIT,
+  DIRTY_REVISION_NEXT_STEP,
+  dirtyRevisionReasons,
   type PathKind,
   type RunCommand,
   writeArmDump,
@@ -812,5 +817,69 @@ describe("prefix evidence stays outside the reviewed worktree (story 2-5c review
     expect(outcome.file).toBe(join(bundle, "prefix", "1", PREFIX_FILE))
     expect(outcome.dump).toBe(join(bundle, "prefix", "1", "run-prefix"))
     expect((await stat(join(outcome.dump!, "record.json"))).isFile()).toBe(true)
+  })
+})
+
+describe("dirtyRevisionReasons: a launch needs a clean checkout", () => {
+  const why = "a launch needs a clean checkout, so every value held in a git-visible file of the checkout is the committed one"
+  const entry = (index: number) => ({ status: "??", path: `f${String(index).padStart(3, "0")}.txt`, blob: "a".repeat(40) })
+
+  test("a clean revision with no entries gives no reason", () => {
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: false, entries: [] })).toEqual([])
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: false })).toEqual([])
+  })
+
+  test("a rename is listed with its source path, both JSON-quoted", () => {
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: true, entries: [{ status: "R ", path: "b.ts", sourcePath: "a.ts", blob: "d".repeat(40) }] })).toEqual([
+      `the worktree differs from HEAD abc123 (1 entry recorded): ${why}`,
+      'uncommitted: R  "b.ts" (from "a.ts")',
+    ])
+  })
+
+  test("`dirty: false` with entries recorded refuses, and says the revision claimed to be clean", () => {
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: false, entries: [{ status: " M", path: "x.ts", blob: "e".repeat(40) }] })).toEqual([
+      `the worktree differs from HEAD abc123 (1 entry recorded), although the revision says it is clean: ${why}`,
+      'uncommitted:  M "x.ts"',
+    ])
+  })
+
+  test("`dirty: true` with no entries recorded refuses without pointing at a list, and the next step needs no list", () => {
+    for (const revision of [{ commit: "abc123", dirty: true }, { commit: "abc123", dirty: true, entries: [] }]) {
+      expect(dirtyRevisionReasons(revision)).toEqual([`the worktree differs from HEAD abc123, but no entries were recorded: ${why}`])
+    }
+    expect(DIRTY_REVISION_NEXT_STEP).not.toContain("listed above")
+  })
+
+  test(`at most ${DIRTY_REASON_LIMIT} entries are listed, then the rest are counted; the count line is exact`, () => {
+    const entries = Array.from({ length: DIRTY_REASON_LIMIT + 7 }, (_, index) => entry(index))
+    const reasons = dirtyRevisionReasons({ commit: "abc123", dirty: true, entries })
+    expect(reasons[0]).toBe(`the worktree differs from HEAD abc123 (${DIRTY_REASON_LIMIT + 7} entries recorded): ${why}`)
+    expect(reasons.slice(1, -1)).toEqual(entries.slice(0, DIRTY_REASON_LIMIT).map((listed) => `uncommitted: ?? ${JSON.stringify(listed.path)}`))
+    expect(reasons.at(-1)).toBe("… and 7 more")
+    const exactly = Array.from({ length: DIRTY_REASON_LIMIT }, (_, index) => entry(index))
+    const all = dirtyRevisionReasons({ commit: "abc123", dirty: true, entries: exactly })
+    expect(all).toHaveLength(DIRTY_REASON_LIMIT + 1)
+    expect(all.at(-1)).toBe(`uncommitted: ?? ${JSON.stringify(exactly.at(-1)!.path)}`)
+  })
+})
+
+describe("boundedCodeRevisionLines: the launchers' printed revision stays bounded", () => {
+  test("past the limit the entries stop and the rest are counted; the revision keeps every entry", () => {
+    const entries = Array.from({ length: DIRTY_REASON_LIMIT + 3 }, (_, index) => ({ status: " M", path: `f${index}.ts`, blob: "b".repeat(40) }))
+    const revision = known({ commit: "abc123", dirty: true, entries })
+    const full = codeRevisionLines(revision)
+    const lines = boundedCodeRevisionLines(revision)
+    expect(lines[0]).toBe(`code revision: abc123, worktree dirty (${DIRTY_REASON_LIMIT + 3} entries recorded)`)
+    expect(lines.slice(0, DIRTY_REASON_LIMIT + 1)).toEqual(full.slice(0, DIRTY_REASON_LIMIT + 1))
+    expect(lines.at(-1)).toBe("  … and 3 more")
+    expect(lines).toHaveLength(DIRTY_REASON_LIMIT + 2)
+    expect(revision.kind === "known" && revision.value.entries).toHaveLength(DIRTY_REASON_LIMIT + 3)
+  })
+
+  test("at or under the limit, and for clean or unknown revisions, the lines are codeRevisionLines' own", () => {
+    const entries = Array.from({ length: DIRTY_REASON_LIMIT }, (_, index) => ({ status: "??", path: `f${index}.ts`, blob: null }))
+    for (const revision of [known({ commit: "abc123", dirty: true, entries }), known({ commit: "abc123", dirty: false, entries: [] }), unknownValue("no git")]) {
+      expect(boundedCodeRevisionLines(revision)).toEqual(codeRevisionLines(revision))
+    }
   })
 })

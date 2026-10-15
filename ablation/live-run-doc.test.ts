@@ -121,7 +121,7 @@ describe("LIVE-RUN.md names the cross-arm case set that is actually in force", (
   })
 })
 
-describe("LIVE-RUN.md states the clean-checkout rule for a billed launch (retro item 2)", () => {
+describe("LIVE-RUN.md states the clean-checkout rule for a billed launch", () => {
   test("the rule, the gate-11 pin check and what neither covers are stated", async () => {
     const doc = (await liveRunDoc()).replace(/\s+/g, " ")
     for (const phrase of [
@@ -133,6 +133,12 @@ describe("LIVE-RUN.md states the clean-checkout rule for a billed launch (retro 
       "A pin committed without a matching scope change refuses there.",
       "Neither check covers ignored files, which `git status` does not list, or a file changed after stage 1 reads the checkout and before the launch uses it.",
       "The OAuth pilot launcher (`bun run oauth-pilot`) has no such check.",
+      "This holds to HEAD every value held in a git-visible file of the checkout",
+      "It does not hold to HEAD: ignored files; the opencode binary resolved on PATH, which is checked separately, by its hash against `MEASURED_HOST`; the prepared and data directories and the output root, which live outside the repository; the environment and the flags; and any change made after stage 1 reads the checkout.",
+      "The reservation does not exist when the revision is read, and every entry the revision records refuses at stage 1",
+      'then MAD\'s own code revision, which must be known and clean (item 6 of "Before anything bills")',
+      "an unknown code revision of MAD itself, or a checkout with any entry `git status` lists",
+      "Then MAD's code revision is read, and an unknown or dirty one refuses",
     ]) {
       expect(doc, phrase).toContain(phrase)
     }

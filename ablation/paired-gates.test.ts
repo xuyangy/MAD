@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "./governor.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
-import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, GATE_11_EVIDENCE_SCOPE, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
+import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
 import { readFrozenProtocol } from "./schedule.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
@@ -1025,13 +1025,14 @@ describe("gate 11's evidence scope", () => {
   })
 
   test("the pin check names each field that differs, with the expected and the actual value", () => {
+    const otherVersion = `${MEASURED_HOST.version}-x`
     const other = "f".repeat(64)
     const rows = [
-      [{ ...MEASURED_HOST, version: "9.9.9" }, OAUTH_PAYLOAD, "the measured host version (`MEASURED_HOST.version`)", MEASURED_HOST.version, "9.9.9"],
-      [{ ...MEASURED_HOST, sha256: other }, OAUTH_PAYLOAD, "the measured host sha256 (`MEASURED_HOST.sha256`)", MEASURED_HOST.sha256, other],
-      [MEASURED_HOST, { ...OAUTH_PAYLOAD, anthropicAuth: { ...OAUTH_PAYLOAD.anthropicAuth, treeDigest: other } }, "the anthropic-auth tree digest (`anthropicAuth.treeDigest`)", OAUTH_PAYLOAD.anthropicAuth.treeDigest, other],
-      [MEASURED_HOST, { ...OAUTH_PAYLOAD, configSeed: { ...OAUTH_PAYLOAD.configSeed, treeDigest: other } }, "the config seed tree digest (`configSeed.treeDigest`)", OAUTH_PAYLOAD.configSeed.treeDigest, other],
-      [MEASURED_HOST, { ...OAUTH_PAYLOAD, catalogue: { ...OAUTH_PAYLOAD.catalogue, sha256: other } }, "the catalogue sha256 (`catalogue.sha256`)", OAUTH_PAYLOAD.catalogue.sha256, other],
+      [{ ...MEASURED_HOST, version: otherVersion }, OAUTH_PAYLOAD, GATE_11_PIN_LABELS.hostVersion, MEASURED_HOST.version, otherVersion],
+      [{ ...MEASURED_HOST, sha256: other }, OAUTH_PAYLOAD, GATE_11_PIN_LABELS.hostSha256, MEASURED_HOST.sha256, other],
+      [MEASURED_HOST, { ...OAUTH_PAYLOAD, anthropicAuth: { ...OAUTH_PAYLOAD.anthropicAuth, treeDigest: other } }, GATE_11_PIN_LABELS.anthropicAuthTreeDigest, OAUTH_PAYLOAD.anthropicAuth.treeDigest, other],
+      [MEASURED_HOST, { ...OAUTH_PAYLOAD, configSeed: { ...OAUTH_PAYLOAD.configSeed, treeDigest: other } }, GATE_11_PIN_LABELS.configSeedTreeDigest, OAUTH_PAYLOAD.configSeed.treeDigest, other],
+      [MEASURED_HOST, { ...OAUTH_PAYLOAD, catalogue: { ...OAUTH_PAYLOAD.catalogue, sha256: other } }, GATE_11_PIN_LABELS.catalogueSha256, OAUTH_PAYLOAD.catalogue.sha256, other],
     ] as const
     for (const [host, pins, field, expected, actual] of rows) {
       expect(gate11PinProblems(host, pins), field).toEqual([`${field} differs from gate 11's evidence scope: expected "${expected}", actual "${actual}"`])
@@ -1040,16 +1041,19 @@ describe("gate 11's evidence scope", () => {
 
   test("a host pin changed in a commit without a gate-11 scope change still refuses: the scope, not the pin, is the authority", () => {
     // Committed drift: the checkout is clean, so only this comparison can see that `MEASURED_HOST` moved and the scope did not.
-    const drifted = { version: "1.18.33", sha256: "e".repeat(64) }
-    expect(gate11PinProblems(drifted, OAUTH_PAYLOAD)).toHaveLength(2)
-    expect(gate11PinProblems(drifted, OAUTH_PAYLOAD).join("\n")).toContain(`expected "${GATE_11_EVIDENCE_SCOPE.host.sha256}", actual "${"e".repeat(64)}"`)
+    const drifted = { version: `${MEASURED_HOST.version}-x`, sha256: "e".repeat(64) }
+    expect(gate11PinProblems(drifted, OAUTH_PAYLOAD)).toEqual([
+      `${GATE_11_PIN_LABELS.hostVersion} differs from gate 11's evidence scope: expected "${GATE_11_EVIDENCE_SCOPE.host.version}", actual "${drifted.version}"`,
+      `${GATE_11_PIN_LABELS.hostSha256} differs from gate 11's evidence scope: expected "${GATE_11_EVIDENCE_SCOPE.host.sha256}", actual "${drifted.sha256}"`,
+    ])
   })
 
   test("a binary precheck expectation other than the measured host refuses, field by field", () => {
-    const problems = gate11PinProblems(MEASURED_HOST, OAUTH_PAYLOAD, { version: "9.9.9", sha256: MEASURED_HOST.sha256 })
+    const otherVersion = `${MEASURED_HOST.version}-x`
+    const problems = gate11PinProblems(MEASURED_HOST, OAUTH_PAYLOAD, { version: otherVersion, sha256: MEASURED_HOST.sha256 })
     expect(problems).toEqual([
       "the binary precheck's expected version differs from the production `MEASURED_HOST`'s, and the precheck expectation must equal it: " +
-        `expected "${MEASURED_HOST.version}", actual "9.9.9"`,
+        `expected "${MEASURED_HOST.version}", actual "${otherVersion}"`,
     ])
   })
 

@@ -33,7 +33,7 @@ import { fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts
 import type { PayloadPins } from "../ablation/oauth-payload.ts"
 import { HALT_MARKER_FILE } from "../ablation/governor.ts"
 import { JOURNAL_FILE } from "../ablation/journal.ts"
-import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { CoinFace } from "../ablation/schedule.ts"
 import { candidate, fakeClock } from "../core/test-support/fakes.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
@@ -58,7 +58,8 @@ import {
 } from "./adversarial.ts"
 import { shippedDecision } from "./adversarial-probe.ts"
 import { boundedGit, GATE_TABLE_FILE, gatesIdentity, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
-import { codeRevisionFrom, type RunCommand } from "../ablation/bundle.ts"
+import { codeRevisionFrom, DIRTY_REASON_LIMIT, DIRTY_REVISION_NEXT_STEP } from "../ablation/bundle.ts"
+import { cleanTempRepo } from "../ablation/git-repo.fixture.ts"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const HERE = process.cwd()
@@ -1748,33 +1749,6 @@ describe("the turn deadline (protocol v3 B6)", () => {
   }, 60_000)
 })
 
-/** A committed one-file git repository in a fresh temporary directory, read through `RunCommand` with no user or system git config. */
-async function cleanTempRepo() {
-  const repo = await tempDir()
-  const gitIn: RunCommand = async (command, args) => {
-    const spawned = Bun.spawn([command, ...args], {
-      cwd: repo,
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
-    return { exitCode: await spawned.exited, stdout, stderr }
-  }
-  const sh = async (...args: string[]) => {
-    const result = await gitIn("git", args)
-    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
-    return result.stdout
-  }
-  await sh("init", "-q", "-b", "main")
-  await writeFile(join(repo, "README"), "clean\n")
-  await sh("add", "README")
-  await sh("-c", "user.email=test@example.invalid", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
-  const head = (await sh("rev-parse", "HEAD")).trim()
-  expect(await sh("status", "--porcelain")).toBe("")
-  return { repo, gitIn, sh, head }
-}
-
 describe("the code revision is read before the reservation is written (retro item 1)", () => {
   test("stage 1 reads and prints the revision while no reservation exists; stage 2 reserves after it", async () => {
     const env = await setup()
@@ -1797,7 +1771,7 @@ describe("the code revision is read before the reservation is written (retro ite
 
   test("in a clean git repository with the real revision reader and reservation writer, stage 1 passes and the sealed schedule says `dirty: false` while the reservation is untracked there", async () => {
     const env = await setup()
-    const { repo, gitIn, sh, head } = await cleanTempRepo()
+    const { repo, gitIn, sh, head } = await cleanTempRepo(await tempDir())
     // Every host start is refused before a spawn, so the run ends once the schedule is sealed.
     const refusing = scriptedHosts({ preSpawn: () => "throw" })
     const { overrides } = await runnable(env, {
@@ -1862,7 +1836,7 @@ describe("an unknown code revision refuses at stage 1 (retro item 1, review loop
   })
 })
 
-describe("the launch holds every authorization-enforcing value to HEAD (retro item 2)", () => {
+describe("the launch holds every authorization-enforcing value to HEAD", () => {
   /** A main run whose every host start throws: what it printed, its exit, and whether any host was asked for. */
   async function launched(env: Awaited<ReturnType<typeof setup>>, extra: AdversarialOverrides) {
     const hosts = scriptedHosts({ preSpawn: () => "throw" })
@@ -1891,16 +1865,35 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
       expect(result.text).toContain("REFUSED at stage 1 (code revision).")
       expect(result.text).toContain("the worktree differs from HEAD abc123 (1 entry recorded)")
       expect(result.text).toContain(`uncommitted: ${entry.status} ${JSON.stringify(entry.path)}`)
-      expect(result.text).toContain("commit or remove every entry listed above")
+      expect(result.text).toContain(DIRTY_REVISION_NEXT_STEP)
       expect(result.text).not.toContain("stage 2 of 4")
       await nothingCreated(env, hosts, before)
     })
   }
 
-  test("a dirty read that an interrupt arrives during keeps the interruption's refusal, exit 130", async () => {
+  test("more dirty entries than the display limit: both printed lists stop at the limit and count the rest, and the count line is exact", async () => {
     const env = await setup()
+    const before = await productionReservation()
+    const entries = Array.from({ length: DIRTY_REASON_LIMIT + 7 }, (_, index) => ({ status: "??", path: `stray/f${String(index).padStart(3, "0")}.txt`, blob: "c".repeat(40) }))
+    const { result, hosts } = await launched(env, { codeRevision: async () => ({ kind: "known", value: { commit: "abc123", dirty: true, entries } }) })
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`code revision: abc123, worktree dirty (${DIRTY_REASON_LIMIT + 7} entries recorded)`)
+    expect(result.text).toContain(`the worktree differs from HEAD abc123 (${DIRTY_REASON_LIMIT + 7} entries recorded)`)
+    for (const entry of entries.slice(0, DIRTY_REASON_LIMIT)) {
+      expect(result.text).toContain(`"??" ${JSON.stringify(entry.path)}: blob ${entry.blob}`)
+      expect(result.text).toContain(`uncommitted: ?? ${JSON.stringify(entry.path)}`)
+    }
+    for (const entry of entries.slice(DIRTY_REASON_LIMIT)) expect(result.text).not.toContain(JSON.stringify(entry.path))
+    // Once under the printed revision and once in the refusal.
+    expect(result.text.split("… and 7 more").length).toBe(3)
+    await nothingCreated(env, hosts, before)
+  })
+
+  test("a dirty read that an interrupt arrives during keeps the interruption's refusal, exit 130; nothing reserved, scheduled or started", async () => {
+    const env = await setup()
+    const before = await productionReservation()
     const signals = signalSource()
-    const { result } = await launched(env, {
+    const { result, hosts } = await launched(env, {
       signals,
       codeRevision: async () => {
         signals.emit("SIGINT")
@@ -1910,13 +1903,13 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
     expect(result.code).toBe(130)
     expect(result.text).toContain("the launcher was interrupted")
     expect(result.text).not.toContain("stage 1 (code revision)")
-    expect(existsSync(env.reservationRoot)).toBe(false)
+    await nothingCreated(env, hosts, before)
   })
 
   test("a clean git repository turned dirty by one untracked file refuses with the real revision reader, and the reservation is absent there", async () => {
     const env = await setup()
     const before = await productionReservation()
-    const { repo, gitIn, head } = await cleanTempRepo()
+    const { repo, gitIn, head } = await cleanTempRepo(await tempDir())
     await writeFile(join(repo, "stray.txt"), "not committed\n")
     const { result, hosts } = await launched(env, { codeRevision: () => codeRevisionFrom(gitIn), reservation: { root: repo, committed: async () => false } })
     expect(result.code).toBe(1)
@@ -1930,31 +1923,36 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
   }, 120_000)
 
   const OTHER = "f".repeat(64)
-  for (const [field, change, label] of [
-    ["host version", (scope: ReturnType<typeof scopeFor>) => ({ ...scope, host: { ...scope.host, version: "9.9.9" } }), "the measured host version (`MEASURED_HOST.version`)"],
-    ["host sha256", (scope: ReturnType<typeof scopeFor>) => ({ ...scope, host: { ...scope.host, sha256: OTHER } }), "the measured host sha256 (`MEASURED_HOST.sha256`)"],
-    [
-      "anthropic-auth tree digest",
-      (scope: ReturnType<typeof scopeFor>) => ({ ...scope, payload: { ...scope.payload, anthropicAuthTreeDigest: OTHER } }),
-      "the anthropic-auth tree digest (`anthropicAuth.treeDigest`)",
-    ],
-    [
-      "config seed tree digest",
-      (scope: ReturnType<typeof scopeFor>) => ({ ...scope, payload: { ...scope.payload, configSeedTreeDigest: OTHER } }),
-      "the config seed tree digest (`configSeed.treeDigest`)",
-    ],
-    ["catalogue sha256", (scope: ReturnType<typeof scopeFor>) => ({ ...scope, payload: { ...scope.payload, catalogueSha256: OTHER } }), "the catalogue sha256 (`catalogue.sha256`)"],
-  ] as const) {
-    test(`a ${field} that differs from gate 11's scope refuses at stage 1, naming the field, expected and actual`, async () => {
+  const OTHER_VERSION = `${MEASURED_HOST.version}-x`
+  type Scope = ReturnType<typeof scopeFor>
+  const fields: readonly { key: keyof typeof GATE_11_PIN_LABELS; change: (scope: Scope) => Scope; expected: string; actual: (scope: Scope) => string }[] = [
+    { key: "hostVersion", change: (scope) => ({ ...scope, host: { ...scope.host, version: OTHER_VERSION } }), expected: OTHER_VERSION, actual: () => MEASURED_HOST.version },
+    { key: "hostSha256", change: (scope) => ({ ...scope, host: { ...scope.host, sha256: OTHER } }), expected: OTHER, actual: () => MEASURED_HOST.sha256 },
+    {
+      key: "anthropicAuthTreeDigest",
+      change: (scope) => ({ ...scope, payload: { ...scope.payload, anthropicAuthTreeDigest: OTHER } }),
+      expected: OTHER,
+      actual: (scope) => scope.payload.anthropicAuthTreeDigest,
+    },
+    {
+      key: "configSeedTreeDigest",
+      change: (scope) => ({ ...scope, payload: { ...scope.payload, configSeedTreeDigest: OTHER } }),
+      expected: OTHER,
+      actual: (scope) => scope.payload.configSeedTreeDigest,
+    },
+    { key: "catalogueSha256", change: (scope) => ({ ...scope, payload: { ...scope.payload, catalogueSha256: OTHER } }), expected: OTHER, actual: (scope) => scope.payload.catalogueSha256 },
+  ]
+  for (const { key, change, expected, actual } of fields) {
+    test(`${key}: a value that differs from gate 11's scope refuses at stage 1, naming the field, expected and actual`, async () => {
       const env = await setup()
       const before = await productionReservation()
-      const scope = change(scopeFor(env.pins))
-      const { result, hosts } = await launched(env, { gate11Scope: scope })
+      const matching = scopeFor(env.pins)
+      const { result, hosts } = await launched(env, { gate11Scope: change(matching) })
       expect(result.code).toBe(1)
       expect(result.text).toContain("FAIL  gate 11 evidence scope pins")
       expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
       const failed = result.text.split("\n").find((line) => line.includes("gate 11 evidence scope pins failed: "))!
-      expect(failed).toContain(`${label} differs from gate 11's evidence scope: expected "${field.startsWith("host version") ? "9.9.9" : OTHER}", actual "`)
+      expect(failed).toContain(`${GATE_11_PIN_LABELS[key]} differs from gate 11's evidence scope: expected "${expected}", actual "${actual(matching)}"`)
       // Exactly one field is named: the other four match.
       expect(failed.split("differs from gate 11's evidence scope").length).toBe(2)
       expect(result.text).not.toContain("stage 2 of 4")
@@ -1969,13 +1967,14 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
     expect(result.code).toBe(1)
     expect(result.text).toContain("FAIL  gate 11 evidence scope pins")
     for (const [label, expected, actual] of [
-      ["the anthropic-auth tree digest (`anthropicAuth.treeDigest`)", GATE_11_EVIDENCE_SCOPE.payload.anthropicAuthTreeDigest, env.pins.anthropicAuth.treeDigest],
-      ["the config seed tree digest (`configSeed.treeDigest`)", GATE_11_EVIDENCE_SCOPE.payload.configSeedTreeDigest, env.pins.configSeed.treeDigest],
-      ["the catalogue sha256 (`catalogue.sha256`)", GATE_11_EVIDENCE_SCOPE.payload.catalogueSha256, env.pins.catalogue.sha256],
+      [GATE_11_PIN_LABELS.anthropicAuthTreeDigest, GATE_11_EVIDENCE_SCOPE.payload.anthropicAuthTreeDigest, env.pins.anthropicAuth.treeDigest],
+      [GATE_11_PIN_LABELS.configSeedTreeDigest, GATE_11_EVIDENCE_SCOPE.payload.configSeedTreeDigest, env.pins.configSeed.treeDigest],
+      [GATE_11_PIN_LABELS.catalogueSha256, GATE_11_EVIDENCE_SCOPE.payload.catalogueSha256, env.pins.catalogue.sha256],
     ]) {
       expect(result.text).toContain(`${label} differs from gate 11's evidence scope: expected "${expected}", actual "${actual}"`)
     }
-    expect(result.text).not.toContain("MEASURED_HOST.version`) differs")
+    expect(result.text).not.toContain(`${GATE_11_PIN_LABELS.hostVersion} differs`)
+    expect(result.text).not.toContain(`${GATE_11_PIN_LABELS.hostSha256} differs`)
     expect(result.text).not.toContain("stage 2 of 4")
     await nothingCreated(env, hosts, before)
   })
@@ -1983,14 +1982,14 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
   test("a binary precheck handed an expectation other than `MEASURED_HOST` refuses, though the stand-in binary's hash matches that expectation", async () => {
     const env = await setup()
     const before = await productionReservation()
-    const hostBinary = { ...measuredBinary("/stand-in/other/opencode", OTHER), measured: { version: "9.9.9", sha256: OTHER } }
+    const hostBinary = { ...measuredBinary("/stand-in/other/opencode", OTHER), measured: { version: OTHER_VERSION, sha256: OTHER } }
     const { result, hosts } = await launched(env, { hostBinary })
     expect(result.code).toBe(1)
     // The precheck itself passes on the injected expectation; the pin check is what refuses.
     expect(result.text).toContain("PASS  measured host binary")
     expect(result.text).toContain("FAIL  gate 11 evidence scope pins")
     expect(result.text).toContain(`the precheck expectation must equal it: expected "${MEASURED_HOST.sha256}", actual "${OTHER}"`)
-    expect(result.text).toContain(`the precheck expectation must equal it: expected "${MEASURED_HOST.version}", actual "9.9.9"`)
+    expect(result.text).toContain(`the precheck expectation must equal it: expected "${MEASURED_HOST.version}", actual "${OTHER_VERSION}"`)
     expect(result.text).not.toContain("stage 2 of 4")
     await nothingCreated(env, hosts, before)
   })
@@ -2000,6 +1999,10 @@ describe("the launch holds every authorization-enforcing value to HEAD (retro it
     const hostBinary = { ...measuredBinary(), measured: { version: MEASURED_HOST.version, sha256: MEASURED_HOST.sha256 } }
     const { result } = await launched(env, { hostBinary })
     expect(result.text).toContain("PASS  gate 11 evidence scope pins")
+    expect(result.text).toContain(
+      `resolved payload pins: anthropic-auth tree ${env.pins.anthropicAuth.treeDigest}, config seed tree ${env.pins.configSeed.treeDigest}, ` +
+        `catalogue ${env.pins.catalogue.sha256}; each the one gate 11's evidence covers`,
+    )
     expect(result.text).toContain("stage 2 of 4")
     expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
   }, 120_000)

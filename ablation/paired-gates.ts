@@ -383,8 +383,10 @@ export interface Gate11MeasuredPair {
  * `OAUTH_PAYLOAD` (ablation/managed-host.ts), which the launcher's own checks
  * refuse on. They are repeated here, and tests hold the three copies and the
  * evidence file equal, so none of them moves without gate 11 being evidenced
- * again. The adversarial launcher also compares them at stage 1
- * (`gate11PinProblems`), with the pins it resolved for the run. Covering another pair, build or payload takes new evidence and a
+ * again. The adversarial launcher also compares, at stage 1
+ * (`gate11PinProblems`), `MEASURED_HOST` and the payload pins it resolved for
+ * the run with this value; only its tests hand it another scope, to match their
+ * stand-in payload pins. Covering another pair, build or payload takes new evidence and a
  * reviewed change to this value.
  */
 export const GATE_11_EVIDENCE_SCOPE: {
@@ -441,14 +443,23 @@ export interface Gate11PayloadPins {
   catalogue: { sha256: string }
 }
 
+/** How each value `gate11PinProblems` compares is named in its problems, by the scope field it is compared with. */
+export const GATE_11_PIN_LABELS = {
+  hostVersion: "measured host version",
+  hostSha256: "measured host sha256",
+  anthropicAuthTreeDigest: "the resolved payload pins' anthropic-auth tree digest (`anthropicAuth.treeDigest`)",
+  configSeedTreeDigest: "the resolved payload pins' config seed tree digest (`configSeed.treeDigest`)",
+  catalogueSha256: "the resolved payload pins' catalogue sha256 (`catalogue.sha256`)",
+} as const
+
 /**
- * Retro item 2 — why the build and the payload pins a launch would use are not
- * the ones gate 11's evidence covers, one problem per field, or `[]`. `host` is
- * the build the managed host refuses every other one against (`MEASURED_HOST`);
- * `pins` are the payload pins the prepared directory is verified against;
- * `precheck`, when given, is the expectation stage 1's binary check was handed,
- * and must be `host` itself. Only the scalars are compared: `MEASURED_HOST` and
- * the payload pins carry fields the scope does not name.
+ * Why the build and the payload pins a launch would use are not the ones gate
+ * 11's evidence covers, one problem per field, or `[]`. `host` is the build the
+ * managed host refuses every other one against (`MEASURED_HOST`); `pins` are
+ * the payload pins the launch resolved, which the prepared directory is
+ * verified against; `precheck`, when given, is the expectation stage 1's binary
+ * check was handed, and must be `host` itself. Only the scalars are compared:
+ * `MEASURED_HOST` and the payload pins carry fields the scope does not name.
  */
 export function gate11PinProblems(
   host: Gate11Host,
@@ -460,11 +471,11 @@ export function gate11PinProblems(
   const compare = (field: string, expected: string, actual: string): void => {
     if (actual !== expected) problems.push(`${field} differs from gate 11's evidence scope: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`)
   }
-  compare("the measured host version (`MEASURED_HOST.version`)", scope.host.version, host.version)
-  compare("the measured host sha256 (`MEASURED_HOST.sha256`)", scope.host.sha256, host.sha256)
-  compare("the anthropic-auth tree digest (`anthropicAuth.treeDigest`)", scope.payload.anthropicAuthTreeDigest, pins.anthropicAuth.treeDigest)
-  compare("the config seed tree digest (`configSeed.treeDigest`)", scope.payload.configSeedTreeDigest, pins.configSeed.treeDigest)
-  compare("the catalogue sha256 (`catalogue.sha256`)", scope.payload.catalogueSha256, pins.catalogue.sha256)
+  compare(GATE_11_PIN_LABELS.hostVersion, scope.host.version, host.version)
+  compare(GATE_11_PIN_LABELS.hostSha256, scope.host.sha256, host.sha256)
+  compare(GATE_11_PIN_LABELS.anthropicAuthTreeDigest, scope.payload.anthropicAuthTreeDigest, pins.anthropicAuth.treeDigest)
+  compare(GATE_11_PIN_LABELS.configSeedTreeDigest, scope.payload.configSeedTreeDigest, pins.configSeed.treeDigest)
+  compare(GATE_11_PIN_LABELS.catalogueSha256, scope.payload.catalogueSha256, pins.catalogue.sha256)
   if (precheck !== undefined) {
     for (const field of ["version", "sha256"] as const) {
       if (precheck[field] !== host[field]) {

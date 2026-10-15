@@ -24,8 +24,13 @@
  *    binary check's expectation, each equal to `GATE_11_EVIDENCE_SCOPE`'s). Then
  *    MAD's own code revision is read, before any reservation, and must be known
  *    and clean: any `git status` entry (staged, unstaged or untracked and not
- *    ignored) refuses, so every value the run is authorized or shaped by, the
- *    gate table and the attempt allowances included, is HEAD's. Every check prints, and a failure refuses
+ *    ignored) refuses (`dirtyRevisionReasons`, ablation/bundle.ts), so every
+ *    value held in a git-visible file of the checkout, the gate table and the
+ *    attempt allowances included, is HEAD's. Not held to HEAD: ignored files,
+ *    the opencode binary resolved on PATH (checked separately, by its hash),
+ *    the prepared and data directories and `--out` outside the repository, the
+ *    environment and the flags, and any change made after stage 1 reads the
+ *    checkout. Every check prints, and a failure refuses
  *    before anything is written: no reservation, worktree, start marker or
  *    host. With the shipped table, run and protocol and the measured binary on
  *    PATH this stage passes for `--pin anthropic/claude-sonnet-5`, the one run
@@ -103,7 +108,7 @@ import {
   type AdversarialAuthorization,
   type AdversarialConfig,
 } from "../ablation/adversarial-schedule.ts"
-import { codeRevisionFrom, codeRevisionLines } from "../ablation/bundle.ts"
+import { boundedCodeRevisionLines, codeRevisionFrom, DIRTY_REVISION_NEXT_STEP, dirtyRevisionReasons } from "../ablation/bundle.ts"
 import {
   identifyBinary,
   MEASURED_HOST,
@@ -139,8 +144,6 @@ import { selectRoster, type Pin, type SelectResult } from "../core/roster/select
 import {
   boundedGit,
   contained,
-  DIRTY_REVISION_NEXT_STEP,
-  dirtyRevisionReasons,
   fail,
   failureReason,
   GATE_TABLE_FILE,
@@ -870,8 +873,10 @@ export interface AdversarialOverrides {
   /** Test-only: the pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
   payloadPins?: PayloadPins
   /**
-   * Test-only: the build and payload digests stage 1 holds `MEASURED_HOST`, the resolved payload pins and the
-   * binary precheck's expectation to. Defaults to `GATE_11_EVIDENCE_SCOPE`'s.
+   * A test-only injection seam, defaulting to `GATE_11_EVIDENCE_SCOPE`: the build and payload digests stage 1 holds
+   * `MEASURED_HOST`, the resolved payload pins and the binary precheck's expectation to. It exists only because the tests'
+   * stand-in payload pins cannot match the shipped scope. The command line calls `main` with no overrides
+   * (`import.meta.main`), so a launch always uses the shipped scope.
    */
   gate11Scope?: Pick<typeof GATE_11_EVIDENCE_SCOPE, "host" | "payload">
   /** Test-only: the home the auth symlinks point into. Defaults to `os.homedir()`. */
@@ -1156,14 +1161,18 @@ async function launch(
     if (problems.length === 0 && payloads.state === "pass") route = candidate
   }
 
-  // `payloadPins` and the precheck's `measured` can be injected without any file edit, so the values in use are held to
-  // gate 11's scope here, field by field; `MEASURED_HOST` is what every host start is refused against.
-  const pinProblems = gate11PinProblems(MEASURED_HOST, payloadPins, overrides.hostBinary?.measured, overrides.gate11Scope ?? GATE_11_EVIDENCE_SCOPE)
+  // The pins this run uses are held to gate 11's scope field by field: `MEASURED_HOST`, which every host start is refused
+  // against, the payload pins the prepared directory was verified against, and the binary precheck's expectation. The
+  // clean-checkout rule does not cover them: it holds the committed constants to HEAD, and a pin committed without a
+  // matching scope change, or one handed to `main` by a caller, is caught only here.
+  const scope = overrides.gate11Scope ?? GATE_11_EVIDENCE_SCOPE
+  const pinProblems = gate11PinProblems(MEASURED_HOST, payloadPins, overrides.hostBinary?.measured, scope)
   checks.push(
     pinProblems.length === 0
       ? pass("gate 11 evidence scope pins", [
-          `measured host ${MEASURED_HOST.version} (sha256 ${MEASURED_HOST.sha256}) and the anthropic-auth, config seed and catalogue ` +
-            "digests in use are the ones gate 11's evidence covers",
+          `measured host ${MEASURED_HOST.version} (sha256 ${MEASURED_HOST.sha256}), the measured build gate 11's evidence covers`,
+          `resolved payload pins: anthropic-auth tree ${payloadPins.anthropicAuth.treeDigest}, config seed tree ` +
+            `${payloadPins.configSeed.treeDigest}, catalogue ${payloadPins.catalogue.sha256}; each the one gate 11's evidence covers`,
         ])
       : fail("gate 11 evidence scope pins", pinProblems),
   )
@@ -1239,7 +1248,7 @@ async function launch(
   } catch (error) {
     codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
   }
-  for (const line of codeRevisionLines(codeRevision)) console.log(`  ${line}`)
+  for (const line of boundedCodeRevisionLines(codeRevision)) console.log(`  ${line}`)
   if (interrupted()) return refusal("stage 1 (offline checks)", ["the launcher was interrupted"], "run the command again when ready.", 130)
   // A run whose code is not identified would spend the authorization on a bundle no reader can compare; no flag overrides this.
   if (codeRevision.kind === "unknown") {

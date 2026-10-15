@@ -546,6 +546,43 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
   return known({ commit, dirty: entries.length > 0, entries })
 }
 
+/** How many dirty entries a launch refusal lists before it summarizes the rest. */
+export const DIRTY_REASON_LIMIT = 50
+
+/**
+ * Why a known code revision may not launch a billed run, or `[]`. A launcher
+ * holds every value kept in a git-visible file of its checkout (the gate table,
+ * the attempt allowances, the measured host, the payload pins) to HEAD only if
+ * the checkout is HEAD's, so a revision refuses when it says `dirty` or records
+ * any entry, the inconsistent `dirty: false` with entries included. Entries are
+ * listed with their paths JSON-quoted, at most `DIRTY_REASON_LIMIT` of them
+ * followed by a count of the rest; the count line is exact. There is no
+ * override and no list of allowed paths. Ignored files are not in the status,
+ * so they are not covered, and neither is a change made after the revision is
+ * read.
+ */
+export function dirtyRevisionReasons(revision: CodeRevision): string[] {
+  const entries = revision.entries ?? []
+  if (!revision.dirty && entries.length === 0) return []
+  const why = "a launch needs a clean checkout, so every value held in a git-visible file of the checkout is the committed one"
+  if (entries.length === 0) return [`the worktree differs from HEAD ${revision.commit}, but no entries were recorded: ${why}`]
+  const shown = entries.slice(0, DIRTY_REASON_LIMIT).map(
+    (entry) => `uncommitted: ${entry.status} ${JSON.stringify(entry.path)}${entry.sourcePath === undefined ? "" : ` (from ${JSON.stringify(entry.sourcePath)})`}`,
+  )
+  const rest = entries.length - shown.length
+  return [
+    `the worktree differs from HEAD ${revision.commit} (${entries.length} entr${entries.length === 1 ? "y" : "ies"} recorded)` +
+      `${revision.dirty ? "" : ", although the revision says it is clean"}: ${why}`,
+    ...shown,
+    ...(rest > 0 ? [`… and ${rest} more`] : []),
+  ]
+}
+
+/** What to do about a dirty code revision. It reads the same whether or not entries were listed. */
+export const DIRTY_REVISION_NEXT_STEP =
+  "commit or remove every uncommitted change, untracked files included (`git status --untracked-files=all` names them), " +
+  "so the checkout is HEAD's, and run the command again. No flag overrides this."
+
 /** The code revision as stage 1 prints it: the commit and every dirty entry, or the reason it is unknown. */
 export function codeRevisionLines(revision: Maybe<CodeRevision>): string[] {
   if (revision.kind === "unknown") return [`code revision: unknown (${revision.why})`]
@@ -559,4 +596,17 @@ export function codeRevisionLines(revision: Maybe<CodeRevision>): string[] {
         (entry.blob === null ? "no file" : `blob ${entry.blob}`),
     ),
   ]
+}
+
+/**
+ * `codeRevisionLines` as a launcher prints it at stage 1: the same lines, with
+ * at most `DIRTY_REASON_LIMIT` entries shown and a count of the rest, so the
+ * console stays bounded whatever the checkout holds. The count in the first
+ * line stays exact, and the revision itself, as the schedule and manifests
+ * record it, keeps every entry.
+ */
+export function boundedCodeRevisionLines(revision: Maybe<CodeRevision>): string[] {
+  const [first, ...entries] = codeRevisionLines(revision)
+  const rest = entries.length - DIRTY_REASON_LIMIT
+  return rest > 0 ? [first!, ...entries.slice(0, DIRTY_REASON_LIMIT), `  … and ${rest} more`] : [first!, ...entries]
 }
