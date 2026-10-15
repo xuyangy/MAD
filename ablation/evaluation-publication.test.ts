@@ -4,8 +4,9 @@
  * `ablation/EVALUATION.md` publishes run 5 from two committed artifacts: the raw
  * bundle under `evidence/paired-oauth-evaluation-run-5-bundle/` and the reader's
  * stdout over it, `evidence/paired-oauth-evaluation-run-5-eval-read.txt`. This
- * test fails on a missing, extra or changed bundle file, naming it, and checks
- * that the reader still prints the committed output.
+ * test fails on a missing, extra or changed bundle file, naming it, pins that
+ * output by its hash, and checks that the current reader prints the dated
+ * output file beside it.
  *
  * WHAT IT ESTABLISHES, AND WHAT IT DOES NOT. Passing means the retained files are
  * consistent with the hashes committed beside them. It does not establish the
@@ -20,6 +21,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { appendFile, cp, lstat, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -28,12 +30,18 @@ import { join, resolve } from "node:path"
 const REPO_ROOT = realpathSync(resolve(import.meta.dir, ".."))
 const BUNDLE_PATH = "ablation/evidence/paired-oauth-evaluation-run-5-bundle"
 const BUNDLE = join(REPO_ROOT, BUNDLE_PATH)
-const EVAL_READ = join(REPO_ROOT, "ablation/evidence/paired-oauth-evaluation-run-5-eval-read.txt")
+/** The record `ablation/EVALUATION.md` publishes from, produced at `PUBLISHED_READER_COMMIT`. */
+const PUBLISHED_EVAL_READ = join(REPO_ROOT, "ablation/evidence/paired-oauth-evaluation-run-5-eval-read.txt")
+const PUBLISHED_EVAL_READ_SHA256 = "2f06a25442acd6c286ff31d96d877b959475be5ed5054ce0215df89dec32f3a5"
+/** The current reader's output over the same bundle. */
+const EVAL_READ = join(REPO_ROOT, "ablation/evidence/paired-oauth-evaluation-run-5-eval-read-2026-10-15.txt")
 const SUMS_FILE = "SHA256SUMS"
 const RETAINED_FILES = 68
 const RETAINED_BYTES = 3794958
-/** The reader commit `ablation/EVALUATION.md` records for the committed output. */
-const READER_COMMIT = "c66b06988785edc7ef6bd97b46713980c07e603e"
+/** The reader commit `ablation/EVALUATION.md` records for the published output. */
+const PUBLISHED_READER_COMMIT = "c66b06988785edc7ef6bd97b46713980c07e603e"
+/** The reader commit the current output file names. */
+const READER_COMMIT = "3fba92dfc5bb9a93982dd8b974ddc3b2900d409a"
 
 const scratch: string[] = []
 
@@ -128,26 +136,33 @@ describe("the retained run-5 bundle against its SHA256SUMS", () => {
 })
 
 /**
- * The committed reader output is a header line naming the reader commit, then the
- * reader's stdout verbatim. Emitted paths are never rewritten in that file; here
- * the checkout root it was produced under, and this checkout's, are both read as
- * one token, so a replay at another checkout path compares equal when only path
- * text differs.
+ * Each committed reader output is a header line naming the reader commit, then
+ * the reader's stdout verbatim. Emitted paths are never rewritten in such a file;
+ * here the checkout root it was produced under, when it prints one, and this
+ * checkout's, are both read as one token, so a replay at another checkout path
+ * compares equal when only path text differs.
  *
- * The replay pins the reader. The committed file is the record at c66b069 and is
- * never regenerated: a later reader change is published as a NEW dated
- * reader-output file under its own header, and this test is pointed at it.
+ * The replay pins the reader to the current output file. Neither file is ever
+ * regenerated: `paired-oauth-evaluation-run-5-eval-read.txt` is the record at
+ * c66b069 that `ablation/EVALUATION.md` publishes from, and is pinned by its
+ * hash. A later reader change is published as a NEW dated reader-output file
+ * under its own header, and this test is pointed at it.
  */
 describe("the committed reader output", () => {
-  test("the reader prints it over the retained copy", async () => {
+  test("the published record at c66b069 is unchanged", async () => {
+    const published = await readFile(PUBLISHED_EVAL_READ)
+    expect(published.toString("utf8").startsWith(`eval-read at commit ${PUBLISHED_READER_COMMIT};`)).toBe(true)
+    expect(createHash("sha256").update(published).digest("hex")).toBe(PUBLISHED_EVAL_READ_SHA256)
+  })
+
+  test("the reader prints the current output over the retained copy", async () => {
     const committed = await readFile(EVAL_READ, "utf8")
     const newline = committed.indexOf("\n")
     expect(newline).toBeGreaterThan(0)
-    expect(committed.slice(0, newline).startsWith(`eval-read at commit ${READER_COMMIT};`)).toBe(true)
+    expect(committed.slice(0, newline)).toBe(`eval-read at commit ${READER_COMMIT}; every line after this one is its stdout, verbatim`)
     const recorded = committed.slice(newline + 1)
     expect(recorded.startsWith(`MAD evaluation bundle — ${BUNDLE_PATH}\n`)).toBe(true)
     const recordedRoot = new RegExp(`([^\\s\`]*)/${BUNDLE_PATH}/`).exec(recorded)?.[1]
-    expect(recordedRoot).toBeDefined()
     expect(recordedRoot).not.toBe("")
     expect(recordedRoot).not.toBe("/")
 
@@ -163,11 +178,11 @@ describe("the committed reader output", () => {
     ])
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
 
-    const asToken = (text: string, root: string) => text.split(`${root}/`).join("<checkout>/")
-    const replay = asToken(stdout, REPO_ROOT)
-    if (replay !== asToken(recorded, recordedRoot!)) {
+    const asToken = (text: string, root: string | undefined) => (root === undefined ? text : text.split(`${root}/`).join("<checkout>/"))
+    const replay = asToken(stdout, recordedRoot === undefined ? undefined : REPO_ROOT)
+    if (replay !== asToken(recorded, recordedRoot)) {
       throw new Error(
-        "The reader no longer prints the committed run-5 output. That file is the record at " +
+        "The reader no longer prints the committed run-5 output. That file is the reader's output at " +
           `${READER_COMMIT} and is never regenerated: publish a later reader's output as a NEW dated ` +
           "reader-output file under its own header, and point this test at it.",
       )
