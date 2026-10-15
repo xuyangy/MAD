@@ -585,7 +585,7 @@ describe("LIVE-RUN.md documents the adversarial suite that is actually shipped",
     const text = between((await section()).replace(/\s+/g, " "), "### The zero-bill probe (story 2-7f2): `bun run adversarial-probe`", " ### ", "the probe section")
     for (const phrase of [
       "One row is about the shipped command, which is the live run once nothing refuses it.",
-      "(`shippedDecision`, by `gatePreflight` and `readFrozenProtocol` with the version-3 check, the rules stage 1 applies)",
+      "(`shippedDecision`, by `gatePreflight` and `readFrozenProtocol` with the version-3 and authorized-hash checks, the rules stage 1 applies)",
       "starts the command as a child process only when one of them establishes that it refuses",
       "**On the shipped tree the probe's barrier is gate 10, which is OPEN, so the probe starts it** and expects a refusal at stage 1 that names gate 10; the launcher's stage 1 also names the used reservation (the authorized-run check).",
       "When no check establishes a refusal, or a check cannot be completed, the probe does not start it and both of the row's claims read UNPROBED; a reservation is never a reason to start it",

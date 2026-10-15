@@ -2120,14 +2120,14 @@ builds the real `OpencodeModelBackend` from the options the lifecycle passes and
 reservation) are not run on a real host. One row is about the shipped command, which is the live
 run once nothing refuses it. The probe reads the committed gate table, the run it names and the
 protocol file first (`shippedDecision`, by `gatePreflight` and `readFrozenProtocol` with the
-version-3 check, the rules stage 1 applies), and starts the command as a child process only when
-one of them establishes that it refuses. **On the shipped tree the probe's barrier is gate 10,
-which is OPEN, so the probe starts it** and expects a refusal at stage 1 that names gate 10; the
-launcher's stage 1 also names the used reservation (the authorized-run check). When no check
-establishes a refusal, or a check cannot be completed, the probe does not start it and both of the
-row's claims read UNPROBED; a reservation is never a reason to start it. The check is one reading of the
-checkout and the child reads it again, so the checkout must not change while the row runs. In the
-evidence of 2026-10-12 the command was started and refused, naming gate 10, gate 11, the null pin
+version-3 and authorized-hash checks, the rules stage 1 applies), and starts the command as a
+child process only when one of them establishes that it refuses. **On the shipped tree the
+probe's barrier is gate 10, which is OPEN, so the probe starts it** and expects a refusal at stage
+1 that names gate 10; the launcher's stage 1 also names the used reservation (the authorized-run
+check). When no check establishes a refusal, or a check cannot be completed, the probe does not
+start it and both of the row's claims read UNPROBED; a reservation is never a reason to start it.
+The check is one reading of the checkout and the child reads it again, so the checkout must not
+change while the row runs. In the evidence of 2026-10-12 the command was started and refused, naming gate 10, gate 11, the null pin
 and the unfrozen protocol, the barriers of the revision it measured.
 
 The schedules are `provenance: "scripted"`, sealed against a private frozen-format copy of protocol

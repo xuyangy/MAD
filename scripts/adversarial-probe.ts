@@ -42,12 +42,13 @@
  * command, `bun run adversarial --live --provider-mode oauth`, which is the
  * live run itself once nothing refuses it. `shippedDecision` therefore reads
  * the committed gate table, the run it names and the protocol file first, by
- * the rules the launcher's stage 1 applies. The probe starts that command as a
- * child process only when one of them establishes a refusal, and records that
- * it refused. When none does, or when that cannot be established, the probe
- * starts nothing and both of the row's claims read UNPROBED. A reservation is
- * never a reason to start it. The check is one reading of the checkout, which
- * the child reads again: the checkout must not change while the row runs.
+ * stage 1's gate preflight and its frozen, version-3 and authorized-hash
+ * protocol checks. The probe starts that command as a child process only when one of them
+ * establishes a refusal, and records that it refused. When none does, or when
+ * that cannot be established, the probe starts nothing and both of the row's
+ * claims read UNPROBED. A reservation is never a reason to start it. The check
+ * is one reading of the checkout, which the child reads again: the checkout
+ * must not change while the row runs.
  *
  * The schedules are `provenance: "scripted"`, and they are sealed against a
  * private copy of protocol v3 re-stamped by the file's own hash rule
@@ -121,7 +122,7 @@ import {
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, verifyPrepared } from "../ablation/oauth-payload.ts"
 import type { OAuthStubFormat } from "../ablation/oauth-stub.ts"
-import { ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
+import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
 import { readFrozenProtocol, sha256 } from "../ablation/schedule.ts"
 import type { Candidate } from "../core/domain/roster.ts"
 import { systemClock, type Clock } from "../core/ports/clock.ts"
@@ -1002,6 +1003,8 @@ export interface ShippedDecisionInputs {
   gates?: readonly PairedGate[]
   run?: AdversarialRun
   protocolFile?: string
+  /** Test-only: the hash the frozen protocol v3 must carry. Defaults to `ADVERSARIAL_PROTOCOL.frozenHash`, the launcher's own default. */
+  protocolHash?: string
   readProtocol?: typeof readFrozenProtocol
 }
 
@@ -1009,10 +1012,13 @@ export interface ShippedDecisionInputs {
  * Whether the shipped command is established to refuse at stage 1, from the
  * gate table, the run and the protocol file alone, by stage 1's own rules:
  * `gatePreflight` for the adversarial phase on the oauth route, and
- * `readFrozenProtocol` with the version-3 check. With no such refusal the
- * command is authorized and would start the live run, so the answer is not to
- * start it; a check that throws gives the same answer. Nothing else is read: a
- * reservation, an earlier run or a flag is never a reason to start it.
+ * `readFrozenProtocol` with the version-3 and authorized-hash checks: a
+ * frozen v3 whose hash is not the one gate 10's authorization names
+ * (`ADVERSARIAL_PROTOCOL.frozenHash`) is refused. Stage 1's other checks are
+ * not taken up. With no such refusal the command is authorized and would start
+ * the live run, so the answer is not to start it; a check that throws gives the
+ * same answer. Nothing else is read: a reservation, an earlier run or a flag is
+ * never a reason to start it.
  */
 export async function shippedDecision(inputs: ShippedDecisionInputs = {}): Promise<ShippedDecision> {
   try {
@@ -1030,13 +1036,22 @@ export async function shippedDecision(inputs: ShippedDecisionInputs = {}): Promi
         text: "the adversarial suite on the OAuth route needs protocol v3",
         why: `the frozen protocol read is ${protocol.id} v${protocol.version}`,
       })
+    } else {
+      const expected = inputs.protocolHash ?? ADVERSARIAL_PROTOCOL.frozenHash
+      if (protocol.hash !== expected) {
+        barriers.push({
+          name: "the protocol hash",
+          text: "a re-frozen v3 is not the protocol the run was authorized under",
+          why: `the frozen protocol v3 read has hash ${protocol.hash}, and gate 10's authorization names ${expected}`,
+        })
+      }
     }
     if (barriers.length === 0) {
       return {
         spawn: false,
         why:
           `no offline refusal is established: every adversarial gate is CLOSED, adversarial run ${run.run} is pinned to ` +
-          `${(run.pins ?? []).join(", ")} and protocol v3 is frozen. The command is authorized, and starting it would use run ` +
+          `${(run.pins ?? []).join(", ")} and protocol v3 is frozen under the hash gate 10's authorization names. The command is authorized, and starting it would use run ` +
           `${run.run}'s one authorization and start the live run, so the probe did not start it`,
       }
     }

@@ -11,7 +11,8 @@ import { startAdversarialStub, type AdversarialStub } from "../ablation/adversar
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { MEASURED_HOST, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { authLinkPaths } from "../ablation/oauth-payload.ts"
-import { ADVERSARIAL_RUN, PAIRED_GATES, type AdversarialRun } from "../ablation/paired-gates.ts"
+import { frozenV3Copy } from "../ablation/adversarial-read.fixture.ts"
+import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, PAIRED_GATES, type AdversarialRun } from "../ablation/paired-gates.ts"
 import { readFrozenProtocol } from "../ablation/schedule.ts"
 import type { Envelope, ModelBackend } from "../core/ports/model-backend.ts"
 import { candidate } from "../core/test-support/fakes.ts"
@@ -739,6 +740,38 @@ describe("whether the shipped command may be started", () => {
     if (v2.spawn) {
       expect(v2.barriers[1]!.text).toBe("the adversarial suite on the OAuth route needs protocol v3")
       expect(v2.barriers[1]!.why).toBe("the frozen protocol read is PROTOCOL-mad-evaluation-v2 v2")
+    }
+  })
+
+  test("a validly frozen v3 whose hash is not the authorized one is a barrier naming both hashes, as stage 1 refuses it", async () => {
+    const fixture = await frozenV3Copy(scratch)
+    expect(fixture.hash).not.toBe(ADVERSARIAL_PROTOCOL.frozenHash)
+    const decision = await shippedDecision({ gates: gate10Closed, protocolFile: fixture.file })
+    expect(decision.spawn).toBe(true)
+    expect(names(decision)).toEqual(["stage 1", "the protocol hash"])
+    if (decision.spawn) {
+      expect(decision.barriers[1]!.text).toBe("a re-frozen v3 is not the protocol the run was authorized under")
+      expect(decision.barriers[1]!.why).toContain(fixture.hash)
+      expect(decision.barriers[1]!.why).toContain(ADVERSARIAL_PROTOCOL.frozenHash)
+    }
+    // The committed protocol carries the authorized hash, so it alone refuses nothing.
+    expect((await shippedDecision({ gates: gate10Closed, protocolFile: PROTOCOL_V3_FILE })).spawn).toBe(false)
+  })
+
+  test("`protocolHash` is the expected hash: honoured when it matches the protocol read, a barrier when it does not", async () => {
+    const fixture = await frozenV3Copy(scratch)
+    const honoured = await shippedDecision({ gates: gate10Closed, protocolFile: fixture.file, protocolHash: fixture.hash })
+    expect(honoured.spawn).toBe(false)
+    if (!honoured.spawn) expect(honoured.why).toContain("no offline refusal is established")
+    const other = "f".repeat(64)
+    expect(other).not.toBe(ADVERSARIAL_PROTOCOL.frozenHash)
+    const decision = await shippedDecision({ gates: gate10Closed, protocolHash: other })
+    expect(decision.spawn).toBe(true)
+    expect(names(decision)).toEqual(["stage 1", "the protocol hash"])
+    if (decision.spawn) {
+      expect(decision.barriers[1]!.text).toBe("a re-frozen v3 is not the protocol the run was authorized under")
+      expect(decision.barriers[1]!.why).toContain(ADVERSARIAL_PROTOCOL.frozenHash)
+      expect(decision.barriers[1]!.why).toContain(other)
     }
   })
 

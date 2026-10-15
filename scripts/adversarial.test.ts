@@ -56,7 +56,7 @@ import {
   type HostRecord,
 } from "./adversarial.ts"
 import { shippedDecision } from "./adversarial-probe.ts"
-import { boundedGit, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
+import { boundedGit, GATE_TABLE_FILE, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const HERE = process.cwd()
@@ -217,6 +217,9 @@ function measuredBinary(path = "/stand-in/bin/opencode", sha256: string = MEASUR
   }
 }
 
+/** The gate table's blob the stand-in gate-table check returns. */
+const STUB_TABLE_BLOB = "0123456789abcdef0123456789abcdef01234567"
+
 /** Everything a run that gets past stage 1 needs, all stand-ins, with the backends each run was given. */
 async function runnable(env: Awaited<ReturnType<typeof setup>>, extra: AdversarialOverrides & { script?: ScriptedAdversarial } = {}) {
   const { script, ...rest } = extra
@@ -248,7 +251,7 @@ async function runnable(env: Awaited<ReturnType<typeof setup>>, extra: Adversari
       return () => coins.shift()!
     })(),
     codeRevision: async () => ({ kind: "known", value: { commit: "abc123", dirty: false } }),
-    gateTable: async () => ({ ok: true, blob: "0123456789abcdef0123456789abcdef01234567" }),
+    gateTable: async () => ({ ok: true, blob: STUB_TABLE_BLOB }),
     reservation: { root: env.reservationRoot, committed: async () => false },
     signals,
     ...rest,
@@ -399,6 +402,9 @@ describe("stage 1 on the shipped tree", () => {
     const unfrozen = join(await mkdtemp(join(tmpdir(), "mad-adversarial-unfrozen-")), "evaluation-protocol-v3.md")
     scratch.push(dirname(unfrozen))
     await writeFile(unfrozen, (await readFile(PROTOCOL_V3_FILE, "utf8")).replace(/^status: frozen$/m, "status: draft"))
+    // Frozen by its own hash rule, under a hash that is not the one gate 10 names.
+    const refrozen = await frozenV3Copy(scratch)
+    expect(refrozen.hash).not.toBe(ADVERSARIAL_PROTOCOL.frozenHash)
     for (const [name, inputs] of [
       ["gate 10 OPEN", { gates: gate10Open }],
       ["no pin", { gates: gate10Closed, run: unpinned }],
@@ -406,6 +412,7 @@ describe("stage 1 on the shipped tree", () => {
       ["a pin outside gate 11's scope", { gates: gate10Closed, run: { ...ADVERSARIAL_RUN, pins: ["anthropic/claude-opus-5"] } }],
       ["an unfrozen protocol", { gates: gate10Closed, protocolFile: unfrozen }],
       ["protocol v2", { gates: gate10Closed, protocolFile: PROTOCOL_V3_FILE.replace("evaluation-protocol-v3.md", "evaluation-protocol-v2.md") }],
+      ["a re-frozen v3", { gates: gate10Closed, protocolFile: refrozen.file }],
     ] as const) {
       const decision = await shippedDecision(inputs)
       if (!decision.spawn) throw new Error(`${name}: no barrier was derived`)
@@ -479,8 +486,10 @@ describe("stage 1 on the shipped tree", () => {
       expect(result.text, pin).toContain(`the pin ${pin} is adversarial run 1's roster`)
       expect(result.text, pin).not.toContain("REFUSED at stage 1")
       expect(result.text, pin).toContain(`reserved adversarial run 1: ${ADVERSARIAL_RUN.reservation} (never removed)`)
-      const reservation = JSON.parse(await readFile(join(env.reservationRoot, ADVERSARIAL_RUN.reservation), "utf8")) as { pins: string[] }
+      const reservation = JSON.parse(await readFile(join(env.reservationRoot, ADVERSARIAL_RUN.reservation), "utf8")) as { pins: string[]; gateTableBlob: string }
       expect(reservation.pins, pin).toEqual([pin])
+      // The blob is the one the stubbed gate-table check returned.
+      expect(reservation.gateTableBlob, pin).toBe(STUB_TABLE_BLOB)
       expect(await productionReservation(), pin).toEqual(before)
     }
   }, 120_000)
@@ -976,7 +985,7 @@ describe("an interrupt before the suite", () => {
       signals,
       gateTable: async () => {
         signals.emit("SIGINT")
-        return { ok: true, blob: "0123456789abcdef0123456789abcdef01234567" }
+        return { ok: true, blob: STUB_TABLE_BLOB }
       },
     })
     const result = await captured(() => main(argvFor(env), overrides))
@@ -1476,6 +1485,14 @@ describe("stage 1 identifies the host binary and ties protocol v3 to gate 10's h
       expect(result.text, name).toContain(name === "missing" ? "ENOENT" : "EACCES")
     }
     expect(missingHashed).toEqual([])
+  })
+
+  test("with every gate CLOSED, an uncommitted gate table refuses at stage 1: no reservation, no host, nothing written", async () => {
+    const env = await setup()
+    const why = `${GATE_TABLE_FILE} differs from HEAD (\` M ${GATE_TABLE_FILE}\`)`
+    const result = await refusedBeforeReservation(env, { gateTable: async () => ({ ok: false, why }) })
+    expect(result.text).toContain("FAIL  gate table committed")
+    expect(result.text).toContain(why)
   })
 
   test("a re-frozen v3, frozen under its own hash and not the one gate 10 names, refuses at stage 1 naming both hashes", async () => {
