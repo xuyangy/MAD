@@ -32,7 +32,8 @@
  * zero-bill probe, and only for what that probe measured:
  * `GATE_11_EVIDENCE_SCOPE` names the two `provider/model` pairs, the host build
  * and the payload pins, and `gate11ScopeProblem` refuses a run pinned to any
- * other pair. `adversarialRunProblem` refuses a run whose pins are `null` or
+ * other pair. `gate11PinProblems` compares the build and the payload pins a
+ * launch would use with the scope's. `adversarialRunProblem` refuses a run whose pins are `null` or
  * malformed. For this phase `gatePreflight` reports both problems, and consults
  * `ADVERSARIAL_CANDIDATE_NON_GATES`, the record of the one prerequisite that may
  * turn out not to be a gate: while that record is unresolved, absent or
@@ -382,7 +383,8 @@ export interface Gate11MeasuredPair {
  * `OAUTH_PAYLOAD` (ablation/managed-host.ts), which the launcher's own checks
  * refuse on. They are repeated here, and tests hold the three copies and the
  * evidence file equal, so none of them moves without gate 11 being evidenced
- * again. Covering another pair, build or payload takes new evidence and a
+ * again. The adversarial launcher also compares them at stage 1
+ * (`gate11PinProblems`), with the pins it resolved for the run. Covering another pair, build or payload takes new evidence and a
  * reviewed change to this value.
  */
 export const GATE_11_EVIDENCE_SCOPE: {
@@ -424,6 +426,56 @@ export function gate11ScopeProblem(run: AdversarialRun = ADVERSARIAL_RUN): strin
     `${gate11Pairs()}, the pairs measured in ${GATE_11_EVIDENCE_SCOPE.evidence}. Another pin needs its own evidence and a ` +
     "reviewed change to that scope"
   )
+}
+
+/** A host build as gate 11's scope names one. */
+export interface Gate11Host {
+  version: string
+  sha256: string
+}
+
+/** The three payload digests gate 11's scope names, as a launcher's resolved payload pins carry them. */
+export interface Gate11PayloadPins {
+  anthropicAuth: { treeDigest: string }
+  configSeed: { treeDigest: string }
+  catalogue: { sha256: string }
+}
+
+/**
+ * Retro item 2 — why the build and the payload pins a launch would use are not
+ * the ones gate 11's evidence covers, one problem per field, or `[]`. `host` is
+ * the build the managed host refuses every other one against (`MEASURED_HOST`);
+ * `pins` are the payload pins the prepared directory is verified against;
+ * `precheck`, when given, is the expectation stage 1's binary check was handed,
+ * and must be `host` itself. Only the scalars are compared: `MEASURED_HOST` and
+ * the payload pins carry fields the scope does not name.
+ */
+export function gate11PinProblems(
+  host: Gate11Host,
+  pins: Gate11PayloadPins,
+  precheck?: Gate11Host,
+  scope: Pick<typeof GATE_11_EVIDENCE_SCOPE, "host" | "payload"> = GATE_11_EVIDENCE_SCOPE,
+): string[] {
+  const problems: string[] = []
+  const compare = (field: string, expected: string, actual: string): void => {
+    if (actual !== expected) problems.push(`${field} differs from gate 11's evidence scope: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`)
+  }
+  compare("the measured host version (`MEASURED_HOST.version`)", scope.host.version, host.version)
+  compare("the measured host sha256 (`MEASURED_HOST.sha256`)", scope.host.sha256, host.sha256)
+  compare("the anthropic-auth tree digest (`anthropicAuth.treeDigest`)", scope.payload.anthropicAuthTreeDigest, pins.anthropicAuth.treeDigest)
+  compare("the config seed tree digest (`configSeed.treeDigest`)", scope.payload.configSeedTreeDigest, pins.configSeed.treeDigest)
+  compare("the catalogue sha256 (`catalogue.sha256`)", scope.payload.catalogueSha256, pins.catalogue.sha256)
+  if (precheck !== undefined) {
+    for (const field of ["version", "sha256"] as const) {
+      if (precheck[field] !== host[field]) {
+        problems.push(
+          `the binary precheck's expected ${field} differs from the production \`MEASURED_HOST\`'s, and the precheck expectation must ` +
+            `equal it: expected ${JSON.stringify(host[field])}, actual ${JSON.stringify(precheck[field])}`,
+        )
+      }
+    }
+  }
+  return problems
 }
 
 export const PAIRED_GATES: readonly PairedGate[] = [

@@ -18,8 +18,14 @@
  *    binary (`identifyBinary` with `startManagedHost`'s defaults: `opencode` on
  *    PATH, its real path hashed against `MEASURED_HOST`; read, never started),
  *    the authorized run (the pin is `ADVERSARIAL_RUN.pins`, its reservation
- *    exists neither on disk nor at HEAD, every earlier run is committed) and the
- *    production Tools identity. Every check prints, and a failure refuses
+ *    exists neither on disk nor at HEAD, every earlier run is committed), the
+ *    production Tools identity, and gate 11's evidence scope pins
+ *    (`gate11PinProblems`: `MEASURED_HOST`, the payload pins in use and the
+ *    binary check's expectation, each equal to `GATE_11_EVIDENCE_SCOPE`'s). Then
+ *    MAD's own code revision is read, before any reservation, and must be known
+ *    and clean: any `git status` entry (staged, unstaged or untracked and not
+ *    ignored) refuses, so every value the run is authorized or shaped by, the
+ *    gate table and the attempt allowances included, is HEAD's. Every check prints, and a failure refuses
  *    before anything is written: no reservation, worktree, start marker or
  *    host. With the shipped table, run and protocol and the measured binary on
  *    PATH this stage passes for `--pin anthropic/claude-sonnet-5`, the one run
@@ -100,6 +106,7 @@ import {
 import { codeRevisionFrom, codeRevisionLines } from "../ablation/bundle.ts"
 import {
   identifyBinary,
+  MEASURED_HOST,
   OAUTH_PAYLOAD,
   oauthRouteProblems,
   startManagedHost,
@@ -113,7 +120,16 @@ import {
 import { syncDirectory } from "../ablation/journal.ts"
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
-import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, gatePreflight, PAIRED_GATES, type AdversarialRun, type PairedGate } from "../ablation/paired-gates.ts"
+import {
+  ADVERSARIAL_PROTOCOL,
+  ADVERSARIAL_RUN,
+  GATE_11_EVIDENCE_SCOPE,
+  gate11PinProblems,
+  gatePreflight,
+  PAIRED_GATES,
+  type AdversarialRun,
+  type PairedGate,
+} from "../ablation/paired-gates.ts"
 import { canonicalJson, readFrozenProtocol, type CoinFace } from "../ablation/schedule.ts"
 import type { Candidate, Roster } from "../core/domain/roster.ts"
 import { systemClock, type Clock } from "../core/ports/clock.ts"
@@ -123,6 +139,8 @@ import { selectRoster, type Pin, type SelectResult } from "../core/roster/select
 import {
   boundedGit,
   contained,
+  DIRTY_REVISION_NEXT_STEP,
+  dirtyRevisionReasons,
   fail,
   failureReason,
   GATE_TABLE_FILE,
@@ -851,6 +869,11 @@ export interface AdversarialOverrides {
   hostBinary?: BinaryIdentityOptions
   /** Test-only: the pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
   payloadPins?: PayloadPins
+  /**
+   * Test-only: the build and payload digests stage 1 holds `MEASURED_HOST`, the resolved payload pins and the
+   * binary precheck's expectation to. Defaults to `GATE_11_EVIDENCE_SCOPE`'s.
+   */
+  gate11Scope?: Pick<typeof GATE_11_EVIDENCE_SCOPE, "host" | "payload">
   /** Test-only: the home the auth symlinks point into. Defaults to `os.homedir()`. */
   home?: string
   /** Starts each run's managed host. Defaults to `startManagedHost`. */
@@ -1133,6 +1156,18 @@ async function launch(
     if (problems.length === 0 && payloads.state === "pass") route = candidate
   }
 
+  // `payloadPins` and the precheck's `measured` can be injected without any file edit, so the values in use are held to
+  // gate 11's scope here, field by field; `MEASURED_HOST` is what every host start is refused against.
+  const pinProblems = gate11PinProblems(MEASURED_HOST, payloadPins, overrides.hostBinary?.measured, overrides.gate11Scope ?? GATE_11_EVIDENCE_SCOPE)
+  checks.push(
+    pinProblems.length === 0
+      ? pass("gate 11 evidence scope pins", [
+          `measured host ${MEASURED_HOST.version} (sha256 ${MEASURED_HOST.sha256}) and the anthropic-auth, config seed and catalogue ` +
+            "digests in use are the ones gate 11's evidence covers",
+        ])
+      : fail("gate 11 evidence scope pins", pinProblems),
+  )
+
   // The binary stage 4 would spawn, identified as `startManagedHost` identifies it: read, hashed, never started.
   checks.push(
     await guarded("measured host binary", async () => {
@@ -1214,6 +1249,10 @@ async function launch(
       "fix what made the code revision unknown (it is named above) and run the command again.",
     )
   }
+  // The launch holds the whole git-visible checkout to HEAD, so the attempt allowances, the measured host and the
+  // payload pins are the committed ones; the gate table's own check is one case of this.
+  const dirty = dirtyRevisionReasons(codeRevision.value)
+  if (dirty.length > 0) return refusal("stage 1 (code revision)", dirty, DIRTY_REVISION_NEXT_STEP)
 
   // ---- STAGE 2: the reservation, before anything else is written ----
   console.log(`\nbun run adversarial — stage 2 of 4: reserve adversarial run ${run.run}`)

@@ -36,6 +36,19 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
    so a shared ceiling stays shared. Three arms over one change is up to
    `1 + 3 + (3 + lenses)` discovery turns plus debate and judge turns for each,
    against your own credentials. Decide the number before you spend it.
+6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every route) and
+   `bun run adversarial` read MAD's own code revision at stage 1, before any reservation, and refuse
+   unless it is known and clean. Every entry `git status` lists refuses, whether staged, unstaged or
+   untracked and not ignored, and the refusal names each one with its path JSON-quoted. There is no
+   override and no list of allowed paths. Commit or remove every such file first, untracked ones
+   included. This holds every value a launch is authorized or shaped by to HEAD, in any file: the gate
+   table, the attempt allowances (`ablation/governor.ts`), the measured host and the payload pins
+   (`ablation/managed-host.ts`). `bun run adversarial` also has the stage-1 check "gate 11 evidence
+   scope pins". It compares `MEASURED_HOST`'s version and sha256, and the anthropic-auth, config-seed
+   and catalogue digests of the payload pins the run uses, with `GATE_11_EVIDENCE_SCOPE`, field by
+   field. A pin committed without a matching scope change refuses there. Neither check covers ignored
+   files, which `git status` does not list, or a file changed after stage 1 reads the checkout and
+   before the launch uses it. The OAuth pilot launcher (`bun run oauth-pilot`) has no such check.
 
 ## The run
 
@@ -885,7 +898,8 @@ Each stage gates the next, and a failure at any stage exits 1 with no schedule a
 
 - **Stage 1 — offline checks.** Flags, containment, the bundle root, the frozen protocol, the gate
   table and whether it is committed, the provider block and its credential variable, the Tools wiring and the first
-  worktree-identity comparison. Every independent check runs and
+  worktree-identity comparison; then MAD's own code revision, which must be known and clean (item 6 of
+  "Before anything bills"). Every independent check runs and
   every failure prints together; a check that throws (a permission error, say) is a failed check, and
   the others still print. A check whose prerequisite is missing or invalid prints
   `not evaluated: <prerequisite>` instead of running — for a rejected flag, with the reason, such as
@@ -931,7 +945,8 @@ copy, removed on success, on refusal, on a thrown error and on SIGINT or SIGTERM
 - any evaluation gate that is OPEN, or a table that is not well formed;
 - a Tools port that is not the production one;
 - a roster that does not hold the pinned model or is short of its slots;
-- a worktree that is not exactly the sealed labelled change.
+- a worktree that is not exactly the sealed labelled change;
+- an unknown code revision of MAD itself, or a checkout with any entry `git status` lists.
 
 Every refusal says what was refused, why, and the next step.
 
@@ -1205,8 +1220,9 @@ run into any bundle root is refused, and of two concurrent invocations only one 
 deletes it: a run that fails or is interrupted after the reservation has used the authorization. A
 stage-1 refusal reserves nothing. A further run needs the budget owner's new authorization in a reviewed
 change. The launcher reads the code revision before it creates the reservation, so the reservation is
-not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`; commit the
-reservation after the run, as the pilot's were.
+not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`. Any other
+entry refuses at stage 1 (item 6 of "Before anything bills"). Commit the reservation after the run, as
+the pilot's were.
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
 Then create the dedicated data directory and its one link to your sign-ins:
@@ -2019,7 +2035,10 @@ other hash refuses, naming both), the committed gate table,
 `gatePreflight(gates, "adversarial", "oauth")`, the OAuth route, the prepared digests, the
 measured host binary, the
 authorized run (the pin is `ADVERSARIAL_RUN.pins`; `ADVERSARIAL_RUN.reservation` exists neither on
-disk nor at HEAD; every earlier run is committed) and the production Tools identity. The binary
+disk nor at HEAD; every earlier run is committed), the production Tools identity and the gate 11
+evidence scope pins (`MEASURED_HOST`, the payload pins in use and the binary check's expectation, each
+equal to `GATE_11_EVIDENCE_SCOPE`'s, field by field). Then MAD's code revision is read, and an unknown
+or dirty one refuses (item 6 of "Before anything bills"). The binary
 check is `identifyBinary` with `startManagedHost`'s defaults: it resolves `opencode` on PATH to its
 real path and reads only that file's contents, hashed against `MEASURED_HOST`; it never starts it,
 reads the auth target or a data directory, or connects anywhere. Gates 11 and 12

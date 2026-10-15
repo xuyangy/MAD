@@ -121,6 +121,24 @@ describe("LIVE-RUN.md names the cross-arm case set that is actually in force", (
   })
 })
 
+describe("LIVE-RUN.md states the clean-checkout rule for a billed launch (retro item 2)", () => {
+  test("the rule, the gate-11 pin check and what neither covers are stated", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    for (const phrase of [
+      "**A clean checkout of MAD for a billed launch.**",
+      "Every entry `git status` lists refuses, whether staged, unstaged or untracked and not ignored",
+      "There is no override and no list of allowed paths.",
+      "Commit or remove every such file first, untracked ones included.",
+      'the stage-1 check "gate 11 evidence scope pins"',
+      "A pin committed without a matching scope change refuses there.",
+      "Neither check covers ignored files, which `git status` does not list, or a file changed after stage 1 reads the checkout and before the launch uses it.",
+      "The OAuth pilot launcher (`bun run oauth-pilot`) has no such check.",
+    ]) {
+      expect(doc, phrase).toContain(phrase)
+    }
+  })
+})
+
 describe("LIVE-RUN.md documents the sealed fixture identity that is actually in force", () => {
   test("the material hash in the document is the seal's", async () => {
     expect(await liveRunDoc()).toContain(LABELLED_CHANGE_SEAL.materialHash)

@@ -50,6 +50,7 @@ import { main as materializeMain } from "./materialize-labelled-change.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { fakeStore, ROW_CONTENT_MARKER } from "../ablation/oauth-store.fixture.ts"
 import {
+  dirtyRevisionReasons,
   evaluationRunProblems,
   GATE_TABLE_FILE,
   gatesIdentity,
@@ -1315,12 +1316,19 @@ describe("refusal wording and small guards", () => {
     const { overrides } = overridesFor(env, { gates: closedGates })
     delete overrides.codeRevision
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
-    expect(result.code, result.text).toBe(0)
-    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
     const mad = (await git(REPO_ROOT, ["rev-parse", "HEAD"])).trim()
     const worktree = (await git(env.directory, ["rev-parse", "HEAD"])).trim()
-    expect(schedule.codeRevision).toMatchObject({ kind: "known", value: { commit: mad } })
     expect(mad).not.toBe(worktree)
+    expect(result.text).toContain(`code revision: ${mad}, worktree `)
+    // This repository's own checkout decides the outcome: a clean one launches and seals HEAD, a dirty one refuses.
+    if (result.text.includes(`code revision: ${mad}, worktree clean`)) {
+      expect(result.code, result.text).toBe(0)
+      const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
+      expect(schedule.codeRevision).toMatchObject({ kind: "known", value: { commit: mad, dirty: false } })
+    } else {
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+    }
   })
 })
 
@@ -2211,7 +2219,7 @@ describe("the code revision is read before the reservation is written (retro ite
     const host = oauthHost()
     const events: string[] = []
     const startHost = host.startHost
-    const read = known({ commit: "abc123", dirty: true, entries: [{ status: " M", path: "core/x.ts", blob: "e".repeat(40) }] })
+    const read = known({ commit: "abc123", dirty: false, entries: [] })
     const { overrides } = oauthOverrides(env, host, {
       gates: closedGates,
       protocolV2File: await frozenV2(env.parent),
@@ -2251,31 +2259,9 @@ describe("the code revision is read before the reservation is written (retro ite
     expect(host.started).toHaveLength(1)
   })
 
-  test("in a clean git repository with the real revision reader and reservation writer, the sealed schedule says `dirty: false` while the reservation is untracked there", async () => {
+  test("in a clean git repository with the real revision reader and reservation writer, stage 1 passes and the sealed schedule says `dirty: false` while the reservation is untracked there", async () => {
     const env = await oauthSetup()
-    const repo = await tempDir()
-    const gitIn: RunCommand = async (command, args) => {
-      const spawned = Bun.spawn([command, ...args], {
-        cwd: repo,
-        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
-      return { exitCode: await spawned.exited, stdout, stderr }
-    }
-    const sh = async (...args: string[]) => {
-      const result = await gitIn("git", args)
-      if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
-      return result.stdout
-    }
-    await sh("init", "-q", "-b", "main")
-    await writeFile(join(repo, "README"), "clean\n")
-    await sh("add", "README")
-    await sh("-c", "user.email=test@example.invalid", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
-    const head = (await sh("rev-parse", "HEAD")).trim()
-    expect(await sh("status", "--porcelain")).toBe("")
-
+    const { repo, gitIn, sh, head } = await cleanTempRepo()
     const host = oauthHost()
     const { overrides } = oauthOverrides(env, host, {
       gates: closedGates,
@@ -2285,14 +2271,42 @@ describe("the code revision is read before the reservation is written (retro ite
     })
     const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
     expect(result.code, result.text).toBe(0)
+    expect(result.text).toContain(`code revision: ${head}, worktree clean`)
     expect(existsSync(join(repo, EVALUATION_RUN.reservation))).toBe(true)
     const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
     expect(schedule.codeRevision).toEqual(known({ commit: head, dirty: false, entries: [] }))
     expect(await sh("status", "--porcelain", "--untracked-files=all")).toContain(`?? ${EVALUATION_RUN.reservation}`)
-    // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean.
+    // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean and let stage 1 pass.
     expect(await codeRevisionFrom(gitIn)).toMatchObject({ kind: "known", value: { commit: head, dirty: true } })
   })
 })
+
+/** A committed one-file git repository in a fresh temporary directory, read through `RunCommand` with no user or system git config. */
+async function cleanTempRepo() {
+  const repo = await tempDir()
+  const gitIn: RunCommand = async (command, args) => {
+    const spawned = Bun.spawn([command, ...args], {
+      cwd: repo,
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+    return { exitCode: await spawned.exited, stdout, stderr }
+  }
+  const sh = async (...args: string[]) => {
+    const result = await gitIn("git", args)
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
+    return result.stdout
+  }
+  await sh("init", "-q", "-b", "main")
+  await writeFile(join(repo, "README"), "clean\n")
+  await sh("add", "README")
+  await sh("-c", "user.email=test@example.invalid", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+  const head = (await sh("rev-parse", "HEAD")).trim()
+  expect(await sh("status", "--porcelain")).toBe("")
+  return { repo, gitIn, sh, head }
+}
 
 describe("an unknown code revision refuses at stage 1 (retro item 1, review loop 1)", () => {
   for (const [name, codeRevision] of [
@@ -2364,7 +2378,7 @@ describe("an unknown code revision refuses at stage 1 (retro item 1, review loop
     expect(host.started).toEqual([])
   })
 
-  test("stage 1 prints the revision it read, entries JSON-quoted", async () => {
+  test("stage 1 prints the revision it read, entries JSON-quoted, before the dirty refusal", async () => {
     const env = await oauthSetup()
     const host = oauthHost()
     const { overrides } = oauthOverrides(env, host, {
@@ -2375,7 +2389,99 @@ describe("an unknown code revision refuses at stage 1 (retro item 1, review loop
     const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
     const printed = result.text.indexOf("code revision: abc123, worktree dirty (1 entry recorded)")
     expect(printed).toBeGreaterThan(-1)
-    expect(printed).toBeLessThan(result.text.indexOf("stage 2 of 4"))
+    expect(printed).toBeLessThan(result.text.indexOf("REFUSED at stage 1 (code revision)."))
     expect(result.text).toContain(`"??" ${JSON.stringify('we"ird')}: no file`)
+    expect(result.text).toContain(`uncommitted: ?? ${JSON.stringify('we"ird')}`)
+  })
+})
+
+describe("a dirty code revision refuses at stage 1 on every route (retro item 2)", () => {
+  for (const [name, entry] of [
+    ["an uncommitted edit to the attempt allowances", { status: " M", path: "ablation/governor.ts", blob: "a".repeat(40) }],
+    ["an uncommitted edit to the measured host and payload pins", { status: " M", path: "ablation/managed-host.ts", blob: "b".repeat(40) }],
+    ["an unrelated untracked file that is not ignored", { status: "??", path: "notes/scratch.txt", blob: "c".repeat(40) }],
+  ] as const) {
+    test(`the OAuth route, ${name}: exit 1 listing the entry; no reservation, no host, nothing scheduled`, async () => {
+      const env = await oauthSetup()
+      const root = join(env.parent, "reservation-root")
+      const host = oauthHost()
+      const { overrides } = oauthOverrides(env, host, {
+        gates: closedGates,
+        protocolV2File: await frozenV2(env.parent),
+        evaluationReservation: { root, committed: priorRunsOnly },
+        codeRevision: async () => known({ commit: "abc123", dirty: true, entries: [entry] }),
+      })
+      const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+      expect(result.text).toContain("the worktree differs from HEAD abc123 (1 entry recorded)")
+      expect(result.text).toContain(`uncommitted: ${entry.status} ${JSON.stringify(entry.path)}`)
+      expect(result.text).not.toContain("stage 2 of 4")
+      expect(existsSync(join(root, EVALUATION_RUN.reservation))).toBe(false)
+      expect(host.started).toEqual([])
+      await nothingScheduled(env.out, env.scratchParent)
+    })
+
+    test(`the api-key route, ${name}: the same refusal, before any host`, async () => {
+      const env = await setup()
+      const { overrides, host } = overridesFor(env, { gates: closedGates, codeRevision: async () => known({ commit: "abc123", dirty: true, entries: [entry] }) })
+      const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+      expect(result.text).toContain(`uncommitted: ${entry.status} ${JSON.stringify(entry.path)}`)
+      expect(host.started).toEqual([])
+      await nothingScheduled(env.out, env.scratchParent)
+    })
+  }
+
+  test("a rename is listed with its source path, JSON-quoted", () => {
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: true, entries: [{ status: "R ", path: "b.ts", sourcePath: "a.ts", blob: "d".repeat(40) }] })).toEqual([
+      "the worktree differs from HEAD abc123 (1 entry recorded): a launch needs a clean checkout, so every value the run is authorized or shaped by is the committed one",
+      'uncommitted: R  "b.ts" (from "a.ts")',
+    ])
+    expect(dirtyRevisionReasons({ commit: "abc123", dirty: false, entries: [] })).toEqual([])
+  })
+
+  test("SIGINT while a dirty revision is read: the interruption's own refusal, exit 130", async () => {
+    const env = await oauthSetup()
+    const root = join(env.parent, "reservation-root")
+    const host = oauthHost()
+    const signals = fakeSignals()
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root, committed: priorRunsOnly },
+      signals: signals.source,
+      exit: () => {},
+      codeRevision: async () => {
+        signals.fire("SIGINT")
+        return known({ commit: "abc123", dirty: true, entries: [{ status: " M", path: "ablation/governor.ts", blob: "a".repeat(40) }] })
+      },
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(130)
+    expect(result.text).not.toContain("stage 1 (code revision)")
+    expect(existsSync(join(root, EVALUATION_RUN.reservation))).toBe(false)
+  })
+
+  test("a clean git repository turned dirty by one untracked file refuses with the real revision reader, and the reservation is absent there", async () => {
+    const env = await oauthSetup()
+    const { repo, gitIn, head } = await cleanTempRepo()
+    await writeFile(join(repo, "stray.txt"), "not committed\n")
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root: repo, committed: priorRunsOnly },
+      codeRevision: () => codeRevisionFrom(gitIn),
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`code revision: ${head}, worktree dirty (1 entry recorded)`)
+    expect(result.text).toContain("REFUSED at stage 1 (code revision).")
+    expect(result.text).toContain('uncommitted: ?? "stray.txt"')
+    expect(existsSync(join(repo, EVALUATION_RUN.reservation))).toBe(false)
+    expect(host.started).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
   })
 })

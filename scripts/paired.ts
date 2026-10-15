@@ -49,8 +49,12 @@
  * file read at run time can close a gate. While any gate the evaluation phase
  * requires on the selected route (`api-key` unless `--provider-mode oauth`) is
  * OPEN, or `ablation/paired-gates.ts` differs from HEAD, this command refuses at
- * stage 1. A gate that covers only the other route is printed and never
- * consulted. The schedule's `config.gates` records the committed blob, the route
+ * stage 1. Stage 1 also reads MAD's own code revision, before any reservation,
+ * and refuses on every route unless it is known and clean: any entry of
+ * `git status` (staged, unstaged or untracked and not ignored) refuses, so every
+ * value the run is authorized or shaped by, in any file, is HEAD's. Ignored
+ * files are not covered. A gate that covers only the other route is printed
+ * and never consulted. The schedule's `config.gates` records the committed blob, the route
  * and every gate's status. On the api-key route the launcher hands the runner
  * `route: "api-key"`, which the sealed config does not repeat: it writes `route`
  * only for the oauth route, so the api-key route is sealed only through
@@ -241,7 +245,10 @@ export type GateTableState = { ok: true; blob: string } | { ok: false; why: stri
 
 /**
  * A gate closes only by a reviewed change, so the table the launcher reads must be
- * the one committed at HEAD: no staged, unstaged or untracked change to it.
+ * the one committed at HEAD: no staged, unstaged or untracked change to it. This
+ * is one case of the launchers' wider rule (`dirtyRevisionReasons`): the whole
+ * git-visible checkout is held to HEAD. This check also gives the table's blob,
+ * which the reservation and the schedule record.
  */
 export async function gateTableState(git: RunGit, root: string): Promise<GateTableState> {
   const status = await git(root, ["status", "--porcelain=v1", "--untracked-files=all", "--", GATE_TABLE_FILE])
@@ -257,6 +264,32 @@ export async function gateTableState(git: RunGit, root: string): Promise<GateTab
   }
   return { ok: true, blob: blob.stdout.trim() }
 }
+
+/**
+ * Retro item 2 — why a known code revision may not launch a run, or `[]`. Every
+ * value a run is authorized or shaped by (the gate table, the attempt
+ * allowances, the measured host, the payload pins) is held to HEAD only if the
+ * checkout is HEAD's, so any recorded dirty entry refuses, each listed with its
+ * path JSON-quoted. There is no override and no list of allowed paths. Ignored
+ * files are not in the status, so they are not covered, and neither is a change
+ * made after the revision is read.
+ */
+export function dirtyRevisionReasons(revision: CodeRevision): string[] {
+  if (!revision.dirty) return []
+  const entries = revision.entries ?? []
+  return [
+    `the worktree differs from HEAD ${revision.commit} (${entries.length} entr${entries.length === 1 ? "y" : "ies"} recorded): a launch needs a ` +
+      "clean checkout, so every value the run is authorized or shaped by is the committed one",
+    ...entries.map(
+      (entry) => `uncommitted: ${entry.status} ${JSON.stringify(entry.path)}${entry.sourcePath === undefined ? "" : ` (from ${JSON.stringify(entry.sourcePath)})`}`,
+    ),
+  ]
+}
+
+/** What to do about a dirty code revision. */
+export const DIRTY_REVISION_NEXT_STEP =
+  "commit or remove every entry listed above, untracked files included, so the checkout is HEAD's, and run the command " +
+  "again. No flag overrides this."
 
 /**
  * Story 2-8d — where the OAuth evaluation's reservation lives and whether HEAD
@@ -1520,6 +1553,9 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         preexisting,
       )
     }
+    // Every route launches only from a clean checkout of HEAD: the gate table's own check is one case of this.
+    const dirty = dirtyRevisionReasons(codeRevision.value)
+    if (dirty.length > 0) return refusal("stage 1 (code revision)", dirty, DIRTY_REVISION_NEXT_STEP, preexisting)
 
     // Story 2-8d: the OAuth route uses gate 4's one authorization here, before any host or network activity.
     if (oauthMode) {
