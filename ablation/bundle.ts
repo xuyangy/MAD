@@ -36,7 +36,7 @@
  * rate.
  */
 
-import { mkdir, open, writeFile } from "node:fs/promises"
+import { lstat, mkdir, open, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 import {
@@ -54,10 +54,14 @@ import type { ArmRun } from "./arms.ts"
 import { syncDirectory } from "./journal.ts"
 import {
   buildManifest,
+  compareDirtyEntries,
+  DIRTY_STATUS,
+  GIT_BLOB,
   known,
   unknownValue,
   type AdversarialBinding,
   type CodeRevision,
+  type DirtyEntry,
   type EvaluationIdentity,
   type ExperimentBinding,
   type Maybe,
@@ -371,21 +375,63 @@ export type RunCommand = (
 ) => Promise<{ exitCode: number; stdout: string; stderr: string }>
 
 /**
+ * What is at a worktree path, by `lstat`: nothing, a regular file, or another
+ * kind, named. Injected beside `RunCommand` so each case can be tested.
+ */
+export type PathKind = (path: string) => Promise<"absent" | "file" | { other: string }>
+
+/** The default `PathKind`: `ENOENT` and `ENOTDIR` are absent; any other failure throws. */
+export const lstatPathKind: PathKind = async (path) => {
+  let info: Awaited<ReturnType<typeof lstat>>
+  try {
+    info = await lstat(path)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return "absent"
+    throw error
+  }
+  if (info.isFile()) return "file"
+  return {
+    other: info.isSymbolicLink()
+      ? "symlink"
+      : info.isDirectory()
+        ? "directory (a gitlink, submodule or nested repository)"
+        : info.isFIFO()
+          ? "FIFO"
+          : info.isSocket()
+            ? "socket"
+            : "device",
+  }
+}
+
+/**
  * AC4 — the code revision, or an explicit unknown WITH ITS REASON.
  *
- * Two questions, both of which must be answered before the revision means
- * anything: which commit, and whether the worktree was clean. A dirty worktree
- * does not make the revision wrong, it makes it INSUFFICIENT — the commit no
- * longer identifies the bytes that ran — so it travels beside it rather than
- * suppressing it.
+ * Which commit, and what in the worktree differed from it. `dirty` alone says
+ * only that the commit no longer identifies the bytes that ran, so every record
+ * of `git status --porcelain=v1 -z --untracked-files=all` is kept as an entry:
+ * its XY status, its path, the source of a rename or copy, and the git blob id
+ * of the regular file now at that path (`null` when no file is there, whatever
+ * the status says). A path git lists twice, such as a staged deletion with a
+ * new untracked file at the same path, gives two entries. Entries are sorted by
+ * path, then status, then source path, and are written on a clean tree too, as
+ * `[]`. With `entries`, the revision can be checked against a later checkout
+ * with git alone.
+ *
+ * Porcelain paths are relative to the repository root, so each one is resolved
+ * against `git rev-parse --show-toplevel` and hashed by its absolute path; the
+ * caller's working directory does not matter.
  *
  * EVERY FAILURE IS AN UNKNOWN, NEVER A GUESS. No git, a non-zero exit, empty
- * output, a directory that is not a repository: each returns
- * `{ kind: "unknown", why }`. A manifest that recorded `""` or a stale default
+ * output, a directory that is not a repository, an unparseable status, a path
+ * that is a symlink, a directory or any other non-regular file, a path that
+ * cannot be inspected, a failed `hash-object`: each returns `{ kind: "unknown",
+ * why }` for the whole revision. A symlink is never identified by its target's
+ * bytes. A manifest that recorded `""`, a stale default or a partial entry list
  * here would be a traceability claim MAD cannot support, which is the one thing
  * FR1 exists to prevent.
  */
-export async function codeRevisionFrom(run: RunCommand): Promise<Maybe<CodeRevision>> {
+export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lstatPathKind): Promise<Maybe<CodeRevision>> {
   let commit: string
   try {
     const head = await run("git", ["rev-parse", "HEAD"])
@@ -397,22 +443,80 @@ export async function codeRevisionFrom(run: RunCommand): Promise<Maybe<CodeRevis
       return unknownValue("`git rev-parse HEAD` produced no output")
     }
   } catch (error) {
-    return unknownValue(`\`git rev-parse HEAD\` could not be run: ${error instanceof Error ? error.message : String(error)}`)
+    return unknownValue(`\`git rev-parse HEAD\` could not be run: ${messageOf(error)}`)
   }
 
+  const unestablished = (what: string) =>
+    unknownValue(`the commit is \`${commit}\` but ${what}, so what the worktree held is not established`)
+
+  let toplevel: string
   try {
-    const status = await run("git", ["status", "--porcelain"])
-    if (status.exitCode !== 0) {
-      return unknownValue(
-        `the commit is \`${commit}\` but \`git status --porcelain\` exited ${status.exitCode}, ` +
-          `so whether the worktree was clean is not established`,
-      )
-    }
-    return known({ commit, dirty: status.stdout.trim().length > 0 })
+    const top = await run("git", ["rev-parse", "--show-toplevel"])
+    if (top.exitCode !== 0) return unestablished(`\`git rev-parse --show-toplevel\` exited ${top.exitCode}: ${top.stderr.trim()}`)
+    toplevel = top.stdout.replace(/\r?\n$/, "")
+    if (toplevel.length === 0) return unestablished("`git rev-parse --show-toplevel` produced no output")
   } catch (error) {
-    return unknownValue(
-      `the commit is \`${commit}\` but \`git status --porcelain\` could not be run ` +
-        `(${error instanceof Error ? error.message : String(error)}), so whether the worktree was clean is not established`,
-    )
+    return unestablished(`\`git rev-parse --show-toplevel\` could not be run (${messageOf(error)})`)
   }
+
+  const statusCommand = "`git status --porcelain=v1 -z --untracked-files=all`"
+  let stdout: string
+  try {
+    const status = await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    if (status.exitCode !== 0) return unestablished(`${statusCommand} exited ${status.exitCode}: ${status.stderr.trim()}`)
+    stdout = status.stdout
+  } catch (error) {
+    return unestablished(`${statusCommand} could not be run (${messageOf(error)})`)
+  }
+
+  // Each record is `XY PATH`, NUL-terminated; a rename or copy is followed by its source path as the next field.
+  const records: { status: string; path: string; sourcePath?: string }[] = []
+  const fields = stdout.split("\0")
+  if (fields.at(-1) !== "") return unestablished(`${statusCommand} printed output that does not end in NUL`)
+  fields.pop()
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index]!
+    const status = field.slice(0, 2)
+    const path = field.slice(3)
+    if (field.length < 4 || field[2] !== " " || !DIRTY_STATUS.test(status)) {
+      return unestablished(`${statusCommand} printed a record that is not \`XY PATH\`: ${JSON.stringify(field)}`)
+    }
+    if (/[RC]/.test(status)) {
+      const sourcePath = fields[index + 1]
+      if (sourcePath === undefined || sourcePath.length === 0) {
+        return unestablished(`${statusCommand} printed the ${status} record for \`${path}\` with no source path`)
+      }
+      records.push({ status, path, sourcePath })
+      index += 1
+    } else records.push({ status, path })
+  }
+
+  const entries: DirtyEntry[] = []
+  for (const record of records) {
+    const absolute = join(toplevel, record.path)
+    let kind: Awaited<ReturnType<PathKind>>
+    try {
+      kind = await pathKind(absolute)
+    } catch (error) {
+      return unestablished(`\`${record.path}\` could not be inspected (${messageOf(error)})`)
+    }
+    let blob: string | null = null
+    if (kind !== "absent") {
+      if (kind !== "file") {
+        return unestablished(`\`${record.path}\` is a ${kind.other}, not a regular file, and only a regular file's content is recorded`)
+      }
+      const command = `\`git hash-object -- ${absolute}\``
+      try {
+        const hashed = await run("git", ["hash-object", "--", absolute])
+        if (hashed.exitCode !== 0) return unestablished(`${command} exited ${hashed.exitCode}: ${hashed.stderr.trim()}`)
+        blob = hashed.stdout.trim()
+      } catch (error) {
+        return unestablished(`${command} could not be run (${messageOf(error)})`)
+      }
+      if (!GIT_BLOB.test(blob)) return unestablished(`${command} printed ${JSON.stringify(blob)}, which is not a blob id`)
+    }
+    entries.push({ ...record, blob })
+  }
+  entries.sort(compareDirtyEntries)
+  return known({ commit, dirty: entries.length > 0, entries })
 }

@@ -56,7 +56,8 @@ import {
   type HostRecord,
 } from "./adversarial.ts"
 import { shippedDecision } from "./adversarial-probe.ts"
-import { boundedGit, GATE_TABLE_FILE, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
+import { boundedGit, GATE_TABLE_FILE, gatesIdentity, preflightSpawn, productionTools, toolsIdentity, type SignalSource } from "./paired.ts"
+import { codeRevisionFrom, type RunCommand } from "../ablation/bundle.ts"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const HERE = process.cwd()
@@ -555,6 +556,8 @@ describe("the run path: all sixteen worktrees, then one host per run", () => {
     const schedule = JSON.parse(await readFile(join(adversarialDirectory(env.out), "adversarial-schedule.json"), "utf8")) as { scheduleHash: string; config: Record<string, unknown> }
     expect(records.every((line) => line.scheduleHash === schedule.scheduleHash)).toBe(true)
     expect(schedule.config).toMatchObject({ accounting: "attempts", route: "oauth", hostTools: { "*": false, StructuredOutput: true }, hostIsolation: "fresh-per-run", provenance: "live" })
+    // What authorized the run, as stage 1 checked it: the gate table's identity and the frozen protocol hash.
+    expect(schedule.config.authorization).toEqual({ gates: gatesIdentity(STUB_TABLE_BLOB, closedGates, "oauth"), protocolHash: overrides.protocolHash })
     // The reservation is made, in the injected root only.
     expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
   }, 120_000)
@@ -996,7 +999,7 @@ describe("an interrupt before the suite", () => {
     expect(hosts.started).toEqual([])
   })
 
-  test("SIGINT after the reservation: exit 130, the reservation kept, no schedule, worktree or host", async () => {
+  test("SIGINT while the code revision is read: exit 130, no reservation, nothing under --out or the data root", async () => {
     const env = await setup()
     const signals = signalSource()
     const { overrides, hosts } = await runnable(env, {
@@ -1004,6 +1007,29 @@ describe("an interrupt before the suite", () => {
       codeRevision: async () => {
         signals.emit("SIGINT")
         return { kind: "known", value: { commit: "abc123", dirty: false } }
+      },
+    })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.code).toBe(130)
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
+    expect(result.text).not.toContain("stage 2 of 4")
+    for (const path of [env.reservationRoot, env.out, env.dataRoot]) expect(existsSync(path), path).toBe(false)
+    expect(hosts.started).toEqual([])
+  })
+
+  test("SIGINT after the reservation: exit 130, the reservation kept, no schedule, worktree or host", async () => {
+    const env = await setup()
+    const signals = signalSource()
+    const clock = fakeClock()
+    const { overrides, hosts } = await runnable(env, {
+      signals,
+      // The reservation's `createdAt` is the clock's first reading; the interrupt lands while the reservation is written.
+      clock: {
+        ...clock,
+        now: () => {
+          signals.emit("SIGINT")
+          return clock.now()
+        },
       },
     })
     const result = await captured(() => main(argvFor(env), overrides))
@@ -1557,6 +1583,8 @@ describe("the suite's config and its stage, shared with the zero-bill probe", ()
       hostIsolation: "fresh-per-run",
     })
     expect(adversarialSuiteConfig("scripted", wiring)).toEqual({ ...live, provenance: "scripted" })
+    const authorization = { gates: "ablation/paired-gates.ts blob 0123; route oauth; gate 10 CLOSED", protocolHash: "sha256:aa" }
+    expect(adversarialSuiteConfig("live", wiring, authorization)).toEqual({ ...live, authorization })
     // A fresh object each time: sealing one cannot change the next.
     expect(live.hostTools).not.toBe(adversarialSuiteConfig("live", wiring).hostTools)
   })
@@ -1708,4 +1736,69 @@ describe("the turn deadline (protocol v3 B6)", () => {
     expect(startedPositions(hosts)).toEqual([first.position])
     expect(hosts.stops.get(first.position)).toBe(1)
   }, 60_000)
+})
+
+describe("the code revision is read before the reservation is written (retro item 1)", () => {
+  test("stage 1 reads and prints the revision while no reservation exists; stage 2 reserves after it", async () => {
+    const env = await setup()
+    const events: string[] = []
+    const refusing = scriptedHosts({ preSpawn: () => "throw" })
+    const { overrides } = await runnable(env, {
+      startHost: refusing.startHost,
+      codeRevision: async () => {
+        events.push(`revision read; reservation ${existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation)) ? "present" : "absent"}`)
+        return { kind: "known", value: { commit: "abc123", dirty: true, entries: [{ status: " M", path: "core/x.ts", blob: "e".repeat(40) }] } }
+      },
+    })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(events).toEqual(["revision read; reservation absent"])
+    const printed = result.text.indexOf("code revision: abc123, worktree dirty (1 entry recorded)")
+    expect(printed).toBeGreaterThan(-1)
+    expect(printed).toBeLessThan(result.text.indexOf("stage 2 of 4"))
+    expect(result.text).toContain(`" M" core/x.ts: blob ${"e".repeat(40)}`)
+    expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
+  }, 120_000)
+
+  test("in a clean git repository with the real revision reader and reservation writer, the sealed schedule says `dirty: false` while the reservation is untracked there", async () => {
+    const env = await setup()
+    const repo = await tempDir()
+    const gitIn: RunCommand = async (command, args) => {
+      const spawned = Bun.spawn([command, ...args], {
+        cwd: repo,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+      return { exitCode: await spawned.exited, stdout, stderr }
+    }
+    const sh = async (...args: string[]) => {
+      const result = await gitIn("git", args)
+      if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
+      return result.stdout
+    }
+    await sh("init", "-q", "-b", "main")
+    await writeFile(join(repo, "README"), "clean\n")
+    await sh("add", "README")
+    await sh("-c", "user.email=test@example.invalid", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+    const head = (await sh("rev-parse", "HEAD")).trim()
+    expect(await sh("status", "--porcelain")).toBe("")
+
+    // Every host start is refused before a spawn, so the run ends once the schedule is sealed.
+    const refusing = scriptedHosts({ preSpawn: () => "throw" })
+    const { overrides } = await runnable(env, {
+      startHost: refusing.startHost,
+      codeRevision: () => codeRevisionFrom(gitIn),
+      reservation: { root: repo, committed: async () => false },
+    })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(result.text).toContain(`code revision: ${head}, worktree clean`)
+    expect(result.text).toContain("schedule sealed at")
+    expect(existsSync(join(repo, ADVERSARIAL_RUN.reservation))).toBe(true)
+    const schedule = JSON.parse(await readFile(join(adversarialDirectory(env.out), "adversarial-schedule.json"), "utf8")) as { codeRevision: unknown }
+    expect(schedule.codeRevision).toEqual({ kind: "known", value: { commit: head, dirty: false, entries: [] } })
+    expect(await sh("status", "--porcelain", "--untracked-files=all")).toContain(`?? ${ADVERSARIAL_RUN.reservation}`)
+    // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean.
+    expect(await codeRevisionFrom(gitIn)).toMatchObject({ kind: "known", value: { commit: head, dirty: true } })
+  }, 120_000)
 })

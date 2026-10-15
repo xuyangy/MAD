@@ -906,7 +906,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "a second run into any bundle root is refused",
       "Nothing deletes it",
       "A stage-1 refusal reserves nothing.",
-      "so the schedule's `codeRevision` records `dirty: true` for that run even on an otherwise clean checkout",
+      "The launcher reads the code revision before it creates the reservation, so the reservation is not among the schedule's `codeRevision` entries",
     ]) {
       expect(text, phrase).toContain(phrase)
     }

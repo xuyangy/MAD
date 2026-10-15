@@ -207,10 +207,50 @@ export type Completion = "completed" | "degraded" | "cancelled" | "unfinished"
 /** A stage's counts, or the fact that the stage never ran. */
 export type StageCounts<T> = { kind: "did-not-run" } | { kind: "ran"; counts: T }
 
-/** The code the run was produced by. `dirty` is a fact about the worktree, not a warning. */
+/**
+ * One record of `git status --porcelain=v1`: its two-letter XY `status`, the
+ * `path` relative to the repository root, the `sourcePath` of a rename or copy
+ * (present for an `R` or `C` status, absent otherwise), and `blob`, git's blob
+ * id of the regular file at `path` in the worktree, or `null` when no file
+ * exists there.
+ */
+export interface DirtyEntry {
+  status: string
+  path: string
+  sourcePath?: string
+  blob: string | null
+}
+
+/** A porcelain v1 XY status: two characters, each a status letter or a space. */
+export const DIRTY_STATUS = /^[ MTADRCU?!]{2}$/
+
+/** A git blob id, SHA-1 or SHA-256. */
+export const GIT_BLOB = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+/**
+ * The one order dirty entries are written and compared in: by `path`, then
+ * `status`, then `sourcePath` (absent first), each by UTF-16 code unit so the
+ * order never depends on a locale.
+ */
+export function compareDirtyEntries(a: DirtyEntry, b: DirtyEntry): number {
+  const byText = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0)
+  if (a.path !== b.path) return byText(a.path, b.path)
+  if (a.status !== b.status) return byText(a.status, b.status)
+  if (a.sourcePath === b.sourcePath) return 0
+  if (a.sourcePath === undefined) return -1
+  if (b.sourcePath === undefined) return 1
+  return byText(a.sourcePath, b.sourcePath)
+}
+
+/**
+ * The code the run was produced by. `dirty` is a fact about the worktree, not a
+ * warning. `entries` says what made it dirty; a dirty revision without them
+ * does not identify the code, and the reader treats it as unknown.
+ */
 export interface CodeRevision {
   commit: string
   dirty: boolean
+  entries?: DirtyEntry[]
 }
 
 /**

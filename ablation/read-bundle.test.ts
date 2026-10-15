@@ -1473,3 +1473,111 @@ describe("story 2-5d — the closing sentence is scoped to this table", () => {
     expect(text).not.toContain("is not attempted here.")
   })
 })
+
+describe("the code revision's dirty entries decide what its commit identifies", () => {
+  const BLOB = "c".repeat(40)
+  const LEGACY_DIRTY = "the worktree was dirty and its entries were not recorded, so the commit does not identify the code"
+  const pair = (on: unknown, off: unknown) =>
+    bundle(
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, codeRevision: on },
+        { armId: "off", repeatId: 0, codeRevision: off },
+      ],
+    )
+  const read = async (root: string) => {
+    const result = await readBundle(root)
+    if ("error" in result) throw new Error(result.error)
+    return result
+  }
+
+  test("`dirty: true` with entries absent or `[]` is unknown: every such arm is segregated with the reason, and none forms a cohort", async () => {
+    for (const revision of [{ commit: "13eadc6", dirty: true }, { commit: "13eadc6", dirty: true, entries: [] }]) {
+      const result = await read(await pair(known(revision), known(revision)))
+      expect(result.comparable).toEqual([])
+      expect(result.cohort.kind).toBe("unknown")
+      expect(result.segregated).toHaveLength(2)
+      for (const row of result.segregated) expect(row.reason).toContain(`codeRevision is unknown (${LEGACY_DIRTY})`)
+    }
+  })
+
+  test("a clean revision with entries absent and one with `entries: []` agree", async () => {
+    const result = await read(await pair(known({ commit: "13eadc6", dirty: false }), known({ commit: "13eadc6", dirty: false, entries: [] })))
+    expect(result.segregated).toEqual([])
+    expect(result.comparable).toHaveLength(2)
+    if (result.cohort.kind !== "known") throw new Error("no cohort")
+    expect(result.cohort.value.codeRevision).toBe('{"commit":"13eadc6","dirty":false,"entries":[]}')
+  })
+
+  test("the key does not depend on property order or entry order", async () => {
+    const entries = [
+      { status: " M", path: "a.ts", blob: BLOB },
+      { status: "R ", path: "c.ts", sourcePath: "b.ts", blob: null },
+    ]
+    const reordered = [
+      { sourcePath: "b.ts", blob: null, path: "c.ts", status: "R " },
+      { blob: BLOB, path: "a.ts", status: " M" },
+    ]
+    const result = await read(
+      await pair(known({ commit: "13eadc6", dirty: true, entries }), known({ entries: reordered, dirty: true, commit: "13eadc6" })),
+    )
+    expect(result.segregated).toEqual([])
+    expect(result.comparable).toHaveLength(2)
+  })
+
+  test("different entries under one commit segregate", async () => {
+    for (const other of [
+      [{ status: " M", path: "a.ts", blob: "d".repeat(40) }],
+      [{ status: "??", path: "a.ts", blob: BLOB }],
+      [{ status: " M", path: "b.ts", blob: BLOB }],
+      [{ status: " D", path: "a.ts", blob: null }],
+    ]) {
+      const result = await read(
+        await pair(known({ commit: "13eadc6", dirty: true, entries: [{ status: " M", path: "a.ts", blob: BLOB }] }), known({ commit: "13eadc6", dirty: true, entries: other })),
+      )
+      expect(result.comparable, JSON.stringify(other)).toEqual([])
+      expect(result.segregated).toHaveLength(2)
+    }
+  })
+
+  test("one path under two statuses is accepted", async () => {
+    const revision = known({
+      commit: "13eadc6",
+      dirty: true,
+      entries: [
+        { status: "??", path: "a", blob: BLOB },
+        { status: "D ", path: "a", blob: BLOB },
+      ],
+    })
+    const result = await read(await pair(revision, revision))
+    expect(result.unreadable).toEqual([])
+    expect(result.comparable).toHaveLength(2)
+  })
+
+  test("malformed entries refuse the arm by name, and never drop an entry", async () => {
+    const good = { status: " M", path: "a.ts", blob: BLOB }
+    for (const [revision, expected] of [
+      [{ commit: "13eadc6", dirty: false, entries: [good] }, "it is `dirty: false` and lists entries"],
+      [{ commit: "13eadc6", dirty: true, entries: [good, { ...good }] }, "repeats the entry for `a.ts`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ status: "R ", path: "c", sourcePath: "a", blob: null }, { status: "R ", path: "c", sourcePath: "a", blob: BLOB }] }, "repeats the entry for `c`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, status: "XX" }] }, "which is not a porcelain XY status"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, status: "M" }] }, "which is not a porcelain XY status"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ status: "R ", path: "c", blob: BLOB }] }, "and no `sourcePath`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, sourcePath: "b.ts" }] }, "which only a rename or copy carries"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, blob: "abc" }] }, "neither a git blob id nor `null`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ status: " M", path: "a.ts" }] }, "neither a git blob id nor `null`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, path: "" }] }, "carries no non-empty `path`"],
+      [{ commit: "13eadc6", dirty: true, entries: [{ ...good, extra: 1 }] }, "unrecognised field(s) `extra`"],
+      [{ commit: "13eadc6", dirty: true, entries: "a.ts" }, "`entries` is not an array"],
+    ] as const) {
+      const result = await read(await bundle([{ armId: "on", repeatId: 0 }], [{ armId: "on", repeatId: 0, codeRevision: known(revision) }]))
+      expect(result.comparable, expected).toEqual([])
+      expect(result.unreadable).toHaveLength(1)
+      expect(result.unreadable[0]!.reason).toContain("malformed `identity.codeRevision`")
+      expect(result.unreadable[0]!.reason).toContain(expected)
+    }
+  })
+})

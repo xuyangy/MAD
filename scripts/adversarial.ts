@@ -89,7 +89,14 @@ import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/o
 import { enumerateCandidates, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
 import { runAdversarialSuite, type AdversarialHostLifecycle, type AdversarialHostStart, type AdversarialHostStop, type AdversarialRunContext } from "../ablation/adversarial.ts"
 import type { RunGit as MaterializeGit } from "../ablation/adversarial-materialize.ts"
-import { ADVERSARIAL_HOST_OFFER, adversarialDirectory, createAdversarialSchedule, FRESH_PER_RUN, type AdversarialConfig } from "../ablation/adversarial-schedule.ts"
+import {
+  ADVERSARIAL_HOST_OFFER,
+  adversarialDirectory,
+  createAdversarialSchedule,
+  FRESH_PER_RUN,
+  type AdversarialAuthorization,
+  type AdversarialConfig,
+} from "../ablation/adversarial-schedule.ts"
 import { codeRevisionFrom } from "../ablation/bundle.ts"
 import {
   identifyBinary,
@@ -738,7 +745,11 @@ export function oauthHostLifecycle(options: OAuthHostLifecycleOptions): {
  * launcher; the zero-bill probe (`scripts/adversarial-probe.ts`) seals the same
  * config as `scripted`.
  */
-export function adversarialSuiteConfig(provenance: AdversarialConfig["provenance"], wiring: ToolsWiring): AdversarialConfig {
+export function adversarialSuiteConfig(
+  provenance: AdversarialConfig["provenance"],
+  wiring: ToolsWiring,
+  authorization?: AdversarialAuthorization,
+): AdversarialConfig {
   return {
     provenance,
     tools: toolsIdentity(wiring),
@@ -746,7 +757,23 @@ export function adversarialSuiteConfig(provenance: AdversarialConfig["provenance
     route: "oauth",
     hostTools: { ...ADVERSARIAL_HOST_OFFER },
     hostIsolation: FRESH_PER_RUN,
+    ...(authorization === undefined ? {} : { authorization: { ...authorization } }),
   }
+}
+
+/** The code revision as stage 1 prints it: the commit and every dirty entry, or the reason it is unknown. */
+export function codeRevisionLines(revision: Maybe<CodeRevision>): string[] {
+  if (revision.kind === "unknown") return [`code revision: unknown (${revision.why})`]
+  const { commit, dirty, entries = [] } = revision.value
+  if (!dirty) return [`code revision: ${commit}, worktree clean`]
+  return [
+    `code revision: ${commit}, worktree dirty (${entries.length} entr${entries.length === 1 ? "y" : "ies"} recorded)`,
+    ...entries.map(
+      (entry) =>
+        `  ${JSON.stringify(entry.status)} ${entry.path}${entry.sourcePath === undefined ? "" : ` (from ${entry.sourcePath})`}: ` +
+        (entry.blob === null ? "no file" : `blob ${entry.blob}`),
+    ),
+  ]
 }
 
 /** What stage 4 runs on: a sealed schedule's inputs, the OAuth route, and the seams whose defaults are the shipped behaviour. */
@@ -1183,6 +1210,16 @@ async function launch(
     )
   }
 
+  // The code revision is read here, before the reservation is written, so the run's own reservation is not in it.
+  let codeRevision: Maybe<CodeRevision>
+  try {
+    codeRevision = await (overrides.codeRevision ?? (() => codeRevisionFrom((_command, args) => git(REPO_ROOT, args))))()
+  } catch (error) {
+    codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
+  }
+  for (const line of codeRevisionLines(codeRevision)) console.log(`  ${line}`)
+  if (interrupted()) return refusal("stage 1 (offline checks)", ["the launcher was interrupted"], "run the command again when ready.", 130)
+
   // ---- STAGE 2: the reservation, before anything else is written ----
   console.log(`\nbun run adversarial — stage 2 of 4: reserve adversarial run ${run.run}`)
   const reserved = await reserveAdversarialRun(
@@ -1207,12 +1244,6 @@ async function launch(
   // ---- STAGE 3: the roots, the roster and the schedule ----
   console.log("\nbun run adversarial — stage 3 of 4: the experiment root, the data root and the sealed schedule (no host)")
   const resolved = adversarialRoster(pin)
-  let codeRevision: Maybe<CodeRevision>
-  try {
-    codeRevision = await (overrides.codeRevision ?? (() => codeRevisionFrom((_command, args) => git(REPO_ROOT, args))))()
-  } catch (error) {
-    codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
-  }
   if (interrupted()) return interruptedAfterReservation("before the roots were created")
   // The two roots are checked again immediately before they are created, containment included: stage 1's answer may be stale.
   const spent = "The reservation is already spent: a further run needs a new authorization."
@@ -1234,7 +1265,8 @@ async function launch(
     return 1
   }
   if (interrupted()) return interruptedAfterReservation("after the roots were created and before the schedule was sealed")
-  const config = adversarialSuiteConfig("live", wiring)
+  // What authorized the run, as stage 1 checked it: the committed gate table's identity and the frozen protocol hash.
+  const config = adversarialSuiteConfig("live", wiring, { gates: gatesIdentity(table.blob, gates, "oauth"), protocolHash })
   const created = await createAdversarialSchedule({
     experimentRoot: out,
     protocolFile,

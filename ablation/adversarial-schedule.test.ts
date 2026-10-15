@@ -623,3 +623,49 @@ describe("the attempt-mode bill summary", () => {
     expect(await billAt("{ torn")).toMatchObject({ kind: "unreadable" })
   })
 })
+
+describe("the authorization a launcher seals", () => {
+  const RUN_1_SCHEDULE = join(import.meta.dir, "evidence/adversarial-oauth-run-1-bundle/adversarial/adversarial-schedule.json")
+
+  async function run1() {
+    const sealed = JSON.parse(await readFile(RUN_1_SCHEDULE, "utf8")) as {
+      config: { tools: string }
+      configDigest: string
+      roster: Parameters<typeof adversarialRunConfig>[1]
+    }
+    const config: Parameters<typeof adversarialRunConfig>[0] = {
+      provenance: "live",
+      tools: sealed.config.tools,
+      accounting: "attempts",
+      route: "oauth",
+      hostTools: { "*": false, StructuredOutput: true },
+      hostIsolation: "fresh-per-run",
+    }
+    const digest = (extra: Partial<Parameters<typeof adversarialRunConfig>[0]> = {}) =>
+      sha256(canonicalJson(adversarialRunConfig({ ...config, ...extra }, sealed.roster)))
+    return { sealed, digest }
+  }
+
+  test("a config declaring no authorization keeps adversarial run 1's sealed digest", async () => {
+    const { sealed, digest } = await run1()
+    expect(digest()).toBe(sealed.configDigest)
+    expect(digest({ authorization: undefined })).toBe(sealed.configDigest)
+  })
+
+  test("declaring it, or changing either component, changes the digest", async () => {
+    const { sealed, digest } = await run1()
+    const base = { gates: "ablation/paired-gates.ts blob 0123; route oauth; gate 10 CLOSED", protocolHash: "sha256:aa" }
+    const digests = [
+      sealed.configDigest,
+      digest({ authorization: base }),
+      digest({ authorization: { ...base, gates: `${base.gates}, gate 11 CLOSED` } }),
+      digest({ authorization: { ...base, protocolHash: "sha256:bb" } }),
+    ]
+    expect(new Set(digests).size).toBe(4)
+    const bound = adversarialRunConfig({ provenance: "live", tools: "t", accounting: "attempts", route: "oauth", authorization: base }, sealed.roster)
+    expect(bound.authorization).toEqual(base)
+    // The token mode binds it too, only when declared.
+    expect(adversarialRunConfig({ provenance: "scripted", tools: "t", authorization: base }, sealed.roster).authorization).toEqual(base)
+    expect("authorization" in adversarialRunConfig({ provenance: "scripted", tools: "t" }, sealed.roster)).toBe(false)
+  })
+})

@@ -40,6 +40,12 @@
  * do not agree — they are both uncheckable, which is a different fact and the
  * one a reader must not mistake for a match.
  *
+ * A code revision that says `dirty: true` and records no entries is unknown too:
+ * the commit does not identify the code that ran, and nothing else in the
+ * manifest does. A revision is compared on a canonical key: its fields in one
+ * order, a clean revision's absent `entries` read as `[]`, and its entries
+ * sorted by path, then status, then source path.
+ *
  * ## The cohort is a PLURALITY, and the word matters
  *
  * The largest group wins outright; a tie for largest yields no cohort at all. It
@@ -65,10 +71,14 @@ import { ROUTING_POLICIES, type RoutingPolicy } from "../core/domain/run-record.
 import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
 import { INHERITED_SUM_RULE, PAIRED_READER_MODULE } from "./report.ts"
 import {
+  compareDirtyEntries,
+  DIRTY_STATUS,
+  GIT_BLOB,
   MANIFEST_FILE,
   MANIFEST_SCHEMA_VERSION,
   USAGE_COMPLETENESS_VALUES,
   fromPersistedFindings,
+  type CodeRevision,
   type Maybe,
   type RunManifest,
 } from "./manifest.ts"
@@ -398,6 +408,8 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     "`{ commit: string, dirty: boolean }`",
   )
   if (revision !== undefined) return fail(`has a malformed \`identity.codeRevision\`: ${revision}`)
+  const entries = dirtyEntriesProblem(identity.codeRevision)
+  if (entries !== undefined) return fail(`has a malformed \`identity.codeRevision\`: ${entries}`)
 
   // ---- run ----
   const run = value.run
@@ -877,6 +889,66 @@ function maybeOf(
   return `an unrecognised kind \`${String(value.kind)}\``
 }
 
+/**
+ * Why a known code revision's `entries` are not what `codeRevisionFrom` writes,
+ * or `undefined`. Absent entries are the legacy shape and pass here; the cohort
+ * key decides what they mean. A clean revision carries no entries; each entry is
+ * `{status, path, sourcePath?, blob}` with a porcelain XY status, a `sourcePath`
+ * exactly when the status names a rename or copy, and a blob id or `null`. Two
+ * entries with one path, status and source path are refused: git lists each
+ * record once, so a repeat is not a worktree git described.
+ */
+function dirtyEntriesProblem(wrapper: unknown): string | undefined {
+  if (!isRecord(wrapper) || wrapper.kind !== "known" || !isRecord(wrapper.value)) return undefined
+  const revision = wrapper.value
+  if (!("entries" in revision) || revision.entries === undefined) return undefined
+  const entries = revision.entries
+  if (!Array.isArray(entries)) return "`entries` is not an array"
+  if (revision.dirty === false && entries.length > 0) return "it is `dirty: false` and lists entries"
+  const seen = new Set<string>()
+  for (const [index, entry] of entries.entries()) {
+    const at = `entry ${index}`
+    if (!isRecord(entry)) return `${at} is not an object`
+    const extra = Object.keys(entry).filter((key) => !["status", "path", "sourcePath", "blob"].includes(key))
+    if (extra.length > 0) return `${at} carries unrecognised field(s) ${extra.map((key) => `\`${key}\``).join(", ")}`
+    if (typeof entry.status !== "string" || !DIRTY_STATUS.test(entry.status)) {
+      return `${at} has status ${JSON.stringify(entry.status)}, which is not a porcelain XY status`
+    }
+    if (!isText(entry.path)) return `${at} carries no non-empty \`path\``
+    const renamed = /[RC]/.test(entry.status)
+    if (renamed && !isText(entry.sourcePath)) return `${at} (\`${entry.path}\`) has status ${JSON.stringify(entry.status)} and no \`sourcePath\``
+    if (!renamed && "sourcePath" in entry) return `${at} (\`${entry.path}\`) has status ${JSON.stringify(entry.status)} and a \`sourcePath\`, which only a rename or copy carries`
+    if (entry.blob !== null && (typeof entry.blob !== "string" || !GIT_BLOB.test(entry.blob))) {
+      return `${at} (\`${entry.path}\`) has blob ${JSON.stringify(entry.blob)}, which is neither a git blob id nor \`null\``
+    }
+    const identity = JSON.stringify([entry.path, entry.status, entry.sourcePath ?? null])
+    if (seen.has(identity)) return `${at} repeats the entry for \`${entry.path}\` with status ${JSON.stringify(entry.status)}`
+    seen.add(identity)
+  }
+  return undefined
+}
+
+/**
+ * The comparison key of a known code revision, or why it has none. The fields
+ * are written in one fixed order, a clean revision's absent `entries` are `[]`,
+ * and entries are sorted as `codeRevisionFrom` sorts them, so the key does not
+ * depend on how the manifest's JSON was ordered. A dirty revision with no
+ * recorded entries does not identify the code, so it has no key.
+ */
+function codeRevisionKey(revision: CodeRevision): { key: string } | { why: string } {
+  const entries = revision.entries ?? []
+  if (revision.dirty && entries.length === 0) {
+    return { why: "the worktree was dirty and its entries were not recorded, so the commit does not identify the code" }
+  }
+  const canonical = [...entries].sort(compareDirtyEntries).map((entry) => ({
+    status: entry.status,
+    path: entry.path,
+    ...(entry.sourcePath === undefined ? {} : { sourcePath: entry.sourcePath }),
+    blob: entry.blob,
+  }))
+  return { key: JSON.stringify({ commit: revision.commit, dirty: revision.dirty, entries: canonical }) }
+}
+
 /** The four values of one arm, or the reason it has none to compare. */
 type Comparability =
   | { kind: "comparable"; key: Record<ComparabilityField, string> }
@@ -897,6 +969,12 @@ function comparabilityOf(manifest: RunManifest): Comparability {
   const unknowns: string[] = []
   for (const field of COMPARABILITY_FIELDS) {
     const wrapper = wrappers[field] as { kind: string; value?: unknown; why?: string }
+    if (wrapper.kind === "known" && field === "codeRevision") {
+      const revision = codeRevisionKey(wrapper.value as CodeRevision)
+      if ("key" in revision) key[field] = revision.key
+      else unknowns.push(`${field} is unknown (${revision.why})`)
+      continue
+    }
     if (wrapper.kind === "known") {
       key[field] = JSON.stringify(wrapper.value)
       continue

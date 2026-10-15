@@ -21,6 +21,7 @@ import type { ZodType } from "zod"
 import type { BlameExecOutcome, SpawnBlame, SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
 import type { OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import type { OpencodeToolsOptions } from "../adapters/opencode/tools.ts"
+import { codeRevisionFrom, type RunCommand } from "../ablation/bundle.ts"
 import { known } from "../ablation/manifest.ts"
 import {
   hostConfig,
@@ -2200,5 +2201,95 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
     expect(result.text).not.toContain("authorized evaluation run")
     expect(existsSync(reservationOf(root))).toBe(false)
+  })
+})
+
+describe("the code revision is read before the reservation is written (retro item 1)", () => {
+  test("the OAuth route reads the revision while no reservation exists and before any host; the schedule seals what was read", async () => {
+    const env = await oauthSetup()
+    const root = join(env.parent, "reservation-root")
+    const host = oauthHost()
+    const events: string[] = []
+    const startHost = host.startHost
+    const read = known({ commit: "abc123", dirty: true, entries: [{ status: " M", path: "core/x.ts", blob: "e".repeat(40) }] })
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root, committed: priorRunsOnly },
+      codeRevision: async () => {
+        events.push(`revision read; reservation ${existsSync(join(root, EVALUATION_RUN.reservation)) ? "present" : "absent"}`)
+        return read
+      },
+      startHost: async (asked) => {
+        events.push("host started")
+        return startHost(asked)
+      },
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(events).toEqual(["revision read; reservation absent", "host started"])
+    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
+    expect(schedule.codeRevision).toEqual(read)
+  })
+
+  test("the api-key route reads the revision before any host too", async () => {
+    const env = await setup()
+    const events: string[] = []
+    const { overrides, host } = overridesFor(env, { gates: closedGates })
+    const startHost = overrides.startHost!
+    overrides.codeRevision = async () => {
+      events.push("revision read")
+      return known({ commit: "abc123", dirty: false, entries: [] })
+    }
+    overrides.startHost = async (asked) => {
+      events.push("host started")
+      return startHost(asked)
+    }
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(events).toEqual(["revision read", "host started"])
+    expect(host.started).toHaveLength(1)
+  })
+
+  test("in a clean git repository with the real revision reader and reservation writer, the sealed schedule says `dirty: false` while the reservation is untracked there", async () => {
+    const env = await oauthSetup()
+    const repo = await tempDir()
+    const gitIn: RunCommand = async (command, args) => {
+      const spawned = Bun.spawn([command, ...args], {
+        cwd: repo,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+      return { exitCode: await spawned.exited, stdout, stderr }
+    }
+    const sh = async (...args: string[]) => {
+      const result = await gitIn("git", args)
+      if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
+      return result.stdout
+    }
+    await sh("init", "-q", "-b", "main")
+    await writeFile(join(repo, "README"), "clean\n")
+    await sh("add", "README")
+    await sh("-c", "user.email=test@example.invalid", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+    const head = (await sh("rev-parse", "HEAD")).trim()
+    expect(await sh("status", "--porcelain")).toBe("")
+
+    const host = oauthHost()
+    const { overrides } = oauthOverrides(env, host, {
+      gates: closedGates,
+      protocolV2File: await frozenV2(env.parent),
+      evaluationReservation: { root: repo, committed: priorRunsOnly },
+      codeRevision: () => codeRevisionFrom(gitIn),
+    })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(existsSync(join(repo, EVALUATION_RUN.reservation))).toBe(true)
+    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
+    expect(schedule.codeRevision).toEqual(known({ commit: head, dirty: false, entries: [] }))
+    expect(await sh("status", "--porcelain", "--untracked-files=all")).toContain(`?? ${EVALUATION_RUN.reservation}`)
+    // Read now, after the reservation, the same revision is dirty: the order is what kept the sealed one clean.
+    expect(await codeRevisionFrom(gitIn)).toMatchObject({ kind: "known", value: { commit: head, dirty: true } })
   })
 })

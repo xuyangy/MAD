@@ -1302,6 +1302,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     warnings: Warning[]
     gatesBlob: string
     mode: ProviderMode
+    /** MAD's own revision, read before any reservation is written. */
+    codeRevision: Maybe<CodeRevision>
   }
   try {
     // ---- STAGE 1: offline checks ----
@@ -1498,6 +1500,16 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       )
     }
 
+    // MAD's own revision, read through the same bounded runner in this repository, before the reservation is written
+    // so the run's own reservation is not in it; `codeRevisionFrom` turns every failure, a non-returned git included,
+    // into an explicit unknown.
+    let codeRevision: Maybe<CodeRevision>
+    try {
+      codeRevision = await (overrides.codeRevision ?? (() => codeRevisionFrom((_command, args) => git(REPO_ROOT, args))))()
+    } catch (error) {
+      codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
+    }
+
     // Story 2-8d: the OAuth route uses gate 4's one authorization here, before any host or network activity.
     if (oauthMode) {
       const reserved = await reserveEvaluationRun(reservationSeam.root, {
@@ -1657,7 +1669,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     console.log(`  PASS  \`${directory}\` is still exactly the sealed labelled change`)
     if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
-    prepared = { pins: flags.pins, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob, mode: flags.mode }
+    prepared = { pins: flags.pins, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob, mode: flags.mode, codeRevision }
   } finally {
     // The scratch copy is removed while the handlers are still on, so no interrupt lands between the two stages' handlers.
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
@@ -1670,7 +1682,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
 
   // ---- STAGE 4: schedule, then the three blocks ----
   console.log("\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks")
-  const { directory, out, wiring, roster, warnings, gatesBlob, mode } = prepared
+  const { directory, out, wiring, roster, warnings, gatesBlob, mode, codeRevision } = prepared
   // SIGINT/SIGTERM during the run: abort through the runner's signal, which keeps every piece of evidence.
   const runInterrupt = (): void => {
     console.log(
@@ -1702,14 +1714,6 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   }
 
   async function stageFour(): Promise<number> {
-    // MAD's own revision, read through the same bounded runner in this repository;
-    // `codeRevisionFrom` turns every failure, a non-returned git included, into an explicit unknown.
-    let codeRevision: Maybe<CodeRevision>
-    try {
-      codeRevision = await (overrides.codeRevision ?? (() => codeRevisionFrom((_command, args) => git(REPO_ROOT, args))))()
-    } catch (error) {
-      codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
-    }
     const config: PairedConfig = {
       provenance: "live",
       tools: toolsIdentity(wiring),

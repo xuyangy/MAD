@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readdir, readFile, rm, stat, symlink } from "node:fs/promises"
+import { realpathSync } from "node:fs"
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -12,11 +13,15 @@ import {
   PREFIX_FILE,
   armDirectory,
   codeRevisionFrom,
+  type PathKind,
+  type RunCommand,
   writeArmDump,
   writeBundleIndex,
   writePrefixEvidence,
 } from "./bundle.ts"
 import { MANIFEST_FILE, known, unknownValue, type EvaluationIdentity } from "./manifest.ts"
+import { parseManifest, readBundle } from "./read-bundle.ts"
+import { manifestFor, writeBundle } from "./read-bundle.fixture.ts"
 
 const scratch: string[] = []
 
@@ -364,19 +369,164 @@ describe("each arm carries the backend it ran against, and is offered as it fini
 
 describe("the code revision is established or explicitly unknown (AC4)", () => {
   const ok = (stdout: string) => ({ exitCode: 0, stdout, stderr: "" })
+  const BLOB_A = "a".repeat(40)
+  const BLOB_B = "b".repeat(40)
 
-  test("a clean worktree records the commit and `dirty: false`", async () => {
-    const revision = await codeRevisionFrom(async (_command, args) =>
-      args[0] === "rev-parse" ? ok("13eadc6e51d1\n") : ok(""),
-    )
-    expect(revision).toEqual(known({ commit: "13eadc6e51d1", dirty: false }))
+  /**
+   * A stubbed git and worktree: `status` is the raw `-z` output, `files` maps each
+   * absolute path to what is there, and `blobs` maps each absolute path to its
+   * `hash-object` answer. Every git call is recorded.
+   */
+  function stubbed(options: {
+    status: string
+    toplevel?: { exitCode: number; stdout: string; stderr?: string } | "throw"
+    files?: Record<string, "file" | { other: string } | "throw">
+    blobs?: Record<string, string | { exitCode: number; stderr: string }>
+  }) {
+    const calls: string[][] = []
+    const run = async (_command: string, args: readonly string[]) => {
+      calls.push([...args])
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return ok("13eadc6e51d1\n")
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        const top = options.toplevel ?? ok("/repo\n")
+        if (top === "throw") throw new Error("git vanished")
+        return { stderr: "", ...top }
+      }
+      if (args[0] === "status") return ok(options.status)
+      if (args[0] === "hash-object") {
+        const answer = options.blobs?.[args.at(-1)!]
+        if (answer === undefined) throw new Error(`no blob stubbed for ${args.at(-1)}`)
+        return typeof answer === "string" ? ok(`${answer}\n`) : { stdout: "", ...answer }
+      }
+      throw new Error(`unexpected git ${args.join(" ")}`)
+    }
+    const pathKind = async (path: string) => {
+      const kind = options.files?.[path]
+      if (kind === "throw") throw new Error("EACCES: permission denied")
+      return kind ?? ("absent" as const)
+    }
+    return { run, pathKind, calls }
+  }
+
+  test("a clean worktree records the commit, `dirty: false` and no entries", async () => {
+    const git = stubbed({ status: "" })
+    expect(await codeRevisionFrom(git.run, git.pathKind)).toEqual(known({ commit: "13eadc6e51d1", dirty: false, entries: [] }))
+    expect(git.calls).toContainEqual(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
   })
 
-  test("a dirty worktree keeps the commit AND says the worktree was dirty", async () => {
-    const revision = await codeRevisionFrom(async (_command, args) =>
-      args[0] === "rev-parse" ? ok("13eadc6e51d1\n") : ok(" M core/run/review.ts\n"),
+  test("a dirty worktree keeps the commit and records every porcelain record with the blob of the file now at its path", async () => {
+    const git = stubbed({
+      // modified; untracked; staged-deleted; renamed (source as the next field); copied; deleted in the worktree.
+      status: " M core/run/review.ts\0?? notes/new.md\0D  gone.ts\0R  moved.ts\0old.ts\0C  copy.ts\0orig.ts\0 D lost.ts\0",
+      files: {
+        "/repo/core/run/review.ts": "file",
+        "/repo/notes/new.md": "file",
+        "/repo/moved.ts": "file",
+        "/repo/copy.ts": "file",
+      },
+      blobs: {
+        "/repo/core/run/review.ts": BLOB_A,
+        "/repo/notes/new.md": BLOB_B,
+        "/repo/moved.ts": BLOB_A,
+        "/repo/copy.ts": BLOB_B,
+      },
+    })
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    expect(revision).toEqual(
+      known({
+        commit: "13eadc6e51d1",
+        dirty: true,
+        entries: [
+          { status: "C ", path: "copy.ts", sourcePath: "orig.ts", blob: BLOB_B },
+          { status: " M", path: "core/run/review.ts", blob: BLOB_A },
+          { status: "D ", path: "gone.ts", blob: null },
+          { status: " D", path: "lost.ts", blob: null },
+          { status: "R ", path: "moved.ts", sourcePath: "old.ts", blob: BLOB_A },
+          { status: "??", path: "notes/new.md", blob: BLOB_B },
+        ],
+      }),
     )
-    expect(revision).toEqual(known({ commit: "13eadc6e51d1", dirty: true }))
+    // Each regular file is hashed by its absolute path under the toplevel.
+    expect(git.calls.filter((args) => args[0] === "hash-object").map((args) => args.at(-1)).sort()).toEqual(
+      ["/repo/copy.ts", "/repo/core/run/review.ts", "/repo/moved.ts", "/repo/notes/new.md"],
+    )
+  })
+
+  test("a path listed twice keeps both records, sorted by status code unit, each with the file now at the path", async () => {
+    const git = stubbed({ status: "?? a\0D  a\0", files: { "/repo/a": "file" }, blobs: { "/repo/a": BLOB_A } })
+    expect(await codeRevisionFrom(git.run, git.pathKind)).toEqual(
+      known({
+        commit: "13eadc6e51d1",
+        dirty: true,
+        entries: [
+          { status: "??", path: "a", blob: BLOB_A },
+          { status: "D ", path: "a", blob: BLOB_A },
+        ],
+      }),
+    )
+  })
+
+  test("a deleted status with a file present is hashed, and a modified status with no file is `null`: the blob follows the worktree", async () => {
+    const git = stubbed({ status: " D here\0 M away\0", files: { "/repo/here": "file" }, blobs: { "/repo/here": BLOB_B } })
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "known") throw new Error(revision.why)
+    expect(revision.value.entries).toEqual([
+      { status: " M", path: "away", blob: null },
+      { status: " D", path: "here", blob: BLOB_B },
+    ])
+  })
+
+  test("two renames to one path from different sources differ only in `sourcePath`", async () => {
+    const files = { "/repo/c": "file" as const }
+    const blobs = { "/repo/c": BLOB_A }
+    const one = await codeRevisionFrom(...runAndKind(stubbed({ status: "R  c\0a\0", files, blobs })))
+    const two = await codeRevisionFrom(...runAndKind(stubbed({ status: "R  c\0b\0", files, blobs })))
+    expect(one).toEqual(known({ commit: "13eadc6e51d1", dirty: true, entries: [{ status: "R ", path: "c", sourcePath: "a", blob: BLOB_A }] }))
+    expect(two).toEqual(known({ commit: "13eadc6e51d1", dirty: true, entries: [{ status: "R ", path: "c", sourcePath: "b", blob: BLOB_A }] }))
+  })
+
+  test("a symlink, a directory or any other non-regular entry makes the whole revision unknown, naming the path and kind; nothing is hashed", async () => {
+    for (const other of ["symlink", "directory (a gitlink, submodule or nested repository)", "FIFO"]) {
+      const git = stubbed({ status: " M fine.ts\0?? odd\0", files: { "/repo/fine.ts": "file", "/repo/odd": { other } }, blobs: { "/repo/fine.ts": BLOB_A } })
+      const revision = await codeRevisionFrom(git.run, git.pathKind)
+      if (revision.kind !== "unknown") throw new Error(`${other} was recorded`)
+      expect(revision.why).toContain("`odd`")
+      expect(revision.why).toContain(other)
+      expect(revision.why).toContain("13eadc6e51d1")
+    }
+  })
+
+  test("a path that cannot be inspected is unknown, naming the path", async () => {
+    const git = stubbed({ status: "?? locked\0", files: { "/repo/locked": "throw" } })
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "unknown") throw new Error("recorded")
+    expect(revision.why).toContain("`locked`")
+    expect(revision.why).toContain("EACCES")
+  })
+
+  test("a failed `hash-object` or `rev-parse --show-toplevel` is unknown, naming the command and the path", async () => {
+    const hashing = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": { exitCode: 128, stderr: "fatal: cannot open" } } })
+    const hashed = await codeRevisionFrom(hashing.run, hashing.pathKind)
+    if (hashed.kind !== "unknown") throw new Error("recorded")
+    expect(hashed.why).toContain("git hash-object -- /repo/x.ts")
+    expect(hashed.why).toContain("fatal: cannot open")
+
+    const junk = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": "not-a-blob" } })
+    expect((await codeRevisionFrom(junk.run, junk.pathKind)).kind).toBe("unknown")
+
+    for (const toplevel of [{ exitCode: 128, stdout: "", stderr: "fatal: bare" }, "throw" as const, ok("\n")]) {
+      const git = stubbed({ status: "", toplevel })
+      const revision = await codeRevisionFrom(git.run, git.pathKind)
+      if (revision.kind !== "unknown") throw new Error("recorded")
+      expect(revision.why).toContain("git rev-parse --show-toplevel")
+    }
+  })
+
+  test("status output that is not NUL-terminated `XY PATH` records, or a rename with no source, is unknown", async () => {
+    for (const status of [" M x.ts", "XYZ\0", "?? \0", "R  c\0"]) {
+      const git = stubbed({ status, files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": BLOB_A } })
+      expect((await codeRevisionFrom(git.run, git.pathKind)).kind, JSON.stringify(status)).toBe("unknown")
+    }
   })
 
   test("no git at all is an unknown that says why, never an empty string", async () => {
@@ -401,17 +551,151 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
 
   test("a commit with no readable status is UNKNOWN, not silently clean", async () => {
     const revision = await codeRevisionFrom(async (_command, args) =>
-      args[0] === "rev-parse" ? ok("13eadc6\n") : { exitCode: 1, stdout: "", stderr: "broken" },
+      args[0] === "rev-parse" ? ok(args[1] === "HEAD" ? "13eadc6\n" : "/repo\n") : { exitCode: 1, stdout: "", stderr: "broken" },
     )
     expect(revision.kind).toBe("unknown")
     if (revision.kind !== "unknown") throw new Error("unreachable")
     expect(revision.why).toContain("13eadc6")
-    expect(revision.why).toContain("clean")
+    expect(revision.why).toContain("worktree held is not established")
   })
 
   test("empty rev-parse output is an unknown, never a commit of `''`", async () => {
     const revision = await codeRevisionFrom(async () => ok("   \n"))
     expect(revision.kind).toBe("unknown")
+  })
+})
+
+function runAndKind(git: { run: RunCommand; pathKind: PathKind }): [RunCommand, PathKind] {
+  return [git.run, git.pathKind]
+}
+
+describe("the code revision over real git", () => {
+  const environment = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }
+
+  /** Real git, run in `cwd`. */
+  function gitIn(cwd: string): RunCommand {
+    return async (command, args) => {
+      const spawned = Bun.spawn([command, ...args], { cwd, env: environment, stdout: "pipe", stderr: "pipe" })
+      const [stdout, stderr] = await Promise.all([new Response(spawned.stdout).text(), new Response(spawned.stderr).text()])
+      return { exitCode: await spawned.exited, stdout, stderr }
+    }
+  }
+
+  async function sh(cwd: string, ...args: string[]): Promise<string> {
+    const result = await gitIn(cwd)("git", args)
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+
+  /** A repository with one commit holding `a` and `b`, identical content. */
+  async function repository(): Promise<string> {
+    const root = realpathSync(await tempDir("mad-revision-"))
+    await sh(root, "init", "-q", "-b", "main")
+    await sh(root, "config", "user.email", "test@example.invalid")
+    await sh(root, "config", "user.name", "test")
+    await sh(root, "config", "commit.gpgsign", "false")
+    await writeFile(join(root, "a"), "same\n")
+    await writeFile(join(root, "b"), "same\n")
+    await mkdir(join(root, "nested", "deeper"), { recursive: true })
+    await writeFile(join(root, "nested", "deeper", "keep"), "kept\n")
+    await sh(root, "add", ".")
+    await sh(root, "commit", "-q", "-m", "init")
+    return root
+  }
+
+  test("a clean tree gives `dirty: false` and no entries", async () => {
+    const root = await repository()
+    const head = await sh(root, "rev-parse", "HEAD")
+    expect(await codeRevisionFrom(gitIn(root))).toEqual(known({ commit: head, dirty: false, entries: [] }))
+  })
+
+  test("renames `a→c` and `b→c` with identical content differ in `sourcePath` and so in cohort key", async () => {
+    const first = await repository()
+    const second = await repository()
+    await sh(first, "mv", "a", "c")
+    await sh(second, "mv", "b", "c")
+    const one = await codeRevisionFrom(gitIn(first))
+    const two = await codeRevisionFrom(gitIn(second))
+    if (one.kind !== "known" || two.kind !== "known") throw new Error("unknown")
+    const blob = await sh(first, "hash-object", "c")
+    expect(one.value.entries).toEqual([{ status: "R ", path: "c", sourcePath: "a", blob }])
+    expect(two.value.entries).toEqual([{ status: "R ", path: "c", sourcePath: "b", blob }])
+
+    // The two commits differ (two repositories), so compare keys under one commit.
+    const bundleRoot = await tempDir("mad-revision-bundle-")
+    await writeBundle(
+      bundleRoot,
+      [
+        { armId: "x", repeatId: 0 },
+        { armId: "y", repeatId: 0 },
+      ],
+      [
+        { armId: "x", repeatId: 0, codeRevision: known(one.value) },
+        { armId: "y", repeatId: 0, codeRevision: known({ ...two.value, commit: one.value.commit }) },
+      ],
+    )
+    const read = await readBundle(bundleRoot)
+    if ("error" in read) throw new Error(read.error)
+    expect(read.comparable).toEqual([])
+    expect(read.segregated).toHaveLength(2)
+  })
+
+  test("a symlink in the worktree makes the revision unknown, naming it", async () => {
+    const root = await repository()
+    await symlink("a", join(root, "link"))
+    const revision = await codeRevisionFrom(gitIn(root))
+    if (revision.kind !== "unknown") throw new Error("a symlink was recorded")
+    expect(revision.why).toContain("`link`")
+    expect(revision.why).toContain("symlink")
+  })
+
+  test("a staged deletion with a recreated file keeps `D ` and `??`, each with the current blob; the revision parses and keys identically reordered", async () => {
+    const root = await repository()
+    await sh(root, "rm", "-q", "--cached", "a")
+    await writeFile(join(root, "a"), "recreated\n")
+    const revision = await codeRevisionFrom(gitIn(root))
+    if (revision.kind !== "known") throw new Error(revision.why)
+    const blob = await sh(root, "hash-object", "a")
+    expect(revision.value).toEqual({
+      commit: await sh(root, "rev-parse", "HEAD"),
+      dirty: true,
+      entries: [
+        { status: "??", path: "a", blob },
+        { status: "D ", path: "a", blob },
+      ],
+    })
+    const parsed = parseManifest(manifestFor({ armId: "on", repeatId: 0, codeRevision: known(revision.value) }))
+    expect(parsed.ok).toBe(true)
+
+    const bundleRoot = await tempDir("mad-revision-bundle-")
+    await writeBundle(
+      bundleRoot,
+      [
+        { armId: "on", repeatId: 0 },
+        { armId: "off", repeatId: 0 },
+      ],
+      [
+        { armId: "on", repeatId: 0, codeRevision: known(revision.value) },
+        { armId: "off", repeatId: 0, codeRevision: known({ ...revision.value, entries: [...revision.value.entries!].reverse() }) },
+      ],
+    )
+    const read = await readBundle(bundleRoot)
+    if ("error" in read) throw new Error(read.error)
+    expect(read.segregated).toEqual([])
+    expect(read.comparable).toHaveLength(2)
+  })
+
+  test("called from a nested directory, porcelain paths are resolved against the toplevel and the right file is hashed", async () => {
+    const root = await repository()
+    await writeFile(join(root, "a"), "changed at the root\n")
+    await writeFile(join(root, "nested", "deeper", "a"), "a different file with the same name\n")
+    const revision = await codeRevisionFrom(gitIn(join(root, "nested", "deeper")))
+    if (revision.kind !== "known") throw new Error(revision.why)
+    expect(revision.value.entries).toEqual([
+      { status: " M", path: "a", blob: await sh(root, "hash-object", "a") },
+      { status: "??", path: "nested/deeper/a", blob: await sh(root, "hash-object", "nested/deeper/a") },
+    ])
+    expect(revision.value.entries![0]!.blob).not.toBe(revision.value.entries![1]!.blob)
   })
 })
 

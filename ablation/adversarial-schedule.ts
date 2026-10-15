@@ -146,6 +146,20 @@ export interface AdversarialConfig {
    * `lifecycle`, and a `lifecycle` without it.
    */
   hostIsolation?: "fresh-per-run"
+  /**
+   * What authorized the run: `gates` is the gate table's identity as the
+   * launcher's stage 1 checked it (its HEAD blob, the route and every gate's
+   * status), and `protocolHash` the frozen protocol hash the authorization
+   * names, as stage 1 checked it. Absent: the config declares no authorization,
+   * and its digest is what it was without the field.
+   */
+  authorization?: AdversarialAuthorization
+}
+
+/** The authorization a launcher seals into its schedule's config. */
+export interface AdversarialAuthorization {
+  gates: string
+  protocolHash: string
 }
 
 /** The one host isolation a config can declare. */
@@ -234,7 +248,7 @@ export function adversarialProtocolProblem(
  * no stop on unknown usage, and the attempt allowances in place of the token
  * ones. A token-mode config carries none of the attempt fields, so its digest
  * does not depend on them. In either mode the host offer and isolation are
- * bound only when the config declares them.
+ * bound only when the config declares them, and so is the authorization.
  */
 export function adversarialRunConfig(config: AdversarialConfig, roster: Roster): Record<string, unknown> {
   if (adversarialAttemptMode(config)) {
@@ -250,6 +264,7 @@ export function adversarialRunConfig(config: AdversarialConfig, roster: Roster):
       instructionsDigest: instructionsDigestOf(roster),
       tools: config.tools,
       ...hostFields(config),
+      ...authorizationField(config),
     }
   }
   return {
@@ -262,6 +277,7 @@ export function adversarialRunConfig(config: AdversarialConfig, roster: Roster):
     instructionsDigest: instructionsDigestOf(roster),
     tools: config.tools,
     ...hostFields(config),
+    ...authorizationField(config),
   }
 }
 
@@ -271,6 +287,12 @@ function hostFields(config: AdversarialConfig): Record<string, unknown> {
     ...(config.hostTools === undefined ? {} : { hostTools: { ...config.hostTools } }),
     ...(config.hostIsolation === undefined ? {} : { hostIsolation: config.hostIsolation }),
   }
+}
+
+/** The authorization, only when the config declares it, so a config declaring none keeps its digest. */
+function authorizationField(config: AdversarialConfig): Record<string, unknown> {
+  if (config.authorization === undefined) return {}
+  return { authorization: { gates: config.authorization.gates, protocolHash: config.authorization.protocolHash } }
 }
 
 export interface AdversarialSchedule {

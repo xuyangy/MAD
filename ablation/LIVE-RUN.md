@@ -106,8 +106,11 @@ Four things worth knowing before you use it:
   *not comparable*, so arms missing one are segregated rather than silently
   compared.
 - **The code revision is established, not assumed.** It comes from
-  `git rev-parse HEAD` plus `git status --porcelain`; if either fails, the
-  manifest records an unknown carrying git's own words.
+  `git rev-parse HEAD` plus `git status --porcelain=v1 -z --untracked-files=all`,
+  and each dirty entry is recorded with its status, path and git blob id. If any
+  step fails, or an entry is not a regular file or absent, the manifest records
+  an unknown carrying the reason. The reader treats a `dirty: true` revision
+  with no recorded entries as unknown.
 - **Each arm is written as it finishes, and a failed write STOPS the run.** If a
   dump cannot be written — no space, a refused path — the evaluation raises and
   no report is printed, so nothing further bills and no untraceable number is
@@ -1197,8 +1200,8 @@ table's blob, the pins and `--out`. Because it lives in the repository and not u
 run into any bundle root is refused, and of two concurrent invocations only one creates it. Nothing
 deletes it: a run that fails or is interrupted after the reservation has used the authorization. A
 stage-1 refusal reserves nothing. A further run needs the budget owner's new authorization in a reviewed
-change. The reservation is an untracked file when stage 4 reads the code revision, so the schedule's
-`codeRevision` records `dirty: true` for that run even on an otherwise clean checkout; commit the
+change. The launcher reads the code revision before it creates the reservation, so the reservation is
+not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`; commit the
 reservation after the run, as the pilot's were.
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
