@@ -639,8 +639,10 @@ describe("the adversarial phase of the gate table", () => {
     const file = new URL(`../${EVALUATION_PROTOCOL.path}`, import.meta.url).pathname
     expect(/^frozen_hash: (.*)$/m.exec(await Bun.file(file).text())?.[1]).toBe(EVALUATION_PROTOCOL.frozenHash)
     expect(await readFrozenProtocol(file)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v2", version: 2, hash: EVALUATION_PROTOCOL.frozenHash })
-    const schedule = await Bun.file(new URL("../ablation/evidence/paired-oauth-evaluation-run-5-bundle/paired-schedule.json", import.meta.url)).text()
-    expect(schedule).toContain(EVALUATION_PROTOCOL.frozenHash)
+    const schedule = JSON.parse(await Bun.file(new URL("../ablation/evidence/paired-oauth-evaluation-run-5-bundle/paired-schedule.json", import.meta.url)).text()) as {
+      protocol: { id: string; version: number; hash: string }
+    }
+    expect(schedule.protocol).toEqual({ id: "PROTOCOL-mad-evaluation-v2", version: 2, hash: EVALUATION_PROTOCOL.frozenHash })
   })
 
   test("run 1's committed reservation and evidence record what gate 10's note says", async () => {

@@ -39,7 +39,7 @@ import {
 import type { PairedPhaseContext } from "../ablation/paired.ts"
 import { EVALUATION_PROTOCOL, EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
-import { SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
+import { readFrozenProtocol, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
 import type { LateUsageReporter } from "../core/ports/late-usage.ts"
@@ -2590,6 +2590,8 @@ describe("the OAuth route's measured host binary and frozen protocol hash (retro
   test("a re-frozen v2 with another hash fails `frozen protocol`, giving the expected and actual hashes; no reservation, no host", async () => {
     const parent = await tempDir()
     const refrozen = await refrozenV2(parent)
+    // A valid frozen v2, so the launcher's refusal is the hash comparison and not the freeze or version check.
+    expect(await readFrozenProtocol(refrozen.file)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v2", version: 2, hash: refrozen.hash })
     expect(refrozen.hash).not.toBe(EVALUATION_PROTOCOL.frozenHash)
     const result = await refusedAtStage1({ protocolV2File: refrozen.file })
     expect(result.text).toContain("FAIL  frozen protocol")
@@ -2597,6 +2599,26 @@ describe("the OAuth route's measured host binary and frozen protocol hash (retro
       `the frozen protocol v2 read has hash ${refrozen.hash}, and the paired evaluation ran under ${EVALUATION_PROTOCOL.frozenHash} ` +
         "(`EVALUATION_PROTOCOL.frozenHash`); a re-frozen v2 is not the protocol the paired evaluation ran under",
     )
+  })
+
+  test("an injected expected hash is named as injected, never credited to EVALUATION_PROTOCOL, on a pass and on a failure", async () => {
+    const parent = await tempDir()
+    const refrozen = await refrozenV2(parent)
+    const passing = await refusedAtStage1({ protocolV2File: refrozen.file, protocolHash: refrozen.hash, hostBinary: measuredBinary("/stand-in/other/opencode", WRONG_SHA) })
+    expect(passing.text).toContain(
+      `PASS  frozen protocol\n        PROTOCOL-mad-evaluation-v2 v2 ${refrozen.hash}, the injected expected hash (not \`EVALUATION_PROTOCOL.frozenHash\`)`,
+    )
+    expect(passing.text).not.toContain("the hash the paired evaluation ran under")
+    const other = `sha256:${"1".repeat(64)}`
+    const failing = await refusedAtStage1({ protocolV2File: refrozen.file, protocolHash: other })
+    expect(failing.text).toContain(
+      `the frozen protocol v2 read has hash ${refrozen.hash}, and the injected expected hash is ${other} (not \`EVALUATION_PROTOCOL.frozenHash\`)`,
+    )
+    expect(failing.text).not.toContain("the paired evaluation ran under")
+  })
+
+  test("PROTOCOL_V2_FILE is the file EVALUATION_PROTOCOL names", () => {
+    expect(PROTOCOL_V2_FILE).toBe(join(REPO_ROOT, EVALUATION_PROTOCOL.path))
   })
 
   test("the api-key route is unchanged: no binary check, and its frozen protocol is not held to the v2 pin", async () => {

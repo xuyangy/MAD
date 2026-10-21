@@ -181,7 +181,7 @@ import { writeLabelledTree, type GitResult, type RunGit } from "./materialize-la
 export const REPO_ROOT = resolve(import.meta.dir, "..")
 export const PROTOCOL_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md")
 /** Story 2-8c3b — the protocol the OAuth route seals under: attempt accounting is defined only by v2. */
-export const PROTOCOL_V2_FILE = join(REPO_ROOT, "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md")
+export const PROTOCOL_V2_FILE = join(REPO_ROOT, EVALUATION_PROTOCOL.path)
 /**
  * Story 2-8d — how long each of the managed host's verification reads may take
  * (`/global/health`, and `/config` and `/config/providers` for each directory).
@@ -1378,14 +1378,17 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
             return fail("frozen protocol", [`the OAuth route needs protocol v2, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
           }
           const expected = overrides.protocolHash ?? EVALUATION_PROTOCOL.frozenHash
+          // The pin is credited only when it is the expectation; an injected hash is named as injected.
+          const pinned = overrides.protocolHash === undefined
+          const expectation = pinned
+            ? `the paired evaluation ran under ${expected} (\`EVALUATION_PROTOCOL.frozenHash\`); a re-frozen v2 is not the protocol the paired evaluation ran under`
+            : `the injected expected hash is ${expected} (not \`EVALUATION_PROTOCOL.frozenHash\`)`
           return protocol.hash === expected
             ? pass("frozen protocol", [
-                `${protocol.id} v${protocol.version} ${protocol.hash}, the hash the paired evaluation ran under (\`EVALUATION_PROTOCOL.frozenHash\`)`,
+                `${protocol.id} v${protocol.version} ${protocol.hash}, ` +
+                  (pinned ? "the hash the paired evaluation ran under (`EVALUATION_PROTOCOL.frozenHash`)" : "the injected expected hash (not `EVALUATION_PROTOCOL.frozenHash`)"),
               ])
-            : fail("frozen protocol", [
-                `the frozen protocol v2 read has hash ${protocol.hash}, and the paired evaluation ran under ${expected} ` +
-                  "(`EVALUATION_PROTOCOL.frozenHash`); a re-frozen v2 is not the protocol the paired evaluation ran under",
-              ])
+            : fail("frozen protocol", [`the frozen protocol v2 read has hash ${protocol.hash}, and ${expectation}`])
         }
         const protocol = await readFrozenProtocol(PROTOCOL_FILE)
         return protocol.ok

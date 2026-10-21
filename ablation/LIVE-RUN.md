@@ -36,29 +36,38 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
    so a shared ceiling stays shared. Three arms over one change is up to
    `1 + 3 + (3 + lenses)` discovery turns plus debate and judge turns for each,
    against your own credentials. Decide the number before you spend it.
-6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every route),
-   `bun run adversarial` and `bun run oauth-pilot --live` read MAD's own code revision before any
-   reservation, and refuse unless it is known and clean. Every entry `git status` lists refuses, whether staged, unstaged or
-   untracked and not ignored, and the refusal names each one with its path JSON-quoted (the first 50,
-   then a count of the rest). There is no override and no list of allowed paths. Commit or remove
-   every such file first, untracked ones included. This holds to HEAD every value held in a
-   git-visible file of the checkout, such as the gate table, the attempt allowances
-   (`ablation/governor.ts`), the measured host and the payload pins (`ablation/managed-host.ts`).
-   It does not hold to HEAD: ignored files; the opencode binary resolved on PATH, which is checked
-   separately, by its hash against `MEASURED_HOST`; the prepared and data directories and the output
-   root, which live outside the repository; the environment and the flags; and any change made after
-   stage 1 reads the checkout. `bun run adversarial` also has the stage-1 check "gate 11 evidence
-   scope pins". It compares `MEASURED_HOST`'s version and sha256, and the anthropic-auth, config-seed
-   and catalogue digests of the payload pins the run uses, with `GATE_11_EVIDENCE_SCOPE`, field by
-   field. A pin committed without a matching scope change refuses there. Neither check covers ignored
-   files, which `git status` does not list, or a file changed after stage 1 reads the checkout and
-   before the launch uses it. The OAuth pilot reads the revision after its host pre-check and before it
-   creates `--out`, so that refusal leaves the authorization unused and `--out` uncreated; its dry run
-   reads no revision. On its OAuth route, `bun run paired` also identifies the measured host binary at
-   stage 1 (`identifyBinary`: read and hashed against `MEASURED_HOST`, never started), as
-   `bun run adversarial` does, and requires the frozen protocol v2 to carry
-   `EVALUATION_PROTOCOL.frozenHash`, the hash the paired evaluation ran under, so a re-frozen v2
-   refuses. The pin authorizes no spend. The api-key route makes neither check.
+6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every
+   route), `bun run adversarial` and `bun run oauth-pilot --live` read MAD's own
+   code revision before any reservation, and refuse unless it is known and
+   clean. Every entry `git status` lists refuses, whether staged, unstaged or
+   untracked and not ignored, and the refusal names each one with its path
+   JSON-quoted (the first 50, then a count of the rest). There is no override
+   and no list of allowed paths. Commit or remove every such file first,
+   untracked ones included. This holds to HEAD every value held in a git-visible
+   file of the checkout, such as the gate table, the attempt allowances
+   (`ablation/governor.ts`), the measured host and the payload pins
+   (`ablation/managed-host.ts`). It does not hold to HEAD: ignored files; the
+   opencode binary resolved on PATH, which is checked separately, by its hash
+   against `MEASURED_HOST`; the prepared and data directories and the output
+   root, which live outside the repository; the environment and the flags; and
+   any change made after the launcher reads the checkout. `bun run adversarial`
+   also has the stage-1 check "gate 11 evidence scope pins". It compares
+   `MEASURED_HOST`'s version and sha256, and the anthropic-auth, config-seed and
+   catalogue digests of the payload pins the run uses, with
+   `GATE_11_EVIDENCE_SCOPE`, field by field. A pin committed without a matching
+   scope change refuses there. Neither check covers ignored files, which
+   `git status` does not list, or a file changed after the launcher reads the
+   checkout and before the launch uses it. The OAuth pilot has no numbered
+   stages: it reads the revision after its host pre-check and before it creates
+   `--out`, so that refusal leaves the authorization unused and `--out`
+   uncreated, and its dry run reads no revision. A pilot refusal that lists an
+   `oauth-pilot-live*` file says never to remove it: another invocation may hold
+   it. On its OAuth route, `bun run paired` also identifies the measured host
+   binary at stage 1 (`identifyBinary`: read and hashed against `MEASURED_HOST`,
+   never started), as `bun run adversarial` does, and requires the frozen
+   protocol v2 to carry `EVALUATION_PROTOCOL.frozenHash`, the hash the paired
+   evaluation ran under, so a re-frozen v2 refuses. The pin authorizes no spend.
+   The api-key route makes neither check.
 
 ## The run
 

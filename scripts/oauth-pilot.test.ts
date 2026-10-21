@@ -1069,6 +1069,18 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(true)
   })
 
+  test("retro item 3: an untracked file that is gitignored is not a dirty entry, and the run reaches its reservation as the clean case does", async () => {
+    const repoRoot = await liveRepo(async (root) => {
+      await writeFile(join(root, ".gitignore"), "ignored-scratch.txt\n")
+    })
+    await writeFile(join(repoRoot, "ignored-scratch.txt"), "ignored, never committed\n")
+    const run = await liveRun({ backend: scriptedBackend([answer, answer]), repoRoot })
+    expect(run.value).toBe(0)
+    expect(run.log).toMatch(/code revision: [0-9a-f]{40}, worktree clean/)
+    expect(run.err).not.toContain("code revision")
+    expect(existsSync(join(repoRoot, OWN_RESERVATION))).toBe(true)
+  })
+
   test("two answered attempts, the third refused with 0 backend calls, the auth target recorded as flags; exit 0", async () => {
     const backend = scriptedBackend([answer, answer])
     const run = await liveRun({ backend })
@@ -2237,11 +2249,15 @@ describe("the live code revision, read after the host pre-check and before the r
    * seam, or, when omitted, the default reader over `repoRoot` with real git. `order` records the pre-check's hash and
    * the revision read, in the order they happened.
    */
-  async function revisionRun(codeRevision?: PilotSeams["codeRevision"], setup?: (repoRoot: string) => Promise<void>) {
+  async function revisionRun(
+    codeRevision?: PilotSeams["codeRevision"],
+    setup?: (repoRoot: string) => Promise<void>,
+    options: { gates?: readonly PairedGate[]; out?: (root: string) => string } = {},
+  ) {
     const repoRoot = await liveRepo()
     await setup?.(repoRoot)
     const root = await temp()
-    const out = join(root, "out")
+    const out = options.out?.(root) ?? join(root, "out")
     const touched: string[] = []
     const order: string[] = []
     const check = await passingHostCheck(root, undefined, undefined, async () => {
@@ -2254,7 +2270,7 @@ describe("the live code revision, read after the host pre-check and before the r
         home: join(root, "home"),
         platform: "darwin",
         repoRoot,
-        gates: closedEight,
+        gates: options.gates ?? closedEight,
         gateTable: async () => ({ ok: true, blob: "committed" }),
         hostCheck: check.hostCheck,
         ...(codeRevision === undefined
@@ -2285,7 +2301,7 @@ describe("the live code revision, read after the host pre-check and before the r
     const run = await revisionRun(async () => unknownValue("`git rev-parse HEAD` exited 128: not a repository"))
     refusedUnused(run)
     expect(run.order).toEqual(["pre-check", "code revision"])
-    expect(run.err).toContain("REFUSED — stage 1 (code revision): the code revision is unknown: `git rev-parse HEAD` exited 128: not a repository;")
+    expect(run.err).toContain("REFUSED — pre-check (code revision): the code revision is unknown: `git rev-parse HEAD` exited 128: not a repository;")
     expect(run.err).toContain("Fix what made the code revision unknown")
   })
 
@@ -2302,7 +2318,7 @@ describe("the live code revision, read after the host pre-check and before the r
     refusedUnused(run)
     expect(run.order).toEqual(["pre-check", "code revision"])
     expect(run.log).toContain(`code revision: ${COMMIT}, worktree dirty (1 entry recorded)`)
-    expect(run.err).toContain("REFUSED — stage 1 (code revision): the checkout is not HEAD's;")
+    expect(run.err).toContain("REFUSED — pre-check (code revision): the checkout is not HEAD's;")
     expect(run.err).toContain(`REFUSED: the worktree differs from HEAD ${COMMIT} (1 entry recorded)`)
     expect(run.err).toContain('REFUSED: uncommitted:  M "ablation/governor.ts"')
     expect(run.err).toContain(DIRTY_REVISION_NEXT_STEP)
@@ -2327,6 +2343,73 @@ describe("the live code revision, read after the host pre-check and before the r
     expect(run.log).toMatch(/code revision: [0-9a-f]{40}, worktree dirty \(1 entry recorded\)/)
     expect(run.err).toContain('REFUSED: uncommitted: ?? "stray.txt"')
     expect(run.err).toContain(DIRTY_REVISION_NEXT_STEP)
+  })
+
+  test("a dirty entry that is a live pilot file adds a line: never remove it, another invocation may hold it", async () => {
+    const reservation = "ablation/evidence/oauth-pilot-live-run-3.reservation"
+    const run = await revisionRun(async () => known({ commit: COMMIT, dirty: true, entries: [{ status: "??", path: reservation, blob: "c".repeat(40) }] }))
+    refusedUnused(run)
+    const lines = run.err.split("\n")
+    const entry = lines.indexOf(`REFUSED: uncommitted: ?? ${JSON.stringify(reservation)}`)
+    expect(entry).toBeGreaterThan(-1)
+    expect(lines[entry + 1]).toBe(
+      `REFUSED: ${JSON.stringify(reservation)} is a gate-8 reservation or live evidence: never remove one; another invocation may hold it, and a further run needs the budget owner's decision.`,
+    )
+    expect(lines[entry + 2]).toBe(DIRTY_REVISION_NEXT_STEP)
+  })
+
+  test("a dirty revision with no live pilot file adds no such line", async () => {
+    const run = await revisionRun(async () => known({ commit: COMMIT, dirty: true, entries: [{ status: " M", path: "ablation/governor.ts", blob: "a".repeat(40) }] }))
+    refusedUnused(run)
+    expect(run.err).not.toContain("gate-8 reservation or live evidence")
+  })
+
+  describe("the revision is read only after every earlier refusal has passed", () => {
+    const counted = () => {
+      let calls = 0
+      const seam = async () => {
+        calls += 1
+        return known({ commit: COMMIT, dirty: true, entries: [{ status: " M", path: "ablation/governor.ts", blob: "a".repeat(40) }] })
+      }
+      return { seam, calls: () => calls }
+    }
+
+    test("gate 8 not CLOSED: the authorization refusal prints, and the revision is never read", async () => {
+      const revision = counted()
+      const run = await revisionRun(revision.seam, undefined, { gates: PAIRED_GATES })
+      expect(run.value).toBe(1)
+      expect(run.err).toContain("REFUSED — the live OAuth pilot is not authorized.")
+      expect(run.err).not.toContain("code revision")
+      expect(revision.calls()).toBe(0)
+      expect(run.touched).toEqual([])
+      expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(false)
+    })
+
+    test("a one-run problem (an existing live file): refused, and the revision is never read", async () => {
+      const revision = counted()
+      const run = await revisionRun(revision.seam, async (repoRoot) => {
+        await writeFile(join(repoRoot, LIVE_EVIDENCE_DIR, "oauth-pilot-live-stray.json"), "{}\n")
+      })
+      expect(run.value).toBe(1)
+      expect(run.err).toContain("REFUSED — the live OAuth pilot is not authorized.")
+      expect(run.err).toContain("oauth-pilot-live-stray.json")
+      expect(run.err).not.toContain("code revision")
+      expect(revision.calls()).toBe(0)
+      expect(run.touched).toEqual([])
+      expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(false)
+    })
+
+    test("a path-overlap refusal: refused, and the revision is never read", async () => {
+      const revision = counted()
+      const run = await revisionRun(revision.seam, undefined, { out: (root) => join(root, "data", "out") })
+      expect(run.value).toBe(1)
+      expect(run.err).toContain("gate 8's authorization for run 3 is unused: no reservation was created.")
+      expect(run.err).not.toContain("code revision")
+      expect(run.order).toEqual([])
+      expect(revision.calls()).toBe(0)
+      expect(run.touched).toEqual([])
+      expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(false)
+    })
   })
 })
 

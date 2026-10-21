@@ -1768,7 +1768,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
     if (codeRevision.kind === "unknown") {
       console.error(
         [
-          `REFUSED — stage 1 (code revision): the code revision is unknown: ${codeRevision.why}; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
+          `REFUSED — pre-check (code revision): the code revision is unknown: ${codeRevision.why}; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
           "Fix what made the code revision unknown (it is named above) and run the command again.",
           untouched,
         ].join("\n"),
@@ -1778,10 +1778,18 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
     // The live run launches only from a clean checkout of HEAD: the gate table's own check is one case of this.
     const dirty = dirtyRevisionReasons(codeRevision.value)
     if (dirty.length > 0) {
+      // A live file listed here may be another invocation's reservation, created after this one's one-run checks passed.
+      const liveFiles = (codeRevision.value.entries ?? []).filter((entry) => basename(entry.path).toLowerCase().startsWith(LIVE_FILE_PREFIX))
       console.error(
         [
-          `REFUSED — stage 1 (code revision): the checkout is not HEAD's; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
+          `REFUSED — pre-check (code revision): the checkout is not HEAD's; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
           ...dirty.map((reason) => `REFUSED: ${reason}`),
+          ...(liveFiles.length === 0
+            ? []
+            : [
+                `REFUSED: ${liveFiles.map((entry) => JSON.stringify(entry.path)).join(", ")} ${liveFiles.length === 1 ? "is a gate-8 reservation or live evidence" : "are gate-8 reservations or live evidence"}: ` +
+                  "never remove one; another invocation may hold it, and a further run needs the budget owner's decision.",
+              ]),
           DIRTY_REVISION_NEXT_STEP,
           untouched,
         ].join("\n"),
