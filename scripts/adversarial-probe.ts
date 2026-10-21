@@ -1026,7 +1026,8 @@ export async function shippedDecision(inputs: ShippedDecisionInputs = {}): Promi
     const run = inputs.run ?? ADVERSARIAL_RUN
     for (const problem of gatePreflight(inputs.gates ?? PAIRED_GATES, "adversarial", "oauth", undefined, run).problems) {
       const text = problem.split(/[;:]/)[0]!
-      barriers.push({ name: text.split(" ").slice(0, 2).join(" "), text, why: problem })
+      // A problem with the run's identity names its constant; the barrier is still the adversarial run.
+      barriers.push({ name: text.startsWith("ADVERSARIAL_RUN") ? "adversarial run" : text.split(" ").slice(0, 2).join(" "), text, why: problem })
     }
     const protocol = await (inputs.readProtocol ?? readFrozenProtocol)(inputs.protocolFile ?? PROTOCOL_V3_FILE)
     if (!protocol.ok) barriers.push({ name: "the protocol file", text: "protocol v3 is not frozen", why: protocol.reason })

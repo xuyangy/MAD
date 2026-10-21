@@ -69,7 +69,7 @@
  * imports it.
  */
 
-import { runIdentityProblems } from "./launch-contract.ts"
+import { launchIdentityProblems } from "./launch-contract.ts"
 
 export type GateKind = "engineering" | "authorization"
 export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation" | "adversarial"
@@ -342,30 +342,34 @@ function onePin(pins: unknown): pins is readonly [string] {
   return Array.isArray(pins) && pins.length === 1 && pins.every((pin) => typeof pin === "string" && /^[^/\s]+\/\S+$/.test(pin))
 }
 
+/** Why `run`'s pins are not a chosen one-slot roster: not yet chosen (`null`), or not exactly one `provider/model` pin. */
+function adversarialPinProblems(run: AdversarialRun): string[] {
+  if (run.pins === null) {
+    return [
+      "ADVERSARIAL_RUN has no roster pin: `ADVERSARIAL_RUN.pins` is null, which means not yet chosen. The " +
+        "pin protocol v3 B1 names is set here by a reviewed change to this table",
+    ]
+  }
+  return onePin(run.pins) ? [] : [`ADVERSARIAL_RUN.pins ${JSON.stringify(run.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`]
+}
+
 /**
  * Why `run` names no usable adversarial run, or `null`: the first problem of
- * the shared run-identity rules (`ablation/launch-contract.ts`) with a floor of
- * 1 and `adversarialReservation`, and the adversarial extra: the pins are
- * chosen and are exactly one `provider/model` pin.
+ * the adversarial pin checks (chosen, and exactly one `provider/model` pin),
+ * then of the shared run-identity rules (`ablation/launch-contract.ts`) with a
+ * floor of 1 and `adversarialReservation`.
  */
 export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): string | null {
-  const problems = runIdentityProblems(run, {
-    label: "ADVERSARIAL_RUN",
-    floor: 1,
-    reservationOf: adversarialReservation,
-    ownReservation: true,
-    extra: (identity) => {
-      const name = Number.isInteger(identity.run) ? `adversarial run ${identity.run}` : "the adversarial run"
-      if (identity.pins === null) {
-        return [
-          `${name} has no roster pin: \`ADVERSARIAL_RUN.pins\` is null, which means not yet chosen. The ` +
-            "pin protocol v3 B1 names is set here by a reviewed change to this table",
-        ]
-      }
-      return onePin(identity.pins) ? [] : [`${name}'s pins ${JSON.stringify(identity.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`]
-    },
-  })
-  return problems[0] ?? null
+  const pins = adversarialPinProblems(run)
+  if (pins.length > 0) return pins[0]!
+  return (
+    launchIdentityProblems(run, {
+      label: "ADVERSARIAL_RUN",
+      floor: 1,
+      reservationOf: adversarialReservation,
+      ownReservation: true,
+    })[0] ?? null
+  )
 }
 
 /** Story 2-7f5 — one `provider/model` pair the zero-bill probe measured, and the API route the host served it over. */

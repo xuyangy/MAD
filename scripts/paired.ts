@@ -160,7 +160,7 @@ import {
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { storeGuard } from "../ablation/oauth-store.ts"
 import { EVALUATION_PROTOCOL, EVALUATION_RUN, evaluationReservation, gatePreflight, PAIRED_GATES, type EvaluationPriorRun, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
-import { reserveExclusive, runIdentityProblems, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
+import { launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -315,7 +315,7 @@ export interface EvaluationRun {
  * `provider/model` pins.
  */
 export function evaluationIdentityProblems(run: EvaluationRun = EVALUATION_RUN): string[] {
-  return runIdentityProblems(run, {
+  return launchIdentityProblems(run, {
     label: "EVALUATION_RUN",
     floor: 1,
     reservationOf: evaluationReservation,
@@ -379,8 +379,8 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
  * so of two invocations only one can create it; the other is refused. Never
  * removed.
  */
-export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation): Promise<ReserveResult> {
-  return reserveExclusive(root, EVALUATION_RUN.reservation, reservation, {
+export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation, run: EvaluationRun = EVALUATION_RUN): Promise<ReserveResult> {
+  return reserveExclusive(root, run.reservation, reservation, {
     exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved gate 4's one authorized evaluation first`,
     failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
   })

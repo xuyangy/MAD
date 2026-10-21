@@ -2068,7 +2068,7 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
       "EVALUATION_RUN.prior names run 2's evidence `docs/run-2.json`, which is not a file in ablation/evidence",
     ])
     const gapped = { ...EVALUATION_RUN, prior: [EVALUATION_RUN.prior[0]!, EVALUATION_RUN.prior[2]!, EVALUATION_RUN.prior[1]!, EVALUATION_RUN.prior[3]!] }
-    expect(evaluationIdentityProblems(gapped)).toEqual(["EVALUATION_RUN.prior lists runs [1, 3, 2, 4], not exactly runs 1 to 4 before run 5: a gap, a duplicate or a reused run"])
+    expect(evaluationIdentityProblems(gapped)).toEqual(["EVALUATION_RUN.prior lists runs [1, 3, 2, 4], not exactly runs 1 to 4 before run 5: a gap, a duplicate, a reused run or an extra entry"])
     expect(evaluationIdentityProblems({ ...EVALUATION_RUN, pins: ["openai/gpt-6-sol", "openai/gpt-6-sol"] })).toEqual([
       'EVALUATION_RUN.pins ["openai/gpt-6-sol","openai/gpt-6-sol"] is not a non-empty list of distinct `provider/model` pins',
     ])

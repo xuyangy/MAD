@@ -1213,9 +1213,9 @@ under. It also identifies the opencode binary stage 2 would spawn (`identifyBina
 never started), so a wrong build refuses before the reservation. Stage 2 spawns the real path stage 1
 identified (`stageOneBinary`, `ablation/launch-contract.ts`) and hashes it again before it spawns, after
 the reservation, so a binary swapped after stage 1 is refused there with the authorization spent. Stage 1
-also holds `EVALUATION_RUN` to the run-identity rules the three launchers share (`runIdentityProblems`,
-`ablation/launch-contract.ts`): its own reservation, and exactly runs 1 to 4 before it, each with its
-own reservation and an evidence file in `ablation/evidence`.
+also holds `EVALUATION_RUN` to the run-identity rules the three launchers share
+(`launchIdentityProblems`, `ablation/launch-contract.ts`): its own reservation, and exactly runs 1 to 4
+before it, each with its own reservation and an evidence file in `ablation/evidence`.
 
 **The guarded OAuth evaluation run (story 2-8d).** `EVALUATION_RUN` in `ablation/paired-gates.ts`
 names run 5, the last run gate 4 authorized (on 2026-10-06; it ran and is spent): its pins in
@@ -1244,15 +1244,15 @@ The launcher now gives each of the host's verification reads `PAIRED_HOST_REQUES
 stage 2 refuses. Once every stage-1 check has passed, and before stage 2 starts a host, the launcher
 creates the reservation exclusively (`O_CREAT|O_EXCL`) in this repository, recording the run, the gate
 table's blob, the pins and `--out`. The three launchers create their reservations through one writer,
-`reserveExclusive` in `ablation/launch-contract.ts`. Because it lives in the repository and not under `--out`, a second
-run into any bundle root is refused, and of two concurrent invocations only one creates it. Nothing
-deletes it: a run that fails or is interrupted after the reservation has used the authorization. A
-stage-1 refusal reserves nothing. A further run needs the budget owner's new authorization in a reviewed
-change. The launcher reads the code revision before it creates the reservation, so the reservation is
-not among the schedule's `codeRevision` entries and a clean checkout records `dirty: false`. The
-reservation does not exist when the revision is read, and every entry the revision records refuses
-at stage 1 (item 6 of "Before anything bills"). Commit the reservation after the run, as
-the pilot's were.
+`reserveExclusive` in `ablation/launch-contract.ts`. Because it lives in the repository and not under
+`--out`, a second run into any bundle root is refused, and of two concurrent invocations only one creates
+it. Nothing deletes it: a run that fails or is interrupted after the reservation has used the
+authorization. A stage-1 refusal reserves nothing. A further run needs the budget owner's new
+authorization in a reviewed change. The launcher reads the code revision before it creates the
+reservation, so the reservation is not among the schedule's `codeRevision` entries and a clean checkout
+records `dirty: false`. The reservation does not exist when the revision is read, and every entry the
+revision records refuses at stage 1 (item 6 of "Before anything bills"). Commit the reservation after the
+run, as the pilot's were.
 
 **Setting up the data directory, once.** Sign in to the three providers with ordinary opencode first.
 Then create the dedicated data directory and its one link to your sign-ins:
@@ -1697,11 +1697,11 @@ exclusively (`O_CREAT|O_EXCL`), so of two concurrent invocations only one can cr
 refuses. It records the run, `story: "2-8c8"`, when it was created, the gate table's blob, the pinned
 proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE evidence included, records it
 too. Last it records `commit`, the commit the code-revision check held clean; runs 1 to 3's committed
-reservations predate it and carry none. **Nothing deletes it**, not after a failure and not after an interruption: a failed or interrupted
-run consumes the authorization, and while it exists every further `--live` refuses, whatever `--out` it
-names. A further run needs the human's explicit decision, and the budget owner re-opens gate 8 after the
-run. None of these checks reads, stats or hashes `auth.json`. `--live` refuses, before the same touches,
-when:
+reservations predate it and carry none. **Nothing deletes it**, not after a failure and not after an
+interruption: a failed or interrupted run consumes the authorization, and while it exists every further
+`--live` refuses, whatever `--out` it names. A further run needs the human's explicit decision, and the
+budget owner re-opens gate 8 after the run. None of these checks reads, stats or hashes `auth.json`.
+`--live` refuses, before the same touches, when:
 
 - `ablation/paired-gates.ts` differs from HEAD, or gate 8 is not CLOSED in it;
 - the exposure document `_bmad-output/specs/spec-mad-orchestrator/stories/2-8d-openai-oauth-pilot-proposal.md`
@@ -2085,16 +2085,16 @@ sha256 is not `MEASURED_HOST`'s, or a reservation that already exists, exits 1 b
 reservation, worktree, start marker or host exists. The early binary check narrows the window
 before the spawn and does not make check and use atomic: stage 4 spawns the real path stage 1
 identified (`stageOneBinary`, `ablation/launch-contract.ts`) and hashes it again before each spawn
-(`startManagedHost`), so a binary swapped after stage 1 is refused there, after the reservation. Only once every check passes is the reservation
-created exclusively, stamped with the launcher's clock; it is never removed. An interrupt after it
-exits 130 with the reservation kept and no schedule, worktree or host. Immediately before the two
-roots are created, each is checked again to be outside this repository and not to contain it
-(AD-16, on real paths) and to be absent or empty, and the data root, `--out`, the prepared
-directory and the user's own opencode store are checked again to be disjoint. A failed recheck,
-or one that cannot be made, refuses before either root is created. A failed `mkdir` refuses before
-any schedule is sealed or host started, and may leave a root it already created. Both say the
-reservation is already spent. These path checks narrow the window before the `mkdir`; they do not
-remove every filesystem race.
+(`startManagedHost`), so a binary swapped after stage 1 is refused there, after the reservation.
+Only once every check passes is the reservation created exclusively, stamped with the launcher's
+clock; it is never removed. An interrupt after it exits 130 with the reservation kept and no
+schedule, worktree or host. Immediately before the two roots are created, each is checked again to
+be outside this repository and not to contain it (AD-16, on real paths) and to be absent or empty,
+and the data root, `--out`, the prepared directory and the user's own opencode store are checked
+again to be disjoint. A failed recheck, or one that cannot be made, refuses before either root is
+created. A failed `mkdir` refuses before any schedule is sealed or host started, and may leave a
+root it already created. Both say the reservation is already spent. These path checks narrow the
+window before the `mkdir`; they do not remove every filesystem race.
 
 **Isolation per run (protocol v3 B9).** The schedule is sealed with the host offer
 `ADVERSARIAL_HOST_TOOLS` (`{ "*": false, StructuredOutput: true }`, passed to every run's

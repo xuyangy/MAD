@@ -1929,7 +1929,7 @@ describe("gate 8 authorizes one run", () => {
   test("a reused or gapped run identity refuses before any touch", async () => {
     const root = await liveRepo()
     const reused = await refusedLive(root, undefined, { run: 1, prior: [] })
-    expect(reused.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 1, which is not an integer of at least 2")
+    expect(reused.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 1: run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2")
     // A malformed identity names no run of its own, so run 1's files are unaccounted, never "run 1's reservation already exists".
     expect(reused.err).toContain(`REFUSED: \`${RUN_1.reservation}\` (committed, in ablation/evidence) is an unaccounted live pilot file`)
     expect(reused.err).not.toContain("already exists")
@@ -1940,14 +1940,14 @@ describe("gate 8 authorizes one run", () => {
     const renamed = await refusedLive(root, undefined, { run: 2, prior: [{ ...RUN_1, reservation: "ablation/evidence/oauth-pilot-live-run-1.reservation" }] })
     expect(renamed.err).toContain("OAUTH_PILOT_RUN.prior names run 1's reservation `ablation/evidence/oauth-pilot-live-run-1.reservation`")
     expect(runIdentityProblems({ run: 2.5, prior: [RUN_1] })).toHaveLength(1)
-    expect(runIdentityProblems({ run: 2 ** 40, prior: [RUN_1] })).toEqual([`OAUTH_PILOT_RUN.prior lists runs [1], not exactly runs 1 to ${2 ** 40 - 1} before run ${2 ** 40}: a gap, a duplicate or a reused run`])
+    expect(runIdentityProblems({ run: 2 ** 40, prior: [RUN_1] })).toEqual([`OAUTH_PILOT_RUN.prior lists runs [1], not exactly runs 1 to ${2 ** 40 - 1} before run ${2 ** 40}: a gap, a duplicate, a reused run or an extra entry`])
   })
 
   test("a fractional run identity through main: exit 1 before any touch, and no own-run names built from it", async () => {
     const root = await liveRepo()
     await writeFile(join(root, LIVE_EVIDENCE_DIR, "oauth-pilot-live-run-2x5-2026-10-01.json"), "{}\n")
     const run = await refusedLive(root, undefined, { run: 2.5, prior: [RUN_1] })
-    expect(run.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 2.5, which is not an integer of at least 2")
+    expect(run.err).toContain("REFUSED: OAUTH_PILOT_RUN names run 2.5, which is not an integer")
     expect(run.err).toContain("`ablation/evidence/oauth-pilot-live-run-2x5-2026-10-01.json` (untracked, in ablation/evidence) is an unaccounted live pilot file")
     expect(existsSync(join(root, "ablation/evidence/oauth-pilot-live-run-2.5.reservation"))).toBe(false)
   })

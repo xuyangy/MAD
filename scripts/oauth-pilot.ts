@@ -64,23 +64,25 @@
  *   `--out`, the environment and the flags, and any change made after the
  *   revision is read. That refusal too leaves the authorization unused and
  *   `--out` uncreated. It then creates this run's reservation exclusively
- *   (`reserveExclusive`, ablation/launch-contract.ts), recording as `commit` the
- *   commit the pre-check held clean, so only one invocation can hold it; nothing deletes it, so a failed or
- *   interrupted run consumes the authorization and a further run needs the
- *   human's explicit decision. The authorization and the one-run checks are the
- *   first thing it does after reading its arguments; the platform, `--out`,
- *   overlap and host pre-checks follow, then the code revision, then the
- *   reservation. None of it reads, stats or hashes the auth target. All of it
- *   comes before any host, any stat of the real auth target, any opening of the
- *   data directory and any network connection. No flag, variable or file can authorize
- *   it. Once authorized, one host runs through `startManagedHost` in OAuth mode on
- *   `--oauth-data-dir` and `--oauth-prepared`, with the pre-check's options and the
- *   real binary path it hashed, and with every check that mode makes: the binary
- *   hash and payload digests again, the auth symlink, the data directory's shape
- *   and disjointness, the store guard before and after. That re-check comes after
- *   the reservation: a binary or payload that changed between the pre-check and the
- *   spawn is refused there, and that run has spent the authorization. Its proxy
- *   tunnels `CONNECT` only to `PILOT_ALLOWED_CONNECTS`.
+ *   (`reserveExclusive`, ablation/launch-contract.ts), recording as `commit`
+ *   the commit the pre-check held clean, so only one invocation can hold it;
+ *   nothing deletes it, so a failed or interrupted run consumes the
+ *   authorization and a further run needs the human's explicit decision. The
+ *   authorization and the one-run checks are the first thing it does after
+ *   reading its arguments; the platform, `--out`, overlap and host pre-checks
+ *   follow, then the code revision, then the reservation. None of it reads,
+ *   stats or hashes the auth target. All of it comes before any host, any stat
+ *   of the real auth target, any opening of the data directory and any network
+ *   connection. No flag, variable or file can authorize it. Once authorized,
+ *   one host runs through `startManagedHost` in OAuth mode on
+ *   `--oauth-data-dir` and `--oauth-prepared`, with the pre-check's options and
+ *   the real binary path it hashed, and with every check that mode makes: the
+ *   binary hash and payload digests again, the auth symlink, the data
+ *   directory's shape and disjointness, the store guard before and after. That
+ *   re-check comes after the reservation: a binary or payload that changed
+ *   between the pre-check and the spawn is refused there, and that run has
+ *   spent the authorization. Its proxy tunnels `CONNECT` only to
+ *   `PILOT_ALLOWED_CONNECTS`.
  *
  * ## The attempts
  *
@@ -162,7 +164,7 @@ import { z } from "zod"
 import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { startAllowlistProxy, type AllowlistProxy, type ProxyConnect } from "../ablation/accounting-stub.ts"
 import { boundedCodeRevisionLines, codeRevisionFrom, DIRTY_REVISION_NEXT_STEP, dirtyRevisionReasons } from "../ablation/bundle.ts"
-import { reserveExclusive, runIdentityProblems as sharedRunIdentityProblems, type ReserveResult } from "../ablation/launch-contract.ts"
+import { isLaunchEvidenceFile, LAUNCH_EVIDENCE_DIR, launchIdentityProblems, reserveExclusive, type ReserveResult } from "../ablation/launch-contract.ts"
 import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type IssuedLine, type SettledLine } from "../ablation/journal.ts"
 import {
@@ -186,7 +188,6 @@ import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifes
 import { authLinkPaths, overlapProblem, type PayloadPins } from "../ablation/oauth-payload.ts"
 import {
   gatePreflight,
-  OAUTH_PILOT_EVIDENCE_DIR,
   OAUTH_PILOT_PROPOSAL,
   OAUTH_PILOT_RUN,
   oauthPilotEvidencePattern,
@@ -901,14 +902,12 @@ export function findingsFrom(input: {
 // ---------------------------------------------------------------------------
 
 /** Where live runs' reservations and committed evidence live. */
-export const LIVE_EVIDENCE_DIR = OAUTH_PILOT_EVIDENCE_DIR
+export const LIVE_EVIDENCE_DIR = LAUNCH_EVIDENCE_DIR
 /** Every live run's reservation and evidence file name starts with this; `oneRunProblems` accounts for each such file. */
 export const LIVE_FILE_PREFIX = "oauth-pilot-live"
 
 /** Where a live file was found. */
 type LiveFileSource = "committed" | "untracked" | `in ${typeof LIVE_EVIDENCE_DIR}`
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 
 /**
  * Why `identity` is not a run gate 8 can authorize: the shared run-identity
@@ -918,27 +917,32 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * dated name (`oauthPilotEvidencePattern`) and its proposal a sha256.
  */
 export function runIdentityProblems(identity: OAuthPilotRun): string[] {
-  return sharedRunIdentityProblems(identity, {
+  return launchIdentityProblems(identity, {
     label: "OAUTH_PILOT_RUN",
     floor: 2,
+    floorReason: "run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2",
     reservationOf: oauthPilotReservation,
-    extra: (pilot) => {
+    extra: (pilot, shape) => {
       const problems: string[] = []
-      if (!Array.isArray(pilot.prior)) return problems
-      for (const prior of pilot.prior as unknown[]) {
-        if (!isRecord(prior) || typeof prior.run !== "number" || !Number.isInteger(prior.run) || prior.run < 1) continue
+      // Entry checks only on a list the shared rules accepted, so a rejected list adds no entry-level line.
+      if (!shape.wellFormed) return problems
+      for (const prior of pilot.prior as unknown as Record<string, unknown>[]) {
+        const run = prior.run as number
         const evidence = prior.evidence
-        if (typeof evidence === "string" && dirname(evidence) === LIVE_EVIDENCE_DIR && !oauthPilotEvidencePattern(prior.run).test(basename(evidence))) {
-          problems.push(`OAUTH_PILOT_RUN.prior names run ${prior.run}'s evidence \`${evidence}\`, which is not run ${prior.run}'s evidence name in ${LIVE_EVIDENCE_DIR}`)
+        // Evidence the shared rules already refused is not named a second time.
+        if (isLaunchEvidenceFile(evidence) && !oauthPilotEvidencePattern(run).test(basename(evidence))) {
+          problems.push(`OAUTH_PILOT_RUN.prior names run ${run}'s evidence \`${evidence}\`, which is not run ${run}'s evidence name in ${LIVE_EVIDENCE_DIR}`)
         }
         if (typeof prior.proposalSha256 !== "string" || !/^[0-9a-f]{64}$/.test(prior.proposalSha256)) {
-          problems.push(`OAUTH_PILOT_RUN.prior records no sha256 for run ${prior.run}'s proposal`)
+          problems.push(`OAUTH_PILOT_RUN.prior records no sha256 for run ${run}'s proposal`)
         }
       }
       return problems
     },
   })
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 
 /**
  * Why a prior run's committed reservation or evidence is not what `OAUTH_PILOT_RUN`
@@ -1069,7 +1073,8 @@ export async function oneRunProblems(root: string, out: string, git: RunGit, ide
     }
   }
 
-  const declared = new Set(identity.prior.flatMap((prior) => [prior.reservation, prior.evidence]))
+  // An injected identity may hold no list; the validator has then already said so.
+  const declared = new Set(Array.isArray(identity.prior) ? identity.prior.flatMap((prior) => [prior.reservation, prior.evidence]) : [])
   const run = identity.run
   // A malformed identity names no run of its own: every undeclared live file is then unaccounted.
   const own = identityProblems.length === 0 ? { reservation: oauthPilotReservation(run), evidence: oauthPilotEvidencePattern(run) } : null
@@ -1730,8 +1735,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
     return 1
   }
   let hostCheck: HostCheckOptions | null = null
-  // The commit the live pre-check held clean, recorded in the reservation.
-  let checkedCommit: string | undefined
+  let reservation: PilotContext["reservation"] = null
   if (args.mode === "live") {
     const untouched = "No host was started; the real auth target was not stat-ed; the data directory was not opened; no network connection was made."
     // The paths first, resolved only, so a mistyped path never spends the authorization and the pre-check never walks the data directory.
@@ -1793,11 +1797,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
       )
       return 1
     }
-    checkedCommit = codeRevision.value.commit
-  }
-  await mkdir(args.out, { recursive: true })
-  let reservation: PilotContext["reservation"] = null
-  if (args.mode === "live") {
+    await mkdir(args.out, { recursive: true })
     // After every refusal that needs no touch, the code revision's included, and before any host, auth-target stat, data-directory open or connection.
     const created: LiveReservation = {
       run: pilotRun.run,
@@ -1806,7 +1806,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
       gateTableBlob: authorization?.blob ?? null,
       proposalSha256: OAUTH_PILOT_PROPOSAL.sha256,
       out: args.out,
-      commit: checkedCommit!,
+      commit: codeRevision.value.commit,
     }
     const reserved = await reserveLiveRun(root, created)
     if (!reserved.ok) {
@@ -1815,7 +1815,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
     }
     reservation = { ...created, path: reserved.path }
     console.log(`reserved gate 8's live run ${pilotRun.run}: ${reserved.path} (never deleted; a further run needs the human's explicit decision)`)
-  }
+  } else await mkdir(args.out, { recursive: true })
   const deadlineMs = seams.deadlineMs ?? PILOT_DEADLINE_MS
   const settleMs = seams.settleMs ?? BODY_SETTLE_MS
   const interruptMs = seams.interruptMs ?? INTERRUPT_MS

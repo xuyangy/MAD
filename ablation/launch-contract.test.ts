@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { runIdentityProblems as pilotIdentityProblems } from "../scripts/oauth-pilot.ts"
 import { evaluationIdentityProblems, type EvaluationRun } from "../scripts/paired.ts"
-import { LAUNCH_EVIDENCE_DIR, reserveExclusive, runIdentityProblems, stageOneBinary, type ReserveWhy } from "./launch-contract.ts"
+import { LAUNCH_EVIDENCE_DIR, launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveWhy } from "./launch-contract.ts"
 import {
   ADVERSARIAL_RUN,
   adversarialReservation,
@@ -120,7 +120,7 @@ const LAUNCHERS = [
   },
 ] as const
 
-describe("runIdentityProblems: the shipped constants", () => {
+describe("launchIdentityProblems: the shipped constants", () => {
   test("OAUTH_PILOT_RUN, EVALUATION_RUN and ADVERSARIAL_RUN pass their launchers' rules", () => {
     expect(pilotIdentityProblems(OAUTH_PILOT_RUN)).toEqual([])
     expect(evaluationIdentityProblems(EVALUATION_RUN)).toEqual([])
@@ -128,7 +128,7 @@ describe("runIdentityProblems: the shipped constants", () => {
   })
 })
 
-describe("runIdentityProblems: malformed identities, for each launcher", () => {
+describe("launchIdentityProblems: malformed identities, for each launcher", () => {
   for (const launcher of LAUNCHERS) {
     const { label, check, base, prior } = launcher
     const good = () => base([prior(1), prior(2)])
@@ -144,31 +144,50 @@ describe("runIdentityProblems: malformed identities, for each launcher", () => {
         [[prior(2), prior(1)], "[2, 1]"],
         [[prior(1), prior(2), prior(3)], "[1, 2, 3]"],
       ] as const) {
-        expect(check(base([...list]))[0], shown).toBe(`${label}.prior lists runs ${shown}, not exactly runs 1 to 2 before run 3: a gap, a duplicate or a reused run`)
+        expect(check(base([...list]))[0], shown).toBe(`${label}.prior lists runs ${shown}, not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry`)
       }
     })
 
-    test(`${label}: a prior entry that is not an object is named`, () => {
+    test(`${label}: a prior entry that is not an object is named, and adds no entry-level extra`, () => {
+      const listed = `${label}.prior lists runs [1, (not an object)], not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry`
       const problems = check(base([prior(1), null]))
-      expect(problems[0]).toBe(`${label}.prior lists runs [1, (not an object)], not exactly runs 1 to 2 before run 3: a gap, a duplicate or a reused run`)
+      // The adversarial wrapper returns its first problem only; the others list every one.
+      if (label === "ADVERSARIAL_RUN") expect(problems[0]).toBe(listed)
+      else expect(problems).toEqual([listed, `${label}.prior entry 2 is not an object`])
+    })
+
+    test(`${label}: an entry with no run is shown as (missing)`, () => {
+      const { run: _run, ...noRun } = prior(2)
+      expect(check(base([prior(1), noRun]))[0]).toBe(
+        `${label}.prior lists runs [1, (missing)], not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry`,
+      )
     })
 
     test(`${label}: a 2**40 run is refused by its length alone`, () => {
       expect(check({ ...good(), run: 2 ** 40, ...(launcher.own ? { reservation: launcher.reservationOf(2 ** 40) } : {}) })[0]).toBe(
-        `${label}.prior lists runs [1, 2], not exactly runs 1 to ${2 ** 40 - 1} before run ${2 ** 40}: a gap, a duplicate or a reused run`,
+        `${label}.prior lists runs [1, 2], not exactly runs 1 to ${2 ** 40 - 1} before run ${2 ** 40}: a gap, a duplicate, a reused run or an extra entry`,
       )
     })
 
-    test(`${label}: a run below the floor or not an integer is refused`, () => {
-      const floor = label === "OAUTH_PILOT_RUN" ? 2 : 1
-      for (const run of [floor - 1, 2.5, "3"]) {
-        expect(check({ ...good(), run })[0], JSON.stringify(run)).toBe(`${label} names run ${JSON.stringify(run)}, which is not an integer of at least ${floor}`)
+    test(`${label}: a run that is not an integer, and one below the floor, are refused with different reasons`, () => {
+      for (const run of [2.5, "3"]) {
+        expect(check({ ...good(), run })[0], JSON.stringify(run)).toBe(`${label} names run ${JSON.stringify(run)}, which is not an integer`)
       }
+      const below =
+        label === "OAUTH_PILOT_RUN"
+          ? "OAUTH_PILOT_RUN names run 1: run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2"
+          : `${label} names run 0: the run is an integer of at least 1`
+      expect(check({ ...good(), run: label === "OAUTH_PILOT_RUN" ? 1 : 0 })[0]).toBe(below)
     })
 
     test(`${label}: evidence outside ${LAUNCH_EVIDENCE_DIR} and another run's reservation are named`, () => {
       const outside = { ...prior(2), evidence: "docs/run-2.json" }
       expect(check(base([prior(1), outside]))[0]).toBe(`${label}.prior names run 2's evidence \`docs/run-2.json\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`)
+      for (const evidence of [`${LAUNCH_EVIDENCE_DIR}/.`, `${LAUNCH_EVIDENCE_DIR}/..`, `${LAUNCH_EVIDENCE_DIR}/./run-2.json`, `${LAUNCH_EVIDENCE_DIR}//run-2.json`, `${LAUNCH_EVIDENCE_DIR}/sub/run-2.json`]) {
+        expect(check(base([prior(1), { ...prior(2), evidence }])), evidence).toEqual(
+          [`${label}.prior names run 2's evidence \`${evidence}\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`],
+        )
+      }
       const renamed = { ...prior(2), reservation: launcher.reservationOf(1) }
       expect(check(base([prior(1), renamed]))[0]).toBe(`${label}.prior names run 2's reservation \`${launcher.reservationOf(1)}\`, not \`${launcher.reservationOf(2)}\``)
     })
@@ -202,16 +221,38 @@ describe("runIdentityProblems: malformed identities, for each launcher", () => {
       `OAUTH_PILOT_RUN.prior names run 1's evidence \`${OAUTH_PILOT_EVIDENCE_DIR}/oauth-pilot-live-run-1.json\`, which is not run 1's evidence name in ${OAUTH_PILOT_EVIDENCE_DIR}`,
       "OAUTH_PILOT_RUN.prior records no sha256 for run 1's proposal",
     ])
-    expect(adversarial({ ...ADVERSARIAL_RUN, pins: ["a/b", "c/d"] })).toEqual([
-      'adversarial run 1\'s pins ["a/b","c/d"] are not exactly one `provider/model` pin for the one-slot roster',
-    ])
+    expect(adversarial({ ...ADVERSARIAL_RUN, pins: ["a/b", "c/d"] })).toEqual(['ADVERSARIAL_RUN.pins ["a/b","c/d"] are not exactly one `provider/model` pin for the one-slot roster'])
     expect(paired({ ...EVALUATION_RUN, pins: [] })).toEqual(["EVALUATION_RUN.pins [] is not a non-empty list of distinct `provider/model` pins"])
   })
 
   test("the shared validator takes no launcher fact of its own: a custom label, floor and reservation name", () => {
     const rules = { label: "X", floor: 1, reservationOf: (run: number) => `${LAUNCH_EVIDENCE_DIR}/x-${run}`, ownReservation: true }
-    expect(runIdentityProblems({ run: 1, reservation: `${LAUNCH_EVIDENCE_DIR}/x-1`, prior: [] }, rules)).toEqual([])
-    expect(runIdentityProblems({ run: 1, reservation: `${LAUNCH_EVIDENCE_DIR}/x-1`, prior: "none" }, rules)).toEqual(["X.prior is not a list: it must list exactly runs [] before run 1"])
+    expect(launchIdentityProblems({ run: 1, reservation: `${LAUNCH_EVIDENCE_DIR}/x-1`, prior: [] }, rules)).toEqual([])
+    expect(launchIdentityProblems({ run: 1, reservation: `${LAUNCH_EVIDENCE_DIR}/x-1`, prior: "none" }, rules)).toEqual(["X.prior is not a list: it must list exactly runs [] before run 1"])
+  })
+
+  test("a floor that is not an integer of at least 1 is a programming error: it throws", () => {
+    for (const floor of [0, -1, 1.5, Number.NaN]) {
+      expect(() => launchIdentityProblems({ run: 1, prior: [] }, { label: "X", floor, reservationOf: (run) => `${run}` }), String(floor)).toThrow("X's rules name the floor")
+    }
+  })
+
+  test("the extras see whether the list is well formed; the pilot's add nothing to a rejected run or list", () => {
+    const seen: boolean[] = []
+    const rules = { label: "X", floor: 1, reservationOf: (run: number) => `${LAUNCH_EVIDENCE_DIR}/x-${run}`, extra: (_: unknown, shape: { wellFormed: boolean }) => (seen.push(shape.wellFormed), []) }
+    launchIdentityProblems({ run: 2, prior: [{ run: 1, reservation: `${LAUNCH_EVIDENCE_DIR}/x-1`, evidence: `${LAUNCH_EVIDENCE_DIR}/e.json` }] }, rules)
+    launchIdentityProblems({ run: 2, prior: [] }, rules)
+    launchIdentityProblems({ run: 0, prior: [] }, rules)
+    expect(seen).toEqual([true, false, false])
+    const bad = { ...pilotPrior(1), evidence: "docs/x.json", proposalSha256: "short" }
+    expect(pilot({ run: 3, prior: [bad] })).toEqual([
+      "OAUTH_PILOT_RUN.prior lists runs [1], not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry",
+    ])
+    expect(pilot({ run: 1, prior: [bad] })).toEqual(["OAUTH_PILOT_RUN names run 1: run 1 has run and is spent, so the run gate 8 authorizes is an integer of at least 2"])
+    // Evidence the shared rules refused is named once, not again as a misnamed pilot file.
+    expect(pilot({ run: 2, prior: [{ ...pilotPrior(1), evidence: `${OAUTH_PILOT_EVIDENCE_DIR}/..` }] })).toEqual([
+      `OAUTH_PILOT_RUN.prior names run 1's evidence \`${OAUTH_PILOT_EVIDENCE_DIR}/..\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`,
+    ])
   })
 })
 
@@ -222,5 +263,10 @@ describe("stageOneBinary", () => {
     expect(stageOneBinary("/real/opencode", { binary: "/link/opencode", resolveBinary, hashFile })).toEqual({ binary: "/real/opencode", resolveBinary, hashFile })
     expect(stageOneBinary("/real/opencode", undefined)).toEqual({ binary: "/real/opencode" })
     expect(stageOneBinary(undefined, undefined)).toEqual({})
+  })
+
+  test("the seam's measured build passes through, so the spawn-time re-check expects what stage 1 expected", () => {
+    const measured = { version: "0.0.0-test", sha256: "f".repeat(64) }
+    expect(stageOneBinary("/real/opencode", { binary: "/link/opencode", measured })).toEqual({ binary: "/real/opencode", measured })
   })
 })

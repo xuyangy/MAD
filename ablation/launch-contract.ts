@@ -6,8 +6,13 @@
  * and `scripts/adversarial.ts` (gate 10) each authorize one numbered run, name
  * every earlier run with its committed files, and create that run's reservation
  * exclusively before any host starts. This module holds the parts that are the
- * same for all three. Each launcher keeps a thin wrapper that supplies its own
- * operator-facing texts and its own rules, so its messages stay its own.
+ * same for all three. `reserveExclusive` writes every reservation; each
+ * launcher's writer is a thin wrapper that supplies its own refusal texts.
+ * `launchIdentityProblems` writes the run, own-reservation, prior-list and
+ * evidence problems for all three, each naming the launcher's constant; a
+ * launcher supplies its rules and keeps only its own extra checks (the pilot's
+ * dated evidence names and proposal sha256s, the paired pin list, the
+ * adversarial single pin).
  *
  * `stageOneBinary` carries stage 1's identified host binary into stage 2's
  * `startManagedHost`, so the host spawned is the binary that was hashed.
@@ -17,7 +22,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
+import { dirname, join, posix } from "node:path"
 
 import type { BinaryIdentityOptions } from "./managed-host.ts"
 
@@ -65,18 +70,30 @@ export interface RunIdentity {
   prior: unknown
 }
 
+/** What the shared checks found about the identity's shape, for a launcher's extra checks. */
+export interface IdentityShape {
+  /** `run` is an integer at the floor or above, and `prior` lists exactly runs 1 to `run - 1` as objects, in order. */
+  wellFormed: boolean
+}
+
 /** One launcher's identity rules. */
 export interface RunIdentityRules<T extends RunIdentity> {
   /** The constant the identity comes from, which every problem names, e.g. `OAUTH_PILOT_RUN`. */
   label: string
-  /** The lowest run the launcher can authorize: 2 for the pilot (run 1 is spent), 1 otherwise. */
+  /** The lowest run the launcher can authorize, an integer of at least 1: 2 for the pilot (run 1 is spent), 1 otherwise. */
   floor: number
+  /** Why a run below `floor` is refused; absent, the floor alone is named. */
+  floorReason?: string
   /** Run N's reservation, relative to the repository; for a prior run as for the run itself. */
   reservationOf(run: number): string
   /** Whether the identity names its own reservation, which must then be `reservationOf(run)`. */
   ownReservation?: boolean
-  /** The launcher's own checks, run after the shared ones; they must tolerate a malformed identity. */
-  extra?(identity: T): string[]
+  /**
+   * The launcher's own checks, run after the shared ones. A check of a prior
+   * entry runs only when `shape.wellFormed`, so a rejected run or list adds no
+   * entry-level problem.
+   */
+  extra?(identity: T, shape: IdentityShape): string[]
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
@@ -87,39 +104,48 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
  * run's own reservation (when the identity names one) must be the derived one;
  * `prior` must be a list of exactly runs 1 to `run - 1`, in order, its length
  * checked before any entry is read; each entry must be an object naming its
- * derived reservation and an evidence file in `LAUNCH_EVIDENCE_DIR`. The
- * launcher's `extra` checks follow.
+ * derived reservation and an evidence file directly in `LAUNCH_EVIDENCE_DIR`.
+ * The launcher's `extra` checks follow. Throws when `rules.floor` is not an
+ * integer of at least 1: that is a programming error, not a refusal.
  */
-export function runIdentityProblems<T extends RunIdentity>(identity: T, rules: RunIdentityRules<T>): string[] {
+export function launchIdentityProblems<T extends RunIdentity>(identity: T, rules: RunIdentityRules<T>): string[] {
+  if (!Number.isInteger(rules.floor) || rules.floor < 1) throw new Error(`${rules.label}'s rules name the floor ${rules.floor}, which is not an integer of at least 1`)
   const problems: string[] = []
   const { label } = rules
   const run = identity.run
-  if (typeof run !== "number" || !Number.isInteger(run) || run < rules.floor) {
-    problems.push(`${label} names run ${JSON.stringify(run)}, which is not an integer of at least ${rules.floor}`)
+  let wellFormed = false
+  if (typeof run !== "number" || !Number.isInteger(run)) {
+    problems.push(`${label} names run ${JSON.stringify(run) ?? String(run)}, which is not an integer`)
+  } else if (run < rules.floor) {
+    problems.push(`${label} names run ${run}: ${rules.floorReason ?? `the run is an integer of at least ${rules.floor}`}`)
   } else {
     if (rules.ownReservation === true && identity.reservation !== rules.reservationOf(run)) {
       problems.push(`${label} names its own reservation ${quoted(identity.reservation)}, which is not \`${rules.reservationOf(run)}\``)
     }
-    problems.push(...priorProblems(identity.prior, run, rules))
+    const prior = priorProblems(identity.prior, run, rules)
+    wellFormed = prior.wellFormed
+    problems.push(...prior.problems)
   }
-  if (rules.extra !== undefined) problems.push(...rules.extra(identity))
+  if (rules.extra !== undefined) problems.push(...rules.extra(identity, { wellFormed }))
   return problems
 }
 
-function priorProblems<T extends RunIdentity>(prior: unknown, run: number, rules: RunIdentityRules<T>): string[] {
+function priorProblems<T extends RunIdentity>(prior: unknown, run: number, rules: RunIdentityRules<T>): { wellFormed: boolean; problems: string[] } {
   const { label } = rules
   const expected = run === 1 ? "[]" : run === 2 ? "[1]" : `1 to ${run - 1}`
-  if (!Array.isArray(prior)) return [`${label}.prior is not a list: it must list exactly runs ${expected} before run ${run}`]
-  const runs = prior.map((entry: unknown) => (isObject(entry) ? JSON.stringify(entry.run) : "(not an object)"))
+  if (!Array.isArray(prior)) return { wellFormed: false, problems: [`${label}.prior is not a list: it must list exactly runs ${expected} before run ${run}`] }
+  const shown = (entry: unknown) => (!isObject(entry) ? "(not an object)" : entry.run === undefined ? "(missing)" : (JSON.stringify(entry.run) ?? String(entry.run)))
   // The length first, so a huge `run` is never compared entry by entry.
   if (prior.length !== run - 1 || prior.some((entry: unknown, index) => !isObject(entry) || entry.run !== index + 1)) {
-    const problems = [`${label}.prior lists runs [${runs.join(", ")}], not exactly runs ${expected} before run ${run}: a gap, a duplicate or a reused run`]
+    const problems = [
+      `${label}.prior lists runs [${prior.map(shown).join(", ")}], not exactly runs ${expected} before run ${run}: a gap, a duplicate, a reused run or an extra entry`,
+    ]
     if (prior.length === run - 1) {
       for (const [index, entry] of prior.entries()) {
         if (!isObject(entry)) problems.push(`${label}.prior entry ${index + 1} is not an object`)
       }
     }
-    return problems
+    return { wellFormed: false, problems }
   }
   const problems: string[] = []
   for (const entry of prior as Record<string, unknown>[]) {
@@ -128,12 +154,18 @@ function priorProblems<T extends RunIdentity>(prior: unknown, run: number, rules
     if (entry.reservation !== reservation) {
       problems.push(`${label}.prior names run ${priorRun}'s reservation ${quoted(entry.reservation)}, not \`${reservation}\``)
     }
-    const evidence = entry.evidence
-    if (typeof evidence !== "string" || dirname(evidence) !== LAUNCH_EVIDENCE_DIR || basename(evidence).trim().length === 0) {
-      problems.push(`${label}.prior names run ${priorRun}'s evidence ${quoted(evidence)}, which is not a file in ${LAUNCH_EVIDENCE_DIR}`)
+    if (!isLaunchEvidenceFile(entry.evidence)) {
+      problems.push(`${label}.prior names run ${priorRun}'s evidence ${quoted(entry.evidence)}, which is not a file in ${LAUNCH_EVIDENCE_DIR}`)
     }
   }
-  return problems
+  return { wellFormed: true, problems }
+}
+
+/** Whether `evidence` names a file directly in `LAUNCH_EVIDENCE_DIR`, already normalized, with a real basename. */
+export function isLaunchEvidenceFile(evidence: unknown): evidence is string {
+  if (typeof evidence !== "string" || posix.normalize(evidence) !== evidence || posix.dirname(evidence) !== LAUNCH_EVIDENCE_DIR) return false
+  const name = posix.basename(evidence)
+  return name.trim().length > 0 && name !== "." && name !== ".."
 }
 
 /**

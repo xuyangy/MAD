@@ -733,7 +733,7 @@ describe("the adversarial phase of the gate table", () => {
       expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins }), JSON.stringify(pins)).toContain("are not exactly one `provider/model` pin")
     }
     expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], reservation: "elsewhere" })).toContain("is not `ablation/evidence/adversarial-oauth-run-1.reservation`")
-    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, run: 0, pins: ["a/b"] })).toContain("ADVERSARIAL_RUN names run 0, which is not an integer of at least 1")
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, run: 0, pins: ["a/b"] })).toContain("ADVERSARIAL_RUN names run 0: the run is an integer of at least 1")
   })
 
   test("run N lists exactly runs 1 to N-1 in `prior`, in order, each with its own reservation and an evidence file", () => {
@@ -750,6 +750,11 @@ describe("the adversarial phase of the gate table", () => {
       ["no evidence", [earlier(1), { ...earlier(2), evidence: " " }], "ADVERSARIAL_RUN.prior names run 2's evidence ` `, which is not a file in ablation/evidence"],
     ]
     for (const [name, prior, why] of cases) expect(adversarialRunProblem({ ...three, prior }), name).toContain(why)
+    // The pin checks come first: an unchosen pin is reported ahead of a malformed prior list or reservation.
+    expect(adversarialRunProblem({ ...three, pins: null, reservation: "elsewhere", prior: [earlier(2)] })).toBe(
+      "ADVERSARIAL_RUN has no roster pin: `ADVERSARIAL_RUN.pins` is null, which means not yet chosen. The pin protocol v3 B1 names is set here by a reviewed change to this table",
+    )
+    expect(adversarialRunProblem({ ...three, pins: ["a/b", "c/d"], prior: [] })).toContain("ADVERSARIAL_RUN.pins")
     // Run 1 has no earlier run, and listing one is refused.
     expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], prior: [earlier(1)] })).toContain("ADVERSARIAL_RUN.prior lists runs [1], not exactly runs [] before run 1")
   })
@@ -871,7 +876,7 @@ describe("gatePreflight for the adversarial phase", () => {
     expect(runProblem).toContain("`ADVERSARIAL_RUN.pins` is null")
     expect(noPin.problems).not.toContain(candidateProblem)
     expect(noPin.lines).toContain("adversarial run 1 — pins not yet chosen")
-    expect(gatePreflight(gate10Open, "adversarial", "oauth", undefined, unpinned).problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10", "adversarial run"])
+    expect(gatePreflight(gate10Open, "adversarial", "oauth", undefined, unpinned).problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 10", "ADVERSARIAL_RUN has"])
   })
 
   test("with gates 10 to 12 CLOSED a supplied record still refuses when it is empty, null, OPEN, or resolved without evidence", () => {

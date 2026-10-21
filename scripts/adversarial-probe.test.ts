@@ -677,7 +677,7 @@ describe("extra requests, and the observation row", () => {
 const BARRIERS: readonly ShippedBarrier[] = [
   { name: "stage 1", text: "REFUSED at stage 1", why: "the refusal is stage 1's" },
   { name: "gate 10", text: "gate 10 (adversarial spend authorization) is OPEN", why: "gate 10 is OPEN" },
-  { name: "adversarial run", text: "adversarial run 1 has no roster pin", why: "the pin is null" },
+  { name: "adversarial run", text: "ADVERSARIAL_RUN has no roster pin", why: "the pin is null" },
 ]
 
 describe("whether the shipped command may be started", () => {
@@ -707,7 +707,7 @@ describe("whether the shipped command may be started", () => {
     if (open.spawn) expect(open.barriers[1]!.text).toBe("gate 10 (adversarial spend authorization) is OPEN")
     const noPin = await shippedDecision({ gates: gate10Closed, run: unpinned })
     expect(names(noPin)).toEqual(["stage 1", "adversarial run"])
-    if (noPin.spawn) expect(noPin.barriers[1]!.text).toBe("adversarial run 1 has no roster pin")
+    if (noPin.spawn) expect(noPin.barriers[1]!.text).toBe("ADVERSARIAL_RUN has no roster pin")
     expect(names(await shippedDecision({ gates: gate10Open, run: unpinned }))).toEqual(["stage 1", "gate 10", "adversarial run"])
     // A pin outside gate 11's evidence refuses too.
     expect(names(await shippedDecision({ gates: gate10Closed, run: { ...ADVERSARIAL_RUN, pins: ["openai/gpt-6-sol"] } }))).toEqual(["stage 1", "adversarial run"])
