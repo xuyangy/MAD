@@ -252,6 +252,34 @@ describe("launchIdentityProblems: malformed identities, for each launcher", () =
       expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-1-2026-11-02.json")).toBe(true)
       expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-1-2026-13-45.json")).toBe(true)
       expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-11-2026-11-02.json")).toBe(false)
+      expect(apiKeyEvaluationEvidencePattern(11).test("paired-api-key-evaluation-run-1-2026-11-02.json")).toBe(false)
+    })
+
+    // Each name is the right dated name plus extra characters, so only the anchors and the escaped dot refuse it.
+    const decorated = [
+      "old-paired-api-key-evaluation-run-1-2026-11-02.json",
+      "paired-api-key-evaluation-run-1-2026-11-02.json.bak",
+      "paired-api-key-evaluation-run-1-2026-11-02.json.reservation",
+      "paired-api-key-evaluation-run-1-2026-11-02xjson",
+    ]
+
+    test("the pattern is anchored at both ends and its dot is literal", () => {
+      for (const name of decorated) expect(apiKeyEvaluationEvidencePattern(1).test(name), name).toBe(false)
+    })
+
+    test("a prefixed, suffixed or wrongly separated name is one problem", () => {
+      for (const name of decorated) {
+        const evidence = `${LAUNCH_EVIDENCE_DIR}/${name}`
+        expect(apiKey(run2(evidence)), name).toEqual([notItsName(evidence)])
+      }
+    })
+
+    test("evidence that is not a file name at all is only the shared problem", () => {
+      for (const evidence of [null, 7, "", LAUNCH_EVIDENCE_DIR, `${LAUNCH_EVIDENCE_DIR}/`]) {
+        const problems = apiKey(run2(evidence))
+        expect(problems, String(evidence)).toHaveLength(1)
+        expect(problems[0], String(evidence)).toContain(`which is not a file in ${LAUNCH_EVIDENCE_DIR}`)
+      }
     })
 
     test("the shipped run passes", () => {

@@ -445,8 +445,10 @@ export interface ApiKeyEvaluationReservation {
  * (`ablation/launch-contract.ts`) with a floor of 1 and
  * `apiKeyEvaluationReservation`, and one extra: each prior run's evidence
  * carries that run's dated api-key evaluation name
- * (`apiKeyEvaluationEvidencePattern`). Gate 9 authorizes no roster, so no pin
- * is checked.
+ * (`apiKeyEvaluationEvidencePattern`). The extra reads entries only when the
+ * shared rules accepted the prior list, and names only evidence they accepted
+ * as a file in `ablation/evidence`, so no problem is reported twice. Gate 9
+ * authorizes no roster, so no pin is checked.
  */
 export function apiKeyEvaluationIdentityProblems(run: ApiKeyEvaluationRun = API_KEY_EVALUATION_RUN): string[] {
   return launchIdentityProblems(run, {
