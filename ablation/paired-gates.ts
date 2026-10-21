@@ -65,6 +65,16 @@
  * authority: no flag, environment variable, file or date names a run, and the
  * command line takes none.
  *
+ * ## Which api-key evaluation run gate 9 authorizes
+ *
+ * `API_KEY_EVALUATION_RUN` names the one run gate 9 covers on the api-key route,
+ * and every earlier run, with the files each one left. It lives in this table,
+ * like `OAUTH_PILOT_RUN` and `EVALUATION_RUN`, so the run's identity is reviewed
+ * authority. `bun run paired --live` creates its reservation exclusively before
+ * it starts the relay or a host, and refuses while it exists on disk or is
+ * committed at HEAD, so closing gate 9 authorizes that one run. Gate 9
+ * authorizes no roster: the identity carries no pins.
+ *
  * AD-1: this tree may import from `core/` and `fixtures/`. Nothing under `core/`
  * imports it.
  */
@@ -211,6 +221,42 @@ export const EVALUATION_RUN = {
     },
   ] as readonly EvaluationPriorRun[],
 } as const
+
+/** An api-key evaluation run that already happened, and the committed files it left. */
+export interface ApiKeyEvaluationPriorRun {
+  readonly run: number
+  /** Its reservation, relative to the repository. */
+  readonly reservation: string
+  /** Its committed evidence, relative to the repository. */
+  readonly evidence: string
+}
+
+/** The api-key evaluation run gate 9 covers, and every run before it, in order. */
+export interface ApiKeyEvaluationRun {
+  readonly run: number
+  /** The reservation the launcher creates exclusively before it starts the relay or a host, relative to the repository. */
+  readonly reservation: string
+  readonly prior: readonly ApiKeyEvaluationPriorRun[]
+}
+
+/** Api-key evaluation run N's reservation, relative to the repository. */
+export function apiKeyEvaluationReservation(run: number): string {
+  return `ablation/evidence/paired-api-key-evaluation-run-${run}.reservation`
+}
+
+/**
+ * The one api-key evaluation run gate 9 authorizes: its run and the reservation
+ * `bun run paired --live` (the api-key route) creates exclusively, in this
+ * repository and so across every `--out`, before it starts a host or a relay.
+ * Nothing deletes a reservation; a failed or interrupted run uses its
+ * authorization. No api-key run has happened, so `prior` is empty. Gate 9
+ * authorizes no roster, so no pin is named.
+ */
+export const API_KEY_EVALUATION_RUN: ApiKeyEvaluationRun = Object.freeze({
+  run: 1,
+  reservation: apiKeyEvaluationReservation(1),
+  prior: Object.freeze([]),
+})
 
 /** Story 2-8c7 — a live OAuth pilot run that already happened, and the committed files it left. */
 export interface OAuthPilotPriorRun {
@@ -705,8 +751,13 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     owner: HUMAN_BUDGET_OWNER,
     status: "OPEN",
     requires:
-      "the budget owner authorizes the three paired blocks' spend on the api-key route in ledger tokens: the three blocks' " +
-      "token spend under PAIRED_ALLOWANCES, unchanged. Closing gate 4, which covers only the oauth route, never stands in for it",
+      `the budget owner authorizes run ${API_KEY_EVALUATION_RUN.run} (\`API_KEY_EVALUATION_RUN\`) of the three paired blocks' spend on the ` +
+      "api-key route in ledger tokens: the three blocks' token spend under PAIRED_ALLOWANCES, unchanged. One run only: " +
+      `\`bun run paired --live\` creates ${API_KEY_EVALUATION_RUN.reservation} exclusively before it starts a host or a relay, and ` +
+      "refuses while it exists on disk or is committed at HEAD, so a second start refuses. A start that fails or is " +
+      "interrupted after the reservation, for example when the relay or the host fails to start, has used the one " +
+      "authorization; nothing deletes it, and the budget owner re-opens this gate after the run. Closing gate 4, which " +
+      "covers only the oauth route, never stands in for it",
   },
   {
     number: 10,

@@ -4,11 +4,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { runIdentityProblems as pilotIdentityProblems } from "../scripts/oauth-pilot.ts"
-import { evaluationIdentityProblems, type EvaluationRun } from "../scripts/paired.ts"
+import { apiKeyEvaluationIdentityProblems, evaluationIdentityProblems, type EvaluationRun } from "../scripts/paired.ts"
 import { LAUNCH_EVIDENCE_DIR, launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveWhy } from "./launch-contract.ts"
 import {
   ADVERSARIAL_RUN,
   adversarialReservation,
+  API_KEY_EVALUATION_RUN,
+  apiKeyEvaluationReservation,
   adversarialRunProblem,
   EVALUATION_RUN,
   evaluationReservation,
@@ -16,6 +18,7 @@ import {
   OAUTH_PILOT_RUN,
   oauthPilotReservation,
   type AdversarialRun,
+  type ApiKeyEvaluationRun,
   type OAuthPilotRun,
 } from "./paired-gates.ts"
 
@@ -81,9 +84,10 @@ describe("reserveExclusive", () => {
   })
 })
 
-/** The three launchers' rule sets, each through its own wrapper, returning every problem (adversarial: its first only). */
+/** The launchers' rule sets, each through its own wrapper, returning every problem (adversarial: its first only). */
 const pilot = (identity: unknown) => pilotIdentityProblems(identity as OAuthPilotRun)
 const paired = (identity: unknown) => evaluationIdentityProblems(identity as EvaluationRun)
+const apiKey = (identity: unknown) => apiKeyEvaluationIdentityProblems(identity as ApiKeyEvaluationRun)
 const adversarial = (identity: unknown) => {
   const first = adversarialRunProblem(identity as AdversarialRun)
   return first === null ? [] : [first]
@@ -110,6 +114,15 @@ const LAUNCHERS = [
     own: true,
   },
   {
+    label: "API_KEY_EVALUATION_RUN",
+    check: apiKey,
+    run: 3,
+    base: (prior: unknown[]) => ({ run: 3, reservation: apiKeyEvaluationReservation(3), prior }),
+    prior: plainPrior(apiKeyEvaluationReservation),
+    reservationOf: apiKeyEvaluationReservation,
+    own: true,
+  },
+  {
     label: "ADVERSARIAL_RUN",
     check: adversarial,
     run: 3,
@@ -121,9 +134,11 @@ const LAUNCHERS = [
 ] as const
 
 describe("launchIdentityProblems: the shipped constants", () => {
-  test("OAUTH_PILOT_RUN, EVALUATION_RUN and ADVERSARIAL_RUN pass their launchers' rules", () => {
+  test("OAUTH_PILOT_RUN, EVALUATION_RUN, API_KEY_EVALUATION_RUN and ADVERSARIAL_RUN pass their launchers' rules", () => {
     expect(pilotIdentityProblems(OAUTH_PILOT_RUN)).toEqual([])
     expect(evaluationIdentityProblems(EVALUATION_RUN)).toEqual([])
+    expect(apiKeyEvaluationIdentityProblems(API_KEY_EVALUATION_RUN)).toEqual([])
+    expect(apiKeyEvaluationIdentityProblems()).toEqual([])
     expect(adversarialRunProblem(ADVERSARIAL_RUN)).toBeNull()
   })
 })
@@ -209,6 +224,17 @@ describe("launchIdentityProblems: malformed identities, for each launcher", () =
       `EVALUATION_RUN.prior names run 1's evidence \`docs/1.json\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`,
       `EVALUATION_RUN.prior names run 2's evidence \`\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`,
     ])
+  })
+
+  test("API_KEY_EVALUATION_RUN: a wrong own reservation, a bad prior and a non-integer run each name the constant; no pin is checked", () => {
+    expect(apiKey({ ...API_KEY_EVALUATION_RUN, reservation: evaluationReservation(1) })).toEqual([
+      `API_KEY_EVALUATION_RUN names its own reservation \`${evaluationReservation(1)}\`, which is not \`${apiKeyEvaluationReservation(1)}\``,
+    ])
+    expect(apiKey({ ...API_KEY_EVALUATION_RUN, prior: [{ run: 1, reservation: apiKeyEvaluationReservation(1), evidence: `${LAUNCH_EVIDENCE_DIR}/x.json` }] })).toEqual([
+      "API_KEY_EVALUATION_RUN.prior lists runs [1], not exactly runs [] before run 1: a gap, a duplicate, a reused run or an extra entry",
+    ])
+    expect(apiKey({ ...API_KEY_EVALUATION_RUN, run: 1.5 })).toEqual(["API_KEY_EVALUATION_RUN names run 1.5, which is not an integer"])
+    expect(apiKey({ ...API_KEY_EVALUATION_RUN, pins: null })).toEqual([])
   })
 
   test("the pilot's legacy run-1 reservation name is the derived one", () => {

@@ -64,6 +64,20 @@
  * only for the oauth route, so the api-key route is sealed only through
  * `config.gates`.
  *
+ * ## One run per authorization, on both routes
+ *
+ * Gate 4 authorizes `EVALUATION_RUN` on the oauth route and gate 9 authorizes
+ * `API_KEY_EVALUATION_RUN` on the api-key route, each one named run. Stage 1's
+ * "authorized evaluation run" check holds the route's run to the shared
+ * run-identity rules (`ablation/launch-contract.ts`), then refuses while its
+ * reservation exists on disk (ignored or untracked included) or at HEAD, or
+ * while an earlier run's reservation or evidence is not committed. After the
+ * code-revision check and before stage 2, the launcher creates that reservation
+ * exclusively with `reserveExclusive`, so of two starts only one proceeds; nothing
+ * removes it. The api-key reservation records the run, `route: "api-key"`,
+ * `createdAt`, the gate table's blob, the pins, the `--provider-model` list and
+ * `--out`.
+ *
  * ## The change is the sealed one, and the worktree is proved
  *
  * `SEEDED_CHANGE` and `LABELLED_CHANGE_SEAL` go to both `createSchedule` and
@@ -159,7 +173,19 @@ import {
 } from "../ablation/managed-host.ts"
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { storeGuard } from "../ablation/oauth-store.ts"
-import { EVALUATION_PROTOCOL, EVALUATION_RUN, evaluationReservation, gatePreflight, PAIRED_GATES, type EvaluationPriorRun, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
+import {
+  API_KEY_EVALUATION_RUN,
+  apiKeyEvaluationReservation,
+  EVALUATION_PROTOCOL,
+  EVALUATION_RUN,
+  evaluationReservation,
+  gatePreflight,
+  PAIRED_GATES,
+  type ApiKeyEvaluationRun,
+  type EvaluationPriorRun,
+  type GateRoute,
+  type PairedGate,
+} from "../ablation/paired-gates.ts"
 import { launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   createSchedule,
@@ -282,7 +308,7 @@ export async function gateTableState(git: RunGit, root: string): Promise<GateTab
 }
 
 /**
- * Story 2-8d — where the OAuth evaluation's reservation lives and whether HEAD
+ * Where either route's evaluation reservation lives and whether HEAD
  * holds it. The shipped values are this repository and `git ls-tree HEAD`.
  */
 export interface EvaluationReservationSeam {
@@ -350,8 +376,24 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
         `${authorized.join(", ")} (the first pin is also small_model)`,
     )
   }
+  problems.push(...(await reservationStateProblems(4, run, seam)))
+  return problems
+}
+
+/**
+ * The reservation state both routes check at stage 1, for the run gate `gate`
+ * authorizes: its reservation exists neither on disk (ignored or untracked
+ * included) nor at HEAD, and every earlier run's reservation and evidence are
+ * committed at HEAD. Reads only the repository.
+ */
+async function reservationStateProblems(
+  gate: 4 | 9,
+  run: { run: number; reservation: string; prior: readonly { run: number; reservation: string; evidence: string }[] },
+  seam: EvaluationReservationSeam,
+): Promise<string[]> {
+  const problems: string[] = []
   const relative = run.reservation
-  const used = `gate 4's one authorized evaluation (run ${run.run}) was already used, whether it succeeded, failed or was interrupted`
+  const used = `gate ${gate}'s one authorized evaluation (run ${run.run}) was already used, whether it succeeded, failed or was interrupted`
   const present = await presence(join(seam.root, relative))
   if (present === "present") problems.push(`the reservation \`${relative}\` already exists: ${used}`)
   else if (present !== "absent") problems.push(present)
@@ -382,6 +424,61 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
 export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation, run: EvaluationRun = EVALUATION_RUN): Promise<ReserveResult> {
   return reserveExclusive(root, run.reservation, reservation, {
     exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved gate 4's one authorized evaluation first`,
+    failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
+  })
+}
+
+/** What the api-key evaluation's reservation records. No secret: the run, the route, the gate table's blob, the pins, the `--provider-model` list and `--out`. */
+export interface ApiKeyEvaluationReservation {
+  run: number
+  route: "api-key"
+  createdAt: string
+  gateTableBlob: string
+  pins: string[]
+  models: string[]
+  out: string
+}
+
+/**
+ * Why `run` is not a run gate 9 can authorize: the shared run-identity rules
+ * (`ablation/launch-contract.ts`) with a floor of 1 and
+ * `apiKeyEvaluationReservation`. Gate 9 authorizes no roster, so no pin is
+ * checked.
+ */
+export function apiKeyEvaluationIdentityProblems(run: ApiKeyEvaluationRun = API_KEY_EVALUATION_RUN): string[] {
+  return launchIdentityProblems(run, {
+    label: "API_KEY_EVALUATION_RUN",
+    floor: 1,
+    reservationOf: apiKeyEvaluationReservation,
+    ownReservation: true,
+  })
+}
+
+/**
+ * Stage 1 on the api-key route: `run` (`API_KEY_EVALUATION_RUN`) passes
+ * `apiKeyEvaluationIdentityProblems`, and only then: its reservation exists
+ * neither on disk (ignored or untracked included) nor at HEAD, and every
+ * earlier run's reservation and evidence are committed at HEAD. Reads only the
+ * repository.
+ */
+export async function apiKeyEvaluationRunProblems(seam: EvaluationReservationSeam, run: ApiKeyEvaluationRun = API_KEY_EVALUATION_RUN): Promise<string[]> {
+  const identity = apiKeyEvaluationIdentityProblems(run)
+  if (identity.length > 0) return identity
+  return reservationStateProblems(9, run, seam)
+}
+
+/**
+ * Creates the api-key evaluation's reservation exclusively (`wx`:
+ * O_CREAT|O_EXCL), so of two invocations only one can create it; the other is
+ * refused. Never removed.
+ */
+export async function reserveApiKeyEvaluationRun(
+  root: string,
+  reservation: ApiKeyEvaluationReservation,
+  run: ApiKeyEvaluationRun = API_KEY_EVALUATION_RUN,
+): Promise<ReserveResult> {
+  return reserveExclusive(root, run.reservation, reservation, {
+    exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved gate 9's one authorized evaluation first`,
     failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
   })
 }
@@ -475,8 +572,10 @@ export interface PairedOverrides {
   codeRevision?: () => Promise<Maybe<CodeRevision>>
   /** Whether the gate table is committed. Defaults to `gateTableState` over this repository. */
   gateTable?: () => Promise<GateTableState>
-  /** Story 2-8d, test-only: where the OAuth evaluation's reservation is checked and made. Defaults to this repository. */
+  /** Test-only: where either route's evaluation reservation is checked and made. Defaults to this repository. */
   evaluationReservation?: EvaluationReservationSeam
+  /** Test-only: the run gate 9 authorizes on the api-key route. Defaults to `API_KEY_EVALUATION_RUN`. */
+  apiKeyEvaluationRun?: ApiKeyEvaluationRun
   /** The bounded launcher's spawn, for the preflight's git calls. Defaults to `preflightSpawn`. */
   spawnGit?: SpawnBlame
   /** Test-only: the preflight's git deadlines. The shipped values are the constants above. */
@@ -1461,6 +1560,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       },
     }
     const pinNames = flags.pins.map((pin) => `${pin.providerId}/${pin.modelId}`)
+    const apiKeyRun = overrides.apiKeyEvaluationRun ?? API_KEY_EVALUATION_RUN
     if (oauthMode) {
       oauthRoute = await oauthChecks(flags, home, overrides.payloadPins ?? OAUTH_PAYLOAD, checks, [
         { name: "--directory", path: directory },
@@ -1487,20 +1587,33 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
             : fail("authorized evaluation run", problems)
         }),
       )
-    } else if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
-    else {
-      const problems = providerBlockProblems(provider)
-      const value = env[provider.apiKeyEnv]
-      if (value === undefined || value.trim().length === 0) {
-        problems.push(`the credential variable \`${provider.apiKeyEnv}\` is not set in this environment, or is empty or blank`)
-      } else credential = value
+    } else {
+      if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
+      else {
+        const problems = providerBlockProblems(provider)
+        const value = env[provider.apiKeyEnv]
+        if (value === undefined || value.trim().length === 0) {
+          problems.push(`the credential variable \`${provider.apiKeyEnv}\` is not set in this environment, or is empty or blank`)
+        } else credential = value
+        checks.push(
+          problems.length === 0
+            ? pass("managed host provider block", [
+                `provider \`${provider.id}\` (${provider.npm}) at ${provider.baseURL}; credential from \`${provider.apiKeyEnv}\`; ` +
+                  `models ${provider.models.join(", ")}`,
+              ])
+            : fail("managed host provider block", problems),
+        )
+      }
       checks.push(
-        problems.length === 0
-          ? pass("managed host provider block", [
-              `provider \`${provider.id}\` (${provider.npm}) at ${provider.baseURL}; credential from \`${provider.apiKeyEnv}\`; ` +
-                `models ${provider.models.join(", ")}`,
-            ])
-          : fail("managed host provider block", problems),
+        await guarded("authorized evaluation run", async () => {
+          const problems = await apiKeyEvaluationRunProblems(reservationSeam, apiKeyRun)
+          return problems.length === 0
+            ? pass("authorized evaluation run", [
+                `gate 9 authorizes run ${apiKeyRun.run} (API_KEY_EVALUATION_RUN) and no roster`,
+                `run ${apiKeyRun.run}'s reservation \`${apiKeyRun.reservation}\` is unused; it is created before the relay and the host start`,
+              ])
+            : fail("authorized evaluation run", problems)
+        }),
       )
     }
 
@@ -1617,6 +1730,27 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         )
       }
       console.log(`  reserved gate 4's evaluation run ${EVALUATION_RUN.run}: ${EVALUATION_RUN.reservation} (never removed)`)
+    } else {
+      // The api-key route uses gate 9's one authorization here, before the relay or the host starts.
+      const record: ApiKeyEvaluationReservation = {
+        run: apiKeyRun.run,
+        route: "api-key",
+        createdAt: new Date().toISOString(),
+        gateTableBlob: table.blob,
+        pins: pinNames,
+        models: [...provider!.models],
+        out,
+      }
+      const reserved = await reserveApiKeyEvaluationRun(reservationSeam.root, record, apiKeyRun)
+      if (!reserved.ok) {
+        return refusal(
+          "stage 1 (evaluation reservation)",
+          [reserved.why],
+          "gate 9 authorizes one api-key evaluation; a further run needs the budget owner's new authorization in a reviewed change.",
+          preexisting,
+        )
+      }
+      console.log(`  reserved gate 9's evaluation run ${apiKeyRun.run}: ${apiKeyRun.reservation} (never removed)`)
     }
 
     // ---- STAGE 2: managed host, client and roster ----

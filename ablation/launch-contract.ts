@@ -2,17 +2,18 @@
  * Epic-2 retro item 3 — the pre-reservation contract the three live launchers
  * share: the exclusive reservation writer and the run-identity validator.
  *
- * `scripts/oauth-pilot.ts` (gate 8), `scripts/paired.ts` (gate 4, OAuth route)
- * and `scripts/adversarial.ts` (gate 10) each authorize one numbered run, name
- * every earlier run with its committed files, and create that run's reservation
- * exclusively before any host starts. This module holds the parts that are the
- * same for all three. `reserveExclusive` writes every reservation; each
- * launcher's writer is a thin wrapper that supplies its own refusal texts.
- * `launchIdentityProblems` writes the run, own-reservation, prior-list and
- * evidence problems for all three, each naming the launcher's constant; a
- * launcher supplies its rules and keeps only its own extra checks (the pilot's
- * dated evidence names and proposal sha256s, the paired pin list, the
- * adversarial single pin).
+ * `scripts/oauth-pilot.ts` (gate 8), `scripts/paired.ts` (gate 4's OAuth run
+ * and gate 9's api-key run) and `scripts/adversarial.ts` (gate 10) each
+ * authorize one numbered run per gate, name every earlier run with its committed
+ * files, and create that run's reservation exclusively before any host starts.
+ * This module holds the parts that are the same for all three launchers.
+ * `reserveExclusive` writes every reservation; each launcher's writer is a thin
+ * wrapper that supplies its own refusal texts. `launchIdentityProblems` writes
+ * the run, own-reservation, prior-list and evidence problems for all three
+ * launchers, each naming the run's constant; a launcher supplies its rules and
+ * keeps only its own extra checks (the pilot's dated evidence names and
+ * proposal sha256s, the paired OAuth pin list, the adversarial single pin;
+ * gate 9's api-key run has none).
  *
  * `stageOneBinary` carries stage 1's identified host binary into stage 2's
  * `startManagedHost`, so the host spawned is the binary that was hashed.

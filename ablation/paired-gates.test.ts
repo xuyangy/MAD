@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "./governor.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
-import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, EVALUATION_PROTOCOL, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
+import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, API_KEY_EVALUATION_RUN, apiKeyEvaluationReservation, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, EVALUATION_PROTOCOL, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
 import { readFrozenProtocol } from "./schedule.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
@@ -252,6 +252,19 @@ describe("PAIRED_GATES", () => {
     expect(gate.status).toBe("OPEN")
     expect(gate.evidence).toBeUndefined()
     for (const text of ["api-key route in ledger tokens", "PAIRED_ALLOWANCES, unchanged", "Closing gate 4, which covers only the oauth route, never stands in for it"]) {
+      expect(gate.requires).toContain(text)
+    }
+  })
+
+  test("gate 9 names run 1 (API_KEY_EVALUATION_RUN), with no prior run, and its reservation makes a second start refuse", () => {
+    expect(API_KEY_EVALUATION_RUN).toEqual({ run: 1, reservation: "ablation/evidence/paired-api-key-evaluation-run-1.reservation", prior: [] })
+    expect(apiKeyEvaluationReservation(2)).toBe("ablation/evidence/paired-api-key-evaluation-run-2.reservation")
+    const gate = PAIRED_GATES.find((entry) => entry.number === 9)!
+    for (const text of [
+      "authorizes run 1 (`API_KEY_EVALUATION_RUN`)",
+      `creates ${API_KEY_EVALUATION_RUN.reservation} exclusively before it starts a host or a relay`,
+      "so a second start refuses",
+    ]) {
       expect(gate.requires).toContain(text)
     }
   })

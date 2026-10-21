@@ -28,6 +28,7 @@ import {
   hostConfig,
   MEASURED_HOST,
   OPENAI_COMPATIBLE_NPM,
+  secretForms,
   startManagedHost,
   type ApiKeyHostOptions,
   type BinaryIdentityOptions,
@@ -37,7 +38,7 @@ import {
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
-import { EVALUATION_PROTOCOL, EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { API_KEY_EVALUATION_RUN, EVALUATION_PROTOCOL, EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
 import { readFrozenProtocol, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
@@ -52,6 +53,8 @@ import { main as materializeMain } from "./materialize-labelled-change.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { fakeStore, ROW_CONTENT_MARKER } from "../ablation/oauth-store.fixture.ts"
 import {
+  apiKeyEvaluationIdentityProblems,
+  apiKeyEvaluationRunProblems,
   evaluationIdentityProblems,
   evaluationRunProblems,
   GATE_TABLE_FILE,
@@ -69,8 +72,10 @@ import {
   preflightGitEnv,
   preflightSpawn,
   productionTools,
+  reserveApiKeyEvaluationRun,
   reserveEvaluationRun,
   toolsIdentity,
+  type ApiKeyEvaluationReservation,
   type EvaluationReservation,
   type PairedOverrides,
   type SignalSource,
@@ -272,6 +277,8 @@ function overridesFor(
       // The gate table's committed state is tested on its own below; here it reads as committed.
       gateTable: async () => ({ ok: true, blob: GATES_BLOB }),
       scratchParent: env.scratchParent,
+      // Never this repository's ablation/evidence: a root beside the scratch parent, where a run past stage 1 writes gate 9's reservation; nothing reads as committed.
+      evaluationReservation: { root: join(dirname(env.scratchParent), "reservation-root"), committed: async () => false },
       ...extra,
     },
   }
@@ -2239,13 +2246,216 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     )
   })
 
-  test("the api-key route neither checks nor makes the OAuth evaluation's reservation", async () => {
+  test("the api-key route neither checks nor makes the OAuth evaluation's reservation; it makes gate 9's", async () => {
     const env = await setup()
     const root = join(env.parent, "reservation-root")
     const { overrides } = overridesFor(env, { gates: closedGates, evaluationReservation: { root, committed: notCommitted } })
     const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
-    expect(result.text).not.toContain("authorized evaluation run")
+    expect(result.text).not.toContain("gate 4's authorized roster")
     expect(existsSync(reservationOf(root))).toBe(false)
+    expect(existsSync(join(root, API_KEY_EVALUATION_RUN.reservation))).toBe(true)
+  })
+})
+
+describe("gate 9's one authorized api-key evaluation: the run and the reservation", () => {
+  const apiKeyReservationOf = (root: string) => join(root, API_KEY_EVALUATION_RUN.reservation)
+  const nothing = async () => false
+
+  test("the shipped constant passes, and its reservation is absent from this repository on disk and at HEAD", async () => {
+    expect(apiKeyEvaluationIdentityProblems()).toEqual([])
+    expect(existsSync(join(REPO_ROOT, API_KEY_EVALUATION_RUN.reservation))).toBe(false)
+    expect(await git(REPO_ROOT, ["ls-tree", "--name-only", "HEAD", "--", API_KEY_EVALUATION_RUN.reservation])).toBe("")
+  })
+
+  test("the shipped table refuses on gate 9 at stage 1; the identity check passes and nothing is written", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides, host, meter } = overridesFor(env, { evaluationReservation: { root, committed: nothing } })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED: gate 9 (api-key evaluation spend authorization) is OPEN")
+    expect(result.text).toContain("PASS  authorized evaluation run")
+    expect(existsSync(root)).toBe(false)
+    expect(host.started).toEqual([])
+    expect(meter.started).toEqual([])
+  })
+
+  test("gates closed, fresh: the reservation is written before stage 2 with the record in key order; a second run refuses at stage 1 and starts no host", async () => {
+    const env = await setup()
+    const root = join(env.parent, "shared-reservation-root")
+    let reservedAtRelay = false
+    const first = overridesFor(env, { gates: closedGates, evaluationReservation: { root, committed: nothing } })
+    const startMeter = first.overrides.startMeter!
+    const result = await captured(() =>
+      main(argvFor(env.directory, env.out), {
+        ...first.overrides,
+        startMeter: (options) => {
+          reservedAtRelay = existsSync(apiKeyReservationOf(root))
+          return startMeter(options)
+        },
+      }),
+    )
+    expect(result.code, result.text).toBe(0)
+    expect(reservedAtRelay).toBe(true)
+    expect(result.text).toContain(`reserved gate 9's evaluation run 1: ${API_KEY_EVALUATION_RUN.reservation} (never removed)`)
+    expect(result.text.indexOf("reserved gate 9's evaluation run 1")).toBeLessThan(result.text.indexOf("stage 2 of 4"))
+    const bytes = await readFile(apiKeyReservationOf(root), "utf8")
+    const recorded = JSON.parse(bytes) as ApiKeyEvaluationReservation
+    expect(Object.keys(recorded)).toEqual(["run", "route", "createdAt", "gateTableBlob", "pins", "models", "out"])
+    expect(recorded).toMatchObject({ run: 1, route: "api-key", gateTableBlob: GATES_BLOB, pins: ["anthropic/claude-sonnet-4-5"], models: MODELS, out: env.out })
+    expect(Number.isNaN(Date.parse(recorded.createdAt))).toBe(false)
+    expect(bytes).toBe(`${JSON.stringify(recorded, null, 2)}\n`)
+
+    const again = await setup()
+    const second = overridesFor(again, { gates: closedGates, evaluationReservation: { root, committed: nothing } })
+    const refused = await captured(() => main(argvFor(again.directory, again.out), second.overrides))
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain("authorized evaluation run failed")
+    expect(refused.text).toContain(
+      `the reservation \`${API_KEY_EVALUATION_RUN.reservation}\` already exists: gate 9's one authorized evaluation (run 1) was already used, whether it succeeded, failed or was interrupted`,
+    )
+    expect(second.host.started).toEqual([])
+    expect(second.meter.started).toEqual([])
+    await nothingScheduled(again.out, again.scratchParent)
+    expect(await readFile(apiKeyReservationOf(root), "utf8")).toBe(bytes)
+  })
+
+  test("a reservation committed at HEAD refuses at stage 1 and starts no host", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides, host } = overridesFor(env, {
+      gates: closedGates,
+      evaluationReservation: { root, committed: async (relative) => relative === API_KEY_EVALUATION_RUN.reservation },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(
+      `the reservation \`${API_KEY_EVALUATION_RUN.reservation}\` is committed at HEAD: gate 9's one authorized evaluation (run 1) was already used`,
+    )
+    expect(existsSync(apiKeyReservationOf(root))).toBe(false)
+    expect(host.started).toEqual([])
+  })
+
+  test("race: a reservation created between stage 1 and the write refuses at the reservation and starts no host", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides, host, meter } = overridesFor(env, {
+      gates: closedGates,
+      evaluationReservation: { root, committed: nothing },
+      codeRevision: async () => {
+        await mkdir(dirname(apiKeyReservationOf(root)), { recursive: true })
+        await writeFile(apiKeyReservationOf(root), "another invocation\n")
+        return known({ commit: "abc123", dirty: false })
+      },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("PASS  authorized evaluation run")
+    expect(result.text).toContain("REFUSED at stage 1 (evaluation reservation)")
+    expect(result.text).toContain("another invocation reserved gate 9's one authorized evaluation first")
+    expect(result.text).toContain("gate 9 authorizes one api-key evaluation")
+    expect(await readFile(apiKeyReservationOf(root), "utf8")).toBe("another invocation\n")
+    expect(host.started).toEqual([])
+    expect(meter.started).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("a bad identity lists every problem, naming API_KEY_EVALUATION_RUN, before any reservation state is read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-api-key-run-"))
+    let asked = 0
+    const seam = { root, committed: async () => (asked++, false) }
+    const bad = { run: 2, reservation: "ablation/evidence/elsewhere.reservation", prior: [{ run: 1, reservation: "x", evidence: "docs/1.json" }] }
+    expect(await apiKeyEvaluationRunProblems(seam, bad)).toEqual([
+      `API_KEY_EVALUATION_RUN names its own reservation \`ablation/evidence/elsewhere.reservation\`, which is not \`ablation/evidence/paired-api-key-evaluation-run-2.reservation\``,
+      "API_KEY_EVALUATION_RUN.prior names run 1's reservation `x`, not `ablation/evidence/paired-api-key-evaluation-run-1.reservation`",
+      "API_KEY_EVALUATION_RUN.prior names run 1's evidence `docs/1.json`, which is not a file in ablation/evidence",
+    ])
+    expect(await apiKeyEvaluationRunProblems(seam, { ...API_KEY_EVALUATION_RUN, run: 1.5 })).toEqual(["API_KEY_EVALUATION_RUN names run 1.5, which is not an integer"])
+    expect(asked).toBe(0)
+    // A well-formed later run checks every earlier run's files at HEAD.
+    const later = { run: 2, reservation: "ablation/evidence/paired-api-key-evaluation-run-2.reservation", prior: [{ run: 1, reservation: API_KEY_EVALUATION_RUN.reservation, evidence: "ablation/evidence/x.json" }] }
+    expect(await apiKeyEvaluationRunProblems(seam, later)).toEqual([
+      `run 1's reservation \`${API_KEY_EVALUATION_RUN.reservation}\` is not committed at HEAD: an earlier run must stay on record before run 2 is reserved`,
+      "run 1's evidence `ablation/evidence/x.json` is not committed at HEAD: an earlier run must stay on record before run 2 is reserved",
+    ])
+  })
+
+  test("a bad identity fails the stage-1 check and reserves nothing", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides, host } = overridesFor(env, {
+      gates: closedGates,
+      evaluationReservation: { root, committed: nothing },
+      apiKeyEvaluationRun: { ...API_KEY_EVALUATION_RUN, run: 0 },
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("API_KEY_EVALUATION_RUN names run 0: the run is an integer of at least 1")
+    expect(existsSync(root)).toBe(false)
+    expect(host.started).toEqual([])
+  })
+
+  test("reserveApiKeyEvaluationRun creates the reservation exclusively and refuses a second", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mad-api-key-run-"))
+    const reservation: ApiKeyEvaluationReservation = {
+      run: 1,
+      route: "api-key",
+      createdAt: "2026-10-21T00:00:00.000Z",
+      gateTableBlob: "abc",
+      pins: ["anthropic/claude-sonnet-4-5"],
+      models: MODELS,
+      out: "/o",
+    }
+    expect(await reserveApiKeyEvaluationRun(root, reservation)).toEqual({ ok: true, path: apiKeyReservationOf(root) })
+    expect(await readFile(apiKeyReservationOf(root), "utf8")).toBe(`${JSON.stringify(reservation, null, 2)}\n`)
+    const second = await reserveApiKeyEvaluationRun(root, { ...reservation, out: "/other" })
+    expect(second.ok ? "" : second.why).toBe(
+      `the reservation \`${API_KEY_EVALUATION_RUN.reservation}\` already exists: another invocation reserved gate 9's one authorized evaluation first`,
+    )
+  })
+
+  test("the shipped constant is frozen", () => {
+    expect(Object.isFrozen(API_KEY_EVALUATION_RUN)).toBe(true)
+    expect(Object.isFrozen(API_KEY_EVALUATION_RUN.prior)).toBe(true)
+  })
+
+  test("a host that refuses at stage 2 exits 1 and leaves the reservation with its record: the authorization is used", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const refusing = scriptedHost({ refuse: "the managed host refused (test)" })
+    const { overrides } = overridesFor(env, { gates: closedGates, evaluationReservation: { root, committed: nothing }, startHost: refusing.startHost })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 2 (managed host)")
+    expect(refusing.started).toHaveLength(1)
+    const recorded = JSON.parse(await readFile(apiKeyReservationOf(root), "utf8")) as ApiKeyEvaluationReservation
+    expect(recorded).toMatchObject({ run: 1, route: "api-key", gateTableBlob: GATES_BLOB, models: MODELS, out: env.out })
+  })
+
+  test("the reservation holds no secret: neither the credential nor any form of it", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides } = overridesFor(env, { gates: closedGates, evaluationReservation: { root, committed: nothing } })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code, result.text).toBe(0)
+    const bytes = await readFile(apiKeyReservationOf(root), "utf8")
+    for (const form of secretForms(KEY)) expect(bytes, form).not.toContain(form)
+    expect(bytes).not.toContain(KEY)
+  })
+
+  test("a dirty revision with the gates closed refuses at stage 1 (code revision) and reserves nothing", async () => {
+    const env = await setup()
+    const root = join(env.parent, "reservation-root")
+    const { overrides, host } = overridesFor(env, {
+      gates: closedGates,
+      evaluationReservation: { root, committed: nothing },
+      codeRevision: async () => known({ commit: "abc123", dirty: true, entries: [{ status: " M", path: "scripts/paired.ts", blob: null }] }),
+    })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 1 (code revision)")
+    expect(existsSync(apiKeyReservationOf(root))).toBe(false)
+    expect(host.started).toEqual([])
   })
 })
 
