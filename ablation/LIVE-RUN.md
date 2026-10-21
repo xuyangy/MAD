@@ -1210,9 +1210,12 @@ the data directory's database holds anything. Stage 1 passes the frozen protocol
 be `EVALUATION_PROTOCOL.frozenHash` (`ablation/paired-gates.ts`), the hash the paired evaluation ran
 under. It also identifies the opencode binary stage 2 would spawn (`identifyBinary` with
 `startManagedHost`'s defaults: `opencode` on PATH, its real path hashed against `MEASURED_HOST`; read,
-never started), so a wrong build refuses before the reservation. Stage 2 hashes the binary again before
-it spawns, after the reservation, so a binary swapped after stage 1 is refused there with the
-authorization spent.
+never started), so a wrong build refuses before the reservation. Stage 2 spawns the real path stage 1
+identified (`stageOneBinary`, `ablation/launch-contract.ts`) and hashes it again before it spawns, after
+the reservation, so a binary swapped after stage 1 is refused there with the authorization spent. Stage 1
+also holds `EVALUATION_RUN` to the run-identity rules the three launchers share (`runIdentityProblems`,
+`ablation/launch-contract.ts`): its own reservation, and exactly runs 1 to 4 before it, each with its
+own reservation and an evidence file in `ablation/evidence`.
 
 **The guarded OAuth evaluation run (story 2-8d).** `EVALUATION_RUN` in `ablation/paired-gates.ts`
 names run 5, the last run gate 4 authorized (on 2026-10-06; it ran and is spent): its pins in
@@ -1240,7 +1243,8 @@ The launcher now gives each of the host's verification reads `PAIRED_HOST_REQUES
 (60000 ms): each read is bounded on its own, so the reads in sequence may take several times that before
 stage 2 refuses. Once every stage-1 check has passed, and before stage 2 starts a host, the launcher
 creates the reservation exclusively (`O_CREAT|O_EXCL`) in this repository, recording the run, the gate
-table's blob, the pins and `--out`. Because it lives in the repository and not under `--out`, a second
+table's blob, the pins and `--out`. The three launchers create their reservations through one writer,
+`reserveExclusive` in `ablation/launch-contract.ts`. Because it lives in the repository and not under `--out`, a second
 run into any bundle root is refused, and of two concurrent invocations only one creates it. Nothing
 deletes it: a run that fails or is interrupted after the reservation has used the authorization. A
 stage-1 refusal reserves nothing. A further run needs the budget owner's new authorization in a reviewed
@@ -1692,7 +1696,8 @@ run 3's reservation `ablation/evidence/oauth-pilot-live-run-3.reservation`
 exclusively (`O_CREAT|O_EXCL`), so of two concurrent invocations only one can create it and the other
 refuses. It records the run, `story: "2-8c8"`, when it was created, the gate table's blob, the pinned
 proposal's sha256 and `--out`, and no secret; the evidence, the INCOMPLETE evidence included, records it
-too. **Nothing deletes it**, not after a failure and not after an interruption: a failed or interrupted
+too. Last it records `commit`, the commit the code-revision check held clean; runs 1 to 3's committed
+reservations predate it and carry none. **Nothing deletes it**, not after a failure and not after an interruption: a failed or interrupted
 run consumes the authorization, and while it exists every further `--live` refuses, whatever `--out` it
 names. A further run needs the human's explicit decision, and the budget owner re-opens gate 8 after the
 run. None of these checks reads, stats or hashes `auth.json`. `--live` refuses, before the same touches,
@@ -2078,9 +2083,9 @@ the shipped tree none of those refuses; gate 10 and the used reservation do. A c
 prepared directory that does not verify, a missing or unreadable `opencode` binary, or one whose
 sha256 is not `MEASURED_HOST`'s, or a reservation that already exists, exits 1 before any
 reservation, worktree, start marker or host exists. The early binary check narrows the window
-before the spawn and does not make check and use atomic: stage 4 resolves `opencode` on PATH and
-hashes it again before each spawn (`startManagedHost`), so a binary swapped after stage 1 is
-refused there, after the reservation. Only once every check passes is the reservation
+before the spawn and does not make check and use atomic: stage 4 spawns the real path stage 1
+identified (`stageOneBinary`, `ablation/launch-contract.ts`) and hashes it again before each spawn
+(`startManagedHost`), so a binary swapped after stage 1 is refused there, after the reservation. Only once every check passes is the reservation
 created exclusively, stamped with the launcher's clock; it is never removed. An interrupt after it
 exits 130 with the reservation kept and no schedule, worktree or host. Immediately before the two
 roots are created, each is checked again to be outside this repository and not to contain it

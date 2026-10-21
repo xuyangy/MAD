@@ -36,9 +36,11 @@
  *    PATH this stage passes for `--pin anthropic/claude-sonnet-5`, the one run
  *    gate 10 authorizes, so the command is the live run. The binary check
  *    narrows the window before the spawn and does not close it: stage 4
- *    resolves and hashes the binary again before each spawn, so a binary
- *    swapped after stage 1 is refused there, with the reservation spent.
- * 2. **The reservation**, created exclusively only once every check passed.
+ *    spawns the real path stage 1 identified (`stageOneBinary`,
+ *    `ablation/launch-contract.ts`) and hashes it again before each spawn, so a
+ *    binary swapped after stage 1 is refused there, with the reservation spent.
+ * 2. **The reservation**, created exclusively (`reserveExclusive`,
+ *    `ablation/launch-contract.ts`) only once every check passed.
  * 3. **The schedule**: immediately before the experiment root and the data
  *    root are created, each is checked again to be outside this repository and
  *    not to contain it, and to be absent or empty, and the data root, `--out`,
@@ -91,7 +93,7 @@
  */
 
 import { $ } from "bun"
-import { lstat, mkdir, open, readdir, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, open, readdir, symlink } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 
@@ -109,6 +111,7 @@ import {
   type AdversarialConfig,
 } from "../ablation/adversarial-schedule.ts"
 import { boundedCodeRevisionLines, codeRevisionFrom, DIRTY_REVISION_NEXT_STEP, dirtyRevisionReasons } from "../ablation/bundle.ts"
+import { reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   identifyBinary,
   MEASURED_HOST,
@@ -261,26 +264,11 @@ export async function adversarialRunProblems(pins: readonly string[], seam: Adve
 }
 
 /** Creates the run's reservation exclusively (`wx`), so of two invocations only one can; never removed. */
-export async function reserveAdversarialRun(
-  root: string,
-  reservation: AdversarialReservation,
-  run: AdversarialRun = ADVERSARIAL_RUN,
-): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
-  const path = join(root, run.reservation)
-  try {
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(reservation, null, 2)}\n`, { encoding: "utf8", flag: "wx" })
-    return { ok: true, path }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    return {
-      ok: false,
-      why:
-        code === "EEXIST"
-          ? `the reservation \`${run.reservation}\` already exists: another invocation reserved adversarial run ${run.run} first`
-          : `the reservation \`${run.reservation}\` could not be created (${messageOf(error)})`,
-    }
-  }
+export async function reserveAdversarialRun(root: string, reservation: AdversarialReservation, run: AdversarialRun = ADVERSARIAL_RUN): Promise<ReserveResult> {
+  return reserveExclusive(root, run.reservation, reservation, {
+    exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved adversarial run ${run.run} first`,
+    failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +477,8 @@ export interface OAuthHostLifecycleOptions {
   clock: Clock
   /** The bound on each of the host's verification reads, and on the roster read. */
   requestMs: number
+  /** The binary options each start passes: stage 1's identified real path, and its overridden seam functions (`stageOneBinary`). */
+  hostBinary?: BinaryIdentityOptions
   startHost: (options: ManagedHostOptions) => Promise<ManagedHostStart>
   createClient: (init: { baseUrl: string; directory: string }) => unknown | Promise<unknown>
   enumerate: (client: unknown) => Promise<Candidate[]>
@@ -664,6 +654,7 @@ export function oauthHostLifecycle(options: OAuthHostLifecycleOptions): {
           return await options.startHost({
             mode: "oauth",
             oauth: route,
+            ...options.hostBinary,
             verifyDirectories: [worktree],
             requestMs: options.requestMs,
             // The launcher owns SIGINT and SIGTERM; the host's own handler would exit before the suite's records are written.
@@ -804,6 +795,8 @@ export interface SuiteStageInput {
   home: string
   payloadPins: PayloadPins
   requestMs?: number
+  /** The binary each host start spawns: stage 1's identified real path and its seam (`stageOneBinary`). Absent, `startManagedHost`'s defaults. */
+  hostBinary?: BinaryIdentityOptions
   startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
   createClient?: (init: { baseUrl: string; directory: string }) => unknown
   enumerate?: (client: unknown) => Promise<Candidate[]>
@@ -832,6 +825,7 @@ export async function runSuiteStage(
     recordFile,
     clock: input.clock,
     requestMs: input.requestMs ?? PAIRED_HOST_REQUEST_MS,
+    ...(input.hostBinary === undefined ? {} : { hostBinary: input.hostBinary }),
     startHost: input.startHost ?? startManagedHost,
     createClient: input.createClient ?? defaultCreateClient,
     enumerate: input.enumerate ?? ((client: unknown) => enumerateCandidates(client as never)),
@@ -1178,9 +1172,11 @@ async function launch(
   )
 
   // The binary stage 4 would spawn, identified as `startManagedHost` identifies it: read, hashed, never started.
+  let identifiedBinary: string | undefined
   checks.push(
     await guarded("measured host binary", async () => {
       const identified = await identifyBinary(overrides.hostBinary ?? {})
+      if (identified.ok) identifiedBinary = identified.binary
       return identified.ok
         ? pass("measured host binary", [`\`${identified.binary}\` has sha256 ${identified.sha256}, the measured build's; read only, not started`])
         : fail("measured host binary", [identified.reason])
@@ -1344,6 +1340,7 @@ async function launch(
     dataRoot,
     home,
     payloadPins,
+    hostBinary: stageOneBinary(identifiedBinary, overrides.hostBinary),
     ...(overrides.hostRequestMs === undefined ? {} : { requestMs: overrides.hostRequestMs }),
     ...(overrides.startHost === undefined ? {} : { startHost: overrides.startHost }),
     ...(overrides.createClient === undefined ? {} : { createClient: overrides.createClient }),

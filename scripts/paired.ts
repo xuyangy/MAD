@@ -103,7 +103,10 @@
  * started) and the auth symlink (`lstat` and `readlink` only), and every OAuth
  * refusal names each failed check's reason in its one aggregated diagnostic. The
  * binary check narrows the window before the spawn and does not close it: stage 2
- * hashes the binary again before it spawns, after the reservation exists. Stage 2 resolves the roster
+ * spawns the real path stage 1 identified (`stageOneBinary`,
+ * `ablation/launch-contract.ts`) and hashes it again before it spawns, after the
+ * reservation exists. Stage 1 also checks `EVALUATION_RUN` against the shared
+ * run-identity rules. The reservation is written by `reserveExclusive`. Stage 2 resolves the roster
  * with the lenses `security` and `reliability`. Stage 4 seals `accounting:
  * "attempts"` and `route: "oauth"` under protocol v2. After the host is stopped
  * the auth symlink and the seeded config lock are checked again, and a failure
@@ -117,9 +120,9 @@
  */
 
 import { rmSync } from "node:fs"
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
@@ -156,7 +159,8 @@ import {
 } from "../ablation/managed-host.ts"
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { storeGuard } from "../ablation/oauth-store.ts"
-import { EVALUATION_PROTOCOL, EVALUATION_RUN, gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
+import { EVALUATION_PROTOCOL, EVALUATION_RUN, evaluationReservation, gatePreflight, PAIRED_GATES, type EvaluationPriorRun, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
+import { reserveExclusive, runIdentityProblems, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -296,23 +300,58 @@ export interface EvaluationReservation {
   out: string
 }
 
+/** The OAuth evaluation run gate 4 authorizes: the shape of `EVALUATION_RUN`. */
+export interface EvaluationRun {
+  run: number
+  pins: readonly string[]
+  reservation: string
+  prior: readonly EvaluationPriorRun[]
+}
+
 /**
- * Story 2-8d — stage 1 on the OAuth route: the pins are exactly
- * `EVALUATION_RUN.pins`, in order; its reservation exists neither on disk
- * (ignored or untracked included) nor at HEAD; and every earlier run's
- * reservation and evidence are committed at HEAD. Reads only the repository.
+ * Why `run` is not a run gate 4 can authorize: the shared run-identity rules
+ * (`ablation/launch-contract.ts`) with a floor of 1 and `evaluationReservation`,
+ * and the paired extra: `pins` is a non-empty list of distinct
+ * `provider/model` pins.
  */
-export async function evaluationRunProblems(pins: readonly string[], seam: EvaluationReservationSeam): Promise<string[]> {
+export function evaluationIdentityProblems(run: EvaluationRun = EVALUATION_RUN): string[] {
+  return runIdentityProblems(run, {
+    label: "EVALUATION_RUN",
+    floor: 1,
+    reservationOf: evaluationReservation,
+    ownReservation: true,
+    extra: (identity) => {
+      const pins: unknown = identity.pins
+      const exact =
+        Array.isArray(pins) &&
+        pins.length > 0 &&
+        pins.every((pin: unknown) => typeof pin === "string" && /^[^/\s]+\/\S+$/.test(pin)) &&
+        new Set(pins).size === pins.length
+      return exact ? [] : [`EVALUATION_RUN.pins ${JSON.stringify(pins)} is not a non-empty list of distinct \`provider/model\` pins`]
+    },
+  })
+}
+
+/**
+ * Story 2-8d — stage 1 on the OAuth route: `run` (`EVALUATION_RUN`) passes
+ * `evaluationIdentityProblems`, and only then: the pins are exactly
+ * `run.pins`, in order; its reservation exists neither on disk (ignored or
+ * untracked included) nor at HEAD; and every earlier run's reservation and
+ * evidence are committed at HEAD. Reads only the repository.
+ */
+export async function evaluationRunProblems(pins: readonly string[], seam: EvaluationReservationSeam, run: EvaluationRun = EVALUATION_RUN): Promise<string[]> {
+  const identity = evaluationIdentityProblems(run)
+  if (identity.length > 0) return identity
   const problems: string[] = []
-  const authorized: readonly string[] = EVALUATION_RUN.pins
+  const authorized: readonly string[] = run.pins
   if (pins.length !== authorized.length || pins.some((pin, index) => pin !== authorized[index])) {
     problems.push(
       `the --pin list ${pins.length === 0 ? "(none)" : pins.join(", ")} is not the roster gate 4 authorizes, in this order: ` +
         `${authorized.join(", ")} (the first pin is also small_model)`,
     )
   }
-  const relative = EVALUATION_RUN.reservation
-  const used = `gate 4's one authorized evaluation (run ${EVALUATION_RUN.run}) was already used, whether it succeeded, failed or was interrupted`
+  const relative = run.reservation
+  const used = `gate 4's one authorized evaluation (run ${run.run}) was already used, whether it succeeded, failed or was interrupted`
   const present = await presence(join(seam.root, relative))
   if (present === "present") problems.push(`the reservation \`${relative}\` already exists: ${used}`)
   else if (present !== "absent") problems.push(present)
@@ -321,11 +360,11 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
   } catch (error) {
     problems.push(`whether the reservation \`${relative}\` is committed could not be established: ${messageOf(error)}`)
   }
-  for (const prior of EVALUATION_RUN.prior) {
+  for (const prior of run.prior) {
     for (const [what, path] of [["reservation", prior.reservation], ["evidence", prior.evidence]] as const) {
       try {
         if (!(await seam.committed(path))) {
-          problems.push(`run ${prior.run}'s ${what} \`${path}\` is not committed at HEAD: an earlier run must stay on record before run ${EVALUATION_RUN.run} is reserved`)
+          problems.push(`run ${prior.run}'s ${what} \`${path}\` is not committed at HEAD: an earlier run must stay on record before run ${run.run} is reserved`)
         }
       } catch (error) {
         problems.push(`whether run ${prior.run}'s ${what} \`${path}\` is committed could not be established: ${messageOf(error)}`)
@@ -340,23 +379,11 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
  * so of two invocations only one can create it; the other is refused. Never
  * removed.
  */
-export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
-  const relative = EVALUATION_RUN.reservation
-  const path = join(root, relative)
-  try {
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, `${JSON.stringify(reservation, null, 2)}\n`, { encoding: "utf8", flag: "wx" })
-    return { ok: true, path }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    return {
-      ok: false,
-      why:
-        code === "EEXIST"
-          ? `the reservation \`${relative}\` already exists: another invocation reserved gate 4's one authorized evaluation first`
-          : `the reservation \`${relative}\` could not be created (${messageOf(error)})`,
-    }
-  }
+export async function reserveEvaluationRun(root: string, reservation: EvaluationReservation): Promise<ReserveResult> {
+  return reserveExclusive(root, EVALUATION_RUN.reservation, reservation, {
+    exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved gate 4's one authorized evaluation first`,
+    failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
+  })
 }
 
 /** The api-key route: the relay to one api-key provider, and the launcher's default. */
@@ -1422,6 +1449,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     let credential: string | undefined
     const provider = flags.provider
     let oauthRoute: OAuthRoute | undefined
+    // The real path stage 1 identified; stage 2 spawns exactly it.
+    let identifiedBinary: string | undefined
     const home = overrides.home ?? homedir()
     const reservationSeam: EvaluationReservationSeam = overrides.evaluationReservation ?? {
       root: REPO_ROOT,
@@ -1441,6 +1470,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       checks.push(
         await guarded("measured host binary", async () => {
           const identified = await identifyBinary(overrides.hostBinary ?? {})
+          if (identified.ok) identifiedBinary = identified.binary
           return identified.ok
             ? pass("measured host binary", [`\`${identified.binary}\` has sha256 ${identified.sha256}, the measured build's; read only, not started`])
             : fail("measured host binary", [identified.reason])
@@ -1605,6 +1635,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         started = await (overrides.startHost ?? startManagedHost)({
           mode: "oauth",
           oauth: oauthRoute,
+          ...stageOneBinary(identifiedBinary, overrides.hostBinary),
           verifyDirectories: [directory],
           requestMs: PAIRED_HOST_REQUEST_MS,
           signals: null,

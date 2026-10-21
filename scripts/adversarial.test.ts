@@ -522,10 +522,13 @@ describe("stage 1 on the shipped tree", () => {
 // ---------------------------------------------------------------------------
 
 describe("the run path: all sixteen worktrees, then one host per run", () => {
-  test("happy: sixteen worktrees exist before host 1; sixteen starts and stops in order, each with its own data directory and worktree; the backend is offered StructuredOutput only", async () => {
+  test("happy: sixteen worktrees exist before host 1; sixteen starts and stops in order, each with its own data directory and worktree, on the binary stage 1 identified; the backend is offered StructuredOutput only", async () => {
     const env = await setup()
     let atFirstStart: boolean[] | undefined
     const { overrides, hosts, backends } = await runnable(env)
+    // Stage 1 resolves the stand-in to a real path; every start must spawn that path, identified with the same seam.
+    const binary = { ...measuredBinary(), resolveBinary: async (input: string) => (input === "/stand-in/bin/opencode" ? "/stand-in/real/opencode" : input) }
+    overrides.hostBinary = binary
     const start = hosts.startHost
     overrides.startHost = async (asked) => {
       atFirstStart ??= SLOTS.map((slot) => existsSync(worktreeFor(env.out, slot)))
@@ -544,6 +547,9 @@ describe("the run path: all sixteen worktrees, then one host per run", () => {
       expect(asked.oauth.models).toEqual([{ providerId: "anthropic", modelId: "claude-sonnet-5" }])
       expect(asked.verifyDirectories).toEqual([worktreeFor(env.out, slot)])
       expect(asked.signals).toBeNull()
+      expect(asked.binary).toBe("/stand-in/real/opencode")
+      expect(asked.resolveBinary).toBe(binary.resolveBinary)
+      expect(asked.hashFile).toBe(binary.hashFile)
       expect(hosts.stops.get(slot.position)).toBe(1)
       // The data directory holds only the auth symlink, pointing at the sign-ins, which were never read.
       expect(await readdir(asked.oauth.dataDir)).toEqual(["opencode"])

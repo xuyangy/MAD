@@ -52,6 +52,7 @@ import { main as materializeMain } from "./materialize-labelled-change.ts"
 import { AUTH_CONTENT_MARKER, fakeAuthLink, fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { fakeStore, ROW_CONTENT_MARKER } from "../ablation/oauth-store.fixture.ts"
 import {
+  evaluationIdentityProblems,
   evaluationRunProblems,
   GATE_TABLE_FILE,
   gatesIdentity,
@@ -2053,6 +2054,26 @@ describe("story 2-8d — gate 4's one authorized OAuth evaluation: the roster an
     ])
   })
 
+  test("EVALUATION_RUN passes the shared identity rules; a malformed identity fails them, every problem listed, before any reservation check", async () => {
+    expect(evaluationIdentityProblems()).toEqual([])
+    const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
+    const bad = {
+      ...EVALUATION_RUN,
+      reservation: "ablation/evidence/elsewhere.reservation",
+      prior: [EVALUATION_RUN.prior[0]!, { ...EVALUATION_RUN.prior[1]!, evidence: "docs/run-2.json" }, EVALUATION_RUN.prior[2]!, EVALUATION_RUN.prior[3]!],
+    }
+    const problems = await evaluationRunProblems(OAUTH_PINS, { root, committed: async () => { throw new Error("no reservation check may run") } }, bad)
+    expect(problems).toEqual([
+      `EVALUATION_RUN names its own reservation \`ablation/evidence/elsewhere.reservation\`, which is not \`${EVALUATION_RUN.reservation}\``,
+      "EVALUATION_RUN.prior names run 2's evidence `docs/run-2.json`, which is not a file in ablation/evidence",
+    ])
+    const gapped = { ...EVALUATION_RUN, prior: [EVALUATION_RUN.prior[0]!, EVALUATION_RUN.prior[2]!, EVALUATION_RUN.prior[1]!, EVALUATION_RUN.prior[3]!] }
+    expect(evaluationIdentityProblems(gapped)).toEqual(["EVALUATION_RUN.prior lists runs [1, 3, 2, 4], not exactly runs 1 to 4 before run 5: a gap, a duplicate or a reused run"])
+    expect(evaluationIdentityProblems({ ...EVALUATION_RUN, pins: ["openai/gpt-6-sol", "openai/gpt-6-sol"] })).toEqual([
+      'EVALUATION_RUN.pins ["openai/gpt-6-sol","openai/gpt-6-sol"] is not a non-empty list of distinct `provider/model` pins',
+    ])
+  })
+
   test("the authorized pins with no reservation anywhere pass", async () => {
     const root = await mkdtemp(join(tmpdir(), "mad-evaluation-run-"))
     expect(await evaluationRunProblems(OAUTH_PINS, { root, committed: notCommitted })).toEqual([])
@@ -2561,6 +2582,21 @@ describe("the OAuth route's measured host binary and frozen protocol hash (retro
     expect(result.text).toContain(`reserved gate 4's evaluation run ${EVALUATION_RUN.run}`)
     expect(existsSync(join(env.parent, "reservation-root", EVALUATION_RUN.reservation))).toBe(true)
     expect(binary.reads).toEqual(["/stand-in/bin/opencode"])
+  })
+
+  test("stage 2 starts the host on the real path stage 1 identified, with the stage-1 seam's resolveBinary and hashFile", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const binary = { ...measuredBinary("/stand-in/bin/opencode"), resolveBinary: async (input: string) => (input === "/stand-in/bin/opencode" ? "/stand-in/real/opencode" : input) }
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, hostBinary: binary })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(result.text).toContain("PASS  measured host binary\n        `/stand-in/real/opencode` has sha256")
+    expect(host.started).toHaveLength(1)
+    expect(host.started[0]!.binary).toBe("/stand-in/real/opencode")
+    expect(host.started[0]!.resolveBinary).toBe(binary.resolveBinary)
+    expect(host.started[0]!.hashFile).toBe(binary.hashFile)
+    expect("measured" in host.started[0]!).toBe(false)
   })
 
   test("a binary that is not the measured build fails `measured host binary` with identifyBinary's reason; no reservation, no host", async () => {

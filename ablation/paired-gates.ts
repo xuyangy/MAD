@@ -69,6 +69,8 @@
  * imports it.
  */
 
+import { runIdentityProblems } from "./launch-contract.ts"
+
 export type GateKind = "engineering" | "authorization"
 export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation" | "adversarial"
 export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation", "adversarial"]
@@ -341,44 +343,29 @@ function onePin(pins: unknown): pins is readonly [string] {
 }
 
 /**
- * Why `run` names no usable adversarial run, or `null`. Refused: a run whose
- * pins are not chosen, a reservation that is not the run's own, and a `prior`
- * list that is not exactly runs 1 to N-1 in order, each with its own
- * reservation and a named evidence file.
+ * Why `run` names no usable adversarial run, or `null`: the first problem of
+ * the shared run-identity rules (`ablation/launch-contract.ts`) with a floor of
+ * 1 and `adversarialReservation`, and the adversarial extra: the pins are
+ * chosen and are exactly one `provider/model` pin.
  */
 export function adversarialRunProblem(run: AdversarialRun = ADVERSARIAL_RUN): string | null {
-  if (!Number.isInteger(run.run) || run.run < 1) return `the adversarial run number ${JSON.stringify(run.run)} is not a whole number from 1`
-  if (run.pins === null) {
-    return (
-      `adversarial run ${run.run} has no roster pin: \`ADVERSARIAL_RUN.pins\` is null, which means not yet chosen. The ` +
-      "pin protocol v3 B1 names is set here by a reviewed change to this table"
-    )
-  }
-  if (!onePin(run.pins)) {
-    return `adversarial run ${run.run}'s pins ${JSON.stringify(run.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`
-  }
-  if (run.reservation !== adversarialReservation(run.run)) {
-    return `adversarial run ${run.run}'s reservation \`${run.reservation}\` is not \`${adversarialReservation(run.run)}\``
-  }
-  if (!Array.isArray(run.prior) || run.prior.length !== run.run - 1) {
-    return (
-      `adversarial run ${run.run} must list exactly its ${run.run - 1} earlier run(s) in \`prior\`, and it lists ` +
-      `${Array.isArray(run.prior) ? run.prior.length : "no list"}`
-    )
-  }
-  for (const [index, earlier] of run.prior.entries()) {
-    const expected = index + 1
-    if (earlier === null || typeof earlier !== "object" || earlier.run !== expected) {
-      return `adversarial run ${run.run}'s \`prior\` entry ${expected} is not run ${expected}; the earlier runs are listed 1 to ${run.run - 1}, in order`
-    }
-    if (earlier.reservation !== adversarialReservation(expected)) {
-      return `adversarial run ${run.run}'s \`prior\` run ${expected} names the reservation \`${earlier.reservation}\`, not \`${adversarialReservation(expected)}\``
-    }
-    if (typeof earlier.evidence !== "string" || earlier.evidence.trim().length === 0) {
-      return `adversarial run ${run.run}'s \`prior\` run ${expected} names no evidence file`
-    }
-  }
-  return null
+  const problems = runIdentityProblems(run, {
+    label: "ADVERSARIAL_RUN",
+    floor: 1,
+    reservationOf: adversarialReservation,
+    ownReservation: true,
+    extra: (identity) => {
+      const name = Number.isInteger(identity.run) ? `adversarial run ${identity.run}` : "the adversarial run"
+      if (identity.pins === null) {
+        return [
+          `${name} has no roster pin: \`ADVERSARIAL_RUN.pins\` is null, which means not yet chosen. The ` +
+            "pin protocol v3 B1 names is set here by a reviewed change to this table",
+        ]
+      }
+      return onePin(identity.pins) ? [] : [`${name}'s pins ${JSON.stringify(identity.pins)} are not exactly one \`provider/model\` pin for the one-slot roster`]
+    },
+  })
+  return problems[0] ?? null
 }
 
 /** Story 2-7f5 — one `provider/model` pair the zero-bill probe measured, and the API route the host served it over. */

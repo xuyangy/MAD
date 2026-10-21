@@ -733,7 +733,7 @@ describe("the adversarial phase of the gate table", () => {
       expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins }), JSON.stringify(pins)).toContain("are not exactly one `provider/model` pin")
     }
     expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], reservation: "elsewhere" })).toContain("is not `ablation/evidence/adversarial-oauth-run-1.reservation`")
-    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, run: 0, pins: ["a/b"] })).toContain("is not a whole number from 1")
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, run: 0, pins: ["a/b"] })).toContain("ADVERSARIAL_RUN names run 0, which is not an integer of at least 1")
   })
 
   test("run N lists exactly runs 1 to N-1 in `prior`, in order, each with its own reservation and an evidence file", () => {
@@ -741,17 +741,17 @@ describe("the adversarial phase of the gate table", () => {
     const three = { run: 3, pins: ["anthropic/claude-sonnet-5"], reservation: adversarialReservation(3), prior: [earlier(1), earlier(2)] }
     expect(adversarialRunProblem(three)).toBeNull()
     const cases: [string, typeof three.prior, string][] = [
-      ["none listed", [], "must list exactly its 2 earlier run(s) in `prior`, and it lists 0"],
-      ["one missing", [earlier(1)], "must list exactly its 2 earlier run(s) in `prior`, and it lists 1"],
-      ["one too many", [earlier(1), earlier(2), earlier(3)], "must list exactly its 2 earlier run(s) in `prior`, and it lists 3"],
-      ["out of order", [earlier(2), earlier(1)], "`prior` entry 1 is not run 1"],
-      ["a run repeated", [earlier(1), earlier(1)], "`prior` entry 2 is not run 2"],
-      ["another run's reservation", [earlier(1), { ...earlier(2), reservation: adversarialReservation(1) }], "`prior` run 2 names the reservation"],
-      ["no evidence", [earlier(1), { ...earlier(2), evidence: " " }], "`prior` run 2 names no evidence file"],
+      ["none listed", [], "ADVERSARIAL_RUN.prior lists runs [], not exactly runs 1 to 2 before run 3"],
+      ["one missing", [earlier(1)], "ADVERSARIAL_RUN.prior lists runs [1], not exactly runs 1 to 2 before run 3"],
+      ["one too many", [earlier(1), earlier(2), earlier(3)], "ADVERSARIAL_RUN.prior lists runs [1, 2, 3], not exactly runs 1 to 2 before run 3"],
+      ["out of order", [earlier(2), earlier(1)], "ADVERSARIAL_RUN.prior lists runs [2, 1], not exactly runs 1 to 2 before run 3"],
+      ["a run repeated", [earlier(1), earlier(1)], "ADVERSARIAL_RUN.prior lists runs [1, 1], not exactly runs 1 to 2 before run 3"],
+      ["another run's reservation", [earlier(1), { ...earlier(2), reservation: adversarialReservation(1) }], "ADVERSARIAL_RUN.prior names run 2's reservation"],
+      ["no evidence", [earlier(1), { ...earlier(2), evidence: " " }], "ADVERSARIAL_RUN.prior names run 2's evidence ` `, which is not a file in ablation/evidence"],
     ]
     for (const [name, prior, why] of cases) expect(adversarialRunProblem({ ...three, prior }), name).toContain(why)
     // Run 1 has no earlier run, and listing one is refused.
-    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], prior: [earlier(1)] })).toContain("must list exactly its 0 earlier run(s)")
+    expect(adversarialRunProblem({ ...ADVERSARIAL_RUN, pins: ["a/b"], prior: [earlier(1)] })).toContain("ADVERSARIAL_RUN.prior lists runs [1], not exactly runs [] before run 1")
   })
 })
 
@@ -1010,7 +1010,7 @@ describe("gate 11's evidence scope", () => {
     const run = { run: 2, pins: ["openai/gpt-6-sol"], reservation: adversarialReservation(2), prior: [] }
     const problems = gatePreflight(allClosed, "adversarial", "oauth", undefined, run).problems
     expect(problems).toEqual([adversarialRunProblem(run)!, scopeProblem("openai/gpt-6-sol", 2)])
-    expect(problems[0]).toContain("must list exactly its 1 earlier run(s)")
+    expect(problems[0]).toContain("ADVERSARIAL_RUN.prior lists runs [], not exactly runs [1] before run 2")
   })
 
   test("the scope is consulted when the supplied table has gate 11 OPEN", () => {
