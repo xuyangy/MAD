@@ -145,7 +145,13 @@ import {
   type Side,
 } from "./adversarial-schedule.ts"
 import { writeArmDump, writeBundleIndex } from "./bundle.ts"
-import { ADVERSARIAL_ALLOWANCES, governorStateFromBill, HALT_MARKER_FILE, type ExperimentGovernorState } from "./governor.ts"
+import {
+  ADVERSARIAL_ALLOWANCES,
+  governorStateFromBill,
+  HALT_MARKER_FILE,
+  sealedAdversarialAttemptAllowances,
+  type ExperimentGovernorState,
+} from "./governor.ts"
 import {
   acquireLock,
   JOURNAL_FILE,
@@ -561,10 +567,16 @@ export async function runAdversarialSuite(input: RunAdversarialSuiteInput): Prom
     const schedule = verified.schedule
 
     // The journal first: a halted or stopped experiment refuses before anything
-    // is written under `adversarial/`.
-    const opened = attempts
-      ? await openJournal(root, lock, () => input.clock.now(), undefined, "attempts", "adversarial")
-      : await openJournal(root, lock, () => input.clock.now())
+    // is written under `adversarial/`. Its overshoot report uses the sealed
+    // allowances, which the schedule load above already held to the constants.
+    let opened: Awaited<ReturnType<typeof openJournal>>
+    if (attempts) {
+      const sealed = sealedAdversarialAttemptAllowances(schedule.config.attemptAllowances)
+      if (!sealed.ok) return await refuse(`the adversarial schedule's attempt allowances cannot be read: ${sealed.reason}`)
+      opened = await openJournal(root, lock, () => input.clock.now(), undefined, "attempts", "adversarial", sealed.allowances)
+    } else {
+      opened = await openJournal(root, lock, () => input.clock.now())
+    }
     if (!opened.ok) return await refuse(opened.reason)
     journal = opened.journal
     const before = journal.bill()

@@ -515,6 +515,67 @@ export const ATTEMPT_ALLOWANCES = {
   continuation: 45,
 } as const
 
+/** Paired attempt allowances of `ATTEMPT_ALLOWANCES`' shape, with any values: the constants, or a sealed config's. */
+export type AttemptAllowances = { readonly [K in keyof typeof ATTEMPT_ALLOWANCES]: number }
+
+/** What a reader made of a sealed `attemptAllowances` field. */
+export type SealedAllowances<T> = { ok: true; allowances: T } | { ok: false; reason: string }
+
+/**
+ * A sealed allowance object checked against the keys `current` names: present,
+ * a plain object, exactly those keys, each value a positive integer. The reason
+ * names the sealed field. Never falls back to `current`'s values.
+ */
+function sealedAllowancesOf<T>(value: unknown, current: Readonly<Record<string, number>>, field: string): SealedAllowances<T> {
+  if (value === undefined) return { ok: false, reason: `the sealed \`${field}\` is absent` }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, reason: `the sealed \`${field}\` is ${JSON.stringify(value)}, not an object` }
+  }
+  const record = value as Record<string, unknown>
+  const expected = Object.keys(current)
+  const extra = Object.keys(record).filter((key) => !expected.includes(key))
+  if (extra.length > 0) {
+    return { ok: false, reason: `the sealed \`${field}\` carries ${extra.map((key) => `\`${key}\``).join(", ")}, which it never holds` }
+  }
+  const allowances: Record<string, number> = {}
+  for (const key of expected) {
+    const entry = record[key]
+    if (entry === undefined) return { ok: false, reason: `the sealed \`${field}.${key}\` is absent` }
+    if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 1) {
+      return { ok: false, reason: `the sealed \`${field}.${key}\` is ${JSON.stringify(entry)}, not a positive integer` }
+    }
+    allowances[key] = entry
+  }
+  return { ok: true, allowances: allowances as T }
+}
+
+/** A paired schedule's sealed `config.attemptAllowances`, validated against `ATTEMPT_ALLOWANCES`' keys. */
+export function sealedAttemptAllowances(value: unknown): SealedAllowances<AttemptAllowances> {
+  return sealedAllowancesOf<AttemptAllowances>(value, ATTEMPT_ALLOWANCES, "config.attemptAllowances")
+}
+
+/** One allowance field whose sealed value is not the current constant's. */
+export interface AllowanceDifference {
+  field: string
+  sealed: number
+  current: number
+}
+
+/** The fields, in `current`'s key order, where `sealed` and `current` differ. Empty when they agree. */
+export function allowanceDifferences<T extends Readonly<Record<keyof T, number>>>(sealed: T, current: T): AllowanceDifference[] {
+  return (Object.keys(current) as (keyof T & string)[])
+    .filter((field) => sealed[field] !== current[field])
+    .map((field) => ({ field, sealed: sealed[field], current: current[field] }))
+}
+
+/** One line naming each field that differs, sealed vs current. Only meaningful for a non-empty list. */
+export function allowanceDifferenceText(differences: readonly AllowanceDifference[]): string {
+  return (
+    "the thresholds are the ones the schedule sealed, which differ from the current constants: " +
+    differences.map((entry) => `${entry.field} sealed ${entry.sealed}, current ${entry.current}`).join("; ")
+  )
+}
+
 /** The four allowance categories the protocol names. `blocks` and `adversarial` are wired. */
 export type AllowanceCategory = "blocks" | "adversarial" | "calibration" | "pilot"
 
@@ -785,6 +846,14 @@ export const ADVERSARIAL_ATTEMPT_ALLOWANCES = {
   global: 480,
   runs: 16,
 } as const
+
+/** Adversarial attempt allowances of `ADVERSARIAL_ATTEMPT_ALLOWANCES`' shape, with any values. */
+export type AdversarialAttemptAllowances = { readonly [K in keyof typeof ADVERSARIAL_ATTEMPT_ALLOWANCES]: number }
+
+/** An adversarial schedule's sealed `config.attemptAllowances`, validated against `ADVERSARIAL_ATTEMPT_ALLOWANCES`' keys. */
+export function sealedAdversarialAttemptAllowances(value: unknown): SealedAllowances<AdversarialAttemptAllowances> {
+  return sealedAllowancesOf<AdversarialAttemptAllowances>(value, ADVERSARIAL_ATTEMPT_ALLOWANCES, "config.attemptAllowances")
+}
 
 /**
  * Story 2-7e — may the suite issue one more attempt for the run `runId`?

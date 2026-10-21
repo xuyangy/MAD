@@ -45,7 +45,7 @@ import {
   type PairDifference,
 } from "./evaluation-report.ts"
 import { fraction, fractionText, meanText } from "./fraction.ts"
-import { HALT_MARKER_FILE } from "./governor.ts"
+import { ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import { JOURNAL_FILE } from "./journal.ts"
 import { readPersistedJournal } from "./journal-read.ts"
 import { readLabelledBundle } from "./labelled-read.ts"
@@ -1217,6 +1217,7 @@ describe("attempt mode (story 2-8c3a)", () => {
   function markAttempts(paired: PairedReadResult): void {
     if (!paired.schedule.ok) throw new Error("expected a schedule")
     paired.schedule.schedule.config.accounting = "attempts"
+    paired.schedule.schedule.config.attemptAllowances = { ...ATTEMPT_ALLOWANCES }
     paired.schedule.schedule.protocol.version = 2
     for (const block of paired.blocks) for (const arm of block.arms) arm.experiment = { ...arm.experiment, accounting: "attempts" }
   }
@@ -1368,7 +1369,7 @@ describe("attempt mode (story 2-8c3a)", () => {
     const { root } = await bundleAt()
     const paired = await pairedOf(root)
     const read = await journalOf([...attempt(1, "on", { stage: "debate" }), ...attempt(1, "on", { stage: "debate", attempt: 2 }), ...attempt(1, "off", { stage: "judge" })])
-    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots, ATTEMPT_ALLOWANCES)
     if (result.kind !== "read") throw new Error("expected counts")
     expect(result.on).toEqual({ first: 1, retries: 1, total: 2 })
     expect(result.rows.find((row) => row.phase === "on")).toMatchObject({ stage: "debate", slot: "discovery-1", first: 1, retries: 1 })
@@ -1380,7 +1381,7 @@ describe("attempt mode (story 2-8c3a)", () => {
     const paired = await pairedOf(root)
     const read = await journalOf([...attempt(1, "on"), ...attempt(1, "off")])
     for (const slots of [[], completedSlots.filter((slot) => !(slot.block === 1 && slot.arm === "off"))]) {
-      const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], slots)
+      const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], slots, ATTEMPT_ALLOWANCES)
       if (result.kind !== "read") throw new Error("expected counts")
       expect(result.contrast.kind).toBe("unavailable")
       if (result.contrast.kind === "unavailable") expect(result.contrast.reason).toContain("slot has no recorded status")
@@ -1392,7 +1393,7 @@ describe("attempt mode (story 2-8c3a)", () => {
     const paired = await pairedOf(root)
     const lines = [...Array.from({ length: 46 }, () => attempt(1, "on")).flat(), ...attempt(1, "off")]
     const read = await journalOf(lines)
-    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots, ATTEMPT_ALLOWANCES)
     if (result.kind !== "read") throw new Error("expected counts")
     expect(result.thresholds.on).toEqual({ limit: 45, spent: 46, overshoot: 1 })
     expect(result.thresholds.prefix).toEqual({ limit: 10, spent: 0, overshoot: 0 })
@@ -1405,11 +1406,94 @@ describe("attempt mode (story 2-8c3a)", () => {
     expect(text).toContain("block (prefix once + both continuations): 47 newly issued attempt(s); realised 47 of the 100-attempt threshold")
   })
 
+  test("sealed allowances equal to the constants print no disclosure line", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    const [labelled, adjudication] = await readers(paired)
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: await journalOf(attempt(1, "prefix")) })
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.allowanceDifferences).toBeUndefined()
+    expect(renderEvaluationReport(report)).not.toContain("THRESHOLDS:")
+  })
+
+  test("sealed allowances that differ are the thresholds: a prefix of 7 against a sealed 5, with one disclosure line", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    if (!paired.schedule.ok) throw new Error("expected a schedule")
+    paired.schedule.schedule.config.attemptAllowances = { ...ATTEMPT_ALLOWANCES, prefix: 5 }
+    const [labelled, adjudication] = await readers(paired)
+    // The journal as the script reads it: replayed against the same sealed allowances.
+    const read = await journalOf(Array.from({ length: 7 }, () => attempt(1, "prefix")).flat())
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: read })
+    if (report.kind !== "read") throw new Error("expected a report")
+    const block1 = report.blocks[0]!.attempts!
+    if (block1.kind !== "read") throw new Error(JSON.stringify(block1))
+    expect(block1.thresholds.prefix).toEqual({ limit: 5, spent: 7, overshoot: 2 })
+    expect(report.allowanceDifferences).toEqual([{ field: "prefix", sealed: 5, current: 10 }])
+    const text = renderEvaluationReport(report)
+    expect(text).toContain("shared prefix, counted once: 7 attempt(s) (7 first, 0 retries); realised 7 of the 5-attempt threshold, OVERSHOT by 2")
+    expect(text.split("\n").filter((line) => line.startsWith("  THRESHOLDS:"))).toEqual([
+      "  THRESHOLDS: the thresholds are the ones the schedule sealed, which differ from the current constants: prefix sealed 5, current 10",
+    ])
+  })
+
+  test("missing or malformed sealed allowances make the attempts unavailable, naming the field, never the constants", async () => {
+    const variants: [string, unknown, string][] = [
+      ["absent", undefined, "the sealed `config.attemptAllowances` is absent"],
+      ["non-integer", { ...ATTEMPT_ALLOWANCES, block: 99.5 }, "`config.attemptAllowances.block` is 99.5, not a positive integer"],
+      ["zero", { ...ATTEMPT_ALLOWANCES, prefix: 0 }, "`config.attemptAllowances.prefix` is 0, not a positive integer"],
+      ["missing key", { global: 300, blocks: 300, block: 100, prefix: 10 }, "the sealed `config.attemptAllowances.continuation` is absent"],
+      ["extra key", { ...ATTEMPT_ALLOWANCES, run: 30 }, "carries `run`, which it never holds"],
+    ]
+    for (const [name, allowances, why] of variants) {
+      const { root } = await bundleAt()
+      const paired = await pairedOf(root)
+      markAttempts(paired)
+      if (!paired.schedule.ok) throw new Error("expected a schedule")
+      if (allowances === undefined) delete paired.schedule.schedule.config.attemptAllowances
+      else paired.schedule.schedule.config.attemptAllowances = allowances
+      const [labelled, adjudication] = await readers(paired)
+      const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: await journalOf(attempt(1, "prefix")) })
+      if (report.kind !== "read") throw new Error("expected a report")
+      for (const block of report.blocks) {
+        if (block.attempts?.kind !== "unavailable") throw new Error(`${name}: expected unavailable, got ${JSON.stringify(block.attempts)}`)
+        expect(block.attempts.reason, name).toStartWith("the attempt thresholds are unavailable: ")
+        expect(block.attempts.reason, name).toContain(why)
+      }
+      expect(report.allowanceDifferences, name).toBeUndefined()
+      const text = renderEvaluationReport(report)
+      expect(text, name).toContain(`attempts UNAVAILABLE — the attempt thresholds are unavailable: `)
+      expect(text, name).not.toContain("-attempt threshold")
+    }
+  })
+
+  test("a refused paired schedule makes the block attempts unavailable, citing the refused schedule", async () => {
+    const { root } = await bundleAt()
+    const paired = await pairedOf(root)
+    markAttempts(paired)
+    for (const block of paired.blocks) for (const arm of block.arms) arm.row.manifest.identity.protocolVersion = { kind: "known", value: 2 } as never
+    paired.schedule = { ok: false, reason: "the schedule was edited after it was sealed" }
+    const [labelled, adjudication] = await readers(paired)
+    const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: await journalOf(attempt(1, "prefix")) })
+    if (report.kind !== "read") throw new Error("expected a report")
+    expect(report.accounting).toBe("attempts")
+    for (const block of report.blocks) {
+      expect(block.attempts).toEqual({
+        kind: "unavailable",
+        reason:
+          "the attempt thresholds are unavailable: the sealed schedule is refused, so its attempt allowances cannot be read: " +
+          "the schedule was edited after it was sealed",
+      })
+    }
+  })
+
   test("the prefix rows name their model source honestly: a continuation manifest, same roster", async () => {
     const { root } = await bundleAt()
     const paired = await pairedOf(root)
     const read = await journalOf(attempt(1, "prefix"))
-    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots)
+    const result = blockAttempts(read.bill, "source", 1, paired.blocks[0], completedSlots, ATTEMPT_ALLOWANCES)
     if (result.kind !== "read") throw new Error("expected counts")
     expect(result.rows[0]!.modelSource).toMatch(/^continuation manifest `.+`, same roster$/)
   })

@@ -12,7 +12,7 @@ import { join } from "node:path"
 
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import type { AdmissionDecision } from "../core/ports/admission.ts"
-import { ADVERSARIAL_ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
+import { ADVERSARIAL_ATTEMPT_ALLOWANCES, ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import {
   acquireLock,
   ATTEMPT_MODE_STOP_PREFIX,
@@ -669,5 +669,88 @@ describe("publishExclusive", () => {
     const outcome = await publishExclusive(root, "doc.json", "x", "a schedule")
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) expect(outcome.reason).toContain("a schedule's temporary file")
+  })
+})
+
+describe("the allowances the overshoot report is computed against", () => {
+  const SEALED = { run: 20, suite: 320, global: 320, runs: 16 }
+
+  async function openWith(root: string, mode: "attempts" | "tokens", scope: "paired" | "adversarial", allowances: unknown) {
+    const lock = await acquireLock(root, now())
+    if (!lock.ok) throw new Error(lock.reason)
+    const outcome = await openJournal(root, lock.lock, now, undefined, mode, scope, allowances as never)
+    if (!outcome.ok) await lock.lock.release()
+    return outcome
+  }
+
+  /** `count` settled paired attempts in block 1's prefix. */
+  function prefixLines(count: number): string {
+    let text = ""
+    for (let index = 0; index < count; index += 1) {
+      const physicalId = `p-${index}`
+      text += `${JSON.stringify({ type: "issued", physicalId, category: "blocks", block: 1, phase: "prefix", stage: "discover", slot: "discovery-1", attempt: 1, runId: "run-p", mode: "attempts" })}\n`
+      text += `${JSON.stringify({ type: "settled", physicalId, settlement: USAGE })}\n`
+    }
+    return text
+  }
+
+  test("an adversarial journal given allowances reports against them, and admission still uses the constants", async () => {
+    const root = await tempDir()
+    await writeFile(join(root, JOURNAL_FILE), seededLines("run-1", 25))
+    const opened = await openWith(root, "attempts", "adversarial", SEALED)
+    if (!opened.ok) throw new Error(opened.reason)
+    const journal = opened.journal
+    expect(journal.bill().overshoot).toMatchObject({
+      global: { limit: 320, spent: 25, overshoot: 0 },
+      adversarial: { limit: 320, spent: 25, overshoot: 0 },
+      runTotals: [{ runId: "run-1", limit: 20, spent: 25, overshoot: 5 }],
+    })
+    // 25 is under the constant's 30, so the 26th attempt is admitted.
+    const decision = await runOf(journal, "run-1").admit(discover)
+    expect(decision.ok).toBe(true)
+    if (decision.ok) await decision.settle(USAGE)
+    expect(journal.bill().overshoot.runTotals).toEqual([{ runId: "run-1", limit: 20, spent: 26, overshoot: 6 }])
+    await journal.close()
+  })
+
+  test("a replay given paired allowances reports against them: a prefix of 7 against a sealed 5 overshoots by 2", async () => {
+    const file = join(await tempDir(), JOURNAL_FILE)
+    await writeFile(file, prefixLines(7))
+    const sealed = { global: 300, blocks: 300, block: 100, prefix: 5, continuation: 45 }
+    const replayed = await replayPersistedJournal(file, "attempts", "paired", sealed)
+    if (!replayed.ok) throw new Error(replayed.reason)
+    expect(replayed.bill.overshoot.phases).toEqual([{ block: 1, phase: "prefix", limit: 5, spent: 7, overshoot: 2 }])
+  })
+
+  test("with no allowances given, the bill is the one the constants give: callers with no schedule are unchanged", async () => {
+    const adversarial = join(await tempDir(), JOURNAL_FILE)
+    await writeFile(adversarial, seededLines("run-1", 31))
+    const byDefault = await replayPersistedJournal(adversarial, "attempts", "adversarial")
+    const byConstants = await replayPersistedJournal(adversarial, "attempts", "adversarial", { ...ADVERSARIAL_ATTEMPT_ALLOWANCES })
+    if (!byDefault.ok || !byConstants.ok) throw new Error("expected both replays")
+    expect(byDefault.bill).toEqual(byConstants.bill)
+    expect(byDefault.bill.overshoot.runTotals).toEqual([{ runId: "run-1", limit: 30, spent: 31, overshoot: 1 }])
+
+    const paired = join(await tempDir(), JOURNAL_FILE)
+    await writeFile(paired, prefixLines(11))
+    const pairedDefault = await replayPersistedJournal(paired, "attempts", "paired")
+    const pairedConstants = await replayPersistedJournal(paired, "attempts", "paired", { ...ATTEMPT_ALLOWANCES })
+    if (!pairedDefault.ok || !pairedConstants.ok) throw new Error("expected both replays")
+    expect(pairedDefault.bill).toEqual(pairedConstants.bill)
+    expect(pairedDefault.bill.overshoot.phases).toEqual([{ block: 1, phase: "prefix", limit: 10, spent: 11, overshoot: 1 }])
+  })
+
+  test("allowances of the wrong shape for the scope, or given to a token-mode journal, refuse to open", async () => {
+    const wrongScope = await openWith(await tempDir(), "attempts", "paired", SEALED)
+    expect(wrongScope.ok).toBe(false)
+    if (!wrongScope.ok) expect(wrongScope.reason).toContain("are not the paired scope's")
+    const malformed = await openWith(await tempDir(), "attempts", "adversarial", { ...SEALED, run: 0 })
+    expect(malformed.ok).toBe(false)
+    if (!malformed.ok) expect(malformed.reason).toContain("`config.attemptAllowances.run` is 0, not a positive integer")
+    const tokens = await openWith(await tempDir(), "tokens", "paired", { ...ATTEMPT_ALLOWANCES })
+    expect(tokens.ok).toBe(false)
+    if (!tokens.ok) expect(tokens.reason).toContain("read in tokens mode, which counts no attempts")
+    const replayed = await replayPersistedJournal(join(await tempDir(), JOURNAL_FILE), undefined, "paired", { ...ATTEMPT_ALLOWANCES })
+    expect(replayed.ok).toBe(false)
   })
 })

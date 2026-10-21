@@ -85,7 +85,14 @@ import {
 } from "./adversarial-schedule.ts"
 import { verdictState } from "./compare.ts"
 import type { AttemptCount, AttemptThreshold } from "./evaluation-report.ts"
-import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "./governor.ts"
+import {
+  ADVERSARIAL_ATTEMPT_ALLOWANCES,
+  allowanceDifferences,
+  allowanceDifferenceText,
+  sealedAdversarialAttemptAllowances,
+  type AdversarialAttemptAllowances,
+  type AllowanceDifference,
+} from "./governor.ts"
 import { isJournalLine, JOURNAL_FILE, replayPersistedJournal, type BilledRequest } from "./journal.ts"
 import { MANIFEST_FILE, type RunManifest } from "./manifest.ts"
 import { parseManifest } from "./read-bundle.ts"
@@ -685,16 +692,30 @@ export type RefusalEvidence =
   | { kind: "read"; refusals: { label: string; stage: string; cause: string; reason: string; attempt?: number }[] }
   | { kind: "missing"; reason: string }
 
+/**
+ * The thresholds an exposure report applies: the schedule's sealed
+ * `config.attemptAllowances`, with each field that differs from the current
+ * constants, or `null` when the sealed value is missing or malformed (the
+ * exposure is then unavailable, with the reason).
+ */
+export interface ExposureThresholds {
+  allowances: AdversarialAttemptAllowances
+  /** Fields where the sealed value is not `ADVERSARIAL_ATTEMPT_ALLOWANCES`'. Empty when they agree. */
+  differences: AllowanceDifference[]
+}
+
 export type AttemptExposure =
   | {
       kind: "unavailable"
       reason: string
+      thresholds: ExposureThresholds | null
       /** A count the readable part of the journal still supports, with what it counts. Never the whole. */
       lowerBound?: { issued: number; reason: string }
       refusals: RefusalEvidence
     }
   | {
       kind: "read"
+      thresholds: ExposureThresholds
       /** The journal the counts were replayed from. */
       source: string
       /** `exact` when the admission evidence is complete and consistent; else a lower bound, with `issuedReason`. */
@@ -791,11 +812,16 @@ async function readAttemptExposure(
 ): Promise<AttemptExposure> {
   const refusals = refusalEvidence(bill, schedule.scheduleHash)
   const file = join(root, JOURNAL_FILE)
+  const sealed = sealedAdversarialAttemptAllowances(schedule.config.attemptAllowances)
+  const thresholds: ExposureThresholds | null = sealed.ok
+    ? { allowances: sealed.allowances, differences: allowanceDifferences(sealed.allowances, ADVERSARIAL_ATTEMPT_ALLOWANCES) }
+    : null
   const unavailable = async (reason: string): Promise<AttemptExposure> => {
     const supported = await supportedLowerBound(file)
     return {
       kind: "unavailable",
       reason,
+      thresholds,
       ...(supported === null || supported === 0
         ? {}
         : {
@@ -807,9 +833,13 @@ async function readAttemptExposure(
       refusals,
     }
   }
+  // The thresholds are the ones the schedule sealed. Missing or malformed, they
+  // are unavailable, never the constants'.
+  if (!sealed.ok) return unavailable(`the attempt thresholds are unavailable: ${sealed.reason}`)
+  const limits = sealed.allowances
   let replayed: Awaited<ReturnType<typeof replayPersistedJournal>>
   try {
-    replayed = await replayPersistedJournal(file, "attempts", "adversarial")
+    replayed = await replayPersistedJournal(file, "attempts", "adversarial", limits)
   } catch (error) {
     return unavailable(`the journal \`${file}\` could not be replayed: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -828,6 +858,7 @@ async function readAttemptExposure(
     // double them, and choosing one would be a guess.
     return {
       kind: "unavailable",
+      thresholds,
       reason:
         `slots ${shared[1].join(" and ")} both name run \`${shared[0]}\`, so its attempts cannot be attributed to one run or one side ` +
         "without counting them twice",
@@ -836,7 +867,6 @@ async function readAttemptExposure(
   }
   const journal = replayed.bill
   const mine = journal.requests.filter((request) => request.category === "adversarial")
-  const limits = ADVERSARIAL_ATTEMPT_ALLOWANCES
   const threshold = (limit: number, spent: number): AttemptThreshold => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
   const byRun = (runId: string | undefined): BilledRequest[] => (runId === undefined ? [] : mine.filter((request) => request.runId === runId))
   const labelOf = (slot: AdversarialSlot): string => `${slot.caseId} ${slot.side}`
@@ -860,6 +890,7 @@ async function readAttemptExposure(
   const integrity = journal.integrity.length
   return {
     kind: "read",
+    thresholds: { allowances: limits, differences: allowanceDifferences(limits, ADVERSARIAL_ATTEMPT_ALLOWANCES) },
     source: replayed.existed ? `\`${file}\`, replayed` : `no journal exists at \`${file}\`, and the schedule was not started`,
     issued: integrity === 0 ? "exact" : "lower-bound",
     issuedReason:
@@ -906,9 +937,13 @@ function refusalLines(refusals: RefusalEvidence): string[] {
 }
 
 function exposureLines(exposure: AttemptExposure): string[] {
-  const limits = ADVERSARIAL_ATTEMPT_ALLOWANCES
+  const thresholds = exposure.thresholds
+  const limits = thresholds?.allowances
   const lines = [
-    `EXPOSURE — issued MAD attempts against the thresholds ${limits.run} per run, ${limits.suite} for the suite, ${limits.global} for the root`,
+    limits === undefined
+      ? "EXPOSURE — issued MAD attempts; the thresholds the schedule sealed are UNAVAILABLE"
+      : `EXPOSURE — issued MAD attempts against the thresholds ${limits.run} per run, ${limits.suite} for the suite, ${limits.global} for the root`,
+    ...(thresholds === null || thresholds.differences.length === 0 ? [] : [`  THRESHOLDS: ${allowanceDifferenceText(thresholds.differences)}`]),
     `  ${EXPOSURE_NOT_A_COST}`,
     `  ${EXPOSURE_UNMEASURED}`,
   ]

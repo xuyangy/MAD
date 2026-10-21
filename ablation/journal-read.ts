@@ -17,6 +17,11 @@
  * - any request issued and never settled (uncertain), because its ending is not
  *   established and the count would be read as final.
  *
+ * The bill's overshoot report is computed against the allowances the caller
+ * hands in. `readPairedAttemptJournal` hands in the sealed schedule's
+ * `config.attemptAllowances` and refuses, naming the field, when they are
+ * missing or malformed; it never falls back to the constants.
+ *
  * It never writes, never takes the lock, and never throws.
  *
  * AD-1: this tree may import from `core/`. Nothing under `core/` imports it.
@@ -24,19 +29,29 @@
 
 import { join, resolve } from "node:path"
 
-import type { AccountingMode } from "./governor.ts"
+import { sealedAttemptAllowances, type AccountingMode, type AttemptAllowances } from "./governor.ts"
 import { JOURNAL_FILE, replayPersistedJournal, type UniqueExecutionBill } from "./journal.ts"
+import type { ScheduleRead } from "./schedule.ts"
 
 export type JournalReadOutcome =
   | { ok: true; file: string; mode: AccountingMode; bill: UniqueExecutionBill }
   | { ok: false; file: string; reason: string }
 
-/** Read and validate the bundle root's journal. `expected`, when given, is the mode it must record. */
-export async function readPersistedJournal(bundleRoot: string, expected?: AccountingMode): Promise<JournalReadOutcome> {
+/**
+ * Read and validate the bundle root's journal. `expected`, when given, is the
+ * mode it must record. `allowances`, when given, are the paired attempt
+ * allowances the bill's overshoot report uses, and need `expected` `attempts`;
+ * the constants apply when absent.
+ */
+export async function readPersistedJournal(
+  bundleRoot: string,
+  expected?: AccountingMode,
+  allowances?: AttemptAllowances,
+): Promise<JournalReadOutcome> {
   const file = join(resolve(bundleRoot), JOURNAL_FILE)
   const refuse = (reason: string): JournalReadOutcome => ({ ok: false, file, reason })
   try {
-    const replayed = await replayPersistedJournal(file, expected, "paired")
+    const replayed = await replayPersistedJournal(file, expected, "paired", allowances)
     if (!replayed.ok) return refuse(replayed.reason)
     if (!replayed.existed) return refuse(`the journal \`${file}\` does not exist, so nothing it admitted can be read`)
     const bill = replayed.bill
@@ -56,4 +71,18 @@ export async function readPersistedJournal(bundleRoot: string, expected?: Accoun
   } catch (error) {
     return refuse(`the journal \`${file}\` could not be read: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+/**
+ * An attempt-mode bundle's journal, read against the allowances its sealed
+ * schedule recorded. A refused schedule, or a sealed `config.attemptAllowances`
+ * that is missing or malformed, refuses with the reason: the thresholds are then
+ * unavailable, never the constants'. Never throws.
+ */
+export async function readPairedAttemptJournal(bundleRoot: string, schedule: ScheduleRead): Promise<JournalReadOutcome> {
+  const file = join(resolve(bundleRoot), JOURNAL_FILE)
+  if (!schedule.ok) return { ok: false, file, reason: `the sealed schedule is refused, so its attempt allowances cannot be read: ${schedule.reason}` }
+  const sealed = sealedAttemptAllowances(schedule.schedule.config.attemptAllowances)
+  if (!sealed.ok) return { ok: false, file, reason: `the attempt thresholds are unavailable: ${sealed.reason}` }
+  return readPersistedJournal(bundleRoot, "attempts", sealed.allowances)
 }

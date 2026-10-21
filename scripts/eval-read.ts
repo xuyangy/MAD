@@ -68,7 +68,7 @@ import { readAdversarialBundle, renderAdversarialBundle } from "../ablation/adve
 import { ADVERSARIAL_DIRECTORY, ADVERSARIAL_SCHEDULE_FILE, hasAdversarialSchedule } from "../ablation/adversarial-schedule.ts"
 import { BUNDLE_FILE } from "../ablation/bundle.ts"
 import { bundleAccounting, readEvaluationReport, renderEvaluationReport, settle } from "../ablation/evaluation-report.ts"
-import { readPersistedJournal } from "../ablation/journal-read.ts"
+import { readPairedAttemptJournal } from "../ablation/journal-read.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
@@ -173,10 +173,13 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
       }
       // The evaluation report reads no file. It composes the three results
       // above, a reader's error included, in its own `try`. An attempt-mode
-      // bundle's cost comes from its persisted journal, read and validated here.
+      // bundle's cost comes from its persisted journal, read and validated here
+      // against the attempt allowances its sealed schedule recorded.
       try {
         const journal =
-          bundleAccounting(paired).kind === "attempts" ? await settle(() => readPersistedJournal(target, "attempts")) : undefined
+          bundleAccounting(paired).kind === "attempts"
+            ? await settle(() => readPairedAttemptJournal(target, paired.schedule))
+            : undefined
         const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, journal)
         if (report.kind !== "not-applicable") console.log(renderEvaluationReport(report))
       } catch (error) {

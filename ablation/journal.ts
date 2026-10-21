@@ -39,7 +39,9 @@
  * `openJournal` takes the accounting mode, `tokens` by default. In `attempts`
  * mode a line is an admitted attempt, never a physical request, and every
  * `issued` line says so with `mode: "attempts"`. The gates count attempts in
- * every issued state against `ATTEMPT_ALLOWANCES`; host-reported tokens are
+ * every issued state against `ATTEMPT_ALLOWANCES`, and the bill's overshoot
+ * report against the allowances `openJournal` was given (the constants by
+ * default; see "The allowances" there); host-reported tokens are
  * kept on the bill as unverified diagnostics and reach no gate. An `unknown`
  * settlement latches nothing. The halt still latches, worded with
  * `ATTEMPT_MODE_STOP_PREFIX`, on an integrity failure, on an attempt in flight at
@@ -57,7 +59,8 @@
  *   Its lines carry no `scope` field, and it refuses Adversarial work.
  * - `adversarial` is the journal of the adversarial suite's own root (protocol
  *   v3 B5): the gate is `adversarialAttemptGate` over
- *   `ADVERSARIAL_ATTEMPT_ALLOWANCES`, every `issued` line says
+ *   `ADVERSARIAL_ATTEMPT_ALLOWANCES` (the overshoot report uses the allowances
+ *   given, those constants by default), every `issued` line says
  *   `scope: "adversarial"` and belongs to the Adversarial category, and Blocks
  *   work is refused before anything is appended.
  *
@@ -90,6 +93,10 @@ import {
   ADVERSARIAL_ALLOWANCES,
   ADVERSARIAL_ATTEMPT_ALLOWANCES,
   ATTEMPT_ALLOWANCES,
+  sealedAdversarialAttemptAllowances,
+  sealedAttemptAllowances,
+  type AdversarialAttemptAllowances,
+  type AttemptAllowances,
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
   requestGate,
@@ -105,6 +112,23 @@ export const LOCK_FILE = "paired.lock"
 
 /** Story 2-7e — whose allowances an attempt-mode journal applies. See the module header. */
 export type JournalScope = "paired" | "adversarial"
+
+/**
+ * The attempt allowances an attempt-mode journal's overshoot report is computed
+ * against: the paired shape for the paired scope, the adversarial shape for the
+ * adversarial scope. A runner passes its sealed schedule's; a caller with no
+ * schedule passes none, and the scope's constants apply. Admission always uses
+ * the constants.
+ */
+export type JournalAllowances = AttemptAllowances | AdversarialAttemptAllowances
+
+/** Why `allowances` cannot be this journal's, or `null`. Absent allowances always fit. */
+function allowancesProblem(mode: AccountingMode | undefined, scope: JournalScope | undefined, allowances: JournalAllowances | undefined): string | null {
+  if (allowances === undefined) return null
+  if (mode !== "attempts") return `attempt allowances were given to a journal read in ${mode ?? "tokens"} mode, which counts no attempts`
+  const checked = scope === "adversarial" ? sealedAdversarialAttemptAllowances(allowances) : sealedAttemptAllowances(allowances)
+  return checked.ok ? null : `the attempt allowances given are not the ${scope ?? "paired"} scope's: ${checked.reason}`
+}
 
 // ---------------------------------------------------------------------------
 // The lock
@@ -474,6 +498,8 @@ class JournalState {
   constructor(
     readonly mode: AccountingMode = "tokens",
     readonly scope: JournalScope = "paired",
+    /** The attempt allowances the overshoot report is computed against; the scope's constants when absent. */
+    readonly allowances?: JournalAllowances,
   ) {}
 
   readonly requests = new Map<string, BilledRequest>()
@@ -742,8 +768,8 @@ class JournalState {
         this.mode !== "attempts"
           ? overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()])
           : this.scope === "adversarial"
-            ? adversarialAttemptOvershootOf(requests)
-            : attemptOvershootOf([...phases.values()]),
+            ? adversarialAttemptOvershootOf(requests, (this.allowances as AdversarialAttemptAllowances | undefined) ?? ADVERSARIAL_ATTEMPT_ALLOWANCES)
+            : attemptOvershootOf([...phases.values()], (this.allowances as AttemptAllowances | undefined) ?? ATTEMPT_ALLOWANCES),
       haltMarker: { ...this.haltMarker },
       operational: [...this.operational],
       ...(this.mode === "attempts" ? { mode: "attempts" as const } : {}),
@@ -778,39 +804,39 @@ function overshootOf(
 
 /**
  * Story 2-8c3a — the same report in admitted attempts, from each phase's count,
- * for a paired attempt-mode journal. The Adversarial row is 0 of 0: that journal
- * admits nothing there.
+ * for a paired attempt-mode journal, against `limits`. The Adversarial row is 0
+ * of 0: that journal admits nothing there.
  */
-function attemptOvershootOf(phases: readonly PhaseBill[]): OvershootReport {
+function attemptOvershootOf(phases: readonly PhaseBill[], limits: AttemptAllowances): OvershootReport {
   const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
   const count = (match: (phase: PhaseBill) => boolean) =>
     phases.filter(match).reduce((total, phase) => total + phase.requests, 0)
   const blockPhases = phases.filter((phase) => phase.category === "blocks" && phase.block !== null && phase.phase !== null)
   const blocks = [...new Set(blockPhases.map((phase) => phase.block!))].sort((a, b) => a - b)
   return {
-    global: row(ATTEMPT_ALLOWANCES.global, count(() => true)),
-    blocks: row(ATTEMPT_ALLOWANCES.blocks, count((phase) => phase.category === "blocks")),
+    global: row(limits.global, count(() => true)),
+    blocks: row(limits.blocks, count((phase) => phase.category === "blocks")),
     adversarial: row(0, count((phase) => phase.category === "adversarial")),
     phases: blockPhases.map((phase) => ({
       block: phase.block!,
       phase: phase.phase!,
-      ...row(phase.phase === "prefix" ? ATTEMPT_ALLOWANCES.prefix : ATTEMPT_ALLOWANCES.continuation, phase.requests),
+      ...row(phase.phase === "prefix" ? limits.prefix : limits.continuation, phase.requests),
     })),
     unit: "attempts",
     blockTotals: blocks.map((block) => ({
       block,
-      ...row(ATTEMPT_ALLOWANCES.block, count((phase) => phase.category === "blocks" && phase.block === block)),
+      ...row(limits.block, count((phase) => phase.category === "blocks" && phase.block === block)),
     })),
   }
 }
 
 /**
  * Story 2-7e — the report for the adversarial suite's journal, in admitted
- * attempts: the root and the suite against `ADVERSARIAL_ATTEMPT_ALLOWANCES`, and
- * one row per run. An attempt counts in every state but `not-issued`. The Blocks
- * row is 0 of 0: this journal admits nothing there.
+ * attempts: the root and the suite against `limits`, and one row per run. An
+ * attempt counts in every state but `not-issued`. The Blocks row is 0 of 0: this
+ * journal admits nothing there.
  */
-function adversarialAttemptOvershootOf(requests: readonly BilledRequest[]): OvershootReport {
+function adversarialAttemptOvershootOf(requests: readonly BilledRequest[], limits: AdversarialAttemptAllowances): OvershootReport {
   const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
   const issued = requests.filter((request) => request.state !== "not-issued")
   const runs = new Map<string, number>()
@@ -819,12 +845,12 @@ function adversarialAttemptOvershootOf(requests: readonly BilledRequest[]): Over
     runs.set(request.runId, (runs.get(request.runId) ?? 0) + (request.state === "not-issued" ? 0 : 1))
   }
   return {
-    global: row(ADVERSARIAL_ATTEMPT_ALLOWANCES.global, issued.length),
+    global: row(limits.global, issued.length),
     blocks: row(0, issued.filter((request) => request.category === "blocks").length),
-    adversarial: row(ADVERSARIAL_ATTEMPT_ALLOWANCES.suite, issued.filter((request) => request.category === "adversarial").length),
+    adversarial: row(limits.suite, issued.filter((request) => request.category === "adversarial").length),
     phases: [],
     unit: "attempts",
-    runTotals: [...runs].map(([runId, spent]) => ({ runId, ...row(ADVERSARIAL_ATTEMPT_ALLOWANCES.run, spent) })),
+    runTotals: [...runs].map(([runId, spent]) => ({ runId, ...row(limits.run, spent) })),
   }
 }
 
@@ -903,7 +929,7 @@ type Replayed = { ok: true; state: JournalState; existed: boolean } | { ok: fals
  * whose scope is not `scope` when `scope` is given. With `scope` absent the
  * file's own is used (paired for a file with no `issued` line).
  */
-async function replayFile(file: string, mode?: AccountingMode, scope?: JournalScope): Promise<Replayed> {
+async function replayFile(file: string, mode?: AccountingMode, scope?: JournalScope, allowances?: JournalAllowances): Promise<Replayed> {
   let text: string
   try {
     text = await readFile(file, "utf8")
@@ -917,7 +943,7 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
           reason: `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${mode ?? "tokens"} mode`,
         }
       }
-      return { ok: true, state: new JournalState(mode, scope), existed: false }
+      return { ok: true, state: new JournalState(mode, scope, allowances), existed: false }
     }
     return { ok: false, reason: `the journal \`${file}\` could not be read: ${messageOf(error)}` }
   }
@@ -993,7 +1019,7 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
       return { ok: false, reason: `line ${position + 1} of the journal \`${file}\` carries \`abandoned\`, which a token-mode journal never holds` }
     }
   }
-  const state = new JournalState(replayMode, replayScope)
+  const state = new JournalState(replayMode, replayScope, allowances)
   for (const line of lines) state.apply(line)
   return { ok: true, state, existed: true }
 }
@@ -1006,10 +1032,19 @@ export type PersistedReplay =
  * Story 2-8c3a — a persisted journal, replayed by the rules `openJournal` uses,
  * for a reader. Nothing is appended and no lock is taken. An `issued` line with
  * no settlement reads UNCERTAIN, exactly as on reopen. `mode` and `scope`, when
- * given, must be the file's own.
+ * given, must be the file's own. `allowances`, when given, are the ones the
+ * bill's overshoot report uses (see `JournalAllowances`); they need `mode`
+ * `attempts` and the shape of `scope`.
  */
-export async function replayPersistedJournal(file: string, mode?: AccountingMode, scope?: JournalScope): Promise<PersistedReplay> {
-  const replayed = await replayFile(file, mode, scope)
+export async function replayPersistedJournal(
+  file: string,
+  mode?: AccountingMode,
+  scope?: JournalScope,
+  allowances?: JournalAllowances,
+): Promise<PersistedReplay> {
+  const problem = allowancesProblem(mode, scope, allowances)
+  if (problem !== null) return { ok: false, reason: problem }
+  const replayed = await replayFile(file, mode, scope, allowances)
   if (!replayed.ok) return replayed
   replayed.state.interrupt()
   return {
@@ -1258,6 +1293,14 @@ export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; 
  * `scope` is whose allowances apply (story 2-7e), `paired` when absent. The
  * adversarial scope exists only in attempt mode. A file whose lines declare
  * another scope, or mix the two, refuses to open.
+ *
+ * ## The allowances
+ *
+ * `allowances` are the attempt allowances the bill's overshoot report is
+ * computed against: the runner's sealed schedule's, or the scope's constants
+ * when absent. They must have the scope's shape, and only an attempt-mode
+ * journal takes them. The gates admit against the constants whatever is given;
+ * schedule load refuses a sealed config that differs from them.
  */
 export async function openJournal(
   bundleRoot: string,
@@ -1266,6 +1309,7 @@ export async function openJournal(
   io: JournalIo = FILE_IO,
   mode: AccountingMode = "tokens",
   scope: JournalScope = "paired",
+  allowances?: JournalAllowances,
 ): Promise<JournalOpened> {
   const root = resolve(bundleRoot)
   const file = join(root, JOURNAL_FILE)
@@ -1276,7 +1320,9 @@ export async function openJournal(
   if (scope === "adversarial" && mode !== "attempts") {
     return { ok: false, reason: `the adversarial suite's journal counts attempts, and it was opened in ${mode} mode` }
   }
-  const replayed = await replayFile(file, mode, scope)
+  const allowanceProblem = allowancesProblem(mode, scope, allowances)
+  if (allowanceProblem !== null) return { ok: false, reason: allowanceProblem }
+  const replayed = await replayFile(file, mode, scope, allowances)
   if (!replayed.ok) return { ok: false, reason: replayed.reason }
   const state = replayed.state
   state.interrupt()
@@ -1894,7 +1940,7 @@ export async function openJournal(
           return outcome
         }
         try {
-          const disk = await replayFile(file, mode, scope)
+          const disk = await replayFile(file, mode, scope, allowances)
           if (!disk.ok) return fail(disk.reason)
           const persist = async (line: JournalLine): Promise<boolean> => {
             try {

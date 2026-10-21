@@ -10,7 +10,9 @@ import { join } from "node:path"
 
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { JOURNAL_FILE, type JournalLine } from "./journal.ts"
-import { readPersistedJournal } from "./journal-read.ts"
+import { ATTEMPT_ALLOWANCES } from "./governor.ts"
+import { readPairedAttemptJournal, readPersistedJournal } from "./journal-read.ts"
+import type { PairedSchedule } from "./schedule.ts"
 
 const scratch: string[] = []
 
@@ -127,5 +129,42 @@ describe("readPersistedJournal", () => {
     expect(paired.mode).toBe("attempts")
     expect(paired.bill.scope).toBeUndefined()
     expect(paired.bill.overshoot.global.limit).toBe(300)
+  })
+})
+
+describe("readPairedAttemptJournal", () => {
+  /** A schedule read whose only field this reader looks at is `config`. */
+  const scheduleWith = (config: Record<string, unknown>) => ({ ok: true as const, file: "s", schedule: { config } as unknown as PairedSchedule })
+  const lines = Array.from({ length: 7 }, (_unused, index) => [issued(`p${index}`, { phase: "prefix" }), usage(`p${index}`)]).flat()
+
+  test("the journal is read against the sealed allowances", async () => {
+    const read = await readPairedAttemptJournal(await rootWith(lines), scheduleWith({ accounting: "attempts", attemptAllowances: { ...ATTEMPT_ALLOWANCES, prefix: 5 } }))
+    if (!read.ok) throw new Error(read.reason)
+    expect(read.bill.overshoot.phases).toEqual([{ block: 1, phase: "prefix", limit: 5, spent: 7, overshoot: 2 }])
+  })
+
+  test("missing or malformed sealed allowances refuse, naming the field, and the constants are never used", async () => {
+    const variants: [unknown, string][] = [
+      [undefined, "the sealed `config.attemptAllowances` is absent"],
+      [{ ...ATTEMPT_ALLOWANCES, prefix: 1.5 }, "`config.attemptAllowances.prefix` is 1.5, not a positive integer"],
+      [{ ...ATTEMPT_ALLOWANCES, global: 0 }, "`config.attemptAllowances.global` is 0, not a positive integer"],
+      [{ global: 300, blocks: 300, block: 100, continuation: 45 }, "the sealed `config.attemptAllowances.prefix` is absent"],
+      [{ ...ATTEMPT_ALLOWANCES, suite: 480 }, "carries `suite`, which it never holds"],
+    ]
+    for (const [allowances, why] of variants) {
+      const config = allowances === undefined ? { accounting: "attempts" } : { accounting: "attempts", attemptAllowances: allowances }
+      const read = await readPairedAttemptJournal(await rootWith(lines), scheduleWith(config))
+      expect(read.ok, why).toBe(false)
+      if (!read.ok) {
+        expect(read.reason, why).toStartWith("the attempt thresholds are unavailable: the sealed `config.attemptAllowances")
+        expect(read.reason, why).toContain(why)
+      }
+    }
+  })
+
+  test("a refused schedule refuses the journal, citing the schedule", async () => {
+    const read = await readPairedAttemptJournal(await rootWith(lines), { ok: false, reason: "it does not match its own scheduleHash" })
+    expect(read.ok).toBe(false)
+    if (!read.ok) expect(read.reason).toBe("the sealed schedule is refused, so its attempt allowances cannot be read: it does not match its own scheduleHash")
   })
 })

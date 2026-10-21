@@ -66,28 +66,30 @@ import type { ChangeSet } from "../core/ports/repo.ts"
  * makes. A reader that does not know a version says so and segregates the arm;
  * it never guesses at an unknown shape.
  *
- * IT STAYS `1` THROUGH STORY 2.3, which widened `UsageCompleteness` from one
- * value to three and added three fields to `spend`. That is a schema change and
- * the version not moving is a decision, not an oversight.
+ * Billed bundles written under version 1 are committed (`ablation/evidence/`),
+ * so version 1 is a published shape: its readers must keep reading them.
  *
- * The reason is that NO EVALUATION BUNDLE WRITTEN BY A BILLING RUN EXISTS. Epic
- * 2 has billed nothing and 2.1 froze the protocol without authorizing any spend,
- * so the only bundles in existence are this repository's own test fixtures,
- * updated in the same commit as the reader. Bumping would make exactly those
- * unreadable (`ablation/read-bundle.ts` refuses a version it does not know) to
- * buy compatibility for a reader that has never run. The freeze boundary the
- * protocol's delegation row sets for 2.2's schema is *"before the first
- * evaluation run is read"*, and that has not happened.
+ * VERSION 1 IS ONE FAMILY OF ACCEPTED VARIANTS, each an additive field with a
+ * stated reading for its absence:
  *
- * The FIRST bundle written by a run that bills is the point at which this
- * argument expires.
+ * - `spend.unknownUsage`, `spend.unknownUsageCount`, `spend.exposure` and the
+ *   three-valued `usageCompleteness` (story 2.3). Required: a version-1
+ *   manifest without `spend.unknownUsage` is refused per arm, by name ("carries
+ *   no `spend.unknownUsage` list"), so version 1 reads no manifest written
+ *   before story 2.3.
+ * - `run.forkedFrom` with `spend.origin` (story 2-5b). Both absent reads as not
+ *   forked (`ablation/read-bundle.ts`); exactly one present is refused.
+ * - `experiment` (story 2-5c). Absent: the manifest is not a paired arm.
+ * - `adversarial` (story 2-7b). Absent: the manifest is not an adversarial run.
+ * - `dials.routingPolicy` (story 2.5A). Absent reads as `shipped`.
+ * - `usageCompleteness: "unverified"` with `spend.source:
+ *   "host-reported-unverified"` (story 2-8c4). Absent `spend.source`: the
+ *   figures are MAD's own ledger.
  *
- * WHAT THIS COSTS, STATED RATHER THAN HIDDEN: a `1` written before story 2.3
- * carries no `spend.unknownUsage`, and `ablation/read-bundle.ts` refuses it —
- * per arm, by name ("carries no `spend.unknownUsage` list"), because the checked
- * set is the touched set. That is the same outcome a version bump would produce,
- * minus the false implication that two readable schemas exist. It is acceptable
- * only because the set of such files is empty.
+ * THE RULE. An additive optional field may join version 1 only with a stated
+ * reading for its absence, written beside the field and applied by the reader.
+ * A change that alters what an existing field means bumps the version, and the
+ * bump names the variants above that the version-1 reader keeps reading.
  */
 export const MANIFEST_SCHEMA_VERSION = 1
 

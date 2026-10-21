@@ -65,6 +65,12 @@
  * established (no evidence, or an attempt-mode seal under a protocol that is not
  * version 2), or whose journal was refused, gets no cost figure. A token-mode bundle keeps the token endpoint above.
  *
+ * The thresholds are the sealed schedule's `config.attemptAllowances`. A
+ * refused schedule, or sealed allowances that are missing or malformed, make the
+ * attempt counts unavailable; the report never falls back to
+ * `ATTEMPT_ALLOWANCES`. When the sealed values differ from those constants, one
+ * line under the COST header names each differing field.
+ *
  * ## WHAT IT DOES NOT DO
  *
  * No significance claim, no pooled precision across blocks, and no product-value
@@ -86,7 +92,15 @@ import {
   ZERO,
   type Fraction,
 } from "./fraction.ts"
-import { ATTEMPT_ALLOWANCES, type PairedPhase } from "./governor.ts"
+import {
+  allowanceDifferences,
+  allowanceDifferenceText,
+  ATTEMPT_ALLOWANCES,
+  sealedAttemptAllowances,
+  type AllowanceDifference,
+  type AttemptAllowances,
+  type PairedPhase,
+} from "./governor.ts"
 import { JOURNAL_FILE, type UniqueExecutionBill } from "./journal.ts"
 import type { JournalReadOutcome } from "./journal-read.ts"
 import type { LabelledReadOutcome } from "./labelled-read.ts"
@@ -305,7 +319,7 @@ export type BlockAttempts =
        * realised caps.
        */
       contrast: { kind: "exact"; attempts: number; differentCaps?: string } | { kind: "unavailable"; reason: string }
-      /** Each phase's realised count against its threshold, and the block's against 100, from the bill's overshoot. */
+      /** Each phase's realised count, from the bill's overshoot, against its sealed threshold, and the block's against its own. */
       thresholds: { prefix: AttemptThreshold; on: AttemptThreshold; off: AttemptThreshold; block: AttemptThreshold }
       /** Prefix once + ON + OFF. */
       total: number
@@ -392,6 +406,11 @@ export interface EvaluationReport {
   upstream: string[]
   /** Story 2-8c3a — present only when the bundle is not a plain token-mode bundle. */
   accounting?: "attempts" | "mixed" | "unestablished"
+  /**
+   * Present only when the attempt thresholds were read from the sealed schedule
+   * and differ from the current `ATTEMPT_ALLOWANCES`: each differing field.
+   */
+  allowanceDifferences?: AllowanceDifference[]
 }
 
 export type EvaluationReportOutcome =
@@ -445,12 +464,19 @@ function compose(
   const scheduleWhy = paired.schedule.ok ? null : `the sealed schedule is refused: ${paired.schedule.reason}`
 
   const accounting = bundleAccounting(paired)
-  let attemptSource: { bill: UniqueExecutionBill; source: string } | { why: string } | null = null
+  let attemptSource: { bill: UniqueExecutionBill; source: string; allowances: AttemptAllowances } | { why: string } | null = null
   if (accounting.kind !== "tokens") {
+    // The thresholds are the ones the schedule sealed. Missing or malformed, they
+    // are unavailable, never the constants'.
+    const sealed = !paired.schedule.ok
+      ? ({ ok: false, reason: `the sealed schedule is refused, so its attempt allowances cannot be read: ${paired.schedule.reason}` } as const)
+      : sealedAttemptAllowances(paired.schedule.schedule.config.attemptAllowances)
     const journalWhy =
       accounting.kind === "mixed" || accounting.kind === "unestablished"
         ? accounting.reason
-        : journalUp === undefined
+        : !sealed.ok
+          ? `the attempt thresholds are unavailable: ${sealed.reason}`
+          : journalUp === undefined
           ? `the persisted journal was not read (\`${JOURNAL_READER_MODULE}\`)`
           : journalUp.kind === "threw"
             ? `the journal reader threw: ${journalUp.message}`
@@ -462,8 +488,9 @@ function compose(
     if (journalWhy !== null) {
       upstream.push(`attempt counts (\`${JOURNAL_READER_MODULE}\`): ${journalWhy}`)
       attemptSource = { why: journalWhy }
-    } else if (journalUp?.kind === "read" && journalUp.value.ok) {
+    } else if (journalUp?.kind === "read" && journalUp.value.ok && sealed.ok) {
       attemptSource = {
+        allowances: sealed.allowances,
         bill: journalUp.value.bill,
         source:
           `\`${JOURNAL_FILE}\`, replayed and validated by \`${JOURNAL_READER_MODULE}\`: each admitted attempt once, under ` +
@@ -521,7 +548,7 @@ function compose(
                 attempts:
                   "why" in attemptSource
                     ? { kind: "unavailable" as const, reason: attemptSource.why }
-                    : blockAttempts(attemptSource.bill, attemptSource.source, number, block, paired.slots),
+                    : blockAttempts(attemptSource.bill, attemptSource.source, number, block, paired.slots, attemptSource.allowances),
               }),
         }),
       )
@@ -553,7 +580,15 @@ function compose(
     availability: availabilityOf(blocks),
     upstream,
     ...(accounting.kind === "tokens" ? {} : { accounting: accounting.kind }),
+    ...differencesOf(attemptSource),
   }
+}
+
+/** The sealed allowances' differences from the constants, as a report field, only when there are any. */
+function differencesOf(source: { allowances: AttemptAllowances } | { why: string } | null): { allowanceDifferences?: AllowanceDifference[] } {
+  if (source === null || !("allowances" in source)) return {}
+  const differences = allowanceDifferences(source.allowances, ATTEMPT_ALLOWANCES)
+  return differences.length === 0 ? {} : { allowanceDifferences: differences }
 }
 
 interface BlockInput {
@@ -1263,6 +1298,9 @@ export function bundleAccounting(paired: Extract<PairedReadOutcome, { root: stri
  * continuations; it is unavailable while either continuation's slot did not
  * complete, because a truncated continuation would read as a workflow-use
  * difference.
+ *
+ * Each threshold is `allowances`' (the sealed schedule's), with the realised
+ * count from the bill's overshoot report.
  */
 export function blockAttempts(
   bill: UniqueExecutionBill,
@@ -1270,15 +1308,18 @@ export function blockAttempts(
   number: number,
   block: PairedBlock | undefined,
   slots: readonly { block: number; arm: Arm; status: string; reason: string }[],
+  allowances: AttemptAllowances,
 ): BlockAttempts {
-  const thresholdOf = (row: { limit: number; spent: number; overshoot: number } | undefined, limit: number): AttemptThreshold =>
-    row === undefined ? { limit, spent: 0, overshoot: 0 } : { limit: row.limit, spent: row.spent, overshoot: row.overshoot }
+  const thresholdOf = (row: { spent: number } | undefined, limit: number): AttemptThreshold => {
+    const spent = row?.spent ?? 0
+    return { limit, spent, overshoot: Math.max(0, spent - limit) }
+  }
   const phaseRow = (phase: PairedPhase) => bill.overshoot.phases.find((row) => row.block === number && row.phase === phase)
   const thresholds = {
-    prefix: thresholdOf(phaseRow("prefix"), ATTEMPT_ALLOWANCES.prefix),
-    on: thresholdOf(phaseRow("on"), ATTEMPT_ALLOWANCES.continuation),
-    off: thresholdOf(phaseRow("off"), ATTEMPT_ALLOWANCES.continuation),
-    block: thresholdOf(bill.overshoot.blockTotals?.find((row) => row.block === number), ATTEMPT_ALLOWANCES.block),
+    prefix: thresholdOf(phaseRow("prefix"), allowances.prefix),
+    on: thresholdOf(phaseRow("on"), allowances.continuation),
+    off: thresholdOf(phaseRow("off"), allowances.continuation),
+    block: thresholdOf(bill.overshoot.blockTotals?.find((row) => row.block === number), allowances.block),
   }
   const mine = bill.requests.filter((request) => request.category === "blocks" && request.block === number)
   const issued = mine.filter((request) => request.state !== "not-issued")
@@ -1533,6 +1574,7 @@ export function renderEvaluationReport(outcome: EvaluationReportOutcome): string
     lines.push(
       "COST — newly issued MAD attempts: a workflow-use contrast, never token cost, money, subscription quota or physical requests",
     )
+    if (outcome.allowanceDifferences !== undefined) lines.push(`  THRESHOLDS: ${allowanceDifferenceText(outcome.allowanceDifferences)}`)
     for (const block of outcome.blocks) lines.push(...attemptLines(block))
     lines.push(
       "  Host-reported tokens on this route are unverified diagnostics and are in no figure above. Token spend and",

@@ -1245,6 +1245,88 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     expect(text).not.toContain("per run, in schedule order:")
   })
 
+  /**
+   * Re-seal the schedule with `config.attemptAllowances` changed by `change`, and
+   * rewrite every file under the root that names the old schedule hash, so the
+   * bundle is one sealed under those allowances.
+   */
+  async function resealAllowances(root: string, change: (config: Record<string, unknown>) => void): Promise<void> {
+    const file = join(adversarialDirectory(root), ADVERSARIAL_SCHEDULE_FILE)
+    const schedule = JSON.parse(await readFile(file, "utf8"))
+    const before = schedule.scheduleHash as string
+    change(schedule.config)
+    schedule.scheduleHash = adversarialScheduleHashOf(schedule)
+    await writeFile(file, JSON.stringify(schedule))
+    for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      const path = join(entry.parentPath, entry.name)
+      const text = await readFile(path, "utf8")
+      if (text.includes(before)) await writeFile(path, text.split(before).join(schedule.scheduleHash))
+    }
+  }
+
+  test("sealed allowances equal to the constants print no disclosure line", async () => {
+    const { suite } = await attemptRun()
+    const outcome = await read(suite.root)
+    if (outcome.exposure?.kind !== "read") throw new Error("no exposure")
+    expect(outcome.exposure.thresholds).toEqual({ allowances: { run: 30, suite: 480, global: 480, runs: 16 }, differences: [] })
+    expect(renderAdversarialBundle(outcome)).not.toContain("THRESHOLDS:")
+  })
+
+  test("sealed allowances that differ are the thresholds, and one line names each differing field, sealed vs current", async () => {
+    const { root } = await attemptCopy()
+    await resealAllowances(root, (config) => {
+      config.attemptAllowances = { run: 20, suite: 320, global: 320, runs: 16 }
+    })
+    const first = (await read(root)).exposure
+    if (first?.kind !== "read") throw new Error(`no exposure: ${JSON.stringify(first)}`)
+    const runId = first.runs[0]!.runId!
+    const before = first.runs[0]!.count.total
+    let extra = ""
+    for (let index = before; index < 25; index += 1) {
+      extra += `${JSON.stringify({ type: "issued", physicalId: `x-${index}`, category: "adversarial", block: null, phase: null, stage: "judge", slot: "judge-1", attempt: 1, runId, mode: "attempts", scope: "adversarial" })}\n`
+      extra += `${JSON.stringify({ type: "settled", physicalId: `x-${index}`, settlement: { kind: "usage", tokens: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 } } })}\n`
+    }
+    await appendFile(join(root, JOURNAL_FILE), extra)
+    const outcome = await read(root)
+    const exposure = outcome.exposure
+    if (exposure?.kind !== "read") throw new Error("no exposure")
+    expect(exposure.runs[0]!.threshold).toEqual({ limit: 20, spent: 25, overshoot: 5 })
+    expect(exposure.suite.threshold.limit).toBe(320)
+    expect(exposure.root.threshold.limit).toBe(320)
+    const text = renderAdversarialBundle(outcome)
+    expect(text).toContain("EXPOSURE — issued MAD attempts against the thresholds 20 per run, 320 for the suite, 320 for the root")
+    expect(text).toContain("of 20, OVERSHOT by 5")
+    const disclosure =
+      "  THRESHOLDS: the thresholds are the ones the schedule sealed, which differ from the current constants: " +
+      "run sealed 20, current 30; suite sealed 320, current 480; global sealed 320, current 480"
+    expect(text.split("\n").filter((line) => line.startsWith("  THRESHOLDS:"))).toEqual([disclosure])
+  })
+
+  test("missing or malformed sealed allowances make the exposure unavailable, naming the field, never the constants", async () => {
+    const variants: [string, (config: Record<string, unknown>) => void, string][] = [
+      ["absent", (config) => delete config.attemptAllowances, "the sealed `config.attemptAllowances` is absent"],
+      ["non-integer", (config) => (config.attemptAllowances = { run: 2.5, suite: 480, global: 480, runs: 16 }), "`config.attemptAllowances.run` is 2.5, not a positive integer"],
+      ["zero", (config) => (config.attemptAllowances = { run: 30, suite: 0, global: 480, runs: 16 }), "`config.attemptAllowances.suite` is 0, not a positive integer"],
+      ["missing key", (config) => (config.attemptAllowances = { run: 30, suite: 480, global: 480 }), "the sealed `config.attemptAllowances.runs` is absent"],
+      ["extra key", (config) => (config.attemptAllowances = { run: 30, suite: 480, global: 480, runs: 16, block: 100 }), "carries `block`, which it never holds"],
+    ]
+    for (const [name, change, why] of variants) {
+      const { root } = await attemptCopy()
+      await resealAllowances(root, change)
+      const outcome = await read(root)
+      const exposure = outcome.exposure
+      if (exposure?.kind !== "unavailable") throw new Error(`${name}: expected unavailable, got ${JSON.stringify(exposure)}`)
+      expect(exposure.thresholds, name).toBeNull()
+      expect(exposure.reason, name).toContain(why)
+      const text = renderAdversarialBundle(outcome)
+      expect(text, name).toContain("EXPOSURE — issued MAD attempts; the thresholds the schedule sealed are UNAVAILABLE")
+      expect(text, name).toContain(`issued attempts: UNAVAILABLE — the attempt thresholds are unavailable: `)
+      expect(text, name).not.toContain("30 per run")
+      expect(text, name).not.toContain("THRESHOLDS:")
+    }
+  })
+
   test("a manifest whose recorded accounting is not the sealed schedule's is noted on its slot and binds nothing", async () => {
     const { root, outcome } = await attemptCopy()
     const slot = outcome.slots[0]!

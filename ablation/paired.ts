@@ -99,7 +99,9 @@ import { writeArmDump, writeBundleIndex, writePrefixEvidence } from "./bundle.ts
 import {
   governorStateFromBill,
   PAIRED_ALLOWANCES,
+  sealedAttemptAllowances,
   type AccountingMode,
+  type AttemptAllowances,
   type ExperimentGovernorState,
   type PairedPhase,
 } from "./governor.ts"
@@ -270,7 +272,16 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
     })
     if (!index.ok) return await refuse(`the bundle index could not be written: ${index.reason}`)
 
-    const opened = await openJournal(root, lock, () => input.clock.now(), undefined, accountingOf(input.config))
+    // In attempt mode the overshoot report uses the sealed allowances, which
+    // `verifySchedule` above already held to the constants.
+    const mode = accountingOf(input.config)
+    let allowances: AttemptAllowances | undefined
+    if (mode === "attempts") {
+      const sealed = sealedAttemptAllowances(schedule.config.attemptAllowances)
+      if (!sealed.ok) return await refuse(`the schedule's attempt allowances cannot be read: ${sealed.reason}`)
+      allowances = sealed.allowances
+    }
+    const opened = await openJournal(root, lock, () => input.clock.now(), undefined, mode, "paired", allowances)
     if (!opened.ok) return await refuse(opened.reason)
     journal = opened.journal
 
