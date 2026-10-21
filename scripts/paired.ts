@@ -96,9 +96,14 @@
  * `--oauth-provider`, all distinct, and refuses every `--provider-*` credential
  * flag; the api-key mode refuses every `--oauth-*` flag. It starts no relay and
  * no meter. Stage 1 checks the gates for route `oauth`, the frozen protocol v2
- * (`PROTOCOL_V2_FILE`), the prepared payloads against `OAUTH_PAYLOAD` and the auth
- * symlink (`lstat` and `readlink` only), and every OAuth refusal names each failed
- * check's reason in its one aggregated diagnostic. Stage 2 resolves the roster
+ * (`PROTOCOL_V2_FILE`, whose hash must be `EVALUATION_PROTOCOL.frozenHash`, the
+ * protocol the paired evaluation ran under), the prepared payloads against
+ * `OAUTH_PAYLOAD`, the measured host binary (`identifyBinary` with
+ * `startManagedHost`'s defaults: read and hashed against `MEASURED_HOST`, never
+ * started) and the auth symlink (`lstat` and `readlink` only), and every OAuth
+ * refusal names each failed check's reason in its one aggregated diagnostic. The
+ * binary check narrows the window before the spawn and does not close it: stage 2
+ * hashes the binary again before it spawns, after the reservation exists. Stage 2 resolves the roster
  * with the lenses `security` and `reliability`. Stage 4 seals `accounting:
  * "attempts"` and `route: "oauth"` under protocol v2. After the host is stopped
  * the auth symlink and the seeded config lock are checked again, and a failure
@@ -133,6 +138,7 @@ import { boundedCodeRevisionLines, codeRevisionFrom, DIRTY_REVISION_NEXT_STEP, d
 import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { runPairedBlocks, type PairedPhaseContext } from "../ablation/paired.ts"
 import {
+  identifyBinary,
   OAUTH_PAYLOAD,
   OPENAI_COMPATIBLE_NPM,
   oauthRouteProblems,
@@ -140,6 +146,7 @@ import {
   redactText,
   secretForms,
   startManagedHost,
+  type BinaryIdentityOptions,
   type ManagedHost,
   type ManagedHostOptions,
   type ManagedHostStart,
@@ -149,7 +156,7 @@ import {
 } from "../ablation/managed-host.ts"
 import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type PayloadPins } from "../ablation/oauth-payload.ts"
 import { storeGuard } from "../ablation/oauth-store.ts"
-import { EVALUATION_RUN, gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
+import { EVALUATION_PROTOCOL, EVALUATION_RUN, gatePreflight, PAIRED_GATES, type GateRoute, type PairedGate } from "../ablation/paired-gates.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -418,6 +425,10 @@ export interface PairedOverrides {
   startHost?: (options: ManagedHostOptions) => Promise<ManagedHostStart>
   /** Story 2-8c3b, test-only: the protocol file the OAuth route reads. Defaults to `PROTOCOL_V2_FILE`. */
   protocolV2File?: string
+  /** Test-only: the hash the OAuth route's frozen protocol v2 must carry. Defaults to `EVALUATION_PROTOCOL.frozenHash`, the protocol the paired evaluation ran under. */
+  protocolHash?: string
+  /** Test-only: how the OAuth route's stage 1 finds and identifies the opencode binary. Defaults to `identifyBinary`'s own, which are `startManagedHost`'s. */
+  hostBinary?: BinaryIdentityOptions
   /** Story 2-8c3b, test-only: the pins the prepared directory is verified against. Defaults to `OAUTH_PAYLOAD`. */
   payloadPins?: PayloadPins
   /** Story 2-8c3b, test-only: the home the auth symlink must point into. Defaults to `os.homedir()`. */
@@ -1363,9 +1374,18 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         if (oauthMode) {
           const protocol = await readFrozenProtocol(overrides.protocolV2File ?? PROTOCOL_V2_FILE)
           if (!protocol.ok) return fail("frozen protocol", [`protocol v2 is not frozen: ${protocol.reason}`])
-          return protocol.version === 2
-            ? pass("frozen protocol", [`${protocol.id} v${protocol.version} ${protocol.hash}`])
-            : fail("frozen protocol", [`the OAuth route needs protocol v2, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
+          if (protocol.version !== 2) {
+            return fail("frozen protocol", [`the OAuth route needs protocol v2, and the frozen protocol read is ${protocol.id} v${protocol.version}`])
+          }
+          const expected = overrides.protocolHash ?? EVALUATION_PROTOCOL.frozenHash
+          return protocol.hash === expected
+            ? pass("frozen protocol", [
+                `${protocol.id} v${protocol.version} ${protocol.hash}, the hash the paired evaluation ran under (\`EVALUATION_PROTOCOL.frozenHash\`)`,
+              ])
+            : fail("frozen protocol", [
+                `the frozen protocol v2 read has hash ${protocol.hash}, and the paired evaluation ran under ${expected} ` +
+                  "(`EVALUATION_PROTOCOL.frozenHash`); a re-frozen v2 is not the protocol the paired evaluation ran under",
+              ])
         }
         const protocol = await readFrozenProtocol(PROTOCOL_FILE)
         return protocol.ok
@@ -1414,6 +1434,15 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         { name: "--directory", path: directory },
         { name: "--out", path: out },
       ])
+      // The binary stage 2 would spawn, identified as `startManagedHost` identifies it: read, hashed, never started.
+      checks.push(
+        await guarded("measured host binary", async () => {
+          const identified = await identifyBinary(overrides.hostBinary ?? {})
+          return identified.ok
+            ? pass("measured host binary", [`\`${identified.binary}\` has sha256 ${identified.sha256}, the measured build's; read only, not started`])
+            : fail("measured host binary", [identified.reason])
+        }),
+      )
       checks.push(
         await guarded("authorized evaluation run", async () => {
           const problems = await evaluationRunProblems(pinNames, reservationSeam)

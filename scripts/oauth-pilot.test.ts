@@ -18,7 +18,9 @@ import { join } from "node:path"
 import { startAllowlistProxy, type ProxyConnect } from "../ablation/accounting-stub.ts"
 import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type PairedJournal } from "../ablation/journal.ts"
+import { DIRTY_REVISION_NEXT_STEP } from "../ablation/bundle.ts"
 import { MEASURED_HOST, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
+import { known, unknownValue } from "../ablation/manifest.ts"
 import type { PreparedMeasure } from "../ablation/oauth-payload.ts"
 import { fakePrepared } from "../ablation/oauth-payload.fixture.ts"
 import { HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotReservation, PAIRED_GATES, type OAuthPilotRun, type PairedGate } from "../ablation/paired-gates.ts"
@@ -852,6 +854,11 @@ describe("a dry run against a stand-in host", () => {
           resolveBinary: async (path) => (preChecked.push(`resolve ${path}`), path),
           hashFile: async (path) => (preChecked.push(`hash ${path}`), MEASURED_HOST.sha256),
         },
+        // The live code revision check: a dry run never reads the revision.
+        codeRevision: async () => {
+          preChecked.push("codeRevision")
+          throw new Error("the dry run read the code revision")
+        },
         selfTest: async () => ({ ok: true, control: "connected", loopback: "connected", external: [{ target: "1.1.1.1:443", outcome: "refused: EPERM" }], why: "held" }),
         prepare: async (dir) => {
           await mkdir(dir, { recursive: true })
@@ -985,6 +992,8 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     callersCapture?: true
     /** Awaited at the start of every host-binary hash, the first of which precedes the reservation. */
     beforeHash?: () => Promise<void>
+    /** The code revision seam; the default reads `repoRoot` with real git. */
+    codeRevision?: PilotSeams["codeRevision"]
   }) {
     const root = await temp()
     const repoRoot = options.repoRoot ?? (await liveRepo())
@@ -1002,6 +1011,7 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
         platform: "darwin",
         repoRoot,
         hostCheck: check.hostCheck,
+        codeRevision: options.codeRevision,
         gates: closedEight,
         gateTable: async () => ({ ok: true, blob: "committed" }),
         selfTest: async () => ({ ok: true, control: "connected", loopback: "connected", external: [{ target: "1.1.1.1:443", outcome: "refused: EPERM" }], why: "held" }),
@@ -1024,6 +1034,8 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     const partialText = existsSync(join(out, PARTIAL_EVIDENCE_FILE)) ? await readFile(join(out, PARTIAL_EVIDENCE_FILE), "utf8") : null
     const result = {
       ...run,
+      /** What the run printed to stdout; `out` is the --out path. */
+      log: run.out,
       requests,
       proxies,
       stats,
@@ -1048,6 +1060,14 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
     }
     return result
   }
+
+  test("retro item 3: a clean git repository passes the code revision check with the real reader, and the run reaches its reservation", async () => {
+    const run = await liveRun({ backend: scriptedBackend([answer, answer]) })
+    expect(run.value).toBe(0)
+    expect(run.log).toMatch(/code revision: [0-9a-f]{40}, worktree clean/)
+    expect(run.log).toContain("reserved gate 8's live run 3")
+    expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(true)
+  })
 
   test("two answered attempts, the third refused with 0 backend calls, the auth target recorded as flags; exit 0", async () => {
     const backend = scriptedBackend([answer, answer])
@@ -1437,6 +1457,9 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
         return { open, opened }
       }
       // Both pass the authorization before either reserves; then the loser waits in its pre-check for the winner's end.
+      // Both read a clean revision: read from git, the loser's checkout would hold the winner's untracked reservation and
+      // refuse as dirty before its own exclusive creation, which is the path this test holds.
+      const clean = async () => known({ commit: "0123456789abcdef0123456789abcdef01234567", dirty: false, entries: [] })
       const loserInPreCheck = gate()
       const winnerEnded = gate()
       let errAtWinnersEnd: string | null = null
@@ -1445,7 +1468,7 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
         err,
       } = await captured((seen) =>
         Promise.all([
-          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true, beforeHash: () => loserInPreCheck.opened }).then((run) => {
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true, codeRevision: clean, beforeHash: () => loserInPreCheck.opened }).then((run) => {
             errAtWinnersEnd = seen().err
             winnerEnded.open()
             return run
@@ -1454,6 +1477,7 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
             backend: scriptedBackend([answer, answer]),
             repoRoot,
             callersCapture: true,
+            codeRevision: clean,
             beforeHash: () => {
               loserInPreCheck.open()
               return winnerEnded.opened
@@ -2201,6 +2225,109 @@ describe("the live host pre-check, before the reservation (story 2-8c8)", () => 
     }
   })
 
+})
+
+describe("the live code revision, read after the host pre-check and before the reservation (retro item 3)", () => {
+  const closedEight = PAIRED_GATES.map((gate): PairedGate => (gate.number === 8 ? { ...gate, status: "CLOSED", evidence: "a test's stand-in authorization" } : gate))
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567"
+  const untouched = "No host was started; the real auth target was not stat-ed; the data directory was not opened; no network connection was made."
+
+  /**
+   * An authorized `main --live` whose host pre-check passes, with every later hook a tripwire. `codeRevision` is the
+   * seam, or, when omitted, the default reader over `repoRoot` with real git. `order` records the pre-check's hash and
+   * the revision read, in the order they happened.
+   */
+  async function revisionRun(codeRevision?: PilotSeams["codeRevision"], setup?: (repoRoot: string) => Promise<void>) {
+    const repoRoot = await liveRepo()
+    await setup?.(repoRoot)
+    const root = await temp()
+    const out = join(root, "out")
+    const touched: string[] = []
+    const order: string[] = []
+    const check = await passingHostCheck(root, undefined, undefined, async () => {
+      order.push("pre-check")
+    })
+    const evidenceBefore = await readdir(join(repoRoot, LIVE_EVIDENCE_DIR))
+    const run = await captured(() =>
+      main(["bun", "oauth-pilot.ts", "--live", "--oauth-data-dir", join(root, "data"), "--oauth-prepared", check.prepared, "--out", out], {
+        ...tripwires(touched),
+        home: join(root, "home"),
+        platform: "darwin",
+        repoRoot,
+        gates: closedEight,
+        gateTable: async () => ({ ok: true, blob: "committed" }),
+        hostCheck: check.hostCheck,
+        ...(codeRevision === undefined
+          ? {}
+          : {
+              codeRevision: async () => {
+                order.push("code revision")
+                return codeRevision()
+              },
+            }),
+      }),
+    )
+    return { ...run, log: run.out, touched, order, out, repoRoot, root, evidenceBefore, evidenceAfter: await readdir(join(repoRoot, LIVE_EVIDENCE_DIR)) }
+  }
+
+  const refusedUnused = (run: Awaited<ReturnType<typeof revisionRun>>) => {
+    expect(run.value).toBe(1)
+    expect(run.touched).toEqual([])
+    expect(existsSync(join(run.repoRoot, OWN_RESERVATION))).toBe(false)
+    expect(run.evidenceAfter).toEqual(run.evidenceBefore)
+    expect(existsSync(run.out)).toBe(false)
+    expect(existsSync(join(run.root, "data"))).toBe(false)
+    expect(run.err).toContain("gate 8's authorization for run 3 is unused: no reservation was created.")
+    expect(run.err).toContain(untouched)
+  }
+
+  test("an unknown revision refuses naming its reason, after the host pre-check; no reservation, no host, --out not created", async () => {
+    const run = await revisionRun(async () => unknownValue("`git rev-parse HEAD` exited 128: not a repository"))
+    refusedUnused(run)
+    expect(run.order).toEqual(["pre-check", "code revision"])
+    expect(run.err).toContain("REFUSED — stage 1 (code revision): the code revision is unknown: `git rev-parse HEAD` exited 128: not a repository;")
+    expect(run.err).toContain("Fix what made the code revision unknown")
+  })
+
+  test("a revision reader that throws is an unknown revision, and refuses the same way", async () => {
+    const run = await revisionRun(async () => {
+      throw new Error("spawn git ENOENT")
+    })
+    refusedUnused(run)
+    expect(run.err).toContain("the code revision is unknown: the code revision could not be read: spawn git ENOENT")
+  })
+
+  test("an uncommitted edit to the attempt allowances refuses listing the entry, JSON-quoted, and the next step", async () => {
+    const run = await revisionRun(async () => known({ commit: COMMIT, dirty: true, entries: [{ status: " M", path: "ablation/governor.ts", blob: "a".repeat(40) }] }))
+    refusedUnused(run)
+    expect(run.order).toEqual(["pre-check", "code revision"])
+    expect(run.log).toContain(`code revision: ${COMMIT}, worktree dirty (1 entry recorded)`)
+    expect(run.err).toContain("REFUSED — stage 1 (code revision): the checkout is not HEAD's;")
+    expect(run.err).toContain(`REFUSED: the worktree differs from HEAD ${COMMIT} (1 entry recorded)`)
+    expect(run.err).toContain('REFUSED: uncommitted:  M "ablation/governor.ts"')
+    expect(run.err).toContain(DIRTY_REVISION_NEXT_STEP)
+  })
+
+  test("many dirty entries: the printed revision and the refusal are both bounded, with an exact count of the rest", async () => {
+    const entries = Array.from({ length: 60 }, (_, index) => ({ status: "??", path: `stray-${String(index).padStart(2, "0")}.txt`, blob: "b".repeat(40) }))
+    const run = await revisionRun(async () => known({ commit: COMMIT, dirty: true, entries }))
+    refusedUnused(run)
+    expect(run.log).toContain(`code revision: ${COMMIT}, worktree dirty (60 entries recorded)`)
+    expect(run.log).toContain("… and 10 more")
+    expect(run.err).toContain("REFUSED: … and 10 more")
+    expect(run.err).toContain('REFUSED: uncommitted: ?? "stray-49.txt"')
+    expect(run.err).not.toContain('"stray-50.txt"')
+  })
+
+  test("a clean git repository turned dirty by one untracked file refuses with the real revision reader, and the reservation is absent there", async () => {
+    const run = await revisionRun(undefined, async (repoRoot) => {
+      await writeFile(join(repoRoot, "stray.txt"), "not committed\n")
+    })
+    refusedUnused(run)
+    expect(run.log).toMatch(/code revision: [0-9a-f]{40}, worktree dirty \(1 entry recorded\)/)
+    expect(run.err).toContain('REFUSED: uncommitted: ?? "stray.txt"')
+    expect(run.err).toContain(DIRTY_REVISION_NEXT_STEP)
+  })
 })
 
 describe("the default gate-table wiring", () => {

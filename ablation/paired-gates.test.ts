@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 
 import { ADVERSARIAL_ATTEMPT_ALLOWANCES } from "./governor.ts"
 import { MEASURED_HOST, OAUTH_PAYLOAD } from "./managed-host.ts"
-import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
+import { ADVERSARIAL_CANDIDATE_ITEMS, ADVERSARIAL_CANDIDATE_NON_GATES, ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, adversarialReservation, adversarialRunProblem, CANDIDATE_CLAIM_WORDING, candidateProblems, candidateRecordProblems, EVALUATION_PROTOCOL, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, gate11PinProblems, gate11ScopeProblem, GATE_PHASES, EVALUATION_RUN, EVALUATION_RUN_3_PROPOSAL, EVALUATION_RUN_4_PROPOSAL, EVALUATION_RUN_5_PROPOSAL, EVALUATION_RUN_PROPOSAL, gatePreflight, HUMAN_BUDGET_OWNER, OAUTH_PILOT_PROPOSAL, OAUTH_PILOT_RUN, oauthPilotEvidencePattern, oauthPilotReservation, PAIRED_GATES, PAIRED_NON_GATES, type CandidateNonGate, type PairedGate } from "./paired-gates.ts"
 import { readFrozenProtocol } from "./schedule.ts"
 
 const closedAll = (gates: readonly PairedGate[]): PairedGate[] =>
@@ -633,6 +633,14 @@ describe("the adversarial phase of the gate table", () => {
     expect(await readFrozenProtocol(file)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v3", version: 3, hash: ADVERSARIAL_PROTOCOL.frozenHash })
     // The figures are the governor's.
     expect([ADVERSARIAL_ATTEMPT_ALLOWANCES.run, ADVERSARIAL_ATTEMPT_ALLOWANCES.suite, ADVERSARIAL_ATTEMPT_ALLOWANCES.global]).toEqual([30, 480, 480])
+  })
+
+  test("EVALUATION_PROTOCOL is the committed v2 file's frozen hash, what readFrozenProtocol computes and what run 5's schedule sealed", async () => {
+    const file = new URL(`../${EVALUATION_PROTOCOL.path}`, import.meta.url).pathname
+    expect(/^frozen_hash: (.*)$/m.exec(await Bun.file(file).text())?.[1]).toBe(EVALUATION_PROTOCOL.frozenHash)
+    expect(await readFrozenProtocol(file)).toEqual({ ok: true, id: "PROTOCOL-mad-evaluation-v2", version: 2, hash: EVALUATION_PROTOCOL.frozenHash })
+    const schedule = await Bun.file(new URL("../ablation/evidence/paired-oauth-evaluation-run-5-bundle/paired-schedule.json", import.meta.url)).text()
+    expect(schedule).toContain(EVALUATION_PROTOCOL.frozenHash)
   })
 
   test("run 1's committed reservation and evidence record what gate 10's note says", async () => {

@@ -36,9 +36,9 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
    so a shared ceiling stays shared. Three arms over one change is up to
    `1 + 3 + (3 + lenses)` discovery turns plus debate and judge turns for each,
    against your own credentials. Decide the number before you spend it.
-6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every route) and
-   `bun run adversarial` read MAD's own code revision at stage 1, before any reservation, and refuse
-   unless it is known and clean. Every entry `git status` lists refuses, whether staged, unstaged or
+6. **A clean checkout of MAD for a billed launch.** `bun run paired` (every route),
+   `bun run adversarial` and `bun run oauth-pilot --live` read MAD's own code revision before any
+   reservation, and refuse unless it is known and clean. Every entry `git status` lists refuses, whether staged, unstaged or
    untracked and not ignored, and the refusal names each one with its path JSON-quoted (the first 50,
    then a count of the rest). There is no override and no list of allowed paths. Commit or remove
    every such file first, untracked ones included. This holds to HEAD every value held in a
@@ -52,7 +52,13 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
    and catalogue digests of the payload pins the run uses, with `GATE_11_EVIDENCE_SCOPE`, field by
    field. A pin committed without a matching scope change refuses there. Neither check covers ignored
    files, which `git status` does not list, or a file changed after stage 1 reads the checkout and
-   before the launch uses it. The OAuth pilot launcher (`bun run oauth-pilot`) has no such check.
+   before the launch uses it. The OAuth pilot reads the revision after its host pre-check and before it
+   creates `--out`, so that refusal leaves the authorization unused and `--out` uncreated; its dry run
+   reads no revision. On its OAuth route, `bun run paired` also identifies the measured host binary at
+   stage 1 (`identifyBinary`: read and hashed against `MEASURED_HOST`, never started), as
+   `bun run adversarial` does, and requires the frozen protocol v2 to carry
+   `EVALUATION_PROTOCOL.frozenHash`, the hash the paired evaluation ran under, so a re-frozen v2
+   refuses. The pin authorizes no spend. The api-key route makes neither check.
 
 ## The run
 
@@ -1191,7 +1197,13 @@ bun run paired --live --provider-mode oauth \
 handles no provider credential, and there is no relay and no meter. **With the shipped tree it always
 refuses at stage 1**, before any host exists, with one aggregated diagnostic that lists gate 4 OPEN (runs
 1 to 5 are spent) and any launch-time condition below that fails, such as the store guard's refusal while
-the data directory's database holds anything. Stage 1 passes the frozen protocol v2.
+the data directory's database holds anything. Stage 1 passes the frozen protocol v2, whose hash must
+be `EVALUATION_PROTOCOL.frozenHash` (`ablation/paired-gates.ts`), the hash the paired evaluation ran
+under. It also identifies the opencode binary stage 2 would spawn (`identifyBinary` with
+`startManagedHost`'s defaults: `opencode` on PATH, its real path hashed against `MEASURED_HOST`; read,
+never started), so a wrong build refuses before the reservation. Stage 2 hashes the binary again before
+it spawns, after the reservation, so a binary swapped after stage 1 is refused there with the
+authorization spent.
 
 **The guarded OAuth evaluation run (story 2-8d).** `EVALUATION_RUN` in `ablation/paired-gates.ts`
 names run 5, the last run gate 4 authorized (on 2026-10-06; it ran and is spent): its pins in
@@ -1325,8 +1337,8 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
   that slot through the provider it names, while an unpinned slot keeps the provider listed first, and the
   launcher's check is a backstop. The refusal comes before any schedule or attempt, but after the
   reservation, so it uses that run's authorization. Stage 4 seals `accounting: "attempts"` and `route: "oauth"` under protocol v2
-  (`evaluation-protocol-v2.md`), frozen on 2026-10-02: stage 1 refuses a v2 file that is not frozen or
-  whose `frozen_hash` does not match its bytes. The
+  (`evaluation-protocol-v2.md`), frozen on 2026-10-02: stage 1 refuses a v2 file that is not frozen,
+  whose `frozen_hash` does not match its bytes, or whose hash is not `EVALUATION_PROTOCOL.frozenHash`. The
   api-key route keeps its lens-free roster.
 - **After the stop.** Once the host's exit is confirmed, the data directory's shape and auth symlink,
   the seeded config lock's sha256, the whole seeded tree's digest and the store guard are checked again. A failure, or an
@@ -1663,7 +1675,10 @@ a mismatch exits 1 with the authorization unused: no reservation is created and 
 `--out`. The host is then started with the pre-check's options and the real binary path it hashed, and
 makes both checks again immediately before the spawn. That re-check comes after the reservation: a binary
 or payload that changed between the pre-check and the spawn is refused there, and the run has spent the
-authorization. Then, before any host, auth-target stat, data-directory open or network connection, `--live` creates
+authorization. **The code revision comes next (epic-2 retro item 3).** `--live` reads MAD's own code
+revision, prints it, and refuses unless it is known and clean, an unknown revision first, then a dirty
+one, with the entries listed JSON-quoted (item 6 of "Before anything bills"). That refusal too leaves the
+authorization unused, with no reservation and `--out` not created. Then, before any host, auth-target stat, data-directory open or network connection, `--live` creates
 run 3's reservation `ablation/evidence/oauth-pilot-live-run-3.reservation`
 exclusively (`O_CREAT|O_EXCL`), so of two concurrent invocations only one can create it and the other
 refuses. It records the run, `story: "2-8c8"`, when it was created, the gate table's blob, the pinned
@@ -1697,6 +1712,8 @@ when:
 - the opencode binary cannot be identified or its sha256 is not `MEASURED_HOST`'s, or the prepared
   directory differs from `OAUTH_PAYLOAD` (a lock, a tree digest or the catalogue): the authorization is
   left unused;
+- MAD's code revision is unknown, or `git status` lists any entry, staged, unstaged or untracked and not
+  ignored: the authorization is left unused;
 - run 3's reservation cannot be created.
 
 After the reservation, `--out` is checked again against the pilot's scratch directory, and the host's own

@@ -30,13 +30,14 @@ import {
   OPENAI_COMPATIBLE_NPM,
   startManagedHost,
   type ApiKeyHostOptions,
+  type BinaryIdentityOptions,
   type ManagedHostOptions,
   type ManagedHostStart,
   type OAuthHostOptions,
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import type { PairedPhaseContext } from "../ablation/paired.ts"
-import { EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
+import { EVALUATION_PROTOCOL, EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
 import { SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
@@ -1709,6 +1710,20 @@ async function frozenV2(dir: string): Promise<string> {
   return file
 }
 
+/** A stand-in opencode binary that resolves to `path` and hashes to `sha256`; nothing is started. Each identification is recorded. */
+function measuredBinary(path = "/stand-in/bin/opencode", sha256: string = MEASURED_HOST.sha256): BinaryIdentityOptions & { reads: string[] } {
+  const reads: string[] = []
+  return {
+    reads,
+    binary: path,
+    resolveBinary: async (input) => input,
+    hashFile: async (file) => {
+      reads.push(file)
+      return sha256
+    },
+  }
+}
+
 /** An OAuth host that starts no process; its stop reports `postStop`. */
 function oauthHost(postStop: { held: string[]; problems: string[] } = { held: ["the auth symlink is intact"], problems: [] }, refuse?: string) {
   const started: ManagedHostOptions[] = []
@@ -1772,6 +1787,7 @@ function oauthOverrides(env: Awaited<ReturnType<typeof oauthSetup>>, host: Retur
       startHost: host.startHost,
       payloadPins: env.pins,
       home: env.home,
+      hostBinary: measuredBinary(),
       enumerate: async () => [candidate("openai", "gpt-6-sol"), candidate("anthropic", "claude-sonnet-5"), candidate("github-copilot", "gpt-6-luna")],
       backendFor: lensAwareBackend,
       // Story 2-8d: never this repository's ablation/evidence.
@@ -2479,5 +2495,125 @@ describe("a dirty code revision refuses at stage 1 on every route", () => {
     expect(existsSync(join(repo, EVALUATION_RUN.reservation))).toBe(false)
     expect(host.started).toEqual([])
     await nothingScheduled(env.out, env.scratchParent)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Epic-2 retro item 3 — the OAuth route identifies the measured host binary and
+// holds the frozen protocol v2 to the hash the paired evaluation ran under,
+// both at stage 1, before the reservation. The api-key route is unchanged.
+// ---------------------------------------------------------------------------
+
+describe("the OAuth route's measured host binary and frozen protocol hash (retro item 3)", () => {
+  const WRONG_SHA = "f".repeat(64)
+
+  /** Protocol v2 with one added line, frozen by its own hash rule: a valid v2 whose hash is not `EVALUATION_PROTOCOL.frozenHash`. */
+  async function refrozenV2(dir: string): Promise<{ file: string; hash: string }> {
+    const draft = await readFile(PROTOCOL_V2_FILE, "utf8")
+    const pending = `${draft.replace(/^frozen_hash: .*$/m, "frozen_hash: PENDING")}\nA line added after the freeze.\n`
+    const hash = `sha256:${new Bun.CryptoHasher("sha256").update(pending).digest("hex")}`
+    const file = join(dir, "evaluation-protocol-v2.refrozen.md")
+    await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`), "utf8")
+    return { file, hash }
+  }
+
+  /** A run with CLOSED gates whose stage 1 must refuse: no reservation, no host, nothing scheduled. */
+  async function refusedAtStage1(extra: PairedOverrides) {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const { overrides, clientCalls } = oauthOverrides(env, host, { gates: closedGates, ...extra })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED at stage 1 (offline checks).")
+    expect(existsSync(join(env.parent, "reservation-root", EVALUATION_RUN.reservation))).toBe(false)
+    expect(host.started).toEqual([])
+    expect(clientCalls).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+    return result
+  }
+
+  test("the shipped protocol file carries the pinned hash, and the binary that matches is read only; with gate 4 OPEN nothing starts", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const binary = measuredBinary()
+    const { overrides } = oauthOverrides(env, host, { hostBinary: binary })
+    expect("protocolV2File" in overrides).toBe(false)
+    expect("protocolHash" in overrides).toBe(false)
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(
+      `PASS  frozen protocol\n        PROTOCOL-mad-evaluation-v2 v2 ${EVALUATION_PROTOCOL.frozenHash}, the hash the paired evaluation ran under (\`EVALUATION_PROTOCOL.frozenHash\`)`,
+    )
+    expect(result.text).toContain(`PASS  measured host binary\n        \`/stand-in/bin/opencode\` has sha256 ${MEASURED_HOST.sha256}, the measured build's; read only, not started`)
+    expect(binary.reads).toEqual(["/stand-in/bin/opencode"])
+    expect(host.started).toEqual([])
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("with CLOSED gates, a matching binary and the pinned hash, the run reaches its reservation as before", async () => {
+    const env = await oauthSetup()
+    const host = oauthHost()
+    const binary = measuredBinary()
+    const { overrides } = oauthOverrides(env, host, { gates: closedGates, hostBinary: binary })
+    const result = await captured(() => main(oauthArgv(env.directory, env.out, env.dataDir, env.prepared), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(result.text).toContain("PASS  measured host binary")
+    expect(result.text).toContain(`reserved gate 4's evaluation run ${EVALUATION_RUN.run}`)
+    expect(existsSync(join(env.parent, "reservation-root", EVALUATION_RUN.reservation))).toBe(true)
+    expect(binary.reads).toEqual(["/stand-in/bin/opencode"])
+  })
+
+  test("a binary that is not the measured build fails `measured host binary` with identifyBinary's reason; no reservation, no host", async () => {
+    const binary = measuredBinary("/stand-in/other/opencode", WRONG_SHA)
+    const result = await refusedAtStage1({ hostBinary: binary })
+    expect(result.text).toContain("FAIL  measured host binary")
+    expect(result.text).toContain(`measured host binary failed: the host is not the measured build`)
+    expect(result.text).toContain(`the binary \`/stand-in/other/opencode\` has sha256 ${WRONG_SHA}; the measured build's is ${MEASURED_HOST.sha256}`)
+  })
+
+  test("a missing binary and an unreadable one each fail `measured host binary` with identifyBinary's reason; no reservation, no host", async () => {
+    for (const [name, hostBinary, expected] of [
+      ["missing", { binary: "/stand-in/missing/opencode", resolveBinary: async () => Promise.reject(new Error("ENOENT: no such file or directory")) }, "ENOENT"],
+      [
+        "unreadable",
+        { binary: "/stand-in/locked/opencode", resolveBinary: async (input: string) => input, hashFile: async () => Promise.reject(new Error("EACCES: permission denied")) },
+        "EACCES",
+      ],
+    ] as const) {
+      const result = await refusedAtStage1({ hostBinary })
+      expect(result.text, name).toContain("FAIL  measured host binary")
+      const reason = result.text.slice(result.text.indexOf("measured host binary failed:"))
+      expect(reason.split("\n")[0], name).toContain(expected)
+    }
+  })
+
+  test("a re-frozen v2 with another hash fails `frozen protocol`, giving the expected and actual hashes; no reservation, no host", async () => {
+    const parent = await tempDir()
+    const refrozen = await refrozenV2(parent)
+    expect(refrozen.hash).not.toBe(EVALUATION_PROTOCOL.frozenHash)
+    const result = await refusedAtStage1({ protocolV2File: refrozen.file })
+    expect(result.text).toContain("FAIL  frozen protocol")
+    expect(result.text).toContain(
+      `the frozen protocol v2 read has hash ${refrozen.hash}, and the paired evaluation ran under ${EVALUATION_PROTOCOL.frozenHash} ` +
+        "(`EVALUATION_PROTOCOL.frozenHash`); a re-frozen v2 is not the protocol the paired evaluation ran under",
+    )
+  })
+
+  test("the api-key route is unchanged: no binary check, and its frozen protocol is not held to the v2 pin", async () => {
+    const env = await setup()
+    const tripped: string[] = []
+    const hostBinary: BinaryIdentityOptions = {
+      binary: "/tripwire/opencode",
+      resolveBinary: async () => {
+        tripped.push("resolveBinary")
+        throw new Error("the api-key route identified the binary")
+      },
+    }
+    const { overrides } = overridesFor(env, { gates: closedGates, hostBinary, protocolHash: `sha256:${"0".repeat(64)}` })
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(result.text).not.toContain("measured host binary")
+    expect(result.text).toContain("PASS  frozen protocol")
+    expect(tripped).toEqual([])
   })
 })

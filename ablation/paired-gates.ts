@@ -305,6 +305,20 @@ export const ADVERSARIAL_PROTOCOL = {
 } as const
 
 /**
+ * Epic-2 retro item 3 — the frozen protocol v2 the paired evaluation (gate 4)
+ * ran under: the file, and the `frozen_hash` it records, which is also the hash
+ * run 5's sealed schedule names. The paired launcher's OAuth route refuses at
+ * stage 1 unless the frozen v2 it reads carries this hash, so a re-frozen v2 is
+ * not taken for the protocol the evaluation ran under. The pin authorizes no
+ * spend: gate 4 alone decides whether a paired evaluation may run. A test holds
+ * the hash equal to the file's and to what `readFrozenProtocol` computes.
+ */
+export const EVALUATION_PROTOCOL = {
+  path: "_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol-v2.md",
+  frozenHash: "sha256:82c7f07fe82bc293d750c61b89f7d4b850b81e6449a79df9f13531fec093c4f2",
+} as const
+
+/**
  * Story 2-7e — the one OAuth adversarial run gate 10 authorized: its run, its
  * roster pin and its reservation, with every earlier run. Run 1 ran on
  * 2026-10-14 and its reservation is committed; gate 10 is OPEN, because its

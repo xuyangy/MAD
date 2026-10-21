@@ -54,15 +54,24 @@
  *   prepared-digest checks (`hostPreCheck`, through the helpers `startManagedHost`
  *   calls, with the same defaults). These read only the binary file and the
  *   prepared directory; the binary is never started. An overlap or a mismatch
- *   refuses with the authorization unused and nothing written to `--out`. It then
- *   creates this run's reservation exclusively, so only one invocation can hold it;
- *   nothing deletes it, so a failed or interrupted run consumes the authorization
- *   and a further run needs the human's explicit decision. The authorization and
- *   the one-run checks are the first thing it does after reading its arguments;
- *   the platform, `--out`, overlap and host pre-checks follow, then the
- *   reservation. None of it reads, stats or hashes the auth target. All of it comes
- *   before any host, any stat of the real auth target, any opening of the data
- *   directory and any network connection. No flag, variable or file can authorize
+ *   refuses with the authorization unused and nothing written to `--out`. Then it
+ *   reads MAD's own code revision and refuses unless it is known and clean: any
+ *   `git status` entry (staged, unstaged or untracked and not ignored) refuses
+ *   (`dirtyRevisionReasons`, ablation/bundle.ts), so every value held in a
+ *   git-visible file of the checkout, the gate table and the attempt allowances
+ *   included, is HEAD's. Not held to HEAD: ignored files, the opencode binary
+ *   (checked separately, by its hash), the prepared and data directories and
+ *   `--out`, the environment and the flags, and any change made after the
+ *   revision is read. That refusal too leaves the authorization unused and
+ *   `--out` uncreated. It then creates this run's reservation exclusively, so
+ *   only one invocation can hold it; nothing deletes it, so a failed or
+ *   interrupted run consumes the authorization and a further run needs the
+ *   human's explicit decision. The authorization and the one-run checks are the
+ *   first thing it does after reading its arguments; the platform, `--out`,
+ *   overlap and host pre-checks follow, then the code revision, then the
+ *   reservation. None of it reads, stats or hashes the auth target. All of it
+ *   comes before any host, any stat of the real auth target, any opening of the
+ *   data directory and any network connection. No flag, variable or file can authorize
  *   it. Once authorized, one host runs through `startManagedHost` in OAuth mode on
  *   `--oauth-data-dir` and `--oauth-prepared`, with the pre-check's options and the
  *   real binary path it hashed, and with every check that mode makes: the binary
@@ -151,6 +160,7 @@ import { z } from "zod"
 
 import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { startAllowlistProxy, type AllowlistProxy, type ProxyConnect } from "../ablation/accounting-stub.ts"
+import { boundedCodeRevisionLines, codeRevisionFrom, DIRTY_REVISION_NEXT_STEP, dirtyRevisionReasons } from "../ablation/bundle.ts"
 import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type IssuedLine, type SettledLine } from "../ablation/journal.ts"
 import {
@@ -170,6 +180,7 @@ import {
   type StopOutcome,
 } from "../ablation/managed-host.ts"
 import { hostErrorOf, type HostError } from "../ablation/host-error.ts"
+import { unknownValue, type CodeRevision, type Maybe } from "../ablation/manifest.ts"
 import { authLinkPaths, overlapProblem, type PayloadPins } from "../ablation/oauth-payload.ts"
 import {
   gatePreflight,
@@ -1668,8 +1679,10 @@ export interface PilotSeams extends PilotHooks {
   body?: PilotBody
   scratchRoot?: string
   home?: string
-  /** Git for the gate table and the one-run checks; the default is the preflight's bounded git. */
+  /** Git for the gate table, the one-run checks and the code revision; the default is the preflight's bounded git. */
   git?: RunGit
+  /** Test-only: reads the live run's code revision. Defaults to `codeRevisionFrom` over the repository root through `git`. */
+  codeRevision?: () => Promise<Maybe<CodeRevision>>
   /** How an interrupted run exits; the default is `process.exit`. */
   exit?: (code: number) => void
 }
@@ -1689,9 +1702,9 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
   const args = parsed.args
   let authorization: Authorization | null = null
   const pilotRun = seams.pilotRun ?? OAUTH_PILOT_RUN
+  const root = seams.repoRoot ?? REPO_ROOT
+  const git = seams.git ?? defaultGit()
   if (args.mode === "live") {
-    const root = seams.repoRoot ?? REPO_ROOT
-    const git = seams.git ?? defaultGit()
     // The first live operation: nothing below runs unless gate 8 is CLOSED in the committed table, for this one run.
     authorization = await authorize(seams.gates ?? PAIRED_GATES, seams.gateTable ?? (() => gateTableState(git, root)))
     if (authorization.ok) {
@@ -1743,11 +1756,43 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
       return 1
     }
     hostCheck = checked.check
+    // MAD's own code revision, read before the reservation and before `--out` is created: unknown refuses first, then dirty.
+    let codeRevision: Maybe<CodeRevision>
+    try {
+      codeRevision = await (seams.codeRevision ?? (() => codeRevisionFrom((_command, gitArgs) => git(root, gitArgs))))()
+    } catch (error) {
+      codeRevision = unknownValue(`the code revision could not be read: ${messageOf(error)}`)
+    }
+    for (const line of boundedCodeRevisionLines(codeRevision)) console.log(`  ${line}`)
+    // A run whose code is not identified cannot say what enforced its authorization; no flag overrides this.
+    if (codeRevision.kind === "unknown") {
+      console.error(
+        [
+          `REFUSED — stage 1 (code revision): the code revision is unknown: ${codeRevision.why}; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
+          "Fix what made the code revision unknown (it is named above) and run the command again.",
+          untouched,
+        ].join("\n"),
+      )
+      return 1
+    }
+    // The live run launches only from a clean checkout of HEAD: the gate table's own check is one case of this.
+    const dirty = dirtyRevisionReasons(codeRevision.value)
+    if (dirty.length > 0) {
+      console.error(
+        [
+          `REFUSED — stage 1 (code revision): the checkout is not HEAD's; gate 8's authorization for run ${pilotRun.run} is unused: no reservation was created.`,
+          ...dirty.map((reason) => `REFUSED: ${reason}`),
+          DIRTY_REVISION_NEXT_STEP,
+          untouched,
+        ].join("\n"),
+      )
+      return 1
+    }
   }
   await mkdir(args.out, { recursive: true })
   let reservation: PilotContext["reservation"] = null
   if (args.mode === "live") {
-    // After every refusal that needs no touch, and before any host, auth-target stat, data-directory open or connection.
+    // After every refusal that needs no touch, the code revision's included, and before any host, auth-target stat, data-directory open or connection.
     const created: LiveReservation = {
       run: pilotRun.run,
       story: "2-8c8",
@@ -1756,7 +1801,7 @@ export async function main(argv: readonly string[] = Bun.argv, seams: PilotSeams
       proposalSha256: OAUTH_PILOT_PROPOSAL.sha256,
       out: args.out,
     }
-    const reserved = await reserveLiveRun(seams.repoRoot ?? REPO_ROOT, created)
+    const reserved = await reserveLiveRun(root, created)
     if (!reserved.ok) {
       console.error(`REFUSED: ${reserved.why}. No host was started; the real auth target was not stat-ed; the data directory was not opened; no network connection was made.`)
       return 1
