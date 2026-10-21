@@ -750,7 +750,20 @@ describe("the allowances the overshoot report is computed against", () => {
     const tokens = await openWith(await tempDir(), "tokens", "paired", { ...ATTEMPT_ALLOWANCES })
     expect(tokens.ok).toBe(false)
     if (!tokens.ok) expect(tokens.reason).toContain("read in tokens mode, which counts no attempts")
-    const replayed = await replayPersistedJournal(join(await tempDir(), JOURNAL_FILE), undefined, "paired", { ...ATTEMPT_ALLOWANCES })
-    expect(replayed.ok).toBe(false)
+  })
+
+  test("a replay given allowances must name the mode as attempts and name the scope", async () => {
+    const file = join(await tempDir(), JOURNAL_FILE)
+    // An adversarial file: replayed in its own scope, paired-shaped allowances would give no limits at all.
+    await writeFile(file, seededLines("run-1", 2))
+    const noMode = await replayPersistedJournal(file, undefined, "adversarial", { ...ADVERSARIAL_ATTEMPT_ALLOWANCES })
+    expect(noMode).toEqual({ ok: false, reason: "attempt allowances were given without the accounting mode named as attempts" })
+    const noScope = await replayPersistedJournal(file, "attempts", undefined, { ...ATTEMPT_ALLOWANCES })
+    expect(noScope).toEqual({
+      ok: false,
+      reason: "attempt allowances were given without the scope named, so their shape cannot be checked against it",
+    })
+    const tokens = await replayPersistedJournal(join(await tempDir(), JOURNAL_FILE), "tokens", "paired", { ...ATTEMPT_ALLOWANCES })
+    expect(tokens).toEqual({ ok: false, reason: "attempt allowances were given to a journal read in tokens mode, which counts no attempts" })
   })
 })

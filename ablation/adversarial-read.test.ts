@@ -45,7 +45,7 @@ import { adversarialDirectory } from "./adversarial-schedule.ts"
 import { JOURNAL_FILE } from "./journal.ts"
 import { MANIFEST_FILE } from "./manifest.ts"
 import { BUNDLE_FILE } from "./bundle.ts"
-import { HALT_MARKER_FILE } from "./governor.ts"
+import { ADVERSARIAL_ATTEMPT_ALLOWANCES, HALT_MARKER_FILE } from "./governor.ts"
 import { ADVERSARIAL_READER_MODULE } from "./report.ts"
 import type { TraceLine } from "./tool-trace.ts"
 
@@ -1008,6 +1008,10 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     expect(text).toContain("This is not a count of zero.")
     expect(text).toContain(`LOWER BOUND: at least ${total} issued attempt(s)`)
     expect(text).not.toMatch(/suite: 0 issued/)
+    // The sealed allowances validated, so the unavailable reading still carries them.
+    expect(exposure.thresholds).toEqual({ allowances: { ...ADVERSARIAL_ATTEMPT_ALLOWANCES }, differences: [] })
+    expect(text).toContain(`against the thresholds ${ADVERSARIAL_ATTEMPT_ALLOWANCES.run} per run`)
+    expect(text).not.toContain("THRESHOLDS:")
   })
 
   test("a journal with nothing readable, an unreadable one, and a missing one after a start are each unavailable with no number", async () => {
@@ -1269,7 +1273,7 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     const { suite } = await attemptRun()
     const outcome = await read(suite.root)
     if (outcome.exposure?.kind !== "read") throw new Error("no exposure")
-    expect(outcome.exposure.thresholds).toEqual({ allowances: { run: 30, suite: 480, global: 480, runs: 16 }, differences: [] })
+    expect(outcome.exposure.thresholds).toEqual({ allowances: { ...ADVERSARIAL_ATTEMPT_ALLOWANCES }, differences: [] })
     expect(renderAdversarialBundle(outcome)).not.toContain("THRESHOLDS:")
   })
 
@@ -1282,6 +1286,7 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     if (first?.kind !== "read") throw new Error(`no exposure: ${JSON.stringify(first)}`)
     const runId = first.runs[0]!.runId!
     const before = first.runs[0]!.count.total
+    expect(before).toBeLessThan(25)
     let extra = ""
     for (let index = before; index < 25; index += 1) {
       extra += `${JSON.stringify({ type: "issued", physicalId: `x-${index}`, category: "adversarial", block: null, phase: null, stage: "judge", slot: "judge-1", attempt: 1, runId, mode: "attempts", scope: "adversarial" })}\n`
@@ -1303,6 +1308,25 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     expect(text.split("\n").filter((line) => line.startsWith("  THRESHOLDS:"))).toEqual([disclosure])
   })
 
+  test("differing sealed allowances on a torn journal: unavailable, with the sealed thresholds in the header and one disclosure line", async () => {
+    const { root } = await attemptCopy()
+    await resealAllowances(root, (config) => {
+      config.attemptAllowances = { run: 20, suite: 320, global: 320, runs: 16 }
+    })
+    await appendFile(join(root, JOURNAL_FILE), '{"type":"issued","physicalId":"torn')
+    const outcome = await read(root)
+    const exposure = outcome.exposure
+    if (exposure?.kind !== "unavailable") throw new Error(`expected unavailable, got ${JSON.stringify(exposure)}`)
+    expect(exposure.reason).toContain("is not JSON")
+    expect(exposure.thresholds?.allowances).toEqual({ run: 20, suite: 320, global: 320, runs: 16 })
+    const text = renderAdversarialBundle(outcome)
+    expect(text).toContain("EXPOSURE — issued MAD attempts against the thresholds 20 per run, 320 for the suite, 320 for the root")
+    expect(text.split("\n").filter((line) => line.startsWith("  THRESHOLDS:"))).toEqual([
+      "  THRESHOLDS: the thresholds are the ones the schedule sealed, which differ from the current constants: " +
+        "run sealed 20, current 30; suite sealed 320, current 480; global sealed 320, current 480",
+    ])
+  })
+
   test("missing or malformed sealed allowances make the exposure unavailable, naming the field, never the constants", async () => {
     const variants: [string, (config: Record<string, unknown>) => void, string][] = [
       ["absent", (config) => delete config.attemptAllowances, "the sealed `config.attemptAllowances` is absent"],
@@ -1310,6 +1334,10 @@ describe("the exposure report: issued attempts from the persisted journal", () =
       ["zero", (config) => (config.attemptAllowances = { run: 30, suite: 0, global: 480, runs: 16 }), "`config.attemptAllowances.suite` is 0, not a positive integer"],
       ["missing key", (config) => (config.attemptAllowances = { run: 30, suite: 480, global: 480 }), "the sealed `config.attemptAllowances.runs` is absent"],
       ["extra key", (config) => (config.attemptAllowances = { run: 30, suite: 480, global: 480, runs: 16, block: 100 }), "carries `block`, which it never holds"],
+      ["unsafe integer", (config) => (config.attemptAllowances = { run: 30, suite: 2 ** 53, global: 480, runs: 16 }), "`config.attemptAllowances.suite` is 9007199254740992, not a positive integer"],
+      ["null", (config) => (config.attemptAllowances = null), "the sealed `config.attemptAllowances` is null, not an object"],
+      ["array", (config) => (config.attemptAllowances = [30, 480, 480, 16]), "the sealed `config.attemptAllowances` is [30,480,480,16], not an object"],
+      ["number", (config) => (config.attemptAllowances = 30), "the sealed `config.attemptAllowances` is 30, not an object"],
     ]
     for (const [name, change, why] of variants) {
       const { root } = await attemptCopy()

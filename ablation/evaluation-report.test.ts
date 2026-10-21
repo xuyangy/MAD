@@ -1424,7 +1424,7 @@ describe("attempt mode (story 2-8c3a)", () => {
     if (!paired.schedule.ok) throw new Error("expected a schedule")
     paired.schedule.schedule.config.attemptAllowances = { ...ATTEMPT_ALLOWANCES, prefix: 5 }
     const [labelled, adjudication] = await readers(paired)
-    // The journal as the script reads it: replayed against the same sealed allowances.
+    // The journal is replayed with the constants; `blockAttempts` takes its thresholds from the sealed allowances.
     const read = await journalOf(Array.from({ length: 7 }, () => attempt(1, "prefix")).flat())
     const report = readEvaluationReport({ kind: "read", value: paired }, labelled, adjudication, { kind: "read", value: read })
     if (report.kind !== "read") throw new Error("expected a report")
@@ -1446,6 +1446,10 @@ describe("attempt mode (story 2-8c3a)", () => {
       ["zero", { ...ATTEMPT_ALLOWANCES, prefix: 0 }, "`config.attemptAllowances.prefix` is 0, not a positive integer"],
       ["missing key", { global: 300, blocks: 300, block: 100, prefix: 10 }, "the sealed `config.attemptAllowances.continuation` is absent"],
       ["extra key", { ...ATTEMPT_ALLOWANCES, run: 30 }, "carries `run`, which it never holds"],
+      ["unsafe integer", { ...ATTEMPT_ALLOWANCES, global: 2 ** 53 }, "`config.attemptAllowances.global` is 9007199254740992, not a positive integer"],
+      ["null", null, "the sealed `config.attemptAllowances` is null, not an object"],
+      ["array", [300, 300, 100, 10, 45], "the sealed `config.attemptAllowances` is [300,300,100,10,45], not an object"],
+      ["number", 300, "the sealed `config.attemptAllowances` is 300, not an object"],
     ]
     for (const [name, allowances, why] of variants) {
       const { root } = await bundleAt()

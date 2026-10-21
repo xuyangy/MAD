@@ -74,9 +74,9 @@ import type { ChangeSet } from "../core/ports/repo.ts"
  *
  * - `spend.unknownUsage`, `spend.unknownUsageCount`, `spend.exposure` and the
  *   three-valued `usageCompleteness` (story 2.3). Required: a version-1
- *   manifest without `spend.unknownUsage` is refused per arm, by name ("carries
- *   no `spend.unknownUsage` list"), so version 1 reads no manifest written
- *   before story 2.3.
+ *   manifest missing any of them is refused per arm, by name (for example
+ *   "carries no `spend.unknownUsage` list"), so version 1 reads no manifest
+ *   written before story 2.3.
  * - `run.forkedFrom` with `spend.origin` (story 2-5b). Both absent reads as not
  *   forked (`ablation/read-bundle.ts`); exactly one present is refused.
  * - `experiment` (story 2-5c). Absent: the manifest is not a paired arm.
@@ -88,8 +88,8 @@ import type { ChangeSet } from "../core/ports/repo.ts"
  *
  * THE RULE. An additive optional field may join version 1 only with a stated
  * reading for its absence, written beside the field and applied by the reader.
- * A change that alters what an existing field means bumps the version, and the
- * bump names the variants above that the version-1 reader keeps reading.
+ * A change that alters what an existing field means bumps the version; the bump
+ * states which of the variants above the new reader still accepts as version 1.
  */
 export const MANIFEST_SCHEMA_VERSION = 1
 

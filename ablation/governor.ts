@@ -541,7 +541,7 @@ function sealedAllowancesOf<T>(value: unknown, current: Readonly<Record<string, 
   for (const key of expected) {
     const entry = record[key]
     if (entry === undefined) return { ok: false, reason: `the sealed \`${field}.${key}\` is absent` }
-    if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 1) {
+    if (typeof entry !== "number" || !Number.isSafeInteger(entry) || entry < 1) {
       return { ok: false, reason: `the sealed \`${field}.${key}\` is ${JSON.stringify(entry)}, not a positive integer` }
     }
     allowances[key] = entry
@@ -568,8 +568,9 @@ export function allowanceDifferences<T extends Readonly<Record<keyof T, number>>
     .map((field) => ({ field, sealed: sealed[field], current: current[field] }))
 }
 
-/** One line naming each field that differs, sealed vs current. Only meaningful for a non-empty list. */
+/** One line naming each field that differs, sealed vs current; `""` for an empty list. */
 export function allowanceDifferenceText(differences: readonly AllowanceDifference[]): string {
+  if (differences.length === 0) return ""
   return (
     "the thresholds are the ones the schedule sealed, which differ from the current constants: " +
     differences.map((entry) => `${entry.field} sealed ${entry.sealed}, current ${entry.current}`).join("; ")

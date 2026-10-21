@@ -813,9 +813,8 @@ async function readAttemptExposure(
   const refusals = refusalEvidence(bill, schedule.scheduleHash)
   const file = join(root, JOURNAL_FILE)
   const sealed = sealedAdversarialAttemptAllowances(schedule.config.attemptAllowances)
-  const thresholds: ExposureThresholds | null = sealed.ok
-    ? { allowances: sealed.allowances, differences: allowanceDifferences(sealed.allowances, ADVERSARIAL_ATTEMPT_ALLOWANCES) }
-    : null
+  // Set once the sealed allowances validate; every unavailable reading after that carries them.
+  let thresholds: ExposureThresholds | null = null
   const unavailable = async (reason: string): Promise<AttemptExposure> => {
     const supported = await supportedLowerBound(file)
     return {
@@ -837,6 +836,7 @@ async function readAttemptExposure(
   // are unavailable, never the constants'.
   if (!sealed.ok) return unavailable(`the attempt thresholds are unavailable: ${sealed.reason}`)
   const limits = sealed.allowances
+  thresholds = { allowances: limits, differences: allowanceDifferences(limits, ADVERSARIAL_ATTEMPT_ALLOWANCES) }
   let replayed: Awaited<ReturnType<typeof replayPersistedJournal>>
   try {
     replayed = await replayPersistedJournal(file, "attempts", "adversarial", limits)
@@ -890,7 +890,7 @@ async function readAttemptExposure(
   const integrity = journal.integrity.length
   return {
     kind: "read",
-    thresholds: { allowances: limits, differences: allowanceDifferences(limits, ADVERSARIAL_ATTEMPT_ALLOWANCES) },
+    thresholds,
     source: replayed.existed ? `\`${file}\`, replayed` : `no journal exists at \`${file}\`, and the schedule was not started`,
     issued: integrity === 0 ? "exact" : "lower-bound",
     issuedReason:

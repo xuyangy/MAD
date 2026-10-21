@@ -122,12 +122,18 @@ export type JournalScope = "paired" | "adversarial"
  */
 export type JournalAllowances = AttemptAllowances | AdversarialAttemptAllowances
 
-/** Why `allowances` cannot be this journal's, or `null`. Absent allowances always fit. */
+/**
+ * Why `allowances` cannot be this journal's, or `null`. Absent allowances always
+ * fit. Given allowances need `mode` named as `attempts` and `scope` named, so
+ * they are checked against the shape of the scope the file is replayed in.
+ */
 function allowancesProblem(mode: AccountingMode | undefined, scope: JournalScope | undefined, allowances: JournalAllowances | undefined): string | null {
   if (allowances === undefined) return null
-  if (mode !== "attempts") return `attempt allowances were given to a journal read in ${mode ?? "tokens"} mode, which counts no attempts`
+  if (mode === undefined) return "attempt allowances were given without the accounting mode named as attempts"
+  if (mode !== "attempts") return `attempt allowances were given to a journal read in ${mode} mode, which counts no attempts`
+  if (scope === undefined) return "attempt allowances were given without the scope named, so their shape cannot be checked against it"
   const checked = scope === "adversarial" ? sealedAdversarialAttemptAllowances(allowances) : sealedAttemptAllowances(allowances)
-  return checked.ok ? null : `the attempt allowances given are not the ${scope ?? "paired"} scope's: ${checked.reason}`
+  return checked.ok ? null : `the attempt allowances given are not the ${scope} scope's: ${checked.reason}`
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1040,7 @@ export type PersistedReplay =
  * no settlement reads UNCERTAIN, exactly as on reopen. `mode` and `scope`, when
  * given, must be the file's own. `allowances`, when given, are the ones the
  * bill's overshoot report uses (see `JournalAllowances`); they need `mode`
- * `attempts` and the shape of `scope`.
+ * named as `attempts`, `scope` named, and the shape of that scope.
  */
 export async function replayPersistedJournal(
   file: string,

@@ -150,6 +150,8 @@ describe("readPairedAttemptJournal", () => {
       [{ ...ATTEMPT_ALLOWANCES, global: 0 }, "`config.attemptAllowances.global` is 0, not a positive integer"],
       [{ global: 300, blocks: 300, block: 100, continuation: 45 }, "the sealed `config.attemptAllowances.prefix` is absent"],
       [{ ...ATTEMPT_ALLOWANCES, suite: 480 }, "carries `suite`, which it never holds"],
+      [{ ...ATTEMPT_ALLOWANCES, block: 2 ** 53 }, "`config.attemptAllowances.block` is 9007199254740992, not a positive integer"],
+      [null, "the sealed `config.attemptAllowances` is null, not an object"],
     ]
     for (const [allowances, why] of variants) {
       const config = allowances === undefined ? { accounting: "attempts" } : { accounting: "attempts", attemptAllowances: allowances }
@@ -165,6 +167,10 @@ describe("readPairedAttemptJournal", () => {
   test("a refused schedule refuses the journal, citing the schedule", async () => {
     const read = await readPairedAttemptJournal(await rootWith(lines), { ok: false, reason: "it does not match its own scheduleHash" })
     expect(read.ok).toBe(false)
-    if (!read.ok) expect(read.reason).toBe("the sealed schedule is refused, so its attempt allowances cannot be read: it does not match its own scheduleHash")
+    if (!read.ok) {
+      expect(read.reason).toBe(
+        "the attempt thresholds are unavailable: the sealed schedule is refused, so its attempt allowances cannot be read: it does not match its own scheduleHash",
+      )
+    }
   })
 })

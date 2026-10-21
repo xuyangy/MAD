@@ -81,7 +81,7 @@ export async function readPersistedJournal(
  */
 export async function readPairedAttemptJournal(bundleRoot: string, schedule: ScheduleRead): Promise<JournalReadOutcome> {
   const file = join(resolve(bundleRoot), JOURNAL_FILE)
-  if (!schedule.ok) return { ok: false, file, reason: `the sealed schedule is refused, so its attempt allowances cannot be read: ${schedule.reason}` }
+  if (!schedule.ok) return { ok: false, file, reason: `the attempt thresholds are unavailable: the sealed schedule is refused, so its attempt allowances cannot be read: ${schedule.reason}` }
   const sealed = sealedAttemptAllowances(schedule.schedule.config.attemptAllowances)
   if (!sealed.ok) return { ok: false, file, reason: `the attempt thresholds are unavailable: ${sealed.reason}` }
   return readPersistedJournal(bundleRoot, "attempts", sealed.allowances)
