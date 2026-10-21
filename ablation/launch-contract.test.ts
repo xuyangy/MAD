@@ -10,6 +10,7 @@ import {
   ADVERSARIAL_RUN,
   adversarialReservation,
   API_KEY_EVALUATION_RUN,
+  apiKeyEvaluationEvidencePattern,
   apiKeyEvaluationReservation,
   adversarialRunProblem,
   EVALUATION_RUN,
@@ -101,6 +102,11 @@ const pilotPrior = (run: number) => ({
   proposalSha256: "a".repeat(64),
 })
 const plainPrior = (reservationOf: (run: number) => string) => (run: number) => ({ run, reservation: reservationOf(run), evidence: `${LAUNCH_EVIDENCE_DIR}/run-${run}.json` })
+const apiKeyPrior = (run: number) => ({
+  run,
+  reservation: apiKeyEvaluationReservation(run),
+  evidence: `${LAUNCH_EVIDENCE_DIR}/paired-api-key-evaluation-run-${run}-2026-11-02.json`,
+})
 
 const LAUNCHERS = [
   { label: "OAUTH_PILOT_RUN", check: pilot, run: 3, base: (prior: unknown[]) => ({ run: 3, prior }), prior: pilotPrior, reservationOf: oauthPilotReservation, own: false },
@@ -118,7 +124,7 @@ const LAUNCHERS = [
     check: apiKey,
     run: 3,
     base: (prior: unknown[]) => ({ run: 3, reservation: apiKeyEvaluationReservation(3), prior }),
-    prior: plainPrior(apiKeyEvaluationReservation),
+    prior: apiKeyPrior,
     reservationOf: apiKeyEvaluationReservation,
     own: true,
   },
@@ -235,6 +241,59 @@ describe("launchIdentityProblems: malformed identities, for each launcher", () =
     ])
     expect(apiKey({ ...API_KEY_EVALUATION_RUN, run: 1.5 })).toEqual(["API_KEY_EVALUATION_RUN names run 1.5, which is not an integer"])
     expect(apiKey({ ...API_KEY_EVALUATION_RUN, pins: null })).toEqual([])
+  })
+
+  describe("API_KEY_EVALUATION_RUN: a prior run's evidence is that run's dated api-key evaluation file", () => {
+    const run2 = (evidence: unknown) => ({ run: 2, reservation: apiKeyEvaluationReservation(2), prior: [{ ...apiKeyPrior(1), evidence }] })
+    const notItsName = (evidence: string) =>
+      `API_KEY_EVALUATION_RUN.prior names run 1's evidence \`${evidence}\`, which is not run 1's api-key evaluation evidence name in ${LAUNCH_EVIDENCE_DIR}`
+
+    test("the pattern is the dated name, with no calendar check", () => {
+      expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-1-2026-11-02.json")).toBe(true)
+      expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-1-2026-13-45.json")).toBe(true)
+      expect(apiKeyEvaluationEvidencePattern(1).test("paired-api-key-evaluation-run-11-2026-11-02.json")).toBe(false)
+    })
+
+    test("the shipped run passes", () => {
+      expect(apiKey(API_KEY_EVALUATION_RUN)).toEqual([])
+    })
+
+    test("a good prior passes", () => {
+      expect(apiKey(run2(`${LAUNCH_EVIDENCE_DIR}/paired-api-key-evaluation-run-1-2026-11-02.json`))).toEqual([])
+    })
+
+    test("the run's own reservation as evidence is one problem", () => {
+      expect(apiKey(run2(apiKeyEvaluationReservation(1)))).toEqual([notItsName(apiKeyEvaluationReservation(1))])
+    })
+
+    test("another launcher's file is one problem", () => {
+      for (const name of ["paired-oauth-evaluation-run-1-2026-10-02.json", "oauth-pilot-live-2026-09-28.json"]) {
+        const evidence = `${LAUNCH_EVIDENCE_DIR}/${name}`
+        expect(apiKey(run2(evidence)), name).toEqual([notItsName(evidence)])
+      }
+    })
+
+    test("a wrong run or an undated name is one problem", () => {
+      for (const name of ["paired-api-key-evaluation-run-2-2026-11-02.json", "paired-api-key-evaluation-run-1.json"]) {
+        const evidence = `${LAUNCH_EVIDENCE_DIR}/${name}`
+        expect(apiKey(run2(evidence)), name).toEqual([notItsName(evidence)])
+      }
+    })
+
+    test("evidence outside the directory is only the shared problem", () => {
+      expect(apiKey(run2("elsewhere/x.json"))).toEqual([`API_KEY_EVALUATION_RUN.prior names run 1's evidence \`elsewhere/x.json\`, which is not a file in ${LAUNCH_EVIDENCE_DIR}`])
+    })
+
+    test("a malformed prior list is only the shared list problem: the extra adds nothing", () => {
+      const badName = { ...apiKeyPrior(2), evidence: `${LAUNCH_EVIDENCE_DIR}/x.json` }
+      expect(apiKey({ run: 3, reservation: apiKeyEvaluationReservation(3), prior: [badName] })).toEqual([
+        "API_KEY_EVALUATION_RUN.prior lists runs [2], not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry",
+      ])
+      expect(apiKey({ run: 3, reservation: apiKeyEvaluationReservation(3), prior: [{ ...apiKeyPrior(1), evidence: `${LAUNCH_EVIDENCE_DIR}/x.json` }, null] })).toEqual([
+        "API_KEY_EVALUATION_RUN.prior lists runs [1, (not an object)], not exactly runs 1 to 2 before run 3: a gap, a duplicate, a reused run or an extra entry",
+        "API_KEY_EVALUATION_RUN.prior entry 2 is not an object",
+      ])
+    })
   })
 
   test("the pilot's legacy run-1 reservation name is the derived one", () => {

@@ -2373,10 +2373,10 @@ describe("gate 9's one authorized api-key evaluation: the run and the reservatio
     expect(await apiKeyEvaluationRunProblems(seam, { ...API_KEY_EVALUATION_RUN, run: 1.5 })).toEqual(["API_KEY_EVALUATION_RUN names run 1.5, which is not an integer"])
     expect(asked).toBe(0)
     // A well-formed later run checks every earlier run's files at HEAD.
-    const later = { run: 2, reservation: "ablation/evidence/paired-api-key-evaluation-run-2.reservation", prior: [{ run: 1, reservation: API_KEY_EVALUATION_RUN.reservation, evidence: "ablation/evidence/x.json" }] }
+    const later = { run: 2, reservation: "ablation/evidence/paired-api-key-evaluation-run-2.reservation", prior: [{ run: 1, reservation: API_KEY_EVALUATION_RUN.reservation, evidence: "ablation/evidence/paired-api-key-evaluation-run-1-2026-11-02.json" }] }
     expect(await apiKeyEvaluationRunProblems(seam, later)).toEqual([
       `run 1's reservation \`${API_KEY_EVALUATION_RUN.reservation}\` is not committed at HEAD: an earlier run must stay on record before run 2 is reserved`,
-      "run 1's evidence `ablation/evidence/x.json` is not committed at HEAD: an earlier run must stay on record before run 2 is reserved",
+      "run 1's evidence `ablation/evidence/paired-api-key-evaluation-run-1-2026-11-02.json` is not committed at HEAD: an earlier run must stay on record before run 2 is reserved",
     ])
   })
 

@@ -136,7 +136,7 @@
 import { rmSync } from "node:fs"
 import { lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, join, posix, resolve } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBlame } from "../adapters/opencode/blame-exec.ts"
@@ -175,6 +175,7 @@ import { authLinkPaths, dataDirProblems, overlapProblem, verifyPrepared, type Pa
 import { storeGuard } from "../ablation/oauth-store.ts"
 import {
   API_KEY_EVALUATION_RUN,
+  apiKeyEvaluationEvidencePattern,
   apiKeyEvaluationReservation,
   EVALUATION_PROTOCOL,
   EVALUATION_RUN,
@@ -186,7 +187,7 @@ import {
   type GateRoute,
   type PairedGate,
 } from "../ablation/paired-gates.ts"
-import { launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
+import { isLaunchEvidenceFile, LAUNCH_EVIDENCE_DIR, launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   createSchedule,
   readFrozenProtocol,
@@ -442,8 +443,10 @@ export interface ApiKeyEvaluationReservation {
 /**
  * Why `run` is not a run gate 9 can authorize: the shared run-identity rules
  * (`ablation/launch-contract.ts`) with a floor of 1 and
- * `apiKeyEvaluationReservation`. Gate 9 authorizes no roster, so no pin is
- * checked.
+ * `apiKeyEvaluationReservation`, and one extra: each prior run's evidence
+ * carries that run's dated api-key evaluation name
+ * (`apiKeyEvaluationEvidencePattern`). Gate 9 authorizes no roster, so no pin
+ * is checked.
  */
 export function apiKeyEvaluationIdentityProblems(run: ApiKeyEvaluationRun = API_KEY_EVALUATION_RUN): string[] {
   return launchIdentityProblems(run, {
@@ -451,6 +454,22 @@ export function apiKeyEvaluationIdentityProblems(run: ApiKeyEvaluationRun = API_
     floor: 1,
     reservationOf: apiKeyEvaluationReservation,
     ownReservation: true,
+    extra: (identity, shape) => {
+      const problems: string[] = []
+      // Entry checks only on a list the shared rules accepted, so a rejected list adds no entry-level line.
+      if (!shape.wellFormed) return problems
+      for (const prior of identity.prior as unknown as Record<string, unknown>[]) {
+        const priorRun = prior.run as number
+        const evidence = prior.evidence
+        // Evidence the shared rules already refused is not named a second time.
+        if (isLaunchEvidenceFile(evidence) && !apiKeyEvaluationEvidencePattern(priorRun).test(posix.basename(evidence))) {
+          problems.push(
+            `API_KEY_EVALUATION_RUN.prior names run ${priorRun}'s evidence \`${evidence}\`, which is not run ${priorRun}'s api-key evaluation evidence name in ${LAUNCH_EVIDENCE_DIR}`,
+          )
+        }
+      }
+      return problems
+    },
   })
 }
 

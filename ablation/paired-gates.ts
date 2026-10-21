@@ -244,6 +244,11 @@ export function apiKeyEvaluationReservation(run: number): string {
   return `ablation/evidence/paired-api-key-evaluation-run-${run}.reservation`
 }
 
+/** Api-key evaluation run N's committed evidence file name: `paired-api-key-evaluation-run-N-YYYY-MM-DD.json`. */
+export function apiKeyEvaluationEvidencePattern(run: number): RegExp {
+  return new RegExp(`^paired-api-key-evaluation-run-${run}-\\d{4}-\\d{2}-\\d{2}\\.json$`)
+}
+
 /**
  * The one api-key evaluation run gate 9 authorizes: its run and the reservation
  * `bun run paired --live` (the api-key route) creates exclusively, in this
