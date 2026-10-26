@@ -18,7 +18,7 @@ import { join } from "node:path"
 import { startAllowlistProxy, type ProxyConnect } from "../ablation/accounting-stub.ts"
 import { ATTEMPT_ALLOWANCES } from "../ablation/governor.ts"
 import { acquireLock, JOURNAL_FILE, openJournal, type PairedJournal } from "../ablation/journal.ts"
-import { DIRTY_REVISION_NEXT_STEP } from "../ablation/bundle.ts"
+import { codeRevisionFrom, DIRTY_REVISION_NEXT_STEP } from "../ablation/bundle.ts"
 import { MEASURED_HOST, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
 import { known, unknownValue } from "../ablation/manifest.ts"
 import type { PreparedMeasure } from "../ablation/oauth-payload.ts"
@@ -1439,30 +1439,107 @@ describe("an authorized live run against stand-ins (gate table injected; nothing
       }
     })
 
-    test("two concurrent invocations: exactly one reservation and one refusal", async () => {
+    /** A one-shot latch: `opened` resolves once `open` is called. */
+    const latch = () => {
+      let open = () => {}
+      const opened = new Promise<void>((resolve) => (open = resolve))
+      return { open, opened }
+    }
+    /** The live run's own code revision reader over `repoRoot`: `codeRevisionFrom` through the preflight's bounded git. */
+    const realRevision = (repoRoot: string) => {
+      const run = boundedGit({ spawn: preflightSpawn, deadlineMs: PREFLIGHT_GIT_DEADLINE_MS, cleanupMs: PREFLIGHT_GIT_CLEANUP_MS })
+      return codeRevisionFrom((_command, args) => run(repoRoot, args))
+    }
+
+    test("two concurrent invocations, both past the clean-revision check before either reserves: exactly one reservation and one refusal", async () => {
       const repoRoot = await liveRepo()
+      // Each reads the real revision, then waits until both have read it, so neither reads a checkout holding the other's reservation.
+      let arrived = 0
+      const bothRead = latch()
+      const readThenWait = async () => {
+        const revision = await realRevision(repoRoot)
+        arrived += 1
+        if (arrived === 2) bothRead.open()
+        await bothRead.opened
+        return revision
+      }
       // One capture for both: the spies are process-global, and it ends only after both invocations have.
       const {
         value: [a, b],
         err,
       } = await captured(() =>
         Promise.all([
-          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true }),
-          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true }),
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true, codeRevision: readThenWait }),
+          liveRun({ backend: scriptedBackend([answer, answer]), repoRoot, callersCapture: true, codeRevision: readThenWait }),
         ]),
       )
       expect([a.value, b.value].sort()).toEqual([0, 1])
       const loser = a.value === 1 ? a : b
       const winner = a.value === 0 ? a : b
       expect(() => loser.err).toThrow("read the console text from that capture")
+      // The loser lost the exclusive creation itself: its only hash is the pre-check's, before any reservation.
+      expect(loser.hashed).toEqual([{ path: "/stand-in/opencode", reserved: false }])
       const refusals = err.split("\n").filter((line) => line.includes("REFUSED"))
       expect(refusals).toHaveLength(1)
-      expect(refusals[0]).toMatch(/^REFUSED: run 3's reservation `ablation\/evidence\/oauth-pilot-live-run-3\.reservation` already exists/)
+      expect(refusals[0]).toMatch(/^REFUSED: run 3's reservation `ablation\/evidence\/oauth-pilot-live-run-3\.reservation` already exists: another `--live` reserved run 3 first/)
       expect(loser.requests).toEqual([])
       expect(loser.stats).toEqual([])
       expect(loser.proxies).toEqual([])
       const written = JSON.parse(await readFile(join(repoRoot, OWN_RESERVATION), "utf8")) as { out: string; run: number }
       expect(written.run).toBe(3)
+      expect(written.out).toBe(winner.out)
+    })
+
+    test("a concurrent invocation whose real revision read sees the winner's reservation refuses as dirty and keeps it", async () => {
+      const repoRoot = await liveRepo()
+      // The loser passes its one-run checks and pre-check, then reads the real revision only after the winner has ended.
+      const loserAtRevision = latch()
+      const winnerEnded = latch()
+      const {
+        value: [winner, loser],
+        err,
+      } = await captured(() =>
+        Promise.all([
+          liveRun({
+            backend: scriptedBackend([answer, answer]),
+            repoRoot,
+            callersCapture: true,
+            codeRevision: async () => {
+              await loserAtRevision.opened
+              return realRevision(repoRoot)
+            },
+          }).then((run) => {
+            winnerEnded.open()
+            return run
+          }),
+          liveRun({
+            backend: scriptedBackend([answer, answer]),
+            repoRoot,
+            callersCapture: true,
+            codeRevision: async () => {
+              loserAtRevision.open()
+              await winnerEnded.opened
+              return realRevision(repoRoot)
+            },
+          }),
+        ]),
+      )
+      expect(winner.value).toBe(0)
+      expect(loser.value).toBe(1)
+      expect(loser.hashed).toEqual([{ path: "/stand-in/opencode", reserved: false }])
+      const refusals = err.split("\n").filter((line) => line.includes("REFUSED"))
+      expect(refusals).toEqual([
+        "REFUSED — pre-check (code revision): the checkout is not HEAD's; gate 8's authorization for run 3 is unused: no reservation was created.",
+        expect.stringMatching(/^REFUSED: the worktree differs from HEAD [0-9a-f]{40} \(1 entry recorded\): a launch needs a clean checkout/),
+        `REFUSED: uncommitted: ?? "${OWN_RESERVATION}"`,
+        `REFUSED: "${OWN_RESERVATION}" is a gate-8 reservation or live evidence: never remove one; another invocation may hold it, and a further run needs the budget owner's decision.`,
+      ])
+      expect(err).toContain(DIRTY_REVISION_NEXT_STEP)
+      expect(loser.requests).toEqual([])
+      expect(loser.stats).toEqual([])
+      expect(loser.proxies).toEqual([])
+      expect(existsSync(loser.out)).toBe(false)
+      const written = JSON.parse(await readFile(join(repoRoot, OWN_RESERVATION), "utf8")) as { out: string; run: number }
       expect(written.out).toBe(winner.out)
     })
 
