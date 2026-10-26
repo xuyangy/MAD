@@ -73,7 +73,10 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
  * or fail outright where they have configured none. The commit also runs with no
  * automatic maintenance: since git 2.47 that maintenance detaches before it checks
  * for work, and the background process can still be writing in the worktree's
- * `.git` while `git apply` runs and after this script exits.
+ * `.git` while `git apply` runs and after this script exits. Git before 2.30
+ * ignores `maintenance.auto` (2.28 runs `git gc --auto` after a commit, 2.29
+ * `git maintenance run --auto`), so `gc.auto=0` turns automatic gc off as well:
+ * an operator's lowered `gc.auto` would otherwise let that gc detach the same way.
  */
 const GIT_IDENTITY = [
   "-c",
@@ -84,6 +87,8 @@ const GIT_IDENTITY = [
   "commit.gpgsign=false",
   "-c",
   "maintenance.auto=false",
+  "-c",
+  "gc.auto=0",
 ]
 
 /**
