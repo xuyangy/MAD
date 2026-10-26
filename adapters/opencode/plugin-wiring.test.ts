@@ -189,7 +189,8 @@ describe("mad_review.execute — a change read that stops, and one git refused",
     expect(result.title).toBe("MAD — could not read the change")
     expect(result.output).toContain("(quarantined)")
     expect(result.output).toContain("This worktree is QUARANTINED: MAD reads nothing in it until opencode restarts.")
-    expect(result.output).toContain("Check that process 9191 has ended, then restart opencode.")
+    expect(result.output).toContain("check that process 9191 has ended AND look for any git process or helper it started")
+    expect(result.output).toContain("Process 9191 having ended does not mean its helpers have.")
     // A quarantined read was never started, so no hang cause is offered.
     expect(result.output).not.toContain("Likely causes")
     // Not the bad-ref hint: that would send the user after the wrong fix.

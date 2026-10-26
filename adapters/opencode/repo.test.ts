@@ -546,6 +546,36 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     expect(changeReadQuarantineFor(worktree)).toBeUndefined()
   })
 
+  /**
+   * THE DEFAULT ITSELF, not the exported constant. An ordinary `mad_review`
+   * omits `readBudgetMs`, so the fallback in `opencodeRepo` is what users get; a
+   * test that always supplies the option would stay green if that fallback alone
+   * became ten minutes. The clock is injected, so no real minute passes.
+   */
+  test("with readBudgetMs OMITTED, a read returning past 60,000 ms stops, and one just inside returns", async () => {
+    let clock = 0
+    let spawns = 0
+    const late = fakeSpawn(healthy, () => {
+      spawns += 1
+      clock = spawns === 3 ? 60_001 : clock + 10
+    })
+    const error = await stoppedBy(
+      opencodeRepo({ worktree: keyed(freshWorktree()), spawn: late.spawn, now: () => clock }).change(),
+    )
+    expect(spawns).toBe(3)
+    expect(error.stop).toBe("budget-passed")
+    expect(error.message).toContain("60000ms change read budget")
+
+    clock = 0
+    spawns = 0
+    const inside = fakeSpawn(healthy, () => {
+      spawns += 1
+      clock = spawns === 3 ? 60_000 : clock + 10
+    })
+    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn: inside.spawn, now: () => clock }).change()
+    expect(change.files).toEqual(["src/pay.ts"])
+  })
+
   test("AND THE SAME READS INSIDE THE BUDGET DO RETURN — the non-vacuous sibling", async () => {
     let clock = 0
     const { spawn } = fakeSpawn(healthy, () => {

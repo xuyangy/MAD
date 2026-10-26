@@ -36,19 +36,22 @@ describe("changeReadStopGuidance", () => {
     const text = changeReadStopGuidance(error)
     expect(text).toContain(CAUSES)
     expect(text).toContain(`This worktree is now ${QUARANTINE_LINE}`)
-    expect(text).toContain("Check that process 9191 has ended, then restart opencode.")
+    // A dead direct child is not the condition: a helper it started can still hold the output.
+    expect(text).toContain("check that process 9191 has ended AND look for any git process or helper it started")
+    expect(text).toContain("Process 9191 having ended does not mean its helpers have. Then restart opencode.")
     expect(text).not.toContain("Then try again.")
   })
 
   test("an observation failure whose cleanup is unresolved latched too", () => {
     const text = changeReadStopGuidance(stop({ stop: "observation-failed", cleanup: "unresolved", pid: 5 }))
     expect(text).toContain(`This worktree is now ${QUARANTINE_LINE}`)
-    expect(text).toContain("Check that process 5 has ended")
+    expect(text).toContain("check that process 5 has ended AND look for any git process or helper it started")
   })
 
   test("an unresolved cleanup with no pid names no process", () => {
     const text = changeReadStopGuidance(stop({ stop: "cleanup-unresolved", cleanup: "unresolved" }))
-    expect(text).toContain("Check for a leftover git process in this worktree, then restart opencode.")
+    expect(text).toContain("look for any git process or helper still running in this worktree")
+    expect(text).toContain("MAD has no process id for this read. Then restart opencode.")
     expect(text).not.toMatch(/process \d/)
   })
 
@@ -56,7 +59,10 @@ describe("changeReadStopGuidance", () => {
     const text = changeReadStopGuidance(
       stop({ stop: "quarantined", quarantine: { operation: "git ls-files", why: "x", pid: 4242 } }),
     )
-    expect(text).toBe(`This worktree is ${QUARANTINE_LINE} Check that process 4242 has ended, then restart opencode.`)
+    expect(text.startsWith(`This worktree is ${QUARANTINE_LINE} Before restarting opencode, `)).toBe(true)
+    // A later call is told the same as the latching one: the pid AND its helpers.
+    expect(text).toContain("check that process 4242 has ended AND look for any git process or helper it started")
+    expect(text).toContain("Process 4242 having ended does not mean its helpers have. Then restart opencode.")
     expect(text).not.toContain(CAUSES)
     expect(text).not.toContain("no process id")
   })

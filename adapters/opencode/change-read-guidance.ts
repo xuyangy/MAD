@@ -15,9 +15,21 @@ const LIKELY_CAUSES =
   `likely: \`git diff\` and \`git ls-files\` do not normally prompt, but a fetch they trigger can, e.g. ` +
   `in a partial clone. Check the repository with plain git in a terminal.`
 
+/**
+ * RECOVERY NAMES THE DESCENDANTS, NOT ONLY THE PID. An unresolved cleanup means
+ * the direct child, a descendant, or a pipe one of them held was not accounted
+ * for, and the direct child is often already gone while a helper it started
+ * still holds the output. So a dead pid is not the condition to restart on.
+ */
 const restart = (pid: number | undefined): string =>
-  `${pid === undefined ? "Check for a leftover git process in this worktree" : `Check that process ${pid} has ended`}, ` +
-  `then restart opencode.`
+  pid === undefined
+    ? `Before restarting opencode, look for any git process or helper still running in this worktree ` +
+      `(for example with \`ps -A -o pid,ppid,command | grep git\`); MAD has no process id for this read. ` +
+      `Then restart opencode.`
+    : `Before restarting opencode, check that process ${pid} has ended AND look for any git process or ` +
+      `helper it started that is still running in this worktree (for example with ` +
+      `\`ps -A -o pid,ppid,command | grep git\`). Process ${pid} having ended does not mean its helpers ` +
+      `have. Then restart opencode.`
 
 export function changeReadStopGuidance(error: ChangeReadStopped): string {
   switch (error.stop) {
