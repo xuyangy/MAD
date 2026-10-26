@@ -68,6 +68,45 @@ sixteen runs executed once, with its kept bundle and the reader's output over it
    protocol v2 to carry `EVALUATION_PROTOCOL.frozenHash`, the hash the paired
    evaluation ran under, so a re-frozen v2 refuses. The pin authorizes no spend.
    The api-key route makes neither check.
+7. **Green CI on the exact parent of the spend-gate commit, before the gate
+   closes.** A spend gate is closed by a commit that changes its status in
+   `ablation/paired-gates.ts`. Before the budget owner makes or approves that
+   commit, the commit it sits on must have a completed, successful `ci` run on
+   `main`. This step is the budget owner's, and nothing in MAD checks it. No
+   launcher reads CI, and a closed gate does not lift item 6's clean-checkout
+   refusal or any other launcher check.
+   - **Before the gate commit exists**, its intended parent is `main`'s HEAD.
+     After `git fetch origin`, `git status` lists nothing and `git rev-parse HEAD`
+     equals `git rev-parse origin/main`. That full SHA is the intended parent.
+   - **Once the gate commit exists**, the parent is `git rev-parse <gate-commit>^`.
+     If that is not the SHA checked before the commit, check again. Rebasing,
+     amending or re-parenting the gate commit invalidates the check.
+   - **Find the run** with the full 40-character SHA. A short SHA lists nothing:
+
+     ```
+     gh run list --workflow ci --branch main --commit <full-parent-sha> \
+       --json status,conclusion,headSha,url
+     ```
+
+     It passes only when a run for exactly that `headSha` shows
+     `status: completed` and `conclusion: success`. A green run on an earlier
+     ancestor does not count, even if the later commits look unrelated.
+   - **Otherwise the gate stays open.** That covers no run, a run that is
+     queued or in progress, a failed or cancelled run, or a run for another
+     SHA. Fix main, wait for its run, and check again. Main's CI was red for 19
+     days through eight live authorizations once (epic-2 retrospective, P1),
+     because the local suite runs on macOS and CI on Linux, so a green local
+     suite is not this check.
+8. **Fresh sign-ins immediately before an authorized OAuth run.** Re-sign in to
+   each provider the run's roster uses (each `--oauth-provider`) with ordinary
+   opencode, immediately before starting the separately authorized
+   `bun run paired --provider-mode oauth`, `bun run adversarial` or
+   `bun run oauth-pilot --live`. Two of nine authorizations in epic 2 were lost
+   to expired sign-ins. This is a human step. MAD never opens or reads
+   `auth.json`, no launcher checks a token's age, and the managed host may
+   still refresh a token during the run (see "What is not controlled" under the
+   OAuth route). Signing in is preparation: it authorizes no MAD model call and
+   closes no gate. The api-key route uses no sign-in.
 
 ## The run
 
@@ -1393,8 +1432,8 @@ that keeps its data under a custom `XDG_DATA_HOME` is not supported.
   example above): opencode's own side requests, such as session titles
   and summaries, go to that model outside every attempt count; the first `--pin` decides it. A stored
   token that has expired may be refreshed by the host through the symlink; where that refresh writes is
-  not established. Refreshing the sign-ins by using ordinary opencode first is operational preparation,
-  not a launcher check.
+  not established. Re-signing in with ordinary opencode immediately before the run (item 8 of "Before
+  anything bills") is operational preparation, not a launcher check.
 - **Re-measuring.** Another npm, another payload version or another platform changes the digests: run
   `bun run oauth-prepare` twice into fresh directories, compare the printed digests, and set
   `OAUTH_PAYLOAD` in a reviewed change with both runs recorded as evidence.

@@ -150,6 +150,30 @@ describe("LIVE-RUN.md states the clean-checkout rule for a billed launch", () =>
   })
 })
 
+describe("LIVE-RUN.md states the human pre-spend steps (epic-2 retro items 6 and 7)", () => {
+  test("green CI on the exact parent of the spend-gate commit, and fresh sign-ins before an OAuth run", async () => {
+    const doc = await liveRunDoc()
+    const checklist = between(doc, "## Before anything bills", "## The run", "pre-run checklist").replace(/\s+/g, " ")
+    for (const phrase of [
+      "7. **Green CI on the exact parent of the spend-gate commit, before the gate closes.**",
+      "This step is the budget owner's, and nothing in MAD checks it. No launcher reads CI, and a closed gate does not lift item 6's clean-checkout refusal or any other launcher check.",
+      "Rebasing, amending or re-parenting the gate commit invalidates the check.",
+      "gh run list --workflow ci --branch main --commit <full-parent-sha> \\ --json status,conclusion,headSha,url",
+      "It passes only when a run for exactly that `headSha` shows `status: completed` and `conclusion: success`. A green run on an earlier ancestor does not count",
+      "**Otherwise the gate stays open.**",
+      "8. **Fresh sign-ins immediately before an authorized OAuth run.**",
+      "MAD never opens or reads `auth.json`, no launcher checks a token's age",
+      "Signing in is preparation: it authorizes no MAD model call and closes no gate.",
+    ]) {
+      expect(checklist, phrase).toContain(phrase)
+    }
+    // The OAuth route's own sign-in note points at the checklist step rather than restating a second rule.
+    expect(doc.replace(/\s+/g, " ")).toContain(
+      'Re-signing in with ordinary opencode immediately before the run (item 8 of "Before anything bills") is operational preparation, not a launcher check.',
+    )
+  })
+})
+
 describe("LIVE-RUN.md documents the sealed fixture identity that is actually in force", () => {
   test("the material hash in the document is the seal's", async () => {
     expect(await liveRunDoc()).toContain(LABELLED_CHANGE_SEAL.materialHash)
