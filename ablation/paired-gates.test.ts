@@ -789,6 +789,8 @@ describe("the item-7 candidate non-gate record", () => {
     expect(seven.validatedBy).toBe("story 2-7f")
     expect(CANDIDATE_CLAIM_WORDING).toBe("not reached by this launcher and configuration")
     expect(seven.claim).toContain(CANDIDATE_CLAIM_WORDING)
+    // The claim names the reads and where they live, and not how they are made.
+    expect(seven.claim).toBe(`the reads of the change in \`adapters/opencode/repo.ts\` are ${CANDIDATE_CLAIM_WORDING}`)
     // The evidence names the scans and the closure walk, and does not claim repo.ts is absent.
     for (const text of [
       "story 2-7f's source and tests, on stand-in hosts and a scripted backend; no real host was run",

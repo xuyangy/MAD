@@ -3,7 +3,8 @@
  *
  * ## What it is for
  *
- * `adapters/opencode/blame-exec.ts` replaces the host shell for `git blame`,
+ * `adapters/opencode/blame-exec.ts` replaces the host shell for `git blame`
+ * and for `adapters/opencode/repo.ts`'s change reads,
  * which is only safe to reason about if the facts it rests on are MEASURED on
  * the machine the evaluation runs on rather than remembered. This script is
  * that measurement, in two stages:

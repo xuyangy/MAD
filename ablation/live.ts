@@ -21,7 +21,7 @@
  * reason: a labelled evaluation needs a change whose bugs are written down, and
  * `repo.change()` can only read whatever is in the worktree. Handing the
  * `ChangeSet` in is three lines; a parallel "labelled run" pipeline would be the
- * second code path. It is the same shape `shell` and `createClient` already
+ * second code path. It is the same shape `repo` and `createClient` already
  * have — absent means today's behaviour exactly.
  *
  * ## CI CAN NEVER EXERCISE THIS
@@ -60,7 +60,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 
 import { enumerateCandidates } from "../adapters/opencode/roster.ts"
 import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
-import { opencodeRepo } from "../adapters/opencode/repo.ts"
+import { opencodeRepo, type OpencodeRepoOptions } from "../adapters/opencode/repo.ts"
 import { selectRoster, type Pin } from "../core/roster/select.ts"
 import { systemClock } from "../core/ports/clock.ts"
 import { createTurnRecorder, type TurnArtifact } from "../adapters/opencode/artifacts.ts"
@@ -104,8 +104,11 @@ export interface LiveOptions {
   repeats?: number
   lenses?: readonly string[]
   providerConfigKey?: string
-  /** Injected so a test can drive this without a shell. */
-  shell?: Parameters<typeof opencodeRepo>[0]["$"]
+  /**
+   * The change reader's options, worktree aside: its spawn seam and its read
+   * and cleanup budgets. Absent means the defaults `opencodeRepo` documents.
+   */
+  repo?: Omit<OpencodeRepoOptions, "worktree">
   /**
    * Injected so a test can OBSERVE what the client is built from (ledger triage
    * 2026-09-09).
@@ -174,17 +177,19 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
 
   // THE REPO READER IS STILL CONSTRUCTED WHEN A CHANGE WAS HANDED IN, and that
   // is deliberate rather than an oversight for a later reader to tidy away
-  // (story 2.4, Task 9). Constructing it is cheap — `opencodeRepo` binds a shell
-  // and returns two closures, it runs no git — and `worktree` is still what
-  // anchors the bundle containment baseline below (`:211` and `:308`, the two
-  // `worktree:` arguments to `writeBundleIndex` and `writeArmDump`), which is the
+  // (story 2.4, Task 9). Constructing it is cheap — `opencodeRepo` validates its
+  // budgets and returns two closures, it runs no git — and `worktree` is still what
+  // anchors the bundle containment baseline below (the two `worktree:`
+  // arguments to `writeBundleIndex` and `writeArmDump`), which is the
   // AD-16 check that keeps an evaluation bundle out of the repository under
   // review. Removing the construction would take that baseline with it.
   //
   // What is skipped is the CALL: `repo.change` reads the worktree, and a run
-  // given its change already knows what it is reviewing.
+  // given its change already knows what it is reviewing. Its reads are bounded
+  // under one total budget, and a read that stops raises `ChangeReadStopped`
+  // here, before the calibration and before any arm runs.
   const repo = opencodeRepo({
-    $: options.shell ?? (Bun.$ as never),
+    ...options.repo,
     worktree: options.worktree ?? options.directory,
   })
   const change = options.change ?? (await repo.change(options.target))

@@ -247,7 +247,7 @@ export function parsePin(value: string): Pin | undefined {
  * (story 2.2 recheck, 2026-09-10).
  *
  * It is the same shape `ablation/live.ts` already uses for `createClient` and
- * `shell`, and for the reason recorded there: the live path is the one thing CI
+ * `repo`, and for the reason recorded there: the live path is the one thing CI
  * can never drive, so the only way a line on it is testable at all is a seam.
  * What this one makes testable is the catch below — that a deliberate stop
  * prints and returns 0 rather than exiting 1 with a stack trace.

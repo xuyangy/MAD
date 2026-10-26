@@ -966,7 +966,7 @@ block the paired blocks. That suite's own prerequisite list, with the one candid
 not a row of this table, is under "Before the sixteen live runs". The 400,000-token allowance of the
 api-key adversarial design is no gate here.
 
-**Checked, and not a gate: bounded review-path reads (`adapters/opencode/repo.ts`).** It reads the change through the host shell with no deadline (adversarial prerequisite 7). Evidence: a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for `repo.change(`) in scripts/paired.ts, ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and `runPairedBlocks`. repo.ts is still in the launcher's import closure, through `DEFAULT_DISCOVERY_SLOTS` from adapters/opencode/plugin.ts, whose tool handler is the one caller of `opencodeRepo`, and through `GitError` from adapters/opencode/tools.ts; a second test walks that closure and finds plugin.ts and tools.ts its only importers, taking those two names alone. It becomes a gate when the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`.
+**Checked, and not a gate: bounded review-path reads (`adapters/opencode/repo.ts`).** On the ordinary path every read of the change runs through the bounded launcher under one total budget of 60,000 ms, and a read that stops gets at most 5,000 ms of cleanup on top of that budget; both are nominal event-loop limits, not wall-clock bounds. A stopped read's cleanup is confirmed, unconfirmed (which quarantines the worktree until the host restarts), or not applicable when no process was left to clean. Evidence for the bounded reads: ledger #48 and adapters/opencode/repo.test.ts. It stays a non-gate because the paired path never calls those reads (adversarial prerequisite 7). Evidence: a source scan in scripts/paired.test.ts finds no `opencodeRepo` and no `repo.change()` call (it looks for `repo.change(`) in scripts/paired.ts, ablation/paired.ts or ablation/schedule.ts; the launcher hands `SEEDED_CHANGE` to `createSchedule` and `runPairedBlocks`. repo.ts is still in the launcher's import closure, through `DEFAULT_DISCOVERY_SLOTS` from adapters/opencode/plugin.ts, whose tool handler is the one caller of `opencodeRepo`, and through `GitError` from adapters/opencode/tools.ts; a second test walks that closure and finds plugin.ts and tools.ts its only importers, taking those two names alone. It becomes a gate when the launcher or `runPairedBlocks` ever reads the reviewed change through `opencodeRepo` or `repo.change()`.
 
 ### The preflight, in one fixed sequence
 
@@ -2439,10 +2439,9 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    that opens the adversarial phase at all, so `gatePreflight` refuses that phase there whatever
    is closed.
 7. **Bounded review-path reads — NON-GATING.** A candidate non-gate, validated by story 2-7f's
-   source and tests, on stand-in hosts and a scripted backend. `adapters/opencode/repo.ts` reads the change through the host shell with no
-   deadline of any kind (`git()` at `:37-41`, and a serial per-file loop at `:69-80` whose
-   `git diff --no-index` has neither a per-call nor a total deadline). One hung read holds the whole
-   review before the judge exists. `bun run adversarial` hands the suite the sealed material, and the
+   source and tests, on stand-in hosts and a scripted backend. In `adapters/opencode/repo.ts`, on
+   the ordinary path, every read of the change runs through the bounded launcher under one total budget of 60,000 ms, and a read that stops gets at most 5,000 ms of cleanup on top of that budget; both are nominal event-loop limits, not wall-clock bounds. A stopped read's cleanup is confirmed, unconfirmed (which quarantines the worktree until the host restarts), or not applicable when no process was left to clean. A tree with very many untracked files can exhaust the budget, and the review then fails with guidance instead of being slow. Evidence for the bounded reads: ledger #48 and adapters/opencode/repo.test.ts. It stays NON-GATING because the paired and
+   adversarial paths never call those reads. `bun run adversarial` hands the suite the sealed material, and the
    suite hands `review()` each case's side of it. A scan of every file in the launcher's import
    closure (static and dynamic relative imports followed, every package specifier listed), with
    comments and string, template and regular-expression literals removed, finds `opencodeRepo` or
@@ -2456,7 +2455,7 @@ refuses that phase while any of them is OPEN and while item 7's record is unreso
    records the claim — that those reads are not reached by this launcher and configuration — with
    `status: "NON-GATING"` and that evidence. The record says only that the reads are not reached,
    and nothing about the reads themselves; it reopens if the launcher, its factories or the suite
-   ever read the reviewed change through the host shell's Repo port.
+   ever read the reviewed change through `opencodeRepo` or `repo.change()`.
 
 **THE NUMBERED LIST ABOVE IS THE WHOLE LIST.** On the planned OAuth route one of the seven is open
 (2, because run 1's authorization is used), four are closed (3, 4, 5 and 6), one does not apply (1)
@@ -2548,8 +2547,9 @@ that override exists for tests and nothing shipped uses one.
   porcelain prefix parses, and would have produced a citation over lines git never finished.
 - **A signalled exit is not a completed run.** A child killed from outside can report status 0
   with whatever it had flushed. That produces no citation and no successful fact count.
-- **The production review path is NOT thereby "bounded".** `adapters/opencode/repo.ts` still
-  reads the change through the host shell with no deadline (7), and FR9 is not complete.
+- **The ordinary review path's change reads are bounded separately (7).** In
+  `adapters/opencode/repo.ts`, every read of the change runs through the bounded launcher under one total budget of 60,000 ms, and a read that stops gets at most 5,000 ms of cleanup on top of that budget; both are nominal event-loop limits, not wall-clock bounds. A stopped read's cleanup is confirmed, unconfirmed (which quarantines the worktree until the host restarts), or not applicable when no process was left to clean. A tree with very many untracked files can exhaust the budget, and the review then fails with guidance instead of being slow. Evidence for the bounded reads: ledger #48 and adapters/opencode/repo.test.ts. They stay NON-GATING because the
+  paired and adversarial paths never call them, and FR9 is not complete.
 
 ### The cleanup-unconfirmed quarantine, and how to recover from it
 

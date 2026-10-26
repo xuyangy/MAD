@@ -1646,3 +1646,25 @@ describe("LIVE-RUN.md documents the adversarial zero-bill probe that was actuall
     expect(raw).toContain("<probe-out>")
   })
 })
+
+describe("LIVE-RUN.md states the ordinary path's bounded change reads (ledger #48)", () => {
+  test("the budget, the cleanup states, the untracked-tree failure, the evidence and FR9, in each of the three places", async () => {
+    const text = (await liveRunDoc()).replace(/\s+/g, " ")
+    const budget =
+      "every read of the change runs through the bounded launcher under one total budget of 60,000 ms, and a read that " +
+      "stops gets at most 5,000 ms of cleanup on top of that budget; both are nominal event-loop limits, not wall-clock bounds."
+    const cleanup =
+      "A stopped read's cleanup is confirmed, unconfirmed (which quarantines the worktree until the host restarts), or " +
+      "not applicable when no process was left to clean."
+    const evidence = "Evidence for the bounded reads: ledger #48 and adapters/opencode/repo.test.ts."
+    const untracked =
+      "A tree with very many untracked files can exhaust the budget, and the review then fails with guidance instead of being slow."
+    // The paired non-gate paragraph, prerequisite 7 and the bullet beside the blame launcher.
+    expect(text.split(budget).length - 1).toBe(3)
+    expect(text.split(cleanup).length - 1).toBe(3)
+    expect(text.split(evidence).length - 1).toBe(3)
+    expect(text.split(untracked).length - 1).toBe(2)
+    expect(text).toContain("They stay NON-GATING because the paired and adversarial paths never call them, and FR9 is not complete.")
+    expect(text).not.toContain("through the host shell with no deadline")
+  })
+})

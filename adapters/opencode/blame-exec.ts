@@ -10,8 +10,8 @@
  * can do about it. `ablation/LIVE-RUN.md` names bounded tool TERMINATION as a
  * prerequisite of the sixteen live adversarial runs, and abandoning the wait
  * while the process runs on is not termination. So `blame` runs here instead of
- * through the shell — and `blame` only: `adapters/opencode/repo.ts` reads the
- * change through `$` and is deliberately untouched.
+ * through the shell, and so does every read `adapters/opencode/repo.ts` makes of
+ * the change, each under the remaining share of one total budget.
  *
  * ## BEFORE THE LAUNCH AND AFTER IT ARE DIFFERENT FACTS
  *

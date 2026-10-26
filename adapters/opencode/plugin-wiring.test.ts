@@ -17,12 +17,14 @@
  * that answers nothing (AD-6b: one slot's failure never costs the run).
  */
 
-import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readdir } from "node:fs/promises"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import { ARTIFACTS_ENV } from "./artifacts.ts"
+import type { SpawnBlame } from "./blame-exec.ts"
+import { ChangeReadStopped, changeReadQuarantineFor, clearChangeReadQuarantineForTests, opencodeRepo } from "./repo.ts"
 
 import { noticeFor } from "../../core/prompt/material.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
@@ -52,24 +54,53 @@ function fakeClient(body: unknown = THREE_PROVIDERS) {
 }
 
 /**
- * `opencodeRepo` calls `$`.cwd(...).nothrow() and then tags it as
- * `` $`git ${argv}` ``, reading `exitCode` / `stdout` / `stderr`.
+ * The host shell `opencodeTools` is handed. Nothing in these runs reaches a
+ * `git blame`, so it is never called; the change itself is read from the real
+ * repository below.
  */
 function fakeShell() {
-  const run = (_strings: TemplateStringsArray, ...values: unknown[]) => {
-    const argv = (values[0] as string[]) ?? []
-    let stdout = ""
-    if (argv[0] === "diff" && argv.includes("--name-only")) stdout = "src/pay.ts\n"
-    else if (argv[0] === "diff" && argv.includes("--no-index")) stdout = ""
-    else if (argv[0] === "diff") stdout = "--- a/src/pay.ts\n+++ b/src/pay.ts\n@@ -1 +1 @@\n-const a = 1\n+const a = 2\n"
-    else if (argv[0] === "ls-files") stdout = ""
-    return Promise.resolve({ exitCode: 0, stdout, stderr: "" })
-  }
+  const run = () => Promise.reject(new Error("the host shell is not used by these runs"))
   const shell = run as unknown as { cwd: () => unknown; nothrow: () => unknown }
   shell.cwd = () => shell
   shell.nothrow = () => shell
   return shell as never
 }
+
+/** Run git in `cwd` for fixture setup, and fail loudly if it fails. */
+async function setupGit(cwd: string, argv: string[]): Promise<void> {
+  const child = Bun.spawn({ cmd: ["git", ...argv], cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  if (code !== 0) throw new Error(`fixture git ${argv.join(" ")} failed: ${stderr}`)
+}
+
+/**
+ * The worktree every run here reviews: a real git repository holding one
+ * uncommitted edit to `src/pay.ts`. The setup commit runs with automatic
+ * maintenance off, so no detached writer races the directory's removal (#138);
+ * that is this fixture's config only, never production's.
+ */
+let worktree = ""
+
+beforeAll(async () => {
+  worktree = await mkdtemp(join(tmpdir(), "mad-wiring-repo-"))
+  await setupGit(worktree, ["init", "-q"])
+  await mkdir(join(worktree, "src"))
+  await writeFile(join(worktree, "src", "pay.ts"), "const a = 1\n")
+  await setupGit(worktree, ["add", "src/pay.ts"])
+  await setupGit(worktree, [
+    "-c", "user.name=MAD test",
+    "-c", "user.email=mad@example.invalid",
+    "-c", "commit.gpgsign=false",
+    "-c", "maintenance.auto=false",
+    "-c", "gc.auto=0",
+    "commit", "-q", "-m", "base",
+  ])
+  await writeFile(join(worktree, "src", "pay.ts"), "const a = 2\n")
+})
+
+afterAll(async () => {
+  if (worktree !== "") await rm(worktree, { recursive: true, force: true })
+})
 
 interface ToolResult {
   title: string
@@ -113,7 +144,7 @@ async function executeWith(
   const plugin = await MadPlugin({
     client: fakeClient(),
     directory: ".",
-    worktree: ".",
+    worktree,
     // Deliberately unreachable: every turn becomes a transport-error drop-out,
     // which is a domain outcome, not an exception (AD-2, spine Errors).
     serverUrl: "http://127.0.0.1:1",
@@ -124,6 +155,65 @@ async function executeWith(
   }).tool
   return tool!.mad_review!.execute(args as never, fakeContext(signal) as never)
 }
+
+/**
+ * Ledger #48 — the change read is bounded, and a read that stops is told apart
+ * from a bad ref at the one surface a user reads.
+ */
+describe("mad_review.execute — a change read that stops, and one git refused", () => {
+  afterEach(() => clearChangeReadQuarantineForTests(worktree))
+
+  test("a QUARANTINED worktree: the stop guidance, and the run ends before any backend is built", async () => {
+    // Latch the worktree the plugin reads, through the same module-level latch
+    // every `opencodeRepo` checks: a read that never exits and survives its kill.
+    const unkillable: SpawnBlame = () => ({
+      pid: 9191,
+      stdout: new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
+      stderr: new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
+      exited: new Promise<number>(() => {}),
+      exitCode: null,
+      signalCode: null,
+      kill: () => undefined,
+    })
+    const latched = await opencodeRepo({ worktree, spawn: unkillable, readBudgetMs: 20, cleanupMs: 20 })
+      .change()
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+    expect(latched).toBeInstanceOf(ChangeReadStopped)
+    expect(changeReadQuarantineFor(worktree)?.pid).toBe(9191)
+
+    const result = await executeWith({})
+
+    expect(result.title).toBe("MAD — could not read the change")
+    expect(result.output).toContain("(quarantined)")
+    expect(result.output).toContain("This worktree is QUARANTINED: MAD reads nothing in it until opencode restarts.")
+    expect(result.output).toContain("Check that process 9191 has ended, then restart opencode.")
+    // A quarantined read was never started, so no hang cause is offered.
+    expect(result.output).not.toContain("Likely causes")
+    // Not the bad-ref hint: that would send the user after the wrong fix.
+    expect(result.output).not.toContain("valid git ref")
+    expect(result.output).not.toContain("is a git repository")
+    // Returned before the backend: a run that reached it carries metadata.
+    expect(result.metadata).toBeUndefined()
+  })
+
+  test("a bad ref keeps its own hint, and no stop guidance", async () => {
+    const result = await executeWith({ target: "nope...HEAD" })
+
+    expect(result.title).toBe("MAD — could not read the change")
+    expect(result.output).toContain("Check that `nope...HEAD` is a valid git ref or ref range.")
+    expect(result.output).not.toContain("Likely causes")
+    expect(result.metadata).toBeUndefined()
+  })
+
+  test("AND THE UNLATCHED WORKTREE IS REVIEWED — the non-vacuous sibling", async () => {
+    const result = await executeWith({})
+    expect(result.title).not.toContain("could not read the change")
+    expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
+  })
+})
 
 describe("mad_review.execute — the default actually reaches the roster (AC1, CAP-1)", () => {
   test("OMITTING `slots` REQUESTS THE DEFAULT FAN-OUT, NOT ONE", async () => {
@@ -384,8 +474,8 @@ describe("mad_review.execute — run control reaches the host boundary (story 7A
 
     test("FLAG POINTED AT THE REPOSITORY: nothing is written, and the run says why", async () => {
       // AD-16's one non-negotiable, through the seam a user actually reaches it
-      // by. `executeWith` builds the plugin with `worktree: "."`.
-      process.env[ARTIFACTS_ENV] = resolve(".")
+      // by. `executeWith` builds the plugin with the fixture repository as its worktree.
+      process.env[ARTIFACTS_ENV] = resolve(worktree)
 
       const result = await executeWith({})
 
@@ -398,7 +488,7 @@ describe("mad_review.execute — run control reaches the host boundary (story 7A
     test("A REFUSED DUMP STILL RETURNS THE REVIEW, unharmed", async () => {
       // The Never clause: a file MAD could not write is untidy; a review it
       // destroyed is a broken tool.
-      process.env[ARTIFACTS_ENV] = resolve(".")
+      process.env[ARTIFACTS_ENV] = resolve(worktree)
       const result = await executeWith({})
       expect(materialSpans(result.output)[0]!.body).toContain("model turn(s) in flight at once")
       expect(result.metadata?.requested).toBe(DEFAULT_DISCOVERY_SLOTS)
@@ -644,18 +734,17 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     return end < 0 ? rest : rest.slice(0, end)
   }
 
-  test("THE PORT IS BUILT, and from the same two inputs `Repo` is built from", async () => {
+  test("THE PORT IS BUILT, and over the same worktree `Repo` reads", async () => {
     const source = await pluginSource()
-    // Story 2-7a widened the construction site by one field. The two inputs this
-    // test has always been about are still both here and still the same two
-    // `Repo` gets; what is new is that the observer rides along with them.
+    // The tools take the host shell, the worktree and the observer; `Repo` takes
+    // the worktree alone, because its reads run through the bounded launcher.
     const literal = toolsLiteral(source)
     expect(literal).toMatch(/^\s*\$,\s*$/m)
     expect(literal).toMatch(/^\s*worktree,\s*$/m)
     expect(literal).toMatch(/^\s*toolObservation,\s*$/m)
     // Beside `Repo`, not somewhere else: both ports describe the same worktree,
     // and a run whose blame reads a different tree than its diff is nonsense.
-    expect(source).toContain("opencodeRepo({ $, worktree })")
+    expect(source).toContain("opencodeRepo({ worktree })")
   })
 
   test("AND IT IS BUILT ONCE — one factory, not a second imitation of it (story 2-7a)", async () => {

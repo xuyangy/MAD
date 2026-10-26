@@ -906,7 +906,7 @@ export const ADVERSARIAL_CANDIDATE_NON_GATES: readonly CandidateNonGate[] = [
     name: "review-path reads (`adapters/opencode/repo.ts`)",
     status: "NON-GATING",
     validatedBy: "story 2-7f",
-    claim: `the reads of the change through the host shell in \`adapters/opencode/repo.ts\` are ${CANDIDATE_CLAIM_WORDING}`,
+    claim: `the reads of the change in \`adapters/opencode/repo.ts\` are ${CANDIDATE_CLAIM_WORDING}`,
     basis:
       "`bun run adversarial` (scripts/adversarial.ts) hands `runAdversarialSuite` the sealed material, and the suite hands " +
       "`review()` each case's side of it; every run's backend is an `OpencodeModelBackend` against that run's managed host " +

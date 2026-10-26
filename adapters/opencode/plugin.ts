@@ -36,7 +36,8 @@ import {
 } from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
-import { opencodeRepo } from "./repo.ts"
+import { changeReadStopGuidance } from "./change-read-guidance.ts"
+import { ChangeReadStopped, opencodeRepo } from "./repo.ts"
 import { opencodeTools, type BlameCleanupUnresolved } from "./tools.ts"
 import { resolveRoster } from "./roster.ts"
 
@@ -442,11 +443,13 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             }
           }
 
-          const repo = opencodeRepo({ $, worktree })
+          // Every git read of the change is bounded under one total budget, and
+          // a worktree whose read left a process unaccounted for is quarantined
+          // in `repo.ts` itself, so no latch is carried in here.
+          const repo = opencodeRepo({ worktree })
           // CAP-8 / AD-13's FIRST route (story 10) — the OTHER repo-facing port,
-          // built here beside `Repo` because they take the same two inputs and
-          // have the same read-only guarantee. `git blame` needs `$` and
-          // `worktree` and nothing else the plugin holds.
+          // built here beside `Repo` because both read the same worktree and
+          // have the same read-only guarantee.
           //
           // STORY 2-7a — THE OBSERVER GOES TO BOTH HALVES FROM ONE VALUE. The
           // judge owns the decision to ask for a tool call; only this adapter
@@ -478,6 +481,17 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
           try {
             change = await repo.change(args.target)
           } catch (error) {
+            // A READ THAT DID NOT RETURN CLEANLY is not a bad ref, and the
+            // bad-ref hint would send the user after the wrong fix.
+            if (error instanceof ChangeReadStopped) {
+              return {
+                title: "MAD — could not read the change",
+                output:
+                  `MAD could not read the change to review.\n\n` +
+                  `${error.message}\n\n` +
+                  changeReadStopGuidance(error),
+              }
+            }
             // A bad ref, or a directory that is not a git repo. Say which.
             return {
               title: "MAD — could not read the change",

@@ -85,7 +85,7 @@
  * It refuses `api-key`, `--server`, `--target` and `--directory` at parse. It
  * never reads a credential: the auth link is created by `symlink` and checked
  * by the host's own `lstat`/`readlink` checks. It never reads a change through
- * the host shell's Repo port: every run's change is the sealed material.
+ * the Repo port: every run's change is the sealed material.
  *
  * Exit codes: 0 when the suite reads `complete: true`, every host stopped with
  * its checks held and every host record was persisted; 1 otherwise; 130 for an

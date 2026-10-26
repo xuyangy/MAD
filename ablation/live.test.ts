@@ -4,6 +4,8 @@ import type { ChangeSet } from "../core/ports/repo.ts"
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
 import { measureCrossArm } from "./cross-arm-rates.ts"
 import { runLiveAblation } from "./live.ts"
+import type { SpawnBlame } from "../adapters/opencode/blame-exec.ts"
+import { ChangeReadStopped } from "../adapters/opencode/repo.ts"
 
 /**
  * THE ONE LINE CI CAN NEVER RUN, asserted at a seam (ledger triage 2026-09-09).
@@ -142,8 +144,8 @@ describe("the live ablation hands each arm's backend the arm's own late-usage si
  *
  * - `createClient` returns a stub whose `config.providers()` answers, so
  *   `enumerateCandidates` succeeds and control reaches the change decision.
- * - `shell` is a stub whose command tag THROWS, so any call to `repo.change`
- *   announces itself by name instead of passing silently.
+ * - `repo.spawn` THROWS, so any call to `repo.change` announces itself by name
+ *   instead of passing silently.
  * - the injected `ChangeSet`'s `diff` is a getter that throws a sentinel from its
  *   SECOND read on, so the run announces the moment THAT object is read as the
  *   change under review. The first read is the cross-arm applicability check,
@@ -177,15 +179,12 @@ describe("the injected change is what the run actually reviews", () => {
     },
   })
 
-  /** Any `git` this shell is asked to run says so, loudly, by name. */
-  const refusingShell = () =>
-    ({
-      cwd: () => ({
-        nothrow: () => () => {
-          throw new Error("repo.change was called")
-        },
-      }),
-    }) as never
+  /** Any `git` the change reader is asked to spawn says so, loudly, by name. */
+  const refusingRepo = () => ({
+    spawn: () => {
+      throw new Error("repo.change was called")
+    },
+  })
 
   const sentinelChange = () => {
     let reads = 0
@@ -207,7 +206,7 @@ describe("the injected change is what the run actually reviews", () => {
       directory: "/tmp/mad-live-test-directory",
       change: sentinelChange(),
       createClient: stubClient as never,
-      shell: refusingShell(),
+      repo: refusingRepo(),
     }).then(
       () => undefined,
       (thrown: Error) => thrown,
@@ -226,13 +225,131 @@ describe("the injected change is what the run actually reviews", () => {
       serverUrl: "http://127.0.0.1:1",
       directory: "/tmp/mad-live-test-directory",
       createClient: stubClient as never,
-      shell: refusingShell(),
+      repo: refusingRepo(),
     }).then(
       () => undefined,
       (thrown: Error) => thrown,
     )
 
     expect(error?.message).toContain("repo.change was called")
+  })
+})
+
+/**
+ * Ledger #48 — the unpaired live ablation's change read is bounded, and a read
+ * that stops ends the run before any arm.
+ *
+ * `repo.spawn` hands back a git that never returns until it is killed. With a
+ * short read budget the launcher kills it, `change()` raises
+ * `ChangeReadStopped`, and the run rejects with it. `serverUrl` is a local
+ * server that counts every request, so an arm whose backend opened a session
+ * would be seen; the sibling shows the same run with a change handed in does
+ * reach it.
+ */
+describe("a change read that stops ends the live ablation before any arm", () => {
+  const stubClient = () => ({
+    config: {
+      providers: async () => ({
+        data: {
+          providers: ["p1", "p2", "p3"].map((id, index) => ({
+            id,
+            models: {
+              only: {
+                id: `m${index + 1}`,
+                name: `m${index + 1}`,
+                capabilities: { toolcall: true },
+                limit: { context: 200_000 },
+              },
+            },
+          })),
+          default: {},
+        },
+      }),
+    },
+  })
+
+  /** A local server that refuses everything and counts what reached it. */
+  const countingServer = () => {
+    let requests = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        requests += 1
+        return new Response("refused", { status: 500 })
+      },
+    })
+    return { url: `http://127.0.0.1:${server.port}`, requests: () => requests, stop: () => server.stop(true) }
+  }
+
+  test("a hung `repo.spawn` under short limits rejects with ChangeReadStopped, and no arm or backend call is made", async () => {
+    let spawns = 0
+    let kills = 0
+    const hung: SpawnBlame = () => {
+      spawns += 1
+      let settle: ((code: number) => void) | undefined
+      return {
+        pid: 31337,
+        stdout: new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
+        stderr: new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
+        exited: new Promise<number>((resolve) => {
+          settle = resolve
+        }),
+        exitCode: null,
+        signalCode: "SIGKILL",
+        kill: () => {
+          kills += 1
+          settle?.(137)
+        },
+      }
+    }
+    const server = countingServer()
+    try {
+      const error = await runLiveAblation({
+        pin: { providerId: "p1", modelId: "m1" },
+        serverUrl: server.url,
+        directory: "/tmp/mad-live-test-hung-read",
+        createClient: stubClient as never,
+        repo: { spawn: hung, readBudgetMs: 30, cleanupMs: 200 },
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+
+      expect(error).toBeInstanceOf(ChangeReadStopped)
+      if (!(error instanceof ChangeReadStopped)) return
+      expect(error.stop).toBe("terminated")
+      expect(error.operation).toBe("git diff")
+      expect(error.cleanup).toBe("confirmed")
+      expect(error.pid).toBe(31337)
+      // One read was started and killed; nothing after it was launched.
+      expect(spawns).toBe(1)
+      expect(kills).toBe(1)
+      // No arm ran: nothing reached the server a backend would call.
+      expect(server.requests()).toBe(0)
+    } finally {
+      server.stop()
+    }
+  })
+
+  test("AND A RUN THAT GETS PAST THE CHANGE DOES REACH THE SERVER — the non-vacuous sibling", async () => {
+    const server = countingServer()
+    try {
+      await runLiveAblation({
+        pin: { providerId: "p1", modelId: "m1" },
+        serverUrl: server.url,
+        directory: "/tmp/mad-live-test-hung-read",
+        change: SEEDED_CHANGE,
+        createClient: stubClient as never,
+        repo: {
+          spawn: () => {
+            throw new Error("repo.change was called")
+          },
+        },
+      }).catch(() => undefined)
+      expect(server.requests()).toBeGreaterThan(0)
+    } finally {
+      server.stop()
+    }
   })
 })
 
@@ -273,14 +390,11 @@ describe("the live report's cross-arm calibration follows the reviewed change", 
     },
   })
 
-  const refusingShell = () =>
-    ({
-      cwd: () => ({
-        nothrow: () => () => {
-          throw new Error("repo.change was called")
-        },
-      }),
-    }) as never
+  const refusingRepo = () => ({
+    spawn: () => {
+      throw new Error("repo.change was called")
+    },
+  })
 
   const reportFor = (change: ChangeSet) =>
     runLiveAblation({
@@ -289,7 +403,7 @@ describe("the live report's cross-arm calibration follows the reviewed change", 
       directory: "/tmp/mad-live-test-directory",
       change,
       createClient: stubClient as never,
-      shell: refusingShell(),
+      repo: refusingRepo(),
     })
 
   test("BEHAVIOURAL: reviewing SEEDED_CHANGE, the report carries the sealed calibration", async () => {
@@ -346,7 +460,7 @@ describe("a live run reviews the change it was given, when it was given one", ()
     expect(source).toContain("worktree: options.worktree ?? options.directory,")
   })
 
-  test("`change` is one optional injected value, beside `shell` and `createClient`", async () => {
+  test("`change` is one optional injected value, beside `repo` and `createClient`", async () => {
     // No second live pipeline: the option is declared on `LiveOptions` like the
     // other three, not behind a mode flag or a parallel entry point.
     const source = await liveSource()
