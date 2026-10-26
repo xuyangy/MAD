@@ -70,7 +70,10 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 /**
  * A deterministic author, so the base commit is reproducible and the script does
  * not depend on whatever `user.email` the operator happens to have configured —
- * or fail outright where they have configured none.
+ * or fail outright where they have configured none. The commit also runs with no
+ * automatic maintenance: since git 2.47 that maintenance detaches before it checks
+ * for work, and the background process can still be writing in the worktree's
+ * `.git` while `git apply` runs and after this script exits.
  */
 const GIT_IDENTITY = [
   "-c",
@@ -79,6 +82,8 @@ const GIT_IDENTITY = [
   "user.email=fixture@mad.invalid",
   "-c",
   "commit.gpgsign=false",
+  "-c",
+  "maintenance.auto=false",
 ]
 
 /**

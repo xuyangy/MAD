@@ -14,7 +14,8 @@
  * ## Git is isolated from the operator's configuration
  *
  * Every git call runs with the operator's global and system config switched
- * off, with no hooks, no line-ending conversion and no template, and with every
+ * off, with no hooks, no line-ending conversion, no template and no automatic
+ * maintenance, and with every
  * `GIT_*` variable removed from its environment (`GIT_DIR`, `GIT_WORK_TREE`,
  * `GIT_INDEX_FILE` and the rest can redirect a command into another
  * repository). The commit skips hooks. A base-tree key with a `.git`
@@ -99,8 +100,16 @@ export type RunGit = (cwd: string, args: readonly string[], stdin?: string) => P
 /** A deterministic author and no signing, so a base commit never depends on the operator's config. */
 const GIT_IDENTITY = ["-c", "user.name=MAD fixture", "-c", "user.email=fixture@mad.invalid", "-c", "commit.gpgsign=false"]
 
-/** Options every git call gets: no hooks, no line-ending conversion. */
-export const GIT_ISOLATION = ["-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false"]
+/**
+ * Options every git call gets: no hooks, no line-ending conversion, and no
+ * automatic maintenance. Since git 2.47 the automatic maintenance after a commit
+ * detaches (`git maintenance run --auto --detach`) before it checks whether there
+ * is any work, so even a one-commit repository gets a background process. That
+ * process can still be writing in the worktree's `.git` while the next step runs,
+ * and after the bounded call has accounted for its child and pipes. A throwaway
+ * worktree with one base commit never needs maintenance.
+ */
+export const GIT_ISOLATION = ["-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false", "-c", "maintenance.auto=false"]
 
 /**
  * The environment every git call gets: the caller's, with every `GIT_*`

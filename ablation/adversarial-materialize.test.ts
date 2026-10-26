@@ -401,6 +401,14 @@ describe("every git call is bounded", () => {
     expect(launched).toBe(0)
   })
 
+  test("every bounded git call runs with automatic maintenance off (ledger #138)", async () => {
+    const dir = await tempDir()
+    expect((await returned(spawnGit(dir, ["init", "--quiet", "--template="]))).exitCode).toBe(0)
+    const value = await returned(spawnGit(dir, ["config", "--get", "maintenance.auto"]))
+    expect(value.exitCode).toBe(0)
+    expect(value.stdout.trim()).toBe("false")
+  })
+
   test("git's own non-zero status is returned as it is, with git's message", async () => {
     const dir = await tempDir()
     const value = await returned(spawnGit(dir, ["init", "--quiet", "--template="]))

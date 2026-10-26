@@ -618,4 +618,24 @@ describe("writeLabelledTree's own precondition (story 2-8b)", () => {
     expect(written.ok).toBe(true)
     expect(applied).toEqual([["apply", "--whitespace=nowarn", resolve("change.diff")]])
   })
+
+  test("the base commit starts no automatic maintenance (ledger #138)", async () => {
+    const root = await freshOut()
+    const commits: string[][] = []
+    const written = await writeLabelledTree({
+      root,
+      git: async (_cwd, args) => {
+        if (args.includes("commit")) commits.push([...args])
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+    expect(written.ok).toBe(true)
+    expect(commits).toHaveLength(1)
+    const commit = commits[0]!
+    // A `-c` option is read only before the subcommand, so it must come before `commit`.
+    const option = commit.indexOf("maintenance.auto=false")
+    expect(option).toBeGreaterThan(0)
+    expect(commit[option - 1]).toBe("-c")
+    expect(option).toBeLessThan(commit.indexOf("commit"))
+  })
 })
