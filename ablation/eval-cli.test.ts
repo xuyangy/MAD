@@ -376,6 +376,38 @@ describe("`--labelled-change` refuses before anything bills", () => {
     ...extra,
   ]
 
+  /**
+   * THE CONTAINMENT REFUSAL EXITS 1 (ledger #12). It is the one refusal an
+   * exit-status check must see as a failure, since passing it would invalidate
+   * the measurement. `--out` is given, so nothing after the guard refuses first:
+   * a guard that let the call through would reach the `runLive` tripwire.
+   */
+  async function containmentRefusal(directory: string): Promise<string> {
+    const bundleRoot = await tempDir("mad-labelled-contained-bundle-")
+    let calls = 0
+    const { code, text } = await captured(() =>
+      ablationMain(labelledArgv("--live", "--directory", directory, "--out", bundleRoot), {
+        runLive: async () => {
+          calls += 1
+          return {
+            arms: [],
+            pairings: [],
+            matcherCalibration: {
+              overMerge: { merged: 0, of: 0 },
+              underMerge: { unmerged: 0, of: 0 },
+            },
+            anyScripted: false,
+            repeats: 1,
+          }
+        },
+      }),
+    )
+    expect(calls).toBe(0)
+    expect(code).toBe(1)
+    expect(text).toContain("A model that can read the answer key measures nothing")
+    return text
+  }
+
   test("without --live it is refused — the scripted path has no roster", async () => {
     const { code, text } = await captured(() => ablationMain(labelledArgv()))
     expect(code).toBe(0)
@@ -385,43 +417,36 @@ describe("`--labelled-change` refuses before anything bills", () => {
 
   test("an explicit --fixture-version beside it is refused", async () => {
     const out = await tempDir("mad-labelled-version-")
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain(
         labelledArgv("--live", "--directory", out, "--fixture-version", "something-else"),
       ),
     )
+    expect(code).toBe(0)
     expect(text).toContain("two authorities on what was reviewed")
     expect(text).toContain(LABELLED_CHANGE_SEAL.version)
   })
 
   test("an explicit --fixture-hash beside it is refused", async () => {
     const out = await tempDir("mad-labelled-hash-")
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain(labelledArgv("--live", "--directory", out, "--fixture-hash", "sha256:nope")),
     )
+    expect(code).toBe(0)
     expect(text).toContain("two authorities on what was reviewed")
   })
 
   test("a --directory INSIDE this repository is refused — the answer key is there", async () => {
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", join(REPO_ROOT, "fixtures"))),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    const text = await containmentRefusal(join(REPO_ROOT, "fixtures"))
     expect(text).toContain("labels.ts")
   })
 
   test("a --directory that IS this repository is refused", async () => {
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", REPO_ROOT)),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    await containmentRefusal(REPO_ROOT)
   })
 
   test("a RELATIVE --directory is refused: containment cannot be decided on it", async () => {
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", "some/relative/tree")),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    await containmentRefusal("some/relative/tree")
   })
 
   /**
@@ -433,10 +458,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
    * from there exactly as easily as it reads it from inside the repository.
    */
   test("a --directory that CONTAINS this repository is refused", async () => {
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", dirname(REPO_ROOT))),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    const text = await containmentRefusal(dirname(REPO_ROOT))
     expect(text).toContain("CONTAINS it")
   })
 
@@ -444,8 +466,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
     // The edge that made the mirror check worth testing rather than assuming:
     // `resolve("/")` already ends in the separator, so a naive `repo + sep`
     // prefix was `"//"` and nothing was ever inside it.
-    const { text } = await captured(() => ablationMain(labelledArgv("--live", "--directory", "/")))
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    await containmentRefusal("/")
   })
 
   test("a SYMLINK pointing at this repository is refused — the lexical test cannot see it", async () => {
@@ -453,10 +474,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
     const link = join(parent, "looks-innocent")
     await symlink(REPO_ROOT, link, "dir")
 
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", link)),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    await containmentRefusal(link)
   })
 
   test("a SYMLINK whose target CONTAINS this repository is refused too", async () => {
@@ -465,19 +483,49 @@ describe("`--labelled-change` refuses before anything bills", () => {
     const link = join(parent, "up-there")
     await symlink(dirname(REPO_ROOT), link, "dir")
 
-    const { text } = await captured(() =>
-      ablationMain(labelledArgv("--live", "--directory", link)),
-    )
-    expect(text).toContain("A model that can read the answer key measures nothing")
+    await containmentRefusal(link)
   })
+
+  /**
+   * THE REAL CLI EXIT STATUS. `main`'s return value reaches the OS through
+   * `process.exit(await main())`, and this pins that end of it. No `--out` is
+   * given, so a regressed guard falls through to the missing-`--out` refusal,
+   * which exits 0 and fails this test without anything able to bill.
+   */
+  test("the real CLI exits 1 on a contained --directory", async () => {
+    const cli = Bun.spawn(
+      [
+        process.execPath,
+        "run",
+        "scripts/ablation.ts",
+        "--pin",
+        "anthropic/claude-sonnet-4-5",
+        "--live",
+        "--labelled-change",
+        "--directory",
+        join(REPO_ROOT, "fixtures"),
+      ],
+      { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" },
+    )
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(cli.stdout).text(),
+      new Response(cli.stderr).text(),
+      cli.exited,
+    ])
+    expect(code).toBe(1)
+    expect(stderr).not.toContain("error:")
+    expect(stdout).toContain("A model that can read the answer key measures nothing")
+    expect(stdout).not.toContain("--labelled-change needs --out")
+  }, 30_000)
 
   test("--target beside it is refused — nothing would read the range", async () => {
     const worktree = await tempDir("mad-labelled-target-")
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain(
         labelledArgv("--live", "--directory", worktree, "--target", "main...HEAD"),
       ),
     )
+    expect(code).toBe(0)
     expect(text).toContain("--target has nothing to select")
     expect(text).toContain("Nothing was run and nothing was billed.")
   })

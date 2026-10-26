@@ -13,11 +13,18 @@
  * names it" stops being true when the caller is a file inside MAD. The caller
  * names it on the command line.
  *
- * IT PRINTS, IT DOES NOT GATE — `main` always returns 0, exactly as
+ * IT PRINTS, IT DOES NOT GATE — `main` returns 0, exactly as
  * `scripts/clustering-rates.ts` does and for the recorded reason: the tests are
  * what fail CI, and a reporter that also exited non-zero would give one
  * regression two different voices. A zero verdict difference is a RESULT here,
  * not an error, so exiting non-zero on it would be actively wrong.
+ *
+ * ONE EXCEPTION: the `--labelled-change` containment refusal returns 1. A
+ * `--directory` that is this repository, sits inside it, contains it, is
+ * relative, or links into or above it would let a live model read the answer
+ * key, so that refusal stands in for an invalidated measurement, and a script
+ * or CI wrapper that checks only the exit status (`materialize … && ablation …`)
+ * must see it fail. Every other refusal and every completed report returns 0.
  */
 
 import { resolve } from "node:path"
@@ -192,14 +199,16 @@ export function stringFlag(argv: readonly string[], name: string): StringFlag {
 }
 
 /**
- * Print why the invocation was refused, and return the module's one exit code.
+ * Print why the invocation was refused, and return `status`.
  *
  * Refusing is not gating: this is the same shape the missing-`--pin` path uses,
- * for the same reason recorded in the file header. What it buys is that the
- * refusal happens before `scriptedAblation` or `runLiveAblation` is called at
- * all, so "nothing was billed" is a structural fact rather than a promise.
+ * for the same reason recorded in the file header, so `status` defaults to 0.
+ * The `--labelled-change` containment refusal alone passes 1, the exception the
+ * file header records. What `refuse` buys is that the refusal happens before
+ * `scriptedAblation` or `runLiveAblation` is called at all, so "nothing was
+ * billed" is a structural fact rather than a promise.
  */
-function refuse(message: string): number {
+function refuse(message: string, status = 0): number {
   console.log(
     `CAP-9 ablation — ${message}\n` +
       "\n" +
@@ -223,7 +232,7 @@ function refuse(message: string): number {
       `\n` +
       `Nothing was run and nothing was billed.`,
   )
-  return 0
+  return status
 }
 
 /** `provider/model`, split at the FIRST slash — a model id may contain one. */
@@ -403,6 +412,10 @@ export async function main(
   // that has not been resolved — and the real form follows symlinks, so a link
   // pointing at this repository, or one whose target contains it, cannot slip
   // past the lexical test.
+  //
+  // THIS REFUSAL EXITS 1, the one exception to the file header's 0. Passing it
+  // would mean a measurement the answer key invalidates, so an exit-status
+  // check (`materialize … && ablation …`) has to see the refusal as a failure.
   if (labelled) {
     const repoRoot = resolve(import.meta.dir, "..")
     const contained =
@@ -418,6 +431,7 @@ export async function main(
           "repository holds `fixtures/seeded-defects/labels.ts` — the ids, loci, summaries and " +
           "markers of all thirteen planted defects. A model that can read the answer key " +
           "measures nothing.",
+        1,
       )
     }
   }

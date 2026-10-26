@@ -174,6 +174,18 @@ describe("LIVE-RUN.md states the human pre-spend steps (epic-2 retro items 6 and
   })
 })
 
+describe("LIVE-RUN.md states the labelled-change containment refusal's exit status", () => {
+  test("the containment refusal exits 1, and every other refusal, a stopped evaluation and every report exit 0", async () => {
+    const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    for (const phrase of [
+      "**This refusal exits 1.**",
+      "Every other refusal, including those below and a missing `--pin`, exits 0, and so do an evaluation the bundle writer stopped and every completed report, whatever benefit it measured.",
+    ]) {
+      expect(doc, phrase).toContain(phrase)
+    }
+  })
+})
+
 describe("LIVE-RUN.md documents the sealed fixture identity that is actually in force", () => {
   test("the material hash in the document is the seal's", async () => {
     expect(await liveRunDoc()).toContain(LABELLED_CHANGE_SEAL.materialHash)
