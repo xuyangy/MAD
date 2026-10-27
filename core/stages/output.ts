@@ -104,6 +104,7 @@ import {
   spentTokens,
   unknownUsageClause,
   usageByOrigin,
+  usageIsAudited,
   usageIsComplete,
 } from "../budget/ledger.ts"
 import { BLAME_KIND } from "../judge/blame.ts"
@@ -1740,7 +1741,17 @@ export function renderRunRecord(record: RunRecord): string {
   // three stages fold into the `usage-unquantified` warning above. A second
   // wording here would be a second place to keep true, and a run can be both
   // stopped AND missing usage at once, which no cause-naming caveat can say.
-  if (record.cancelled !== undefined || !usageIsComplete(record.ledger)) {
+  //
+  // NEVER FOR AN UNAUDITED LEDGER (ledger #20), cancelled or not. A ledger with
+  // no unknown-usage collection (a pre-2.3 dump, or a record a JavaScript caller
+  // built) is incomplete by the accountant's verdict, but this paragraph asserts
+  // a billed turn whose spend is missing, and absence proves neither: a fully
+  // counted pre-2.3 record has the same shape. The accountant's UNAUDITED
+  // sentence below is the page's whole statement about that ledger.
+  if (
+    usageIsAudited(record.ledger) &&
+    (record.cancelled !== undefined || !usageIsComplete(record.ledger))
+  ) {
     lines.push(
       `  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one`,
       `  it stopped waiting on, or one that settled with the host reporting none — still billed,`,

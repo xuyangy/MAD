@@ -182,9 +182,33 @@ export function mayISpend(ledger: BudgetLedger, stage: SpendStage): boolean {
  * reported every missing number reads complete again — `reconcileLateUsage`
  * moves the recovered entry out of `unknownUsage` and into `entries`, and this
  * reads the collection rather than a flag somebody has to remember to clear.
+ *
+ * AN UNAUDITED LEDGER IS NEVER COMPLETE (`usageIsAudited` below). A ledger with
+ * no collection at all cannot say whether anything went uncounted, and "cannot
+ * say" is not "nothing", so `mayISpend` refuses it under `stopOnUnknownUsage`
+ * exactly as it refuses a known unknown.
  */
 export function usageIsComplete(ledger: TokenLedger): boolean {
+  if (!usageIsAudited(ledger)) return false
   return ledger.unknownUsage.length === 0
+}
+
+/**
+ * Ledger #20 — DOES THIS LEDGER CARRY AN UNKNOWN-USAGE COLLECTION AT ALL?
+ *
+ * `TokenLedger.unknownUsage` is required, so every ledger MAD builds has one.
+ * A record deserialized from a pre-2.3 dump, or one a JavaScript caller built,
+ * has not been through that type, and its ledger may hold none. That ledger is
+ * UNAUDITED: whether any usage went uncounted cannot be assessed. It is the same
+ * verdict `ablation/manifest.ts`'s `auditUsage` writes for that shape.
+ *
+ * ABSENCE IS ITS OWN STATE. It is not an empty collection (a run audited and
+ * found complete) and not a non-empty one (a run with counted unknowns), and no
+ * reader here defaults it to either. A fully counted pre-2.3 record has the same
+ * shape as one that lost a turn, so absence proves neither.
+ */
+export function usageIsAudited(ledger: TokenLedger): boolean {
+  return Array.isArray(ledger.unknownUsage)
 }
 
 /**
@@ -200,6 +224,10 @@ export function usageIsComplete(ledger: TokenLedger): boolean {
  * It counts EXECUTIONS, not slots and not turns: `stage + slot + attempt` is not
  * a unique id (`evaluation-protocol.md:504-507`), so two unknowns on one slot in
  * one stage are two.
+ *
+ * IT REQUIRES AN AUDITED LEDGER. A count of an absent collection has no honest
+ * value, so a caller that may hold an unaudited ledger checks `usageIsAudited`
+ * first, as `unknownUsageClause` does.
  */
 export function unknownUsageCount(ledger: TokenLedger): number {
   return ledger.unknownUsage.length
@@ -231,8 +259,23 @@ export function unknownUsageCount(ledger: TokenLedger): number {
  * The count is pluralised because a reader counts what the sentence says, and
  * "1 turns" is the kind of seam that makes a reader distrust the figure beside
  * it — which, on this particular line, is the opposite of the point.
+ *
+ * AN UNAUDITED LEDGER GETS ITS OWN SENTENCE, checked before anything is counted
+ * (`usageIsAudited`). It carries no number, because there is no count to give,
+ * and it claims no gap and no missing spend, because a fully counted pre-2.3
+ * record has the same shape. It says only that completeness cannot be assessed,
+ * so the TOKENS figure is OBSERVED spend that cannot be called a full count. The renderer prints this sentence and not
+ * its FLOOR paragraph for that ledger: the sentence is the page's whole
+ * statement about it.
  */
 export function unknownUsageClause(ledger: TokenLedger): string | null {
+  if (!usageIsAudited(ledger)) {
+    return (
+      `This run's ledger is UNAUDITED: it records no unknown-usage collection, so whether ` +
+      `any turn's usage went uncounted cannot be assessed, and the TOKENS figure is OBSERVED ` +
+      `spend that cannot be called a full count.`
+    )
+  }
   const count = unknownUsageCount(ledger)
   if (count === 0) return null
   const subject = count === 1 ? "1 turn in this run has" : `${count} turns in this run have`
@@ -275,7 +318,7 @@ export interface UsageByOrigin {
  * a number.
  *
  * A LEDGER WITH NO UNKNOWN-USAGE COLLECTION IS READ AS AN EMPTY ONE, and the
- * `Array.isArray` guard is not dead code though the type says it is:
+ * `usageIsAudited` guard is not dead code though the type says it is:
  * `TokenLedger.unknownUsage` is required, so every ledger MAD builds has one,
  * but a record deserialized from a pre-2.3 dump or handed over by a JavaScript
  * caller has not been through that type. `ablation/manifest.ts`'s `auditUsage`
@@ -285,12 +328,14 @@ export interface UsageByOrigin {
  * the one place a pre-2.3 dump crashes. The absence costs this function nothing,
  * because an absent collection holds no inherited unknown either way.
  *
- * IT IS NOT A CLAIM THAT THE USAGE IS COMPLETE. `usageIsComplete` and
- * `unknownUsageCount` answer that, and they still read the field directly — a
- * `core/` caller renders a ledger this module's own types built.
+ * IT IS NOT A CLAIM THAT THE USAGE IS COMPLETE. `usageIsAudited` and
+ * `usageIsComplete` answer that, and they read an absent collection as
+ * UNAUDITED, never as an empty one. `unknownUsageClause` phrases that verdict
+ * for the renderer. `unknownUsageCount` requires an audited ledger: a count of an
+ * absent collection has no honest value.
  */
 export function usageByOrigin(ledger: TokenLedger): UsageByOrigin {
-  const unknownUsage = Array.isArray(ledger.unknownUsage) ? ledger.unknownUsage : []
+  const unknownUsage = usageIsAudited(ledger) ? ledger.unknownUsage : []
   let hereTokens = emptyTokenUsage()
   let inheritedTokens = emptyTokenUsage()
   let hereTurns = 0

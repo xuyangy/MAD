@@ -16,6 +16,7 @@ import {
   unknownUsageClause,
   unknownUsageCount,
   usageByOrigin,
+  usageIsAudited,
   usageIsComplete,
   type BudgetLedger,
 } from "./ledger.ts"
@@ -621,5 +622,71 @@ describe("usageByOrigin — attributed, executed here, inherited (AD-15 amended,
       inherited: { tokens: tokens(0, 5), turns: 0, unknown: 0 },
     }
     expect(hasInheritedUsage(split)).toBe(true)
+  })
+})
+
+describe("ledger #20 — a ledger with NO unknown-usage collection is UNAUDITED", () => {
+  // A pre-2.3 dump, or a record a JavaScript caller built: one counted turn and
+  // no collection at all.
+  const legacy = (cap: number | null = 400, stopOnUnknownUsage = false): BudgetLedger => {
+    const ledger = emptyLedger(cap) as BudgetLedger
+    ledger.stopOnUnknownUsage = stopOnUnknownUsage
+    recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+    delete (ledger as { unknownUsage?: unknown }).unknownUsage
+    return ledger
+  }
+
+  test("ABSENT is unaudited and never complete, and its sentence carries no number", () => {
+    const ledger = legacy()
+    expect(usageIsAudited(ledger)).toBe(false)
+    expect(usageIsComplete(ledger)).toBe(false)
+    const clause = unknownUsageClause(ledger)!
+    expect(clause).toContain("UNAUDITED")
+    expect(clause).toContain("OBSERVED")
+    // No count and no estimate: absence has no honest number.
+    expect(clause).not.toMatch(/\d/)
+    expect(clause).not.toContain("estimate")
+  })
+
+  test("a PRESENT EMPTY collection is audited, complete and silent — the non-vacuous sibling", () => {
+    const ledger = emptyLedger(400) as BudgetLedger
+    expect(usageIsAudited(ledger)).toBe(true)
+    expect(usageIsComplete(ledger)).toBe(true)
+    expect(unknownUsageClause(ledger)).toBeNull()
+  })
+
+  test("with the dial ON, an absent collection is REFUSED on every stage, uncapped included", () => {
+    // The positive control: the same dial, stages and caps admit an audited
+    // ledger whose collection is present and empty, so the refusal is the
+    // absence and not the dial or the cap.
+    const auditedEmpty = (cap: number | null): BudgetLedger => {
+      const ledger = emptyLedger(cap) as BudgetLedger
+      ledger.stopOnUnknownUsage = true
+      recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+      return ledger
+    }
+    for (const cap of [400, null]) {
+      for (const stage of ["discover", "debate", "judge"] as const) {
+        expect(mayISpend(legacy(cap, true), stage)).toBe(false)
+        expect(mayISpend(auditedEmpty(cap), stage)).toBe(true)
+      }
+    }
+  })
+
+  test("with the dial OFF, an absent collection spends exactly as a present empty one does", () => {
+    const audited = (cap: number | null): BudgetLedger => {
+      const ledger = emptyLedger(cap) as BudgetLedger
+      ledger.stopOnUnknownUsage = false
+      recordTurn(ledger, { slot: "discovery-1", stage: "discover", attempt: 1, tokens: tokens(10, 20) })
+      return ledger
+    }
+    for (const cap of [400, 30, 10, null]) {
+      for (const stage of ["discover", "debate", "judge"] as const) {
+        expect(mayISpend(legacy(cap), stage)).toBe(mayISpend(audited(cap), stage))
+      }
+    }
+    // The comparison is not vacuous: the cap both admits and refuses here.
+    expect(mayISpend(legacy(400), "judge")).toBe(true)
+    expect(mayISpend(legacy(10), "judge")).toBe(false)
   })
 })

@@ -2992,3 +2992,220 @@ describe("story 2.5A (2-5b) — a forked run's TOKENS figures are ATTRIBUTED", (
     expect(rendered).not.toContain("NEWLY EXECUTED")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Ledger #20 — a legacy record whose ledger has NO unknown-usage collection (a
+// pre-2.3 dump, or a record a JavaScript caller built) renders, as UNAUDITED.
+// ---------------------------------------------------------------------------
+
+/** The one valid record shape the ledger #20 tests vary: one counted turn. */
+function oneCountedTurn(): RunRecord {
+  const rec = record([finding({ severity: "high", file: "a.ts" })])
+  billedCounted(rec)
+  return rec
+}
+
+/** As `oneCountedTurn`, with the collection deleted as a pre-2.3 dump has it. */
+function legacyRecord(): RunRecord {
+  const rec = oneCountedTurn()
+  delete (rec.ledger as { unknownUsage?: unknown }).unknownUsage
+  return rec
+}
+
+// The complete pages of the five ledger #20 records, pinned byte for byte: the
+// three that carry the collection (empty, non-empty, empty and cancelled) and the
+// two that lack it (one counted turn, uncancelled and cancelled).
+const PRESENT_EMPTY = [
+  "MAD review — run run-1",
+  "============================================================",
+  "",
+  "ROSTER",
+  "  discovery-1: openai/gpt-5 — GPT (OpenAI)",
+  "  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1",
+  "",
+  "WARNINGS: none — this run is clean.",
+  "",
+  "DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): openai. Models: openai/gpt-5.",
+  "",
+  "FINDINGS (1)",
+  "",
+  "  #1  [high]  a.ts:1",
+  "      co-discovery: —   verdict: not adjudicated   evidence: assertion only",
+  "      raised by: discovery-1  (source: pool)",
+  "",
+  "      something is wrong",
+  "",
+  "      because of this",
+  "",
+  "UNRESOLVED — YOU DECIDE (0)",
+  "  Nothing was left undecided.",
+  "",
+  "TOKENS — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
+  "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
+].join("\n")
+
+const PRESENT_NON_EMPTY = [
+  "MAD review — run run-1",
+  "============================================================",
+  "",
+  "ROSTER",
+  "  discovery-1: openai/gpt-5 — GPT (OpenAI)",
+  "  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1",
+  "",
+  "WARNINGS: none — this run is clean.",
+  "",
+  "DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): openai. Models: openai/gpt-5.",
+  "",
+  "FINDINGS (1)",
+  "",
+  "  #1  [high]  a.ts:1",
+  "      co-discovery: —   verdict: not adjudicated   evidence: assertion only",
+  "      raised by: discovery-1  (source: pool)",
+  "",
+  "      something is wrong",
+  "",
+  "      because of this",
+  "",
+  "UNRESOLVED — YOU DECIDE (0)",
+  "  Nothing was left undecided.",
+  "",
+  "TOKENS (OBSERVED) — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
+  "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
+  "  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one",
+  "  it stopped waiting on, or one that settled with the host reporting none — still billed,",
+  "  and that spend is missing here. MAD does not estimate it.",
+  "  1 turn in this run has UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full count. MAD does not fill the gap in.",
+].join("\n")
+
+const PRESENT_EMPTY_CANCELLED = [
+  "MAD review — run run-1",
+  "============================================================",
+  "RUN CANCELLED — you stopped this run during the judge stage.",
+  "This is a PARTIAL review. See the warnings and the UNRESOLVED section below.",
+  "============================================================",
+  "",
+  "ROSTER",
+  "  discovery-1: openai/gpt-5 — GPT (OpenAI)",
+  "  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1",
+  "",
+  "WARNINGS: none — this run is clean.",
+  "",
+  "DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): openai. Models: openai/gpt-5.",
+  "",
+  "FINDINGS (1)",
+  "",
+  "  #1  [high]  a.ts:1",
+  "      co-discovery: —   verdict: not adjudicated   evidence: assertion only",
+  "      raised by: discovery-1  (source: pool)",
+  "",
+  "      something is wrong",
+  "",
+  "      because of this",
+  "",
+  "UNRESOLVED — YOU DECIDE (0)",
+  "  Nothing was left undecided.",
+  "",
+  "TOKENS — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
+  "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
+  "  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one",
+  "  it stopped waiting on, or one that settled with the host reporting none — still billed,",
+  "  and that spend is missing here. MAD does not estimate it.",
+].join("\n")
+
+const ABSENT = [
+  "MAD review — run run-1",
+  "============================================================",
+  "",
+  "ROSTER",
+  "  discovery-1: openai/gpt-5 — GPT (OpenAI)",
+  "  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1",
+  "",
+  "WARNINGS: none — this run is clean.",
+  "",
+  "DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): openai. Models: openai/gpt-5.",
+  "",
+  "FINDINGS (1)",
+  "",
+  "  #1  [high]  a.ts:1",
+  "      co-discovery: —   verdict: not adjudicated   evidence: assertion only",
+  "      raised by: discovery-1  (source: pool)",
+  "",
+  "      something is wrong",
+  "",
+  "      because of this",
+  "",
+  "UNRESOLVED — YOU DECIDE (0)",
+  "  Nothing was left undecided.",
+  "",
+  "TOKENS (OBSERVED) — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
+  "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
+  "  This run's ledger is UNAUDITED: it records no unknown-usage collection, so whether any turn's usage went uncounted cannot be assessed, and the TOKENS figure is OBSERVED spend that cannot be called a full count.",
+].join("\n")
+
+const ABSENT_CANCELLED = [
+  "MAD review — run run-1",
+  "============================================================",
+  "RUN CANCELLED — you stopped this run during the judge stage.",
+  "This is a PARTIAL review. See the warnings and the UNRESOLVED section below.",
+  "============================================================",
+  "",
+  "ROSTER",
+  "  discovery-1: openai/gpt-5 — GPT (OpenAI)",
+  "  slots requested: 1 | filled: 1 | answered: 1 | distinct verified lineages: 1",
+  "",
+  "WARNINGS: none — this run is clean.",
+  "",
+  "DISCLOSURE: [roster/provider-fan-out] This review sends the change to 1 provider(s): openai. Models: openai/gpt-5.",
+  "",
+  "FINDINGS (1)",
+  "",
+  "  #1  [high]  a.ts:1",
+  "      co-discovery: —   verdict: not adjudicated   evidence: assertion only",
+  "      raised by: discovery-1  (source: pool)",
+  "",
+  "      something is wrong",
+  "",
+  "      because of this",
+  "",
+  "UNRESOLVED — YOU DECIDE (0)",
+  "  Nothing was left undecided.",
+  "",
+  "TOKENS (OBSERVED) — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
+  "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
+  "  This run's ledger is UNAUDITED: it records no unknown-usage collection, so whether any turn's usage went uncounted cannot be assessed, and the TOKENS figure is OBSERVED spend that cannot be called a full count.",
+].join("\n")
+
+describe("ledger #20 — a ledger with NO unknown-usage collection renders as UNAUDITED", () => {
+  test("a record WITH the collection renders its pinned page (empty, non-empty, cancelled)", () => {
+    const nonEmpty = oneCountedTurn()
+    billedUncounted(nonEmpty)
+    const cancelled = oneCountedTurn()
+    cancelled.cancelled = { stage: "judge" }
+
+    expect(output(oneCountedTurn())).toBe(PRESENT_EMPTY)
+    expect(output(nonEmpty)).toBe(PRESENT_NON_EMPTY)
+    expect(output(cancelled)).toBe(PRESENT_EMPTY_CANCELLED)
+  })
+
+  for (const cancelled of [false, true]) {
+    test(`an ABSENT collection${cancelled ? " on a cancelled run" : ""} renders OBSERVED and UNAUDITED, and no FLOOR`, () => {
+      // Absence proves neither a missing spend nor its absence: a fully counted
+      // pre-2.3 record has this same shape. So the page says completeness cannot
+      // be assessed, gives no count, and never prints the assertive FLOOR
+      // paragraph, whose claim is a billed turn whose spend is missing.
+      const rec = legacyRecord()
+      if (cancelled) rec.cancelled = { stage: "judge" }
+      expect(rec.ledger.unknownUsage).toBeUndefined()
+
+      const rendered = output(rec)
+      // The whole page: the sentence's position below PEAK, its indent, and that
+      // it appears exactly once.
+      expect(rendered).toBe(cancelled ? ABSENT_CANCELLED : ABSENT)
+      const tokensLine = rendered.split("\n").find((l) => l.startsWith("TOKENS"))!
+      expect(tokensLine).toBe("TOKENS (OBSERVED) — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0")
+      expect(rendered.split("UNAUDITED")).toHaveLength(2)
+      expect(rendered).not.toContain("THAT TOTAL IS A FLOOR")
+      expect(rendered).not.toContain("UNKNOWN usage")
+    })
+  }
+})
