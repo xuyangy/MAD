@@ -58,7 +58,7 @@ import type {
   UnknownUsageEntry,
 } from "../core/domain/run-record.ts"
 import type { LensSlot, RosterSlot } from "../core/domain/roster.ts"
-import { DISCLOSURE_CODES, type Warning, type WarningCode } from "../core/domain/warning.ts"
+import { DISCLOSURE_CODES, type Warning, type WarningCode, type WarningOrigin } from "../core/domain/warning.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 
 /**
@@ -309,6 +309,15 @@ export interface ManifestWarning {
    * vocabulary; a second denylist somewhere else is a second place it can drift.
    */
   disclosure: boolean
+  /**
+   * Ledger #22 — the run that first recorded this warning and its zero-based
+   * position in that run's `warnings`, copied from `Warning.origin`. Present
+   * only on a warning a forked run inherited; absent on one the run raised
+   * itself. Optional and additive: `MANIFEST_SCHEMA_VERSION` stays 1. A manifest
+   * written before the field existed carries no origin on any warning, so an
+   * unmarked warning there makes no claim about where it was raised.
+   */
+  origin?: WarningOrigin
 }
 
 /**
@@ -682,6 +691,9 @@ function toManifestWarning(warning: Warning): ManifestWarning {
     stage: warning.stage,
     message: warning.message,
     disclosure: DISCLOSURE_CODES.has(warning.code),
+    ...(warning.origin === undefined
+      ? {}
+      : { origin: { runId: warning.origin.runId, warning: warning.origin.warning } }),
   }
 }
 

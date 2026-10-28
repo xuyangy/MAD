@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { CUMULATIVE_SHARE } from "../core/budget/presets.ts"
 import type { Finding } from "../core/domain/finding.ts"
 import type { RunRecord } from "../core/domain/run-record.ts"
+import type { Warning } from "../core/domain/warning.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
 import { selectRoster } from "../core/roster/select.ts"
@@ -580,6 +581,162 @@ describe("ledger provenance in the manifest (story 2.5A, 2-5b)", () => {
       if (!parsed.ok) continue
       expect(parsed.value.run.forkedFrom, name).toEqual(manifest.run.forkedFrom)
       expect(parsed.value.spend.origin, name).toEqual(manifest.spend.origin)
+    }
+  })
+})
+
+describe("ledger #22 — an inherited warning's origin survives the manifest", () => {
+  const caller: Warning = { code: "session-cleanup-unresolved", stage: "discover", message: "a session could not be deleted" }
+  const read = (value: unknown) => parseManifest(JSON.parse(JSON.stringify(value)))
+  const written = () =>
+    buildManifest({
+      record: record({
+        runId: "run-B",
+        forkedFrom: "run-S",
+        warnings: [
+          { ...caller, origin: { runId: "run-S", warning: 0 } },
+          { ...caller, origin: { runId: "run-S", warning: 1 }, detail: { secret: "kept out" } },
+          // Another run's identical warning, unmarked.
+          { ...caller },
+        ],
+      }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+
+  test("the round trip keeps both references distinct and leaves an unmarked same-text warning unmarked", () => {
+    const parsed = read(written())
+    expect(parsed.ok, parsed.ok ? "" : parsed.reason).toBe(true)
+    if (!parsed.ok) return
+    const warnings = parsed.value.status.warnings
+    expect(warnings.map((w) => w.message)).toEqual([caller.message, caller.message, caller.message])
+    expect(warnings[0]!.origin).toEqual({ runId: "run-S", warning: 0 })
+    expect(warnings[1]!.origin).toEqual({ runId: "run-S", warning: 1 })
+    expect("origin" in warnings[2]!).toBe(false)
+    for (const warning of warnings) {
+      expect("detail" in warning).toBe(false)
+      expect(warning.message).not.toContain("run-S")
+    }
+  })
+
+  test("the manifest copies the origin into a fresh object", () => {
+    const source = record({ warnings: [{ ...caller, origin: { runId: "run-S", warning: 0 } }] })
+    const manifest = buildManifest({ record: source, change, identity, turnFiles: known(0) })
+    expect(manifest.status.warnings[0]!.origin).toEqual({ runId: "run-S", warning: 0 })
+    expect(manifest.status.warnings[0]!.origin).not.toBe(source.warnings[0]!.origin)
+  })
+
+  test("an ordinary run's warning carries no origin key, and a legacy manifest without one reads", () => {
+    const manifest = buildManifest({ record: record({ warnings: [{ ...caller }] }), change, identity, turnFiles: known(0) })
+    expect("origin" in manifest.status.warnings[0]!).toBe(false)
+    const parsed = read(manifest)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) expect("origin" in parsed.value.status.warnings[0]!).toBe(false)
+  })
+
+  test.each([
+    ["{ runId, warning: 0 }", { runId: "run-S", warning: 0 }, true],
+    ["an empty runId", { runId: "", warning: 0 }, false],
+    ["a negative position", { runId: "run-S", warning: -1 }, false],
+    ["a fractional position", { runId: "run-S", warning: 1.5 }, false],
+    ["an unsafe position", { runId: "run-S", warning: 2 ** 53 }, false],
+    ["NaN", { runId: "run-S", warning: Number.NaN }, false],
+    ["Infinity", { runId: "run-S", warning: Number.POSITIVE_INFINITY }, false],
+    ["a string position", { runId: "run-S", warning: "0" }, false],
+    ["a numeric runId", { runId: 7, warning: 0 }, false],
+    ["a missing runId", { warning: 0 }, false],
+    ["a missing position", { runId: "run-S" }, false],
+    ["null", null, false],
+    ["undefined", undefined, false],
+    ["a string", "run-S:0", false],
+    ["an array", ["run-S", 0], false],
+    ["a whitespace-only runId", { runId: "   ", warning: 0 }, false],
+    ["an extra key", { runId: "run-S", warning: 0, stage: "discover" }, false],
+  ] as const)("the parser on an origin of %s", (_name, origin, ok) => {
+    // `origin` is set after the JSON round trip and the edited value goes to
+    // `parseManifest` as an object, so the `undefined` row reaches the parser as a
+    // present key whose value is `undefined`.
+    const onDisk = JSON.parse(JSON.stringify(written())) as { status: { warnings: Record<string, unknown>[] } }
+    onDisk.status.warnings[2] = { ...onDisk.status.warnings[2], origin }
+    const parsed = parseManifest(onDisk)
+    expect(parsed.ok).toBe(ok)
+    if (!parsed.ok) expect(parsed.reason).toContain("`status.warnings[2].origin`")
+  })
+
+  test("an origin on a manifest with no known `run.forkedFrom` fails", () => {
+    const manifest = buildManifest({
+      record: record({ warnings: [{ ...caller, origin: { runId: "run-S", warning: 0 } }] }),
+      change,
+      identity,
+      turnFiles: known(0),
+    })
+    const parsed = read(manifest)
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain("`status.warnings[0].origin` but no known `run.forkedFrom`")
+  })
+
+  test("an origin naming the manifest's own run fails", () => {
+    const onDisk = JSON.parse(JSON.stringify(written())) as { status: { warnings: Record<string, unknown>[] } }
+    onDisk.status.warnings[0] = { ...onDisk.status.warnings[0], origin: { runId: "run-B", warning: 0 } }
+    const parsed = parseManifest(onDisk)
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.reason).toContain("`status.warnings[0].origin` naming its own run")
+  })
+
+  test("a committed pre-change forked manifest still parses and carries no origin", async () => {
+    const path = new URL(
+      "./evidence/paired-oauth-evaluation-run-5-bundle/on/0/run-0muxufnbb-0016/manifest.json",
+      import.meta.url,
+    )
+    const parsed = parseManifest(JSON.parse(await Bun.file(path).text()))
+    expect(parsed.ok, parsed.ok ? "" : parsed.reason).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.run.forkedFrom.kind).toBe("known")
+    expect(parsed.value.status.warnings.length).toBeGreaterThan(0)
+    for (const warning of parsed.value.status.warnings) expect("origin" in warning).toBe(false)
+  })
+
+  test("a real fork into two arms: each arm's manifest keeps both distinct references", async () => {
+    const { roster, warnings } = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")],
+      { slots: 2, providerConfigKey: "provider" },
+    )
+    const clock = fakeClock()
+    const prepared = await prepareReview({
+      roster,
+      backend: new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: { findings: [] } }],
+        "discovery-2": [{ kind: "ok", value: { findings: [] } }],
+      }),
+      clock,
+      change: fakeChange(),
+      priorWarnings: [...warnings, { ...caller }, { ...caller }],
+    })
+    const S = prepared.record.runId
+    const first = prepared.record.warnings.findIndex((w) => w.message === caller.message)
+    expect(prepared.record.warnings.filter((w) => w.message === caller.message)).toHaveLength(2)
+
+    const arms = forkPreparedReview(prepared, clock, 2)
+    // The ON arm raises one warning itself, appended as a continuation appends.
+    const raisedHere: Warning = { code: "session-cleanup-unresolved", stage: "debate", message: "raised by the arm" }
+    arms[0]!.record.warnings.push({ ...raisedHere })
+    for (const [armId, arm] of [["on", arms[0]!], ["off", arms[1]!]] as const) {
+      const manifest = buildManifest({ record: arm.record, change, identity: { ...identity, armId }, turnFiles: known(0) })
+      const parsed = read(manifest)
+      expect(parsed.ok, parsed.ok ? "" : parsed.reason).toBe(true)
+      if (!parsed.ok) continue
+      const mine = parsed.value.status.warnings.filter((w) => w.message === caller.message)
+      expect(mine.map((w) => w.origin)).toEqual([
+        { runId: S, warning: first },
+        { runId: S, warning: first + 1 },
+      ])
+      const own = parsed.value.status.warnings.filter((w) => w.message === raisedHere.message)
+      expect(own).toHaveLength(armId === "on" ? 1 : 0)
+      for (const warning of own) expect("origin" in warning).toBe(false)
+      for (const warning of parsed.value.status.warnings) {
+        if (warning.message !== raisedHere.message) expect(warning.origin?.runId).toBe(S)
+      }
     }
   })
 })

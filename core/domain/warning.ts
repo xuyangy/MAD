@@ -365,6 +365,29 @@ export interface Warning {
   /** Human-readable, already carrying every name the user needs to act. */
   message: string
   detail?: Record<string, unknown>
+  /**
+   * Where an inherited warning was first recorded, set by `forkPreparedReview`
+   * the way it sets `UsageOrigin` on a ledger row.
+   *
+   * `runId` is the run that first recorded the warning, and `warning` is its
+   * zero-based position in that run's persisted `warnings`, fixed at the moment
+   * the warning is first inherited. A warning has no id of its own, so its
+   * position is the reference, as `UsageOrigin.entry` is for a ledger row.
+   *
+   * A warning that already has an origin keeps it when its record is forked
+   * again, so the reference names the run that first recorded it and never an
+   * intermediate branch. A warning a branch raises itself has none until that
+   * branch is forked, and then gets the branch's id. Absent on every warning a
+   * run raised itself, including its `priorWarnings`. `stage`, `code` and
+   * `message` are not an id and are never used as one.
+   */
+  origin?: WarningOrigin
+}
+
+/** See `Warning.origin`. */
+export interface WarningOrigin {
+  runId: string
+  warning: number
 }
 
 /**

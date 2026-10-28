@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
-import { DISCLOSURE_CODES } from "../domain/warning.ts"
+import { DISCLOSURE_CODES, type Warning } from "../domain/warning.ts"
 import { recordTurn, recordUnknownTurn, type RunRecord } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
@@ -3069,6 +3069,123 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
     expect(offRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(false)
     expect(onRecord!.ledger.entries.some((e) => e.stage === "debate")).toBe(true)
     expect(onRecord!.runId).not.toBe(offRecord!.runId)
+  })
+  // Ledger #22 — inherited warnings name the run and position that first recorded them.
+  const CALLER_WARNING: Warning = {
+    code: "session-cleanup-unresolved",
+    stage: "discover",
+    message: "a session could not be deleted",
+  }
+
+  test("WARNING ORIGIN: every branch marks each inherited warning by position, identical text included", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview({
+      ...deps,
+      priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING }, { ...CALLER_WARNING }],
+    })
+    const before = structuredClone(prefix.record.warnings)
+    expect(before.length).toBeGreaterThanOrEqual(2)
+
+    const branches = forkPreparedReview(prefix, deps.clock, 2)
+    const S = prefix.record.runId
+    for (const branch of branches) {
+      expect(branch.record.warnings.map((w) => w.origin)).toEqual(before.map((_, position) => ({ runId: S, warning: position })))
+      // Kept whole: same order and content once the mark is set aside.
+      expect(branch.record.warnings.map(({ origin: _origin, ...rest }) => rest)).toEqual(before)
+      const last = branch.record.warnings.length - 1
+      expect(branch.record.warnings[last - 1]!.origin).not.toEqual(branch.record.warnings[last]!.origin)
+    }
+
+    // The source is not written to.
+    expect(prefix.record.warnings).toEqual(before)
+    for (const warning of prefix.record.warnings) expect("origin" in warning).toBe(false)
+  })
+
+  test("WARNING ORIGIN ISOLATION: a branch's origin is its own object", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview({ ...deps, priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING }] })
+    const [a, b] = forkPreparedReview(prefix, deps.clock, 2)
+    const at = a!.record.warnings.length - 1
+    expect(a!.record.warnings[at]!.origin).not.toBe(b!.record.warnings[at]!.origin)
+
+    a!.record.warnings[at]!.origin!.runId = "mutated"
+    a!.record.warnings[at]!.origin!.warning = 99
+    expect(b!.record.warnings[at]!.origin).toEqual({ runId: prefix.record.runId, warning: at })
+    expect("origin" in prefix.record.warnings[at]!).toBe(false)
+
+    // A re-fork copies an existing origin rather than sharing it.
+    const [c, d] = forkPreparedReview(b!, deps.clock, 2)
+    expect(c!.record.warnings[at]!.origin).not.toBe(b!.record.warnings[at]!.origin)
+    c!.record.warnings[at]!.origin!.warning = 42
+    expect(d!.record.warnings[at]!.origin).toEqual({ runId: prefix.record.runId, warning: at })
+    expect(b!.record.warnings[at]!.origin).toEqual({ runId: prefix.record.runId, warning: at })
+  })
+
+  test("WARNING ORIGIN CHAIN: a re-fork keeps the first origin and marks the branch's own warning with the branch", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview({ ...deps, priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING }] })
+    const inherited = prefix.record.warnings.length
+    const [b] = forkPreparedReview(prefix, deps.clock, 2)
+
+    // Appended to an UNUSED prepared value, as the MIXED CHAIN test does for rows.
+    b!.record.warnings.push({ ...CALLER_WARNING })
+    expect("origin" in b!.record.warnings[inherited]!).toBe(false)
+
+    const S = prefix.record.runId
+    const B = b!.record.runId
+    for (const c of forkPreparedReview(b!, deps.clock, 2)) {
+      expect(c.record.forkedFrom).toBe(B)
+      expect(c.record.warnings.map((w) => w.origin)).toEqual([
+        ...Array.from({ length: inherited }, (_, position) => ({ runId: S, warning: position })),
+        { runId: B, warning: inherited },
+      ])
+    }
+  })
+
+  test("WARNING ORIGIN CHAIN: an inherited warning keeps its first ordinal, not its index in the branch", async () => {
+    const { deps } = criticalRun()
+    const prefix = await prepareReview({
+      ...deps,
+      priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING }, { ...CALLER_WARNING, message: "second" }],
+    })
+    const last = prefix.record.warnings.length - 1
+    const [b] = forkPreparedReview(prefix, deps.clock, 2)
+    // Only the last inherited warning remains, now at index 0 of the branch.
+    b!.record.warnings = [b!.record.warnings[last]!]
+    const [c] = forkPreparedReview(b!, deps.clock, 2)
+    expect(c!.record.warnings.map((w) => w.origin)).toEqual([{ runId: prefix.record.runId, warning: last }])
+  })
+
+  test("WARNING ORIGIN: the fork keeps a warning's `detail` beside the origin it sets", async () => {
+    const { deps } = criticalRun()
+    const detail = { slot: "discovery-1", sessions: ["s-1"] }
+    const prefix = await prepareReview({ ...deps, priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING, detail }] })
+    const at = prefix.record.warnings.length - 1
+    for (const branch of forkPreparedReview(prefix, deps.clock, 2)) {
+      expect(branch.record.warnings[at]).toEqual({ ...CALLER_WARNING, detail, origin: { runId: prefix.record.runId, warning: at } })
+      expect(branch.record.warnings[at]!.detail).not.toBe(detail)
+    }
+  })
+
+  test("WARNING ORIGIN: a prior warning that arrives with an origin is seeded without one", async () => {
+    const { deps } = criticalRun()
+    const carried: Warning = { ...CALLER_WARNING, origin: { runId: "run-elsewhere", warning: 3 } }
+    const prepared = await prepareReview({ ...deps, priorWarnings: [...deps.priorWarnings, carried] })
+    const seeded = prepared.record.warnings.find((w) => w.message === CALLER_WARNING.message)!
+    expect("origin" in seeded).toBe(false)
+    expect(seeded).toEqual(CALLER_WARNING)
+    // The caller's warning is not written to.
+    expect(carried.origin).toEqual({ runId: "run-elsewhere", warning: 3 })
+    const { record } = await continueReview(prepared, deps)
+    for (const warning of record.warnings) expect("origin" in warning).toBe(false)
+  })
+
+  test("WARNING ORIGIN: a run that is never forked carries no origin on any warning", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview({ ...deps, priorWarnings: [...deps.priorWarnings, { ...CALLER_WARNING }] })
+    const { record } = await continueReview(prepared, deps)
+    expect(record.warnings.length).toBeGreaterThan(0)
+    for (const warning of record.warnings) expect("origin" in warning).toBe(false)
   })
 })
 

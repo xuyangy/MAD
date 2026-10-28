@@ -65,7 +65,11 @@ export interface ReviewDeps {
    * builds the implementation and passes it in here.
    */
   tools?: Tools
-  /** Warnings raised before the pipeline started — the roster's (AD-6c). */
+  /**
+   * Warnings raised before the pipeline started — the roster's (AD-6c). They are
+   * this run's own: the record is seeded with each one's `origin` removed, so an
+   * unforked run never claims to have inherited a warning.
+   */
   priorWarnings?: Warning[]
   /** AD-11 — versioned instruction set; defaulted, never inlined at a call site. */
   instructions?: InstructionSet
@@ -594,7 +598,10 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
     // `dial-clamped` is appended AFTER the record is built, below — it compares
     // against the clamped values this object now carries, so it cannot be
     // computed inside the literal that produces them.
-    warnings: [...(deps.priorWarnings ?? [])],
+    // Ledger #22 — a prior warning is this run's own, so any `origin` it arrived
+    // with is dropped (the property is absent, not `undefined`): only a fork marks
+    // a warning as inherited.
+    warnings: (deps.priorWarnings ?? []).map(({ origin: _origin, ...warning }) => warning),
     // AD-15 — the ceiling rides on the ledger, beside the spend it bounds, and
     // is CLAMPED once here for exactly `threshold`'s and `maxRounds`' reason. An
     // unclamped `NaN` is the one that bites: `spent < NaN` is false for every
@@ -791,6 +798,14 @@ export const MAX_FORK_BRANCHES = 64
  * spend against its own cap, and `usageByOrigin` tells it apart from what the
  * branch runs itself.
  *
+ * The marks, each set only where no `origin` is present yet: a ledger row gets
+ * `{ runId, entry }` (its position in the source's `ledger.entries`), an unknown
+ * gets `{ runId }`, and a warning gets `{ runId, warning }` (its position in the
+ * source's `warnings`). A kept origin is still the branch's own object, because
+ * `cloneCheckpoint` gives every branch its own `structuredClone`. The branch keeps
+ * every warning, in order and otherwise unchanged; the mark only says which run
+ * first recorded each one.
+ *
  * ATOMIC. The count, the source's state, every clone and every id are checked
  * before the source is marked consumed. A failure throws a `CheckpointForkError`,
  * or whatever `clock.id` threw, and leaves the source usable. Once forked, the
@@ -867,6 +882,9 @@ export function forkPreparedReview(
     )
     record.ledger.unknownUsage = record.ledger.unknownUsage.map((entry) =>
       entry.origin === undefined ? { ...entry, origin: { runId: source.runId } } : entry,
+    )
+    record.warnings = record.warnings.map((warning, position) =>
+      warning.origin === undefined ? { ...warning, origin: { runId: source.runId, warning: position } } : warning,
     )
     forks.push({ ...copy, framedChange: prepared.framedChange, stopRequested: prepared.stopRequested })
   }

@@ -854,6 +854,16 @@ describe("prefix record binding", () => {
       reason: "`warnings[0].detail` is not an object",
     },
     {
+      name: "`warnings[].origin` with an empty `runId`",
+      mutate: (record) => record.warnings.unshift({ code: "model-dropped-out", stage: "discover", origin: { runId: "", warning: 0 } }),
+      reason: "`warnings[0].origin` is not exactly { runId: a non-empty string, warning: a non-negative safe integer }",
+    },
+    {
+      name: "`warnings[].origin` with a fractional position",
+      mutate: (record) => record.warnings.unshift({ code: "model-dropped-out", stage: "discover", origin: { runId: "run-S", warning: 1.5 } }),
+      reason: "`warnings[0].origin` is not exactly { runId: a non-empty string, warning: a non-negative safe integer }",
+    },
+    {
       name: "`cancelled`",
       mutate: (record) => (record.cancelled = {}),
       reason: "`cancelled` is present and has no string `stage`",
@@ -876,6 +886,17 @@ describe("prefix record binding", () => {
       expect(reasonsOf(record)).toContain(`is malformed: ${entry.reason}`)
     })
   }
+
+  test("a `record.json` warning with a well-formed `origin` is read (ledger #22)", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block === 1) {
+          record.warnings.push({ code: "session-cleanup-unresolved", stage: "discover", message: "m", origin: { runId: "run-S", warning: 0 } })
+        }
+      },
+    })
+    expect(blockOf(await labelled(root), 1).record.kind).toBe("read")
+  })
 
   /**
    * THE OTHER HALF OF THE ISOLATION. `record.findings` is the adjudication

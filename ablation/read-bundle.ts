@@ -68,6 +68,7 @@ import { join } from "node:path"
 import { inheritsAny } from "../core/budget/ledger.ts"
 import type { Finding } from "../core/domain/finding.ts"
 import { ROUTING_POLICIES, type RoutingPolicy } from "../core/domain/run-record.ts"
+import type { WarningOrigin } from "../core/domain/warning.ts"
 import { BUNDLE_FILE, type BundleArm, type BundleIndex } from "./bundle.ts"
 import { INHERITED_SUM_RULE, PAIRED_READER_MODULE } from "./report.ts"
 import {
@@ -598,6 +599,30 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
     ) {
       return fail(`has an unreadable \`status.warnings[${position}]\``)
     }
+    // Ledger #22 — absent is the only way to say "not inherited". A present
+    // origin that is not a well-formed reference fails the read rather than
+    // being stripped, so a warning is never silently re-labelled as local.
+    if (Object.hasOwn(warning, "origin")) {
+      if (!isWarningOrigin(warning.origin)) {
+        return fail(
+          `has a malformed \`status.warnings[${position}].origin\`: it must be exactly { runId: a non-empty ` +
+            `string, warning: a non-negative safe integer }`,
+        )
+      }
+      // The same pairing `provenanceProblem` holds inherited usage to: only a run
+      // with a known `forkedFrom` inherits, and a run never inherits from itself. The reference is not
+      // resolved against the prefix's record; that is no reader's job here.
+      const parent = run.forkedFrom
+      if (!isRecord(parent) || parent.kind !== "known") {
+        return fail(
+          `has a \`status.warnings[${position}].origin\` but no known \`run.forkedFrom\`; only a forked run ` +
+            `inherits a warning`,
+        )
+      }
+      if (warning.origin.runId === run.runId) {
+        return fail(`has a \`status.warnings[${position}].origin\` naming its own run, so it inherited the warning from itself`)
+      }
+    }
   }
   const cancelled = maybeOf(status.cancelledAt, (payload) => typeof payload === "string", "a string")
   if (cancelled !== undefined) return fail(`has a malformed \`status.cancelledAt\`: ${cancelled}`)
@@ -707,6 +732,21 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   }
 
   return { ok: true, value: value as unknown as RunManifest }
+}
+
+/**
+ * Ledger #22 — a well-formed `Warning.origin`: exactly `runId` (non-empty text)
+ * and `warning` (a non-negative safe integer), nothing else. Shared with
+ * `labelled-read.ts`, so the manifest reader and the record reader agree.
+ */
+export function isWarningOrigin(value: unknown): value is WarningOrigin {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => key === "runId" || key === "warning") &&
+    isText(value.runId) &&
+    Number.isSafeInteger(value.warning) &&
+    (value.warning as number) >= 0
+  )
 }
 
 function isText(value: unknown): value is string {

@@ -502,6 +502,21 @@ there with what it cost. The journal's bill counts each physical execution once,
 prefix is not counted again for each branch that inherited it. `paired-slots.jsonl` records a
 started and a terminal status, with its reason, for each of the six planned arm slots.
 
+Each arm keeps every warning its prefix recorded, because each one qualifies that arm's
+result. A warning an arm inherited carries `origin: { runId, warning }` in its record and in
+its manifest's `status.warnings`: the run that first recorded it and its zero-based position
+in that run's `warnings`. The fork sets it on every warning that has none. When an arm is
+itself forked, a warning it inherited keeps the origin it already has, so the reference still
+names the run that first recorded it, and a warning the arm raised itself gets the arm's run
+id and its position in the arm's `warnings`. Until then a warning the arm raised has no
+origin. Two inherited warnings with the same text are distinct references, and an unmarked
+warning with the same text is not either of them. The reader refuses a malformed origin, and
+an origin on a run with no known `run.forkedFrom` or naming the run itself. The mark is
+metadata only, and no reader uses it yet: per-arm warning listings, and any count taken over
+arms, still include every inherited warning in each arm. A consumer that must count an
+occurrence once uses the mark to do it. A manifest written before the field existed has no
+origin on any warning, so an unmarked warning there makes no claim about where it was raised.
+
 A continuation that returned is `completed` only when nothing was refused. When the run's own
 ledger or an admission gate refused it planned work (discovery slots skipped, findings left
 unresolved, or a refused admission in its phase or its block's prefix), the slot is `failed`

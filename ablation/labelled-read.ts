@@ -92,6 +92,7 @@ import { verdictState } from "./compare.ts"
 import { countText } from "./cross-arm-rates.ts"
 import { meanText } from "./fraction.ts"
 import { allExcluded, type PairedBlock, type PairedReadResult } from "./paired-read.ts"
+import { isWarningOrigin } from "./read-bundle.ts"
 import { ADJUDICATION_READER_MODULE, EVALUATION_REPORT_MODULE, LABELLED_READER_MODULE } from "./report.ts"
 import { canonicalJson, PAIRED_BLOCKS, type Arm, type ArmPosition, type PairedSchedule } from "./schedule.ts"
 
@@ -691,6 +692,10 @@ function parsePrefixRecord(raw: unknown): PrefixRecord | string {
       return `\`warnings[${index}]\` has no string \`code\` and \`stage\``
     }
     if (warning.detail !== undefined && !isRecord(warning.detail)) return `\`warnings[${index}].detail\` is not an object`
+    // Ledger #22 — the manifest reader's rule, through the same predicate.
+    if (Object.hasOwn(warning, "origin") && !isWarningOrigin(warning.origin)) {
+      return `\`warnings[${index}].origin\` is not exactly { runId: a non-empty string, warning: a non-negative safe integer }`
+    }
   }
   if (raw.cancelled !== undefined && !(isRecord(raw.cancelled) && typeof raw.cancelled.stage === "string")) {
     return "`cancelled` is present and has no string `stage`"
