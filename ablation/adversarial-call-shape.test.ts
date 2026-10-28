@@ -159,7 +159,11 @@ function callShapeBackend(shape: Shape = {}) {
   return { calls, backendFor }
 }
 
-/** Run the sixteen sealed slots over the test-local backend. */
+/**
+ * Run the sixteen sealed slots over the test-local backend. A test that calls
+ * this carries a 60 s timeout, as adversarial.test.ts's slowest suite tests
+ * do: on a loaded machine one suite run can take longer than bun's 5 s default.
+ */
 async function suiteWith(shape: Shape = {}, options: { complete?: boolean } = {}) {
   const sealed = await sealedSuite(scratch)
   const backend = callShapeBackend(shape)
@@ -236,7 +240,7 @@ describe("the one-slot call shape: backend runTurn invocations per run and per s
     // A non-critical finding at 1/1 co-discovery is judged verify-independently: one fact-check.
     expect(calls.filter((call) => call.stage === "judge").every((call) => call.role === "fact-check")).toBe(true)
     expectJournalMatches(outcome, calls)
-  })
+  }, 60_000)
 
   test("two critical findings, both argued: discover 1, ONE debate invocation covering both, the four adjudicate roles each", async () => {
     const { calls, outcome, schedule } = await suiteWith({ discovery: twoCritical })
@@ -251,7 +255,7 @@ describe("the one-slot call shape: backend runTurn invocations per run and per s
       expect([...roles].sort()).toEqual([...ADJUDICATE, ...ADJUDICATE].sort())
     }
     expectJournalMatches(outcome, calls)
-  })
+  }, 60_000)
 
   test("a critical finding its author withdraws costs no judge invocation; the upheld one gets the four adjudicate roles", async () => {
     const withdrawn = new Map<number, string>()
@@ -284,7 +288,7 @@ describe("the one-slot call shape: backend runTurn invocations per run and per s
       expect(record.findings.filter((candidate) => candidate.id !== id).map((candidate) => candidate.verdict)).toEqual(["upheld"])
     }
     expectJournalMatches(outcome, calls)
-  })
+  }, 60_000)
 
   test("a critical finding with an empty transcript falls back to one verify-independently judge invocation", async () => {
     const { calls, outcome, schedule } = await suiteWith({
@@ -299,7 +303,7 @@ describe("the one-slot call shape: backend runTurn invocations per run and per s
       expect(callsOf(calls, slot.position)).toHaveLength(plannedTurns(1, 1, 0) - 3)
     }
     expectJournalMatches(outcome, calls)
-  })
+  }, 60_000)
 })
 
 describe("retries: a failed turn issues at most 2 attempts, so planned turns and issued attempts differ", () => {
@@ -316,7 +320,7 @@ describe("retries: a failed turn issues at most 2 attempts, so planned turns and
     const retries = outcome.bill.requests.filter((request) => request.attempt === 2)
     expect(retries).toHaveLength(schedule.slots.length)
     expect(retries.every((request) => request.stage === "discover")).toBe(true)
-  })
+  }, 60_000)
 
   test("one judge model-error: the fact-check is retried once", async () => {
     const { calls, outcome, schedule } = await suiteWith({ fail: { stage: "judge", role: "fact-check", onTarget: true, times: 1 } })
@@ -329,7 +333,7 @@ describe("retries: a failed turn issues at most 2 attempts, so planned turns and
     const retries = outcome.bill.requests.filter((request) => request.attempt === 2)
     expect(retries).toHaveLength(schedule.slots.length)
     expect(retries.every((request) => request.stage === "judge")).toBe(true)
-  })
+  }, 60_000)
 
   test("one debate model-error: the batched debate turn is retried once", async () => {
     const { calls, outcome, schedule } = await suiteWith({ discovery: twoCritical, fail: { stage: "debate", times: 1 } })
@@ -339,7 +343,7 @@ describe("retries: a failed turn issues at most 2 attempts, so planned turns and
     }
     expectJournalMatches(outcome, calls)
     expect(outcome.bill.requests.filter((request) => request.attempt === 2).every((request) => request.stage === "debate")).toBe(true)
-  })
+  }, 60_000)
 
   test("a turn that fails twice in a row is not attempted a third time", async () => {
     const { calls, outcome, schedule } = await suiteWith(
@@ -352,7 +356,7 @@ describe("retries: a failed turn issues at most 2 attempts, so planned turns and
     }
     expect(outcome.bill.requests.some((request) => request.attempt > 2)).toBe(false)
     expectJournalMatches(outcome, calls)
-  })
+  }, 60_000)
 })
 
 describe("protocol v3's state, and v1 and v2 unchanged", () => {
