@@ -33,6 +33,15 @@ export const WARNING_CODES = [
   "roster-lens-homogeneous",
   /** AD-6b — a model errored or timed out; one retry, then the run proceeds. */
   "model-dropped-out",
+  /**
+   * Ledger #7 — the host reported a turn aborted (`TurnFailure`
+   * `"host-aborted"`). It claims only that: who initiated the abort, and why,
+   * are unknown, so it names neither the model nor the user. The turn got no
+   * retry, the slot is not a drop-out and stays eligible for later planned
+   * turns, and the run is not marked cancelled. Detail shape matches
+   * `model-dropped-out`: `{slot, model, attempts, failure, error, admission?}`.
+   */
+  "turn-host-aborted",
   /** AD-6a — fewer models answered than were requested. */
   "denominator-reduced",
   /** AD-12 — a model answered, but some items in its envelope failed validation. */
@@ -356,4 +365,46 @@ export interface Warning {
   /** Human-readable, already carrying every name the user needs to act. */
   message: string
   detail?: Record<string, unknown>
+}
+
+/**
+ * Ledger #7 — the one `turn-host-aborted` warning, built the same way by every
+ * stage so the wording cannot drift into blaming the model or the user.
+ *
+ * `turn` names the turn ("discovery", "debate round 2", ...) and `consequence`
+ * states what the missing answer cost in that stage. The detail shape matches
+ * `model-dropped-out`'s, with `failure` always `"host-aborted"`; `extra` carries
+ * the stage-specific keys (debate: `round`, `findings`; judge: `role`,
+ * `finding`) and never overrides a canonical key.
+ */
+export function hostAbortedWarning(input: {
+  stage: Stage
+  slot: string
+  model: string
+  attempts: number
+  error: string
+  turn: string
+  consequence: string
+  admission?: string
+  extra?: Record<string, unknown>
+}): Warning {
+  return {
+    code: "turn-host-aborted",
+    stage: input.stage,
+    message:
+      `HOST-ABORTED TURN: the host reported the ${input.turn} turn for \`${input.model}\` ` +
+      `(slot ${input.slot}) aborted. Who initiated the abort, and why, is not known. The turn ` +
+      `was not retried and gave no answer; ${input.consequence} The slot is not treated as a ` +
+      `dropped-out model, and the run was not stopped.`,
+    detail: {
+      // First, so every canonical key below wins over a stage's extra key.
+      ...input.extra,
+      slot: input.slot,
+      model: input.model,
+      attempts: input.attempts,
+      failure: "host-aborted",
+      error: input.error,
+      ...(input.admission === undefined ? {} : { admission: input.admission }),
+    },
+  }
 }

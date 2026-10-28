@@ -93,7 +93,7 @@ import {
 } from "../domain/finding.ts"
 import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { DebateCounts } from "../domain/run-record.ts"
-import type { Warning } from "../domain/warning.ts"
+import { hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
@@ -478,6 +478,8 @@ async function runDebateTurn(
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { refused: false, envelope, attempts: attempt }
     if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
+    // Ledger #7 — a host-reported abort gets no second attempt.
+    if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
   return { refused: false, envelope: last!, attempts: 2 }
@@ -1082,6 +1084,8 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // A seat an admission refused (story 2-5c) counts as a turn only when its
     // first attempt was issued before the retry was refused.
     const refusedThisRound = new Map<Room, string | undefined>()
+    /** Ledger #7 — rooms with a seat whose turn the host reported aborted this round. */
+    const hostAbortedThisRound = new Set<Room>()
     for (const outcome of outcomes) {
       attempts += outcome.attempts
       if (outcome.refused) {
@@ -1143,6 +1147,30 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         // reports it once, under AD-6(f).
         if (outcome.envelope.failure === "cancelled") {
           cancelled = true
+          continue
+        }
+
+        // Ledger #7 — A HOST-ABORTED TURN IS NOT A DROP-OUT AND NOT A STOP. The
+        // host reported this round's turn aborted, initiator unknown. The seat
+        // abstains for this round only: it is not added to
+        // `droppedOutThisStage`, so it is seated again in any later round, and
+        // the round's `cancelled` flag is untouched.
+        if (outcome.envelope.failure === "host-aborted") {
+          for (const room of outcome.rooms) hostAbortedThisRound.add(room)
+          warnings.push(
+            hostAbortedWarning({
+              stage: "debate",
+              slot: outcome.slot,
+              model: modelOf(outcome.slot),
+              attempts: outcome.attempts,
+              error: outcome.envelope.message,
+              turn: `debate round ${round}`,
+              extra: { round, findings: outcome.rooms.map((room) => room.finding.id) },
+              consequence:
+                `its silence this round is an abstention on the finding(s) it was seated for, ` +
+                `and it is seated again in any later round.`,
+            }),
+          )
           continue
         }
 
@@ -1271,8 +1299,15 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // stated positions stay on the record and the room is stranded on the budget
     // path below. Every other room is read as usual and keeps arguing.
     for (const [room, reason] of refusedThisRound) refusedRooms.set(room, reason)
+    //
+    // Ledger #7 — A ROOM WITH A HOST-ABORTED SEAT takes no exit this round
+    // either, for the same reason: the seat stated nothing, and its silence is
+    // not an abstention it chose. Unlike a refused room it is not stranded: it
+    // stays open, and the seat is asked again in the next PLANNED round. No round
+    // is added; after the last one it ends at the cap like any open room, and the
+    // `turn-host-aborted` warning names the cause.
     for (const room of open) {
-      if (refusedRooms.has(room)) continue
+      if (refusedRooms.has(room) || hostAbortedThisRound.has(room)) continue
       const decided = exitFor(
         room.finding,
         round,

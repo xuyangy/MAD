@@ -1890,23 +1890,42 @@ is allowed by design.
 **The settlement rule.** When a turn sent its prompt, settled as a failure, and its `tokens` object
 maps to all zeros (input, output, reasoning, cache read, cache write; `{}` included),
 `OpencodeModelBackend` settles the turn `unknown`, not `usage`. The failures it covers are a host error
-(`model-error`), no structured payload (`empty-response`), and `schema-invalid` from a structured
-payload that is a string but not valid JSON or that the schema rejects. opencode zero-initializes that
-object and leaves it at zero on a failed turn, whether the turn failed before any request (the live
-pilot's `Token refresh failed: 401`, `ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json`) or
-after six (story 2-8c3b's persistent-500 attempt), so the zeros are not knowledge. That was observed
-for host errors; the `empty-response` and `schema-invalid` cases follow by analogy (ledger #93), not
-from a live observation. A failed turn with any non-zero field keeps its tokens, and a successful turn
-is unchanged: an all-zero successful turn is a known zero. Failure kinds are unchanged, so AD-6b's
-retry classification does not move. A metered turn (story 2-8c2) takes the meter's figure instead,
-whatever the host reported: the meter sees every physical request, so a metered turn with 0 physical
-requests is a known zero.
+(`model-error`, or `host-aborted` when the host reported the turn aborted), no structured payload
+(`empty-response`), and `schema-invalid` from a structured payload that is a string but not valid JSON
+or that the schema rejects. opencode zero-initializes that object and leaves it at zero on a failed
+turn, whether the turn failed before any request (the live pilot's `Token refresh failed: 401`,
+`ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json`) or after six (story 2-8c3b's persistent-500
+attempt), so the zeros are not knowledge. That was observed for host errors; the `empty-response` and
+`schema-invalid` cases follow by analogy (ledger #93), not from a live observation. A failed turn with
+any non-zero field keeps its tokens, and a successful turn is unchanged: an all-zero successful turn is
+a known zero. Failure kinds are unchanged, so AD-6b's retry classification does not move. A metered
+turn (story 2-8c2) takes the meter's figure instead, whatever the host reported: the meter sees every
+physical request, so a metered turn with 0 physical requests is a known zero.
+
+**A host-reported abort (ledger #7).** A settled message whose `error.name` is `MessageAbortedError`
+settles as `host-aborted`, matched on the name alone: an `APIError` whose message mentions an abort, or
+an error named `AbortError`, stays `model-error`. It claims only that the host reported the turn
+aborted; who initiated the abort, and why, are not known. It is a no-retry outcome, distinct from MAD's
+user cancellation (`cancelled`): no stage takes a second attempt, the slot is not a model drop-out and
+stays eligible for later, independently planned turns, and no stage or run is marked cancelled. A
+debate room with a host-aborted seat takes no exit that round and the seat is asked again in the next
+planned round; no round is added. Each such turn raises one `turn-host-aborted` degradation warning.
+The user's signal takes precedence: when the caller's signal has already fired as a `host-aborted`
+outcome settles, the turn settles `cancelled`, keeping its settled usage, and the stage latches the
+run's cancellation. Frozen v1 §4 allows at most two attempts per request; a host-aborted turn takes one
+and leaves the second untaken, which stays inside that rule and does not amend it. Its usage follows
+the host-error rule above: an all-zero object, `{}` included, is unknown, an absent object is unknown,
+any non-zero field is kept, and a metered turn takes the meter's figure. On the late path, an all-zero
+abort that settles after the turn was abandoned reports nothing, and a non-zero one reports its tokens.
 
 **Route effects.**
 
 - OAuth attempt mode (the pilot, the probe, `paired --provider-mode oauth`): the attempt is counted
   exactly as before. A non-abandoned `unknown` is a diagnostic, latches no halt, and the manifest lists
   it among the unknown diagnostics. The pilot's stop reason stays "ended in an error".
+- OAuth attempt mode, host-reported abort: a `host-aborted` attempt is an attempt that ended in a host
+  error, counted and stopped on as above, and its `hostError` carries the fixed `host-aborted`
+  category; the pilot, the probe and `paired` have no other branch on the failure kind.
 - The api-key relay route (`paired`, `accounting-probe`): unchanged; the meter decides.
 - Unmetered tokens mode (`ablation/live.ts`, the adversarial runner): the journal latches its
   UNKNOWN-amount halt on such a turn, host error, empty reply or malformed reply alike, as the
@@ -1918,22 +1937,24 @@ requests is a known zero.
   usage-incomplete.
 
 **The host-error record.** The pilot's attempts and the probe's attempts each carry `hostError`, from
-`ablation/host-error.ts`. It classifies the envelope's failure and message into one of five categories:
+`ablation/host-error.ts`. It classifies the envelope's failure and message into one of six categories:
 
 | Category | When | Code |
 |---|---|---|
+| `host-aborted` | the failure is `host-aborted`, whatever the message; checked first | none |
 | `oauth-token-refresh-rejected` | the message is exactly `UnknownError: Token refresh failed: <status>`, status 400, 401 or 403 | that status |
 | `provider-api-error` | the message begins `APIError:` | none |
 | `turn-timeout` | a `transport-error` whose message is the backend's own deadline message | none |
 | `transport-failure` | any other `transport-error` | none |
 | `unrecognized` | anything else | none |
 
-The refresh and timeout patterns match the whole message; `provider-api-error` is a prefix match with a
-fixed output. The summary comes from a fixed table per category, with only the allowlisted code
-interpolated, so no character of the host's message reaches the evidence: a message carrying a
-credential, JSON, control characters or 100 kB of text is `unrecognized` (or `provider-api-error` when
-it begins `APIError:`) and is recorded only as that category's fixed summary. A successful turn records
-`hostError: null`. The evidence files committed before this rule are left as they were written.
+`host-aborted` is decided by the failure kind before any message pattern. The refresh and timeout
+patterns match the whole message; `provider-api-error` is a prefix match with a fixed output. The
+summary comes from a fixed table per category, with only the allowlisted code interpolated, so no
+character of the host's message reaches the evidence: a message carrying a credential, JSON, control
+characters or 100 kB of text is `unrecognized` (or `provider-api-error` when it begins `APIError:`) and
+is recorded only as that category's fixed summary. A successful turn records `hostError: null`. The
+evidence files committed before this rule are left as they were written.
 
 ## The adversarial suite (stories 2-7b and 2-7f): the library and its OAuth launcher
 

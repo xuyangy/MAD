@@ -100,7 +100,7 @@ import {
 } from "../domain/finding.ts"
 import { modelNameOf, type Roster } from "../domain/roster.ts"
 import type { JudgeCounts } from "../domain/run-record.ts"
-import type { Warning } from "../domain/warning.ts"
+import { hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { anonymize, type AnonymizedTranscript } from "../judge/anonymize.ts"
 import {
   BLAME_KIND,
@@ -115,7 +115,7 @@ import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
-import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type Envelope, type ModelBackend, type TurnFailure } from "../ports/model-backend.ts"
 import {
   awaitObservationWrite,
   deadlineProblem,
@@ -446,6 +446,8 @@ async function runJudgeTurn<T>(
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { refused: false, envelope, attempts: attempt }
     if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
+    // Ledger #7 — a host-reported abort gets no second attempt.
+    if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
   return { refused: false, envelope: last!, attempts: 2 }
@@ -1198,6 +1200,43 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   }
 
   /**
+   * Ledger #7 — the one door every role's failure branch goes through. A turn
+   * the host reported aborted is NOT a drop-out: the slot is not added to
+   * `droppedOut`, so it keeps its role on later findings, and the model is not
+   * named as failing. The caller's fallback (a `not-adjudicated` verdict, a
+   * finding decided on what the other steps produced) runs either way, because
+   * the turn still gave no answer.
+   */
+  const noteLost = (
+    slot: string,
+    role: JudgeRole,
+    envelope: { failure: TurnFailure; message: string; raw?: unknown },
+    attempts: number,
+    finding: Finding,
+  ): void => {
+    if (envelope.failure === "host-aborted") {
+      warnings.push(
+        hostAbortedWarning({
+          stage: "judge",
+          slot,
+          model: modelOf(slot),
+          attempts,
+          error: envelope.message,
+          turn: `judge ${role}`,
+          consequence:
+            `any finding it was asked about is decided on what the other steps produced, or left ` +
+            `not adjudicated, and the slot keeps its role on later findings.`,
+          // `finding` lets the renderer tell a verdict this abort left unsettled
+          // from one the evidence did not decide.
+          extra: { role, finding: finding.id },
+        }),
+      )
+      return
+    }
+    noteDropOut(slot, role, envelope)
+  }
+
+  /**
    * A retry refused after a real failure keeps that failure: the model is named
    * as it would be after two failures, with the retry named as refused.
    */
@@ -1459,7 +1498,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       } else if (stoppedHere(finding, outcome.envelope)) {
         continue
       } else {
-        noteDropOut(slot, "evidence-extract", outcome.envelope)
+        noteLost(slot, "evidence-extract", outcome.envelope, outcome.attempts, finding)
       }
     }
 
@@ -1740,7 +1779,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
           stoppedHere(finding, logicEnvelope)
           continue
         }
-        noteDropOut(logicSlot, "logic-eval", logicEnvelope)
+        noteLost(logicSlot, "logic-eval", logicEnvelope, logicOutcome!.attempts, finding)
       }
       refuseTurn(finding, factResult, factSlot, "fact-check")
       continue
@@ -1830,7 +1869,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     } else if (stoppedHere(finding, factOutcome.envelope)) {
       continue
     } else {
-      noteDropOut(factSlot, "fact-check", factOutcome.envelope)
+      noteLost(factSlot, "fact-check", factOutcome.envelope, factOutcome.attempts, finding)
       // COUNTED SEPARATELY (code review 2026-08-28). `verifiedIndependently` is
       // the MODE and still increments below, because the five mode buckets have
       // to sum to `judged` — but the summary used to print it as "N checked
@@ -1838,7 +1877,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // was checked at all. `factChecksUnverified` does not cover this: that
       // counts checks that ANSWERED while opening nothing. This one never
       // answered.
-      counts.factChecksDroppedOut += 1
+      // A host-aborted check never answered either, but the line this count
+      // renders says the model failed both attempts, which is not what happened.
+      // The renderer reports it from the judge-stage `turn-host-aborted` warning.
+      if (factOutcome.envelope.failure !== "host-aborted") counts.factChecksDroppedOut += 1
       if (!argued) {
         counts.verifiedIndependently += 1
         recordVerdict(
@@ -1877,7 +1919,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       } else if (stoppedHere(finding, logicOutcome.envelope)) {
         continue
       } else {
-        noteDropOut(logicSlot, "logic-eval", logicOutcome.envelope)
+        noteLost(logicSlot, "logic-eval", logicOutcome.envelope, logicOutcome.attempts, finding)
       }
     }
 
@@ -1939,7 +1981,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // did go through the aggregator and is counted; only the cancelled branch
       // above returns without one.
       counts.adjudicated += 1
-      noteDropOut(aggregateSlot, "aggregate", aggregateOutcome.envelope)
+      noteLost(aggregateSlot, "aggregate", aggregateOutcome.envelope, aggregateOutcome.attempts, finding)
       // A missing ruling is not a ruling. `not-adjudicated` is the honest value
       // and the warning above names the model that was supposed to produce one.
       recordVerdict(

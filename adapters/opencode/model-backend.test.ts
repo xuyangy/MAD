@@ -1474,6 +1474,144 @@ describe("runTurn — late usage of a failed all-zero reply (ledger #93)", () =>
 })
 
 /**
+ * Ledger #7 — the host reported the turn aborted (the SDK's
+ * `MessageAbortedError`). It settles as `host-aborted`, matched on the error's
+ * `name` only, and its usage follows the host-error rule.
+ */
+describe("runTurn — a host-reported abort settles as host-aborted (ledger #7)", () => {
+  const ABORTED = { name: "MessageAbortedError", data: { message: "The operation was aborted." } }
+  const HOST_ERROR_ZERO_WHY =
+    "the turn ended in a host error and the host reported an all-zero token object, which it " +
+    "also reports for an errored turn that made requests, so the zeros are not a known usage"
+
+  test("a MessageAbortedError with non-zero tokens is host-aborted, tokens known", async () => {
+    const result = await backendWith({
+      reply: { data: { info: { error: ABORTED, tokens: { ...ZERO_HOST_TOKENS, input: 12 } } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+    expect(!result.ok && result.failure).toBe("host-aborted")
+    expect(!result.ok && result.message).toBe("MessageAbortedError: The operation was aborted.")
+    expect(result.tokens).toEqual({ ...ZERO_MAPPED, input: 12 })
+    expect("usageUnknown" in result).toBe(false)
+  })
+
+  for (const [label, tokens] of [
+    ["an all-zero token object", ZERO_HOST_TOKENS],
+    ["an empty token object", {}],
+  ] as const) {
+    test(`a MessageAbortedError with ${label} is unknown usage with the host-error reason`, async () => {
+      const result = await backendWith({
+        reply: { data: { info: { error: ABORTED, tokens } } },
+      }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+      expect(!result.ok && result.failure).toBe("host-aborted")
+      expect("tokens" in result).toBe(false)
+      expect(result.usageUnknown).toEqual({ executionId: "exec-1", why: HOST_ERROR_ZERO_WHY })
+    })
+  }
+
+  test("a MessageAbortedError with no tokens object keeps the host-reported-no-usage reason", async () => {
+    const result = await backendWith({ reply: { data: { info: { error: ABORTED } } } }).backend.runTurn(
+      "discovery-1", "i", "d", SCHEMA,
+    )
+    expect(!result.ok && result.failure).toBe("host-aborted")
+    expect("tokens" in result).toBe(false)
+    expect(result.usageUnknown?.why).toBe("the turn settled and the host reported no usage for it")
+  })
+
+  test("a metered abort takes the meter's figure", async () => {
+    const HANDLE: AdmittedTurn = { admitStep: async () => ({ ok: false, cause: "budget", reason: "unused" }), settleFirst: async () => {} }
+    const measuredTokens: TokenUsage = { input: 300, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const run = async (measured: MeteredUsage) => {
+      const fake = fakeV2({ reply: { data: { info: { error: ABORTED, tokens: ZERO_HOST_TOKENS } } } })
+      const meter: RequestMeterPort = { open: () => ({ close: async () => measured }) }
+      const backend = new OpencodeModelBackend({
+        serverUrl: "http://localhost:4096",
+        directory: "/repo",
+        slots: SLOTS,
+        client: fake.client as never,
+        meter,
+        cleanupTimeoutMs: 10,
+      })
+      return backend.runTurn("discovery-1", "i", "d", SCHEMA, undefined, HANDLE)
+    }
+    const usage = await run({ kind: "usage", tokens: measuredTokens, physicalRequests: 1 })
+    expect(!usage.ok && usage.failure).toBe("host-aborted")
+    expect(usage.tokens).toEqual(measuredTokens)
+    expect("usageUnknown" in usage).toBe(false)
+
+    const unknown = await run({ kind: "unknown", why: "the provider answered HTTP 500", physicalRequests: 1 })
+    expect(!unknown.ok && unknown.failure).toBe("host-aborted")
+    expect("tokens" in unknown).toBe(false)
+    expect(unknown.usageUnknown?.why).toContain("the provider answered HTTP 500")
+  })
+
+  test("the user's stop wins: an abort that settles after the caller's signal fired is cancelled, usage kept", async () => {
+    const controller = new AbortController()
+    const reply = { data: { info: { error: ABORTED, tokens: { ...ZERO_HOST_TOKENS, input: 12 } } } }
+    const fake = fakeV2({ reply })
+    // The signal fires once the request is out, and the host's reply is already
+    // there: the turn settles as aborted with the caller's signal fired.
+    fake.client.session.prompt = ((_args: unknown) => {
+      controller.abort()
+      return Promise.resolve(reply)
+    }) as never
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://localhost:4096",
+      directory: "/repo",
+      slots: SLOTS,
+      client: fake.client as never,
+    })
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    expect(!result.ok && result.failure).toBe("cancelled")
+    expect(!result.ok && result.message).toBe(
+      "the run was cancelled while this turn was in flight, and the host reported the turn aborted",
+    )
+    expect(result.tokens).toEqual({ ...ZERO_MAPPED, input: 12 })
+    expect("usageUnknown" in result).toBe(false)
+  })
+
+  test("with a signal that has not fired, the abort stays host-aborted", async () => {
+    const controller = new AbortController()
+    const result = await backendWith({
+      reply: { data: { info: { error: ABORTED, tokens: ZERO_HOST_TOKENS } } },
+    }).backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    expect(!result.ok && result.failure).toBe("host-aborted")
+    expect(result.usageUnknown).toEqual({ executionId: "exec-1", why: HOST_ERROR_ZERO_WHY })
+  })
+
+  test("look-alikes stay model-error: an APIError mentioning an abort, an AbortError", async () => {
+    for (const error of [
+      { name: "APIError", data: { message: "request aborted by upstream" } },
+      { name: "AbortError", data: { message: "The operation was aborted." } },
+      { name: "UnknownError", data: { message: "MessageAbortedError" } },
+    ]) {
+      const result = await backendWith({
+        reply: { data: { info: { error, tokens: HOST_TOKENS } } },
+      }).backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(!result.ok && result.failure).toBe("model-error")
+    }
+  })
+
+  test("a late all-zero abort reports nothing; a late non-zero abort reports", async () => {
+    for (const [tokens, expected] of [
+      [ZERO_HOST_TOKENS, false],
+      [{ ...ZERO_HOST_TOKENS, output: 4 }, true],
+    ] as const) {
+      const lateUsage = collectingReporter()
+      const { backend, settlePrompt } = backendWith({ pendingPrompt: true }, { timeoutMs: 10, cleanupTimeoutMs: 10, lateUsage })
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(!result.ok && result.failure).toBe("transport-error")
+      settlePrompt({ data: { info: { error: ABORTED, tokens } } })
+      await flush()
+      expect(lateUsage.reports).toEqual(
+        expected ? [{ executionId: result.usageUnknown!.executionId, tokens: { ...ZERO_MAPPED, output: 4 } }] : [],
+      )
+    }
+  })
+})
+
+/**
  * Ledger #93, through a consumer — the real backend driving `discover` under an
  * evaluation's stop dial. The unknown the backend now reports lands in
  * `ledger.unknownUsage`, and the accountant refuses the retry; with non-zero
@@ -1534,5 +1672,54 @@ describe("discover over the real backend — an all-zero empty-response stops th
     expect(ledger.unknownUsage.map((entry) => entry.why)).toEqual([FAILED_ZERO_WHY, FAILED_ZERO_WHY])
     expect(ledger.entries).toEqual([])
     expect(discovered.answered).toBe(0)
+  })
+})
+
+/**
+ * Ledger #7, through a consumer — the real backend driving `discover` with a
+ * host reply whose error is `MessageAbortedError` and whose tokens are non-zero.
+ */
+describe("discover over the real backend — a host-reported abort (ledger #7)", () => {
+  test("one prompt, a turn-host-aborted warning, no drop-out, not cancelled, tokens counted", async () => {
+    const roster = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      lenses: [],
+      providerConfigKey: "provider",
+    }).roster
+    const fake = fakeV2({
+      reply: {
+        data: {
+          info: {
+            error: { name: "MessageAbortedError", data: { message: "The operation was aborted." } },
+            tokens: { ...ZERO_HOST_TOKENS, input: 12 },
+          },
+        },
+      },
+    })
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://localhost:4096",
+      directory: "/repo",
+      slots: roster.slots,
+      client: fake.client as never,
+      cleanupTimeoutMs: 10,
+    })
+    const ledger = emptyLedger()
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+    })
+
+    expect(fake.calls.prompt).toHaveLength(1)
+    expect(ledger.entries).toHaveLength(1)
+    expect(ledger.entries[0]!.tokens).toEqual({ ...ZERO_MAPPED, input: 12 })
+    expect(discovered.cancelled).toBe(false)
+    expect(discovered.droppedOut).toEqual([])
+    const codes = discovered.warnings.map((warning) => warning.code)
+    expect(codes).toContain("turn-host-aborted")
+    expect(codes).not.toContain("model-dropped-out")
   })
 })

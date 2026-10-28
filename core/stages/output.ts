@@ -111,7 +111,7 @@ import { BLAME_KIND } from "../judge/blame.ts"
 import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
-import { DISCLOSURE_CODES } from "../domain/warning.ts"
+import { DISCLOSURE_CODES, type WarningCode } from "../domain/warning.ts"
 import { LINE_BREAK_CLASS, listCell, oneLine } from "../prompt/material.ts"
 import { isStatedPosition, type DebatePosition } from "./debate.ts"
 
@@ -728,9 +728,31 @@ function judgeSummary(record: RunRecord): string[] {
     )
   }
 
-  if (counts.notAdjudicated > 0) {
+  // Ledger #7 — judge turns the host reported aborted, read off the judge-stage
+  // `turn-host-aborted` warnings (`JudgeCounts` has no bucket for them). A
+  // finding one of them left `not-adjudicated` was not settled because a turn
+  // never answered, not because the evidence did not decide it.
+  const judgeAborts = record.warnings.filter(
+    (warning) => warning.code === "turn-host-aborted" && warning.stage === "judge",
+  )
+  const abortedIds = new Set(judgeAborts.map((warning) => warning.detail?.finding))
+  const unsettledByAbort = record.findings.filter(
+    (finding) => finding.verdict === "not-adjudicated" && abortedIds.has(finding.id),
+  ).length
+  const abortedChecks = judgeAborts.filter((warning) => warning.detail?.role === "fact-check").length
+
+  if (counts.notAdjudicated > unsettledByAbort) {
     lines.push(
-      `  "Not settled" is a real answer, not a failure: the evidence available did not decide it.`,
+      unsettledByAbort === 0
+        ? `  "Not settled" is a real answer, not a failure: the evidence available did not decide it.`
+        : `  "Not settled" is a real answer, not a failure, for ${counts.notAdjudicated - unsettledByAbort} ` +
+            `of them: the evidence available did not decide it.`,
+    )
+  }
+  if (unsettledByAbort > 0) {
+    lines.push(
+      `  ! ${unsettledByAbort} finding(s) were not settled because the host reported a judge turn ` +
+        `aborted: the step never answered, so this is not a ruling on the evidence.`,
     )
   }
 
@@ -742,6 +764,13 @@ function judgeSummary(record: RunRecord): string[] {
       `  ! ${counts.factChecksDroppedOut} check(s) against the code NEVER COMPLETED — the model`,
       `  asked failed both attempts. Any finding relying on one was decided without it, or not`,
       `  decided at all.`,
+    )
+  }
+
+  if (abortedChecks > 0) {
+    lines.push(
+      `  ! ${abortedChecks} check(s) against the code NEVER COMPLETED — the host reported the turn`,
+      `  aborted. Any finding relying on one was decided without it, or not decided at all.`,
     )
   }
 
@@ -1363,6 +1392,26 @@ export function renderRunRecord(record: RunRecord): string {
   // discovery stage already raised is the signal (AD-6b).
   const anyDroppedOut = record.warnings.some((warning) => warning.code === "model-dropped-out")
   const skippedForBudget = record.skippedForBudget?.length ?? 0
+  // Ledger #7 — A THIRD, SEPARATE CAUSE: the host reported a POOL slot's
+  // discovery turn aborted. Counted off the discovery stage's
+  // `turn-host-aborted` warnings for roster pool slots only, so a lens turn or a
+  // debate or judge turn the host aborted never counts as an unanswered pool
+  // slot. Kept apart from drop-outs and budget skips because it claims neither a
+  // model failure nor a budget refusal, and from a user stop because nobody is
+  // known to have asked for it.
+  const poolSlotIds = new Set(record.roster.slots.map((rosterSlot) => rosterSlot.slot))
+  const discoverySlotsWith = (code: WarningCode): number =>
+    new Set(
+      record.warnings
+        .filter((warning) => warning.code === code && warning.stage === "discover")
+        .map((warning) => warning.detail?.slot)
+        .filter((slot): slot is string => typeof slot === "string" && poolSlotIds.has(slot)),
+    ).size
+  const hostAbortedPool = discoverySlotsWith("turn-host-aborted")
+  const hostAbortedClause =
+    `${hostAbortedPool} pool slot(s) did not answer discovery: the host reported their turn(s) ` +
+    `aborted. Who initiated the abort, and why, is not known; those turns were not retried and ` +
+    `no model is named as failing for them.`
   if (resolved.length === 0) {
     // AD-6 — "no findings" and "nobody answered" are opposite facts and must
     // never render the same. An empty list after a roster that all dropped out
@@ -1384,6 +1433,54 @@ export function renderRunRecord(record: RunRecord): string {
         `  No model failed and no model was retried; the run stopped during the ` +
           `${record.cancelled.stage} stage.`,
       )
+      // A later user stop does not erase an earlier host-reported abort.
+      if (hostAbortedPool > 0) lines.push(`  Before the stop, ${hostAbortedClause}`)
+    } else if (hostAbortedPool > 0 && record.answered === 0) {
+      // Ledger #7 — neither "before any model was asked" (a host-aborted turn was
+      // issued) nor "every slot failed or dropped out" (a host abort is not a
+      // model failure) is true here. Every known cause gets its own line.
+      //
+      // `answered` counts the POOL only, so the headline is pool-scoped whenever
+      // a lens slot left no trace of not answering (no drop-out, no host abort,
+      // no budget skip) — it answered and raised nothing.
+      const discoveryLost = (slot: string): boolean =>
+        record.warnings.some(
+          (warning) =>
+            warning.stage === "discover" &&
+            (warning.code === "model-dropped-out" || warning.code === "turn-host-aborted") &&
+            warning.detail?.slot === slot,
+        ) || (record.skippedForBudget ?? []).includes(slot)
+      const lensAnswered = record.roster.lensSlots.filter((lensSlot) => !discoveryLost(lensSlot.slot)).length
+      if (lensAnswered > 0) {
+        lines.push("  NO POOL MODEL ANSWERED — this is not a clean review.")
+        lines.push(`  ${lensAnswered} lens slot(s) answered and raised nothing; no pool model examined the change.`)
+      } else {
+        lines.push("  NO MODEL ANSWERED — this is not a clean review; nothing was examined.")
+      }
+      lines.push(`  ${hostAbortedClause}`)
+      const droppedOutPool = discoverySlotsWith("model-dropped-out")
+      if (droppedOutPool > 0) {
+        lines.push(
+          `  ${droppedOutPool} pool slot(s) failed or dropped out; see the warnings above for which ` +
+            `models failed and why.`,
+        )
+      }
+      // A drop-out that is not a pool discovery one (a lens slot, or a debate or
+      // judge seat) is still a model failure the reader should find.
+      const otherDropOuts = record.warnings.filter(
+        (warning) =>
+          warning.code === "model-dropped-out" &&
+          !(warning.stage === "discover" && poolSlotIds.has(warning.detail?.slot as string)),
+      ).length
+      if (otherDropOuts > 0) {
+        lines.push("  Other slot(s) failed or dropped out; see the warnings above for which models failed and why.")
+      }
+      if (skippedForBudget > 0) {
+        lines.push(
+          `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
+            `token budget — those were not skipped because a model failed.`,
+        )
+      }
     } else if (skippedForBudget > 0 && record.answered === 0 && !anyDroppedOut) {
       // AD-15 / AD-6 (story 8) — THE SAME DEFECT, RE-OPENED BY A SECOND CAUSE.
       // 7A fixed this branch for cancellation and the fix was cause-specific:
@@ -1461,6 +1558,10 @@ export function renderRunRecord(record: RunRecord): string {
         `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
           `token budget — so this is not a clean review of the whole roster.`,
       )
+    }
+    // Ledger #7 — the same bound, for the host-aborted cause, in its own clause.
+    if (hostAbortedPool > 0 && record.answered > 0) {
+      lines.push(`  ${hostAbortedClause} So this is not a clean review of the whole roster.`)
     }
   }
   for (const finding of resolved) {

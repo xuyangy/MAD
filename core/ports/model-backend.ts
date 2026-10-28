@@ -62,6 +62,18 @@ export type TurnFailure =
    * per run, naming the stage the run stopped at.
    */
   | "cancelled"
+  /**
+   * Ledger #7 — the HOST reported the turn aborted (the SDK's
+   * `MessageAbortedError`). That is all it claims: who initiated the abort, and
+   * why, are unknown.
+   *
+   * It gets no retry: the attempt was issued, and a second one is not taken.
+   * It is not a model drop-out: no `model-dropped-out` warning, and the slot is
+   * not excluded from later, independently planned turns. It is not a user stop
+   * either: it never marks a stage or the run `cancelled`. Reported as one
+   * `turn-host-aborted` degradation warning per turn.
+   */
+  | "host-aborted"
 
 /**
  * FR10 / AC1 (story 2.3) — THIS EXECUTION BILLED SOMETHING MAD CANNOT COUNT.
@@ -269,8 +281,8 @@ export const UNSTATED_ABANDONMENT_REASON = "the turn was abandoned in flight, wi
  *   invent one (AC1: no unknown value is ever estimated or interpolated).
  * - **No `tokens`, ever — the key is ABSENT, not zero.** `emptyTokenUsage()` is
  *   truthy, and a truthy zero here is the exact lie this story deletes.
- * - **`failure: "cancelled"`, unchanged.** `TurnFailure`'s five members are
- *   untouched by this story, deliberately, so the retry classification does not
+ * - **`failure: "cancelled"`, unchanged.** Story 2.3 left `TurnFailure`'s
+ *   then-five members untouched, deliberately, so the retry classification does not
  *   move: `evaluation-protocol.md:311-327` — "Cancellation, budget refusal and
  *   unquantified usage never authorize a retry." A turn whose first attempt's
  *   cost is unknown is a turn a retry makes WORSE, not better, because it adds a

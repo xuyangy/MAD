@@ -521,7 +521,9 @@ export interface PreparedReview {
   /**
    * Slots still able to be seated or asked after discovery — neither dropped
    * out nor refused by the budget. Derived from discovery's own lists, because
-   * discovery is the only stage that knows who answered.
+   * discovery is the only stage that knows who answered. Eligibility, not
+   * answering: a slot whose discovery turn the host reported aborted did not
+   * answer discovery and is still listed here.
    */
   answeredSlots: string[]
   /**
@@ -714,6 +716,22 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // in a debate room and BILLED — under the very budget that refused to ask it.
   // A model that never spoke cannot contest a finding, and paying for it out of
   // an exhausted budget is the worst version of that.
+  //
+  // THE NAME SAYS "ANSWERED"; THE CONTRACT IS ELIGIBILITY. These are the slots
+  // later stages may seat or ask, which is not the same set as the slots that
+  // answered discovery. A slot whose discovery turn the host reported aborted
+  // (ledger #7) did not answer, and `discovered.answered` does not count it,
+  // but it is neither a drop-out nor a budget refusal: nothing says the model
+  // failed, so it stays eligible for debate and judge turns that are planned
+  // independently of the aborted one. Its aborted turn is never reissued and
+  // its eligibility adds no round or turn.
+  //
+  // WHY THE ARGUMENT ABOVE DOES NOT EXCLUDE IT. That argument is about a model
+  // known not to speak: one that failed twice, or one the budget refused. A
+  // host-reported abort is not evidence that the model is unavailable or
+  // failing, so seating it is not paying for a known silence. And the bill
+  // stays governed either way: the protocol's stop rule and the admission
+  // still gate every later billed turn it is offered.
   const answeredSlots = roster.slots
     .map((slot) => slot.slot)
     .concat(roster.lensSlots.map((slot) => slot.slot))

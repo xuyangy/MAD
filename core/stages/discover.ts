@@ -98,7 +98,7 @@ import {
   unknownUsageCount,
 } from "../budget/ledger.ts"
 import type { LensInstructionRecord, TokenLedger } from "../domain/run-record.ts"
-import type { Warning } from "../domain/warning.ts"
+import { hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
@@ -478,6 +478,11 @@ async function runWithOneRetry(
     if (envelope.failure === "cancelled") {
       return { skippedForBudget: false, envelope, attempts: attempt }
     }
+    // Ledger #7 — the host reported the turn aborted. The attempt was issued and
+    // is recorded above; a second one is not taken, whatever its usage was.
+    if (envelope.failure === "host-aborted") {
+      return { skippedForBudget: false, envelope, attempts: attempt }
+    }
     last = envelope
   }
   return { skippedForBudget: false, envelope: last!, attempts: 2 }
@@ -561,6 +566,8 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const warnings: Warning[] = []
   const droppedOut: string[] = []
   const skippedForBudget: string[] = []
+  /** Ledger #7 — slots, pool and lens, whose turn the host reported aborted. */
+  const hostAborted: string[] = []
   /** Story 2-5c — the admission's reason for each slot it refused, by slot. */
   const admissionRefusals = new Map<string, string>()
   let answered = 0
@@ -621,6 +628,31 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       // answer and AD-6(a) counts answers rather than requests. What must not
       // happen — and does not — is a model being named as the cause.
       if (!envelope.ok && envelope.failure === "cancelled") return false
+
+      // Ledger #7 — A HOST-ABORTED TURN IS NOT A DROP-OUT EITHER. The host
+      // reported the turn aborted and nothing says who aborted it or why, so the
+      // model is not named as failing and the slot is not added to `droppedOut`:
+      // it stays eligible for later, independently planned turns. It did not
+      // answer, so it still does not count toward the denominator.
+      if (!envelope.ok && envelope.failure === "host-aborted") {
+        hostAborted.push(rosterSlot.slot)
+        warnings.push(
+          hostAbortedWarning({
+            stage: "discover",
+            slot: rosterSlot.slot,
+            model: modelName,
+            attempts: outcome.attempts,
+            error: envelope.message,
+            turn: origin.source === "lens" ? `lens discovery` : `discovery`,
+            consequence:
+              origin.source === "lens"
+                ? `this lens's vantage is missing from discovery.`
+                : `it is excluded from the co-discovery denominator.`,
+            ...(outcome.admissionReason === undefined ? {} : { admission: outcome.admissionReason }),
+          }),
+        )
+        return false
+      }
 
       // AD-6b — retried once already; proceed with a warning naming the model.
       droppedOut.push(rosterSlot.slot)
@@ -792,9 +824,6 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // other two were simply never asked. Story 7A's whole thesis is that
     // degradation is reported honestly, and a cause the report knows and does not
     // print is the same failure one step quieter.
-    const becauseStopped = cancelled
-      ? ` The remaining ${roster.slots.length - answered} were never asked: you stopped the run.`
-      : ""
     // AD-15 (story 8) — THE SAME RULE, FOR THE OTHER CAUSE MAD KNOWS ABOUT.
     // The budget is a reason the report knows for the denominator being smaller,
     // and a cause the report knows and does not print is the same failure one
@@ -811,12 +840,27 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         : poolAdmissionRefused === poolSkippedCount
           ? ` ${poolSkippedCount} were never asked: the experiment's admission refused their turn.`
           : ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
+    // Ledger #7 — THE THIRD KNOWN CAUSE: the host reported a pool turn aborted.
+    // Worded without an actor, because the report does not know one.
+    const poolHostAbortedCount = hostAborted.filter((slot) => poolIds.has(slot)).length
+    const becauseHostAborted =
+      poolHostAbortedCount === 0
+        ? ""
+        : poolHostAbortedCount === 1
+          ? ` 1 did not answer: the host reported its turn aborted.`
+          : ` ${poolHostAbortedCount} did not answer: the host reported their turns aborted.`
+    // AD-6f — the stop's clause, argued at the top of this block. A
+    // host-aborted slot was asked, so it is not among the ones the stop left
+    // unasked.
+    const unaskedByStop = roster.slots.length - answered - poolHostAbortedCount
+    const becauseStopped =
+      cancelled && unaskedByStop > 0 ? ` The remaining ${unaskedByStop} were never asked: you stopped the run.` : ""
     warnings.push({
       code: "denominator-reduced",
       stage: "discover",
       message:
         `Only ${answered} of ${roster.slots.length} roster model(s) answered.${becauseStopped}` +
-        `${becauseBudget} Every co-discovery fraction below is over ${answered}, not over ` +
+        `${becauseBudget}${becauseHostAborted} Every co-discovery fraction below is over ${answered}, not over ` +
         `${roster.requested} requested.`,
       detail: {
         answered,
@@ -824,6 +868,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         requested: roster.requested,
         cancelled,
         skippedForBudget: poolSkippedCount,
+        ...(poolHostAbortedCount === 0 ? {} : { hostAborted: poolHostAbortedCount }),
       },
     })
   }

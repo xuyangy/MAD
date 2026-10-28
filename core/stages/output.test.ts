@@ -12,7 +12,7 @@ import {
   type RunRecord,
 } from "../domain/run-record.ts"
 import { MATERIAL_NOTICES } from "../prompt/material.ts"
-import { DISCLOSURE_CODES, WARNING_CODES } from "../domain/warning.ts"
+import { DISCLOSURE_CODES, hostAbortedWarning, WARNING_CODES } from "../domain/warning.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate, materialSpans } from "../test-support/fakes.ts"
 import { output, rankFindings } from "./output.ts"
@@ -3208,4 +3208,185 @@ describe("ledger #20 — a ledger with NO unknown-usage collection renders as UN
       expect(rendered).not.toContain("UNKNOWN usage")
     })
   }
+})
+
+describe("AD-6 — an empty finding list with a host-reported discovery abort (ledger #7)", () => {
+  /** Three pool slots and one lens slot, so pool and lens aborts can be told apart. */
+  function pooled(answered: number): RunRecord {
+    const { roster } = selectRoster(
+      [candidate("openai", "gpt-5"), candidate("anthropic", "claude-sonnet-4-5"), candidate("google", "gemini-2.5-pro")],
+      { slots: 3, lenses: ["security"], providerConfigKey: "provider" },
+    )
+    const base = record([], answered)
+    return { ...base, roster, warnings: [] }
+  }
+  const aborted = (slot: string, stage: "discover" | "debate" | "judge" = "discover") =>
+    hostAbortedWarning({
+      stage,
+      slot,
+      model: "provider/model",
+      attempts: 1,
+      error: "MessageAbortedError: aborted",
+      turn: stage === "discover" ? "discovery" : stage,
+      consequence: "it did not answer.",
+    })
+  const droppedOut = (slot: string) => ({
+    code: "model-dropped-out" as const,
+    stage: "discover" as const,
+    message: `MODEL DROPPED OUT: (slot ${slot}) failed twice`,
+    detail: { slot },
+  })
+  const HOST_CLAUSE = "pool slot(s) did not answer discovery: the host reported their turn(s) aborted."
+
+  function expectNoFalseClaim(rendered: string) {
+    expect(rendered).not.toContain("WARNINGS: none — this run is clean.")
+    expect(rendered).not.toContain("the budget ran out before any model was asked")
+    expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+  }
+
+  test("host abort only, nothing answered: its own clause, not budget, not failure, not a stop", () => {
+    const rec = pooled(0)
+    rec.warnings = [aborted("discovery-1"), aborted("discovery-2"), aborted("discovery-3"), aborted("discovery-lens-security")]
+    const rendered = output(rec)
+    expect(rendered).toContain("NO MODEL ANSWERED — this is not a clean review; nothing was examined.")
+    expect(rendered).toContain(`3 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("no model is named as failing for them")
+    expect(rendered).not.toContain("you stopped")
+    expect(rendered).not.toContain("failed or dropped out")
+    expect(rendered).not.toContain("No findings were raised")
+    expectNoFalseClaim(rendered)
+  })
+
+  test("host abort + budget skips: both causes, each with its own count", () => {
+    const rec = pooled(0)
+    rec.ledger.cap = 100
+    rec.skippedForBudget = ["discovery-2", "discovery-3"]
+    rec.warnings = [aborted("discovery-1")]
+    const rendered = output(rec)
+    expect(rendered).toContain(`1 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("2 further slot(s) were never asked at all")
+    expect(rendered).not.toContain("No model failed and no model was retried")
+    expectNoFalseClaim(rendered)
+  })
+
+  test("host abort + a genuine model failure: both causes, the abort not counted as a failure", () => {
+    const rec = pooled(0)
+    rec.warnings = [aborted("discovery-1"), droppedOut("discovery-2"), droppedOut("discovery-3")]
+    const rendered = output(rec)
+    expect(rendered).toContain(`1 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("2 pool slot(s) failed or dropped out")
+    expectNoFalseClaim(rendered)
+  })
+
+  test("every pool slot host-aborted while the lens answered: the headline is pool-scoped", () => {
+    const rec = pooled(0)
+    rec.warnings = [aborted("discovery-1"), aborted("discovery-2"), aborted("discovery-3")]
+    const rendered = output(rec)
+    expect(rendered).toContain("NO POOL MODEL ANSWERED — this is not a clean review.")
+    expect(rendered).toContain("1 lens slot(s) answered and raised nothing")
+    expect(rendered).not.toContain("NO MODEL ANSWERED")
+    expect(rendered).not.toContain("nothing was examined")
+    expect(rendered).toContain(`3 ${HOST_CLAUSE}`)
+  })
+
+  test("host abort + a lens drop-out: the drop-out is still named as a failure", () => {
+    const rec = pooled(0)
+    rec.warnings = [
+      aborted("discovery-1"),
+      aborted("discovery-2"),
+      aborted("discovery-3"),
+      droppedOut("discovery-lens-security"),
+    ]
+    const rendered = output(rec)
+    expect(rendered).toContain("NO MODEL ANSWERED — this is not a clean review; nothing was examined.")
+    expect(rendered).toContain(`3 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("Other slot(s) failed or dropped out; see the warnings above")
+    expect(rendered).not.toContain("pool slot(s) failed or dropped out")
+  })
+
+  test("a lens-only abort, or one in debate or judge, with an answering pool is no unanswered pool slot", () => {
+    const rec = pooled(3)
+    rec.warnings = [aborted("discovery-lens-security"), aborted("discovery-1", "debate"), aborted("discovery-2", "judge")]
+    const rendered = output(rec)
+    expect(rendered).toContain("No findings were raised by the 3 model(s) that answered.")
+    expect(rendered).not.toContain(HOST_CLAUSE)
+    expect(rendered).not.toContain("NO MODEL ANSWERED")
+  })
+
+  test("a pool abort beside answering models bounds the empty result", () => {
+    const rec = pooled(2)
+    rec.warnings = [aborted("discovery-3")]
+    const rendered = output(rec)
+    expect(rendered).toContain("No findings were raised by the 2 model(s) that answered.")
+    expect(rendered).toContain(`1 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("no model is named as failing for them. So this is not a clean review of the whole roster.")
+  })
+
+  test("a later user stop does not erase an earlier host abort", () => {
+    const none = pooled(0)
+    none.cancelled = { stage: "discover" }
+    none.warnings = [aborted("discovery-1")]
+    const rendered = output(none)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
+    expect(rendered).toContain(`Before the stop, 1 ${HOST_CLAUSE}`)
+
+    const some = pooled(2)
+    some.cancelled = { stage: "debate" }
+    some.warnings = [aborted("discovery-1")]
+    const partly = output(some)
+    expect(partly).toContain("before you stopped the run.")
+    expect(partly).toContain(`1 ${HOST_CLAUSE}`)
+  })
+})
+
+describe("the JUDGE summary reports a host-aborted check (ledger #7)", () => {
+  function judgedRecord(abortedIds: string[], notSettled: string[]): RunRecord {
+    const findings = notSettled.map((id) => {
+      const f = finding({ id, severity: "high", file: `${id}.ts`, route: "judge", routeReason: "uncontested" })
+      f.verdict = "not-adjudicated"
+      return f
+    })
+    const rec = record(findings, 3, [], DEFAULT_CO_DISCOVERY_THRESHOLD, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+      ...JUDGE_COUNTS,
+      judged: notSettled.length,
+      adjudicated: 0,
+      verifiedIndependently: notSettled.length,
+      withdrawnByAuthor: 0,
+      upheld: 0,
+      notAdjudicated: notSettled.length,
+    })
+    rec.warnings = abortedIds.map((id) =>
+      hostAbortedWarning({
+        stage: "judge",
+        slot: "discovery-2",
+        model: "provider/model",
+        attempts: 1,
+        error: "MessageAbortedError: aborted",
+        turn: "judge fact-check",
+        consequence: "it did not answer.",
+        extra: { role: "fact-check", finding: id },
+      }),
+    )
+    return rec
+  }
+
+  test("a never-completed line names the host abort, and the 'real answer' sentence is not claimed for it", () => {
+    const rendered = output(judgedRecord(["f-1"], ["f-1"]))
+    expect(rendered).toContain("1 check(s) against the code NEVER COMPLETED — the host reported the turn")
+    expect(rendered).toContain("1 finding(s) were not settled because the host reported a judge turn aborted")
+    expect(rendered).not.toContain('"Not settled" is a real answer')
+    expect(rendered).not.toContain("asked failed both attempts")
+  })
+
+  test("mixed: the 'real answer' sentence is scoped to the findings the evidence did not decide", () => {
+    const rendered = output(judgedRecord(["f-1"], ["f-1", "f-2"]))
+    expect(rendered).toContain('"Not settled" is a real answer, not a failure, for 1 of them')
+    expect(rendered).toContain("1 finding(s) were not settled because the host reported a judge turn aborted")
+  })
+
+  test("without an abort the summary is unchanged", () => {
+    const rendered = output(judgedRecord([], ["f-2"]))
+    expect(rendered).toContain('"Not settled" is a real answer, not a failure: the evidence available did not decide it.')
+    expect(rendered).not.toContain("NEVER COMPLETED")
+  })
 })

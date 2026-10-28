@@ -233,6 +233,16 @@ function salvage(record: RecordJson, slot: string): void {
   })
 }
 
+/** Ledger #7 — the discover-stage warning a host-reported abort leaves. */
+function hostAbort(record: RecordJson, slot: string | undefined): void {
+  record.warnings.push({
+    code: "turn-host-aborted",
+    stage: "discover",
+    message: `HOST-ABORTED TURN: slot ${slot}`,
+    detail: { ...(slot === undefined ? {} : { slot }), model: "x/y", attempts: 1, failure: "host-aborted", error: "MessageAbortedError: aborted" },
+  })
+}
+
 function reasonsOf(result: { kind: string; reasons?: string[] }): string {
   return (result.reasons ?? []).join(" ")
 }
@@ -1258,6 +1268,81 @@ describe("slot identity and coverage", () => {
       reason: "slot `discovery-lens-tests` is both `model-dropped-out` and in `skippedForBudget`",
       cap1: true,
     },
+    {
+      name: "a pool slot both host-aborted and dropped",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+        dropOut(record, "discovery-3")
+        record.answered = 2
+      },
+      reason: "slot `discovery-3` is both `turn-host-aborted` and `model-dropped-out`",
+      cap1: false,
+    },
+    {
+      name: "a pool slot both host-aborted and skipped",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+        record.skippedForBudget = ["discovery-3"]
+        record.answered = 2
+      },
+      reason: "slot `discovery-3` is both `turn-host-aborted` and in `skippedForBudget`",
+      cap1: false,
+    },
+    {
+      name: "a pool slot both host-aborted and salvaged",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+        salvage(record, "discovery-3")
+        record.answered = 2
+      },
+      reason: "slot `discovery-3` is both `turn-host-aborted` and a `partial-envelope` answer",
+      cap1: false,
+    },
+    {
+      name: "duplicate host-aborted warnings for one pool slot",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+        hostAbort(record, "discovery-3")
+        record.answered = 2
+      },
+      reason: "slot `discovery-3` carries 2 discover-stage `turn-host-aborted` warnings",
+      cap1: false,
+    },
+    {
+      name: "a host-aborted warning with no `detail.slot`",
+      mutate: (record) => hostAbort(record, undefined),
+      reason: "a discover-stage `turn-host-aborted` warning carries no string `detail.slot`",
+      cap1: false,
+    },
+    {
+      name: "a host-aborted warning naming an unknown slot",
+      mutate: (record) => hostAbort(record, "discovery-9"),
+      reason: "a discover-stage `turn-host-aborted` warning names slot `discovery-9`, which the roster does not hold",
+      cap1: false,
+    },
+    {
+      name: "a host-aborted pool slot whose findings are still in the pool",
+      mutate: (record) => {
+        hostAbort(record, "discovery-3")
+        record.answered = 2
+      },
+      reason: "name author `discovery-3`, which is not an answered pool slot",
+      cap1: false,
+    },
+    {
+      name: "a lens slot both host-aborted and dropped",
+      mutate: (record) => {
+        withoutAuthors(record, ["discovery-lens-tests"])
+        hostAbort(record, "discovery-lens-tests")
+        dropOut(record, "discovery-lens-tests")
+      },
+      reason: "slot `discovery-lens-tests` is both `turn-host-aborted` and `model-dropped-out`",
+      cap1: true,
+    },
   ]
   for (const contradiction of contradictions) {
     test(`CONTRADICTORY SLOT EVIDENCE: ${contradiction.name} withholds ${contradiction.cap1 ? "CAP-11 only" : "both"}`, async () => {
@@ -1488,5 +1573,82 @@ describe("every path the labelled report prints as provenance resolves", () => {
     const { root } = await labelledBundle()
     expect(renderLabelledBundle(await labelled(root))).toContain(PROTOCOL_V2_DRAFT)
     expect(existsSync(join(import.meta.dir, "..", PROTOCOL_V2_DRAFT))).toBe(true)
+  })
+})
+
+describe("slot identity — a host-reported abort is its own non-answer cause (ledger #7)", () => {
+  test("HOST-ABORTED POOL SLOT: excluded from the answered pool, listed as host-aborted, never as dropped", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+        record.answered = 2
+      },
+    })
+    const result = await labelled(root)
+    const block = blockOf(result, 1)
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    expect(block.record.slots.find((slot) => slot.slot === "discovery-3")).toMatchObject({ state: "host-aborted" })
+    if (block.cap1.kind !== "measured") throw new Error(JSON.stringify(block.cap1))
+    expect(block.cap1.members.map((member) => member.slot)).toEqual(["discovery-1", "discovery-2"])
+    expect(block.cap1.complete).toBe(false)
+    const text = renderLabelledBundle(result)
+    expect(text).toContain("pool slot `discovery-3`: UNANSWERED (host-aborted)")
+    expect(text).not.toContain("UNANSWERED (dropped)")
+  })
+
+  test("HOST-ABORTED LENS SLOT: CAP-11 reads over 3 of 4 lens slots, and the pool is untouched", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        withoutAuthors(record, ["discovery-lens-tests"])
+        hostAbort(record, "discovery-lens-tests")
+      },
+    })
+    const result = await labelled(root)
+    const block = blockOf(result, 1)
+    if (block.cap1.kind !== "measured") throw new Error(JSON.stringify(block.cap1))
+    expect(block.cap1.members.map((member) => member.slot)).toEqual(["discovery-1", "discovery-2", "discovery-3"])
+    if (block.cap11.kind !== "measured") throw new Error(JSON.stringify(block.cap11))
+    expect(block.cap11.lens).toEqual({ answered: 3, of: 4 })
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    expect(block.record.slots.find((slot) => slot.slot === "discovery-lens-tests")).toMatchObject({ state: "host-aborted" })
+    expect(renderLabelledBundle(result)).toContain("lens slot `discovery-lens-tests` lens `tests`: UNANSWERED (host-aborted)")
+  })
+
+  test("debate- and judge-stage host aborts do not remove a slot from the answered pool", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        for (const stage of ["debate", "judge"] as const) {
+          record.warnings.push({
+            code: "turn-host-aborted",
+            stage,
+            message: "HOST-ABORTED TURN: slot discovery-3",
+            detail: { slot: "discovery-3", model: "x/y", attempts: 1, failure: "host-aborted", error: "aborted" },
+          })
+        }
+      },
+    })
+    const result = await labelled(root)
+    const block = blockOf(result, 1)
+    if (block.cap1.kind !== "measured") throw new Error(JSON.stringify(block.cap1))
+    expect(block.cap1.members.map((member) => member.slot)).toEqual(["discovery-1", "discovery-2", "discovery-3"])
+    if (block.record.kind !== "read") throw new Error(JSON.stringify(block.record))
+    expect(block.record.slots.find((slot) => slot.slot === "discovery-3")).toMatchObject({ state: "answered" })
+  })
+
+  test("a host-aborted pool slot whose answered count still includes it is an identity mismatch", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        withoutAuthors(record, ["discovery-3"])
+        hostAbort(record, "discovery-3")
+      },
+    })
+    const block = blockOf(await labelled(root), 1)
+    expect(block.cap1.kind).toBe("unavailable")
+    expect(reasonsOf(block.cap1)).toContain("but `record.answered` is 3")
   })
 })

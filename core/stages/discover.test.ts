@@ -1516,3 +1516,111 @@ describe("discover — an admission refusal names its cause (story 2-5c review)"
     expect(dropped?.detail?.["admission"]).toBe("refused by the fake admission")
   })
 })
+
+describe("discover — a host-reported abort (ledger #7)", () => {
+  test("one call, its usage recorded, a turn-host-aborted warning, no drop-out, not cancelled", async () => {
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const { result, backend, ledger } = run(roster, {
+      "discovery-1": [{ kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" }],
+    })
+    const discovered = await result
+
+    expect(backend.calls).toHaveLength(1)
+    expect(ledger.entries).toHaveLength(1)
+    expect(ledger.entries[0]!.tokens).toEqual(tokens())
+    expect(discovered.answered).toBe(0)
+    expect(discovered.droppedOut).toEqual([])
+    expect(discovered.cancelled).toBe(false)
+    expect(discovered.warnings.some((w) => w.code === "model-dropped-out")).toBe(false)
+
+    const aborted = discovered.warnings.filter((w) => w.code === "turn-host-aborted")
+    expect(aborted).toHaveLength(1)
+    expect(aborted[0]!.stage).toBe("discover")
+    expect(aborted[0]!.detail).toEqual({
+      slot: "discovery-1",
+      model: "anthropic/claude-sonnet-4-5",
+      attempts: 1,
+      failure: "host-aborted",
+      error: "MessageAbortedError: aborted",
+    })
+    expect(aborted[0]!.message).not.toMatch(/dropped out|failed|you stopped/i)
+  })
+
+  test("not retried when its usage is unknown either: one attempt, one unknown", async () => {
+    const roster = rosterOf(1, [["openai", "gpt-5"]])
+    const { result, backend, ledger } = run(roster, {
+      "discovery-1": [{ kind: "fail", failure: "host-aborted", usageUnknown: "the host reported no usage" }],
+    })
+    await result
+    expect(backend.calls).toHaveLength(1)
+    expect(ledger.unknownUsage.map((entry) => entry.attempt)).toEqual([1])
+  })
+
+  test("the model-error control is still retried once", async () => {
+    const roster = rosterOf(1, [["openai", "gpt-5"]])
+    const { result, backend } = run(roster, {
+      "discovery-1": [{ kind: "fail", failure: "model-error", message: "MessageAbortedError lookalike" }],
+    })
+    const discovered = await result
+    expect(backend.calls).toHaveLength(2)
+    expect(discovered.droppedOut).toEqual(["discovery-1"])
+  })
+
+  test("denominator-reduced names the host abort as its cause", async () => {
+    const roster = rosterOf(2, [
+      ["anthropic", "claude-sonnet-4-5"],
+      ["openai", "gpt-5"],
+    ])
+    const { result } = run(roster, {
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING }],
+      "discovery-2": [{ kind: "fail", failure: "host-aborted" }],
+    })
+    const discovered = await result
+    expect(discovered.answered).toBe(1)
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
+    expect(reduced.message).not.toContain("you stopped")
+    expect(reduced.detail).toMatchObject({ answered: 1, cancelled: false, hostAborted: 1 })
+  })
+
+  test("a cancelled run with a host abort counts each slot once: asked-and-aborted is not never-asked", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const { result } = run(roster, {
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING }],
+      "discovery-2": [{ kind: "fail", failure: "host-aborted" }],
+      "discovery-3": [{ kind: "fail", failure: "cancelled" }],
+    })
+    const discovered = await result
+    expect(discovered.cancelled).toBe(true)
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("Only 1 of 3 roster model(s) answered.")
+    expect(reduced.message).toContain("The remaining 1 were never asked: you stopped the run.")
+    expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
+  })
+
+  test("two pool aborts read in the plural", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES)
+    const { result } = run(roster, {
+      "discovery-1": [{ kind: "ok", value: ONE_FINDING }],
+      "discovery-2": [{ kind: "fail", failure: "host-aborted" }],
+      "discovery-3": [{ kind: "fail", failure: "host-aborted" }],
+    })
+    const reduced = (await result).warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("2 did not answer: the host reported their turns aborted.")
+    expect(reduced.message).not.toContain("never asked")
+  })
+
+  test("a lens abort does not move the pool denominator and is not a drop-out", async () => {
+    const roster = rosterOf(3, THREE_LINEAGES, ["security", "performance"])
+    const script = lensedScript()
+    script["discovery-lens-security"] = [{ kind: "fail", failure: "host-aborted" }]
+    const backend = new FakeBackend(script)
+    const discovered = await discoverLensed(roster, script, backend)
+    expect(backend.calls.filter((c) => c.slot === "discovery-lens-security")).toHaveLength(1)
+    expect(discovered.answered).toBe(3)
+    expect(discovered.droppedOut).toEqual([])
+    expect(discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(false)
+    const aborted = discovered.warnings.find((w) => w.code === "turn-host-aborted")!
+    expect(aborted.detail!.slot).toBe("discovery-lens-security")
+  })
+})

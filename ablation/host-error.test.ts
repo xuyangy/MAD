@@ -133,6 +133,41 @@ describe("classifyHostError (story 2-8c6)", () => {
     expect(classifyHostError("transport-error", "ECONNREFUSED").summary).toBe("the call to the host failed in transport; the host's message is omitted")
   })
 
+  test("a host-aborted failure is `host-aborted` with a fixed summary, ahead of every message classifier (ledger #7)", () => {
+    const secret = "sk-proj-SECRETabcdef0123456789"
+    const fixed = {
+      category: "host-aborted",
+      code: null,
+      summary:
+        "the host reported the turn aborted; who initiated the abort is not known, and the host's message is omitted",
+    }
+    for (const message of [
+      "MessageAbortedError: The operation was aborted.",
+      "UnknownError: Token refresh failed: 401",
+      "APIError: Internal Server Error",
+      "turn timed out after 120000ms",
+      `MessageAbortedError: ${secret}`,
+      "",
+    ]) {
+      const error = classifyHostError("host-aborted", message)
+      expect(error).toEqual(fixed as HostError)
+      if (message.length > 0) expect(emitted(error)).not.toContain(message)
+    }
+    // The category is the failure kind's, never a message's: other kinds that
+    // mention an abort keep their classification.
+    expect(classifyHostError("model-error", "MessageAbortedError: aborted").category).toBe("unrecognized")
+    expect(classifyHostError("model-error", "APIError: request aborted").category).toBe("provider-api-error")
+  })
+
+  test("hostErrorOf classifies a host-aborted envelope by its kind (ledger #7)", () => {
+    expect(hostErrorOf({ ok: false, failure: "host-aborted", message: "APIError: Token refresh failed: 401" })).toEqual({
+      category: "host-aborted",
+      code: null,
+      summary:
+        "the host reported the turn aborted; who initiated the abort is not known, and the host's message is omitted",
+    })
+  })
+
   test("hostErrorOf is null for a successful turn", () => {
     expect(hostErrorOf({ ok: true })).toBeNull()
     expect(hostErrorOf({ ok: false, failure: "transport-error", message: "turn timed out after 5ms" })?.category).toBe(

@@ -2368,3 +2368,76 @@ describe("debate — admission refusals name their cause and strand only their r
     expect(kinds("discovery-3").map((settlement) => settlement.kind)).toEqual(["unknown", "unknown"])
   })
 })
+
+describe("debate — a host-reported abort (ledger #7)", () => {
+  test("one call that round, a turn-host-aborted warning, no drop-out, not cancelled, seated again later", async () => {
+    const canonical = contested({ id: "f-1", author: "discovery-1" })
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [
+        { kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" },
+        says({ findingId: "f-1", position: "denies" }),
+      ],
+      "discovery-3": [says({ findingId: "f-1", position: "denies" })],
+    })
+    const ledger = emptyLedger() as BudgetLedger
+    const result = await run([canonical], {}, { backend, ledger, maxRounds: 3 })
+
+    const seat2 = backend.calls.filter((call) => call.slot === "discovery-2")
+    // Round 1: one attempt, no retry. Later rounds: seated again.
+    expect(seat2[0]!.attempt).toBe(1)
+    expect(seat2.length).toBeGreaterThan(1)
+    expect(seat2.length).toBe(result.rounds)
+    expect(ledger.entries.filter((entry) => entry.slot === "discovery-2")).toHaveLength(seat2.length)
+
+    expect(result.droppedOut).toEqual([])
+    expect(result.cancelled).toBe(false)
+    expect(result.warnings.some((w) => w.code === "model-dropped-out")).toBe(false)
+    const aborted = result.warnings.filter((w) => w.code === "turn-host-aborted")
+    expect(aborted).toHaveLength(1)
+    expect(aborted[0]!.stage).toBe("debate")
+    expect(aborted[0]!.detail).toMatchObject({
+      slot: "discovery-2",
+      model: "provider/discovery-2",
+      round: 1,
+      attempts: 1,
+      failure: "host-aborted",
+      error: "MessageAbortedError: aborted",
+      findings: ["f-1"],
+    })
+    // An issued abort counts as a turn: every call was an issued turn.
+    expect(result.turns).toBe(backend.calls.length)
+  })
+
+  test("a two-seat room with a host-aborted seat takes no stalled/silent exit on the abort; it ends at the cap", async () => {
+    // Without the hold, the author's silence plus the aborted seat's silence
+    // reads as "nobody has ever spoken" and the room exits stalled/silent in
+    // round 1. With it, the room stays open, the seat is asked again in the
+    // planned round 2, and after the last planned round it ends at the cap.
+    const canonical = contested({ id: "f-1", author: "discovery-1" })
+    const backend = new FakeBackend({
+      "discovery-1": [{ kind: "ok", value: { turns: [] } }],
+      "discovery-2": [{ kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" }],
+    })
+    const result = await run([canonical], {}, { backend, roster: roster(["discovery-1", "discovery-2"]), maxRounds: 2 })
+
+    expect(canonical.exit).toBe("cap")
+    expect(exitBody(canonical)).not.toContain("silent")
+    expect(result.rounds).toBe(2)
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
+    expect(result.cancelled).toBe(false)
+    expect(canonical.unresolved).toBeUndefined()
+    expect(result.warnings.filter((w) => w.code === "turn-host-aborted")).toHaveLength(2)
+  })
+
+  test("the model-error control is still retried once and dropped", async () => {
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [{ kind: "fail", failure: "model-error", message: "gone" }],
+      "discovery-3": [says({ findingId: "f-1", position: "denies" })],
+    })
+    const result = await run([contested()], {}, { backend, maxRounds: 3 })
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
+    expect(result.droppedOut).toEqual(["discovery-2"])
+  })
+})

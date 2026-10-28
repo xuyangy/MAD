@@ -2350,3 +2350,120 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
     expect(result.warnings.some((w) => w.code === "tool-observation-failed")).toBe(true)
   })
 })
+
+describe("judge — a host-reported abort (ledger #7)", () => {
+  /** The role's first turn is host-aborted; every later turn of that role answers normally. */
+  function abortedOnce(role: JudgeRoleTag): FakeBackend {
+    return new FakeBackend({}, {}, {
+      [role]: [
+        { kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" },
+        { kind: "ok", value: DEFAULT_JUDGE_ANSWERS[role] },
+      ],
+    })
+  }
+
+  function expectHostAbortedOnly(result: Awaited<ReturnType<typeof judge>>, role: JudgeRoleTag) {
+    const codes = result.warnings.map((warning) => warning.code)
+    expect(codes).not.toContain("model-dropped-out")
+    expect(codes).not.toContain("judge-unavailable")
+    const aborted = result.warnings.filter((warning) => warning.code === "turn-host-aborted")
+    expect(aborted).toHaveLength(1)
+    expect(aborted[0]!.stage).toBe("judge")
+    expect(aborted[0]!.detail).toMatchObject({ role, attempts: 1, failure: "host-aborted" })
+    expect(result.cancelled).toBe(false)
+    expect(result.unresolvedByCancellation).toBe(0)
+  }
+
+  test("evidence-extract: one attempt per finding, the check falls back to the raw transcript, the slot keeps its role", async () => {
+    const backend = abortedOnce("evidence-extract")
+    const first = argued({ id: "f-1" })
+    const second = argued({ id: "f-2" })
+    const ledger = emptyLedger()
+    const result = await run([first, second], { backend, ledger })
+
+    // Two extraction calls, one per finding. The fake numbers its calls per
+    // (slot, role) across findings; the STAGE's attempt number, in the ledger,
+    // shows neither finding got a second attempt.
+    expect(backend.calls.filter((call) => call.role === "evidence-extract")).toHaveLength(2)
+    const judgeEntries = ledger.entries.filter((entry) => entry.stage === "judge")
+    expect(judgeEntries.length).toBe(backend.calls.length)
+    expect(judgeEntries.every((entry) => entry.attempt === 1)).toBe(true)
+    expect(first.evidence).toBeUndefined()
+    expect(first.verdict).toBe("upheld")
+    expect(second.evidence).toBeDefined()
+    expectHostAbortedOnly(result, "evidence-extract")
+  })
+
+  test("fact-check on an argued finding: the aggregator still decides; not counted as a dropped-out check", async () => {
+    const backend = abortedOnce("fact-check")
+    const first = argued({ id: "f-1" })
+    const second = argued({ id: "f-2" })
+    const result = await run([first, second], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "fact-check")).toHaveLength(2)
+    expect(first.factCheck).toBeUndefined()
+    expect(first.verdict).toBe("upheld")
+    expect(second.factCheck).toBeDefined()
+    expect(result.factChecksDroppedOut).toBe(0)
+    expectHostAbortedOnly(result, "fact-check")
+  })
+
+  test("fact-check on a never-argued finding: not adjudicated, never guessed", async () => {
+    const backend = abortedOnce("fact-check")
+    const f = finding({ route: "judge", history: [] })
+    const result = await run([f], { backend })
+
+    expect(backend.calls).toHaveLength(1)
+    expect(f.verdict).toBe("not-adjudicated")
+    expect(result.notAdjudicated).toBe(1)
+    expectHostAbortedOnly(result, "fact-check")
+    // The renderer reads the finding id to tell this from a ruling on the evidence.
+    expect(result.warnings.find((w) => w.code === "turn-host-aborted")!.detail?.finding).toBe(f.id)
+  })
+
+  test("logic-eval: advisory, so the verdict still lands", async () => {
+    const backend = abortedOnce("logic-eval")
+    const first = argued({ id: "f-1" })
+    const second = argued({ id: "f-2" })
+    const result = await run([first, second], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "logic-eval")).toHaveLength(2)
+    expect(first.logicEval).toBeUndefined()
+    expect(first.verdict).toBe("upheld")
+    expect(second.logicEval).toBeDefined()
+    expectHostAbortedOnly(result, "logic-eval")
+  })
+
+  test("aggregate: NOT ADJUDICATED, earlier work kept, the next finding decided", async () => {
+    const backend = abortedOnce("aggregate")
+    const first = argued({ id: "f-1" })
+    const second = argued({ id: "f-2" })
+    const result = await run([first, second], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "aggregate")).toHaveLength(2)
+    expect(first.verdict).toBe("not-adjudicated")
+    expect(first.evidence).toBeDefined()
+    expect(first.factCheck).toBeDefined()
+    expect(second.verdict).toBe("upheld")
+    expectHostAbortedOnly(result, "aggregate")
+  })
+
+  test("a refused fact-check beside a host-aborted logic evaluation strands on the admission, not as cancelled", async () => {
+    const subject = argued()
+    const roles = rolesBySlot(subject)
+    const admission = fakeAdmission((request) => roles.get(request.slot) === "fact-check")
+    const backend = new FakeBackend({}, {}, { "logic-eval": [{ kind: "fail", failure: "host-aborted" }] })
+    const result = await run([subject], { admission: admission.admission, roster: roster(FIVE), backend })
+    expect(subject.unresolved?.reason).toContain("refused by the fake admission")
+    expect(subject.unresolved?.reason).not.toContain("cancelled")
+    expect(backend.calls.filter((call) => call.role === "logic-eval")).toHaveLength(1)
+    expectHostAbortedOnly(result, "logic-eval")
+  })
+
+  test("the model-error control is still retried once and dropped", async () => {
+    const backend = failingRoles("aggregate")
+    const result = await run([argued()], { backend })
+    expect(backend.calls.filter((call) => call.role === "aggregate")).toHaveLength(2)
+    expect(result.warnings.map((w) => w.code)).toContain("model-dropped-out")
+  })
+})

@@ -935,7 +935,9 @@ export interface JudgeCounts {
    * It is counted even when the extractor or the fact-checker dropped out,
    * because the mode is what the stage CHOSE and the partition above has to sum.
    * What was actually completed is reported by `factChecksUnverified` and
-   * `factChecksDroppedOut`, which is where a reader looks to discount it.
+   * `factChecksDroppedOut`, which is where a reader looks to discount it, and,
+   * for a turn the host reported aborted, by its judge-stage
+   * `turn-host-aborted` warning.
    */
   adjudicated: number
   /**
@@ -959,6 +961,10 @@ export interface JudgeCounts {
    * and only check dropped out was still counted in `verifiedIndependently` and
    * printed as "checked independently" — nothing had been checked at all, and no
    * other line said so.
+   *
+   * A fact-check the host reported aborted (ledger #7) is in neither this nor
+   * `factChecksUnverified`: it is reported by its judge-stage `turn-host-aborted`
+   * warning, which the renderer reads for its own "never completed" line.
    */
   factChecksDroppedOut: number
   /**

@@ -3169,3 +3169,65 @@ describe("review — the tool-action observer reaches the judge (story 2-7a)", (
     expect(states).toEqual(["unavailable"])
   })
 })
+
+describe("review — a host-reported discovery abort (ledger #7)", () => {
+  const raisedHere = (claim: string, file: string) => ({
+    kind: "ok" as const,
+    value: { findings: [{ ...ENVELOPE.findings[0]!, claim, file, startLine: 1, endLine: 1 }] },
+  })
+  const positionHere = (findingId: string, position: string) => ({
+    kind: "ok" as const,
+    value: { turns: [{ findingId, position, argument: `${position} on ${findingId}`, citations: ["src/pay.ts:12"] }] },
+  })
+
+  async function runWith(discovery2: SlotStep) {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const backend = new FakeBackend({
+      "discovery-1": [raisedHere("The rate is never validated.", "src/pay.ts"), positionHere("finding-2", "upholds")],
+      "discovery-2": [discovery2, positionHere("finding-2", "denies")],
+      "discovery-3": [raisedHere("The ledger write is not awaited.", "src/ledger.ts"), positionHere("finding-2", "denies")],
+    })
+    const run = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+    return { ...run, backend }
+  }
+
+  test("not cancelled, the slot still seated in debate, and no extra round or turn", async () => {
+    const aborted = await runWith({ kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" })
+    // The control: discovery-2 answers discovery with nothing, so routing is the same.
+    const control = await runWith({ kind: "ok", value: { findings: [] } })
+
+    const { record, rendered, backend } = aborted
+    expect(record.cancelled).toBeUndefined()
+    expect(record.answered).toBe(2)
+    const codes = record.warnings.map((warning) => warning.code)
+    expect(codes).toContain("turn-host-aborted")
+    expect(codes).not.toContain("model-dropped-out")
+    expect(codes).not.toContain("run-cancelled")
+
+    // Its one discovery attempt, then debate turns: it is still seated.
+    const seat2 = backend.calls.filter((call) => call.slot === "discovery-2")
+    expect(seat2.length).toBeGreaterThan(1)
+    expect(record.debateCounts!.debated).toBeGreaterThan(0)
+
+    // Eligibility adds nothing: the same turns and rounds as a slot that answered.
+    expect(backend.calls.length).toBe(control.backend.calls.length)
+    expect(record.debateCounts!.rounds).toBe(control.record.debateCounts!.rounds)
+    expect(record.debateCounts!.turns).toBe(control.record.debateCounts!.turns)
+
+    expect(rendered).toContain("did not answer: the host reported its turn aborted.")
+    expect(rendered).not.toContain("you stopped")
+  })
+})

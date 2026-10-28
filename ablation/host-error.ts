@@ -4,7 +4,7 @@
  * The OAuth pilot and the zero-bill probe used to record only a failure kind, so
  * a failed attempt's cause had to be recovered from the host's own database. This
  * classifier reads the envelope's `failure` and `message` (the backend's
- * `describeError` output) and returns one of five categories, an optional code
+ * `describeError` output) and returns one of six categories, an optional code
  * and a summary.
  *
  * Redaction is structural rather than a filter: the summary comes from a fixed
@@ -16,6 +16,7 @@
 import type { TurnFailure } from "../core/ports/model-backend.ts"
 
 export type HostErrorCategory =
+  | "host-aborted"
   | "oauth-token-refresh-rejected"
   | "provider-api-error"
   | "turn-timeout"
@@ -35,6 +36,8 @@ export interface HostError {
 
 /** The fixed summary per category; `code` is the only interpolated value. */
 const SUMMARY: { [K in HostErrorCategory]: (code: RefreshRejectionCode | null) => string } = {
+  "host-aborted": () =>
+    "the host reported the turn aborted; who initiated the abort is not known, and the host's message is omitted",
   "oauth-token-refresh-rejected": (code) =>
     `the host reported that its OAuth token refresh was rejected with HTTP ${code}; the host's message is omitted`,
   "provider-api-error": () => "the host reported a provider API error; the host's message is omitted",
@@ -51,10 +54,13 @@ function record(category: HostErrorCategory, code: RefreshRejectionCode | null =
 }
 
 /**
- * Classifies a failed turn. The refresh and timeout patterns match the complete
- * message; `provider-api-error` is a prefix classification with a fixed output.
+ * Classifies a failed turn. A `host-aborted` failure (ledger #7) is classified
+ * by its kind alone, ahead of every message pattern. The refresh and timeout
+ * patterns match the complete message; `provider-api-error` is a prefix
+ * classification with a fixed output.
  */
 export function classifyHostError(failure: TurnFailure, message: string): HostError {
+  if (failure === "host-aborted") return record("host-aborted")
   if (failure === "transport-error") {
     return TURN_TIMEOUT.test(message) ? record("turn-timeout") : record("transport-failure")
   }

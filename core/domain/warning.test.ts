@@ -37,7 +37,15 @@ describe("the warning vocabulary (AD-6)", () => {
     // here, in this file, before it could reach the renderer — which is exactly
     // the argument a reader needs, because the two codes are about the same
     // block of the judge and mean opposite things about the evidence.
-    expect(WARNING_CODES).toHaveLength(19)
+    expect(WARNING_CODES).toHaveLength(20)
+  })
+
+  test("`turn-host-aborted` IS A DEGRADATION, not a disclosure (ledger #7)", () => {
+    // A turn the host reported aborted did not answer, so the run is worth less
+    // than one where it did. It is not a drop-out and not a user stop, but it is
+    // still a lost turn.
+    expect(WARNING_CODES).toContain("turn-host-aborted")
+    expect(DISCLOSURE_CODES.has("turn-host-aborted")).toBe(false)
   })
 
   test("`usage-unquantified` IS A DEGRADATION, not a disclosure (story 2.3)", () => {

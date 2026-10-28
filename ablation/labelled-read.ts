@@ -35,7 +35,8 @@
  * `RunRecord` carries `answered` as a count; the slot ids live only on
  * `PreparedReview.answeredSlots`, which is not persisted. So the answered pool
  * is derived — pool slots minus discover-stage `model-dropped-out` slots minus
- * `skippedForBudget` — and checked: its size against `record.answered`, every
+ * discover-stage `turn-host-aborted` slots minus `skippedForBudget` — and
+ * checked: its size against `record.answered`, every
  * finding's `author` against the answered slots of its own source, and the slot
  * evidence against itself. A disagreement withholds the quantity it affects,
  * naming both sides.
@@ -167,7 +168,11 @@ export interface SlotAccount {
   slot: string
   kind: "pool" | "lens"
   lens?: string
-  state: "answered" | "dropped" | "skipped-for-budget" | "unknown"
+  /**
+   * `host-aborted` (ledger #7): the host reported its discovery turn aborted. A
+   * distinct non-answer cause, never folded into `dropped`.
+   */
+  state: "answered" | "dropped" | "host-aborted" | "skipped-for-budget" | "unknown"
   /** Why it did not answer, or the salvage disclosure of an answered slot. */
   note?: string
   /** Findings the record attributes to this slot. */
@@ -815,9 +820,13 @@ function accountSlots(record: ScorableRecord): SlotIdentity {
   const dropped = new Map<string, string>()
   const salvaged = new Map<string, string>()
   const dropCounts = new Map<string, number>()
+  const hostAborted = new Map<string, string>()
+  const abortCounts = new Map<string, number>()
   for (const warning of record.warnings) {
     if (warning.stage !== "discover") continue
-    if (warning.code !== "model-dropped-out" && warning.code !== "partial-envelope") continue
+    if (warning.code !== "model-dropped-out" && warning.code !== "partial-envelope" && warning.code !== "turn-host-aborted") {
+      continue
+    }
     const slot = warning.detail?.slot
     if (typeof slot !== "string") {
       both.push(`a discover-stage \`${warning.code}\` warning carries no string \`detail.slot\``)
@@ -827,7 +836,10 @@ function accountSlots(record: ScorableRecord): SlotIdentity {
       both.push(`a discover-stage \`${warning.code}\` warning names slot \`${slot}\`, which the roster does not hold`)
       continue
     }
-    if (warning.code === "model-dropped-out") {
+    if (warning.code === "turn-host-aborted") {
+      abortCounts.set(slot, (abortCounts.get(slot) ?? 0) + 1)
+      hostAborted.set(slot, "`turn-host-aborted`: the host reported its discovery turn aborted, initiator unknown")
+    } else if (warning.code === "model-dropped-out") {
       dropCounts.set(slot, (dropCounts.get(slot) ?? 0) + 1)
       dropped.set(slot, `\`model-dropped-out\` (failure: ${fieldText(warning.detail?.failure)})`)
     } else {
@@ -848,13 +860,25 @@ function accountSlots(record: ScorableRecord): SlotIdentity {
       contradiction(slot, `slot \`${slot}\` is both \`model-dropped-out\` and in \`skippedForBudget\``)
     }
   }
+  // Ledger #7 — a host-aborted turn is issued once and never retried, so one
+  // slot carries at most one, and it cannot also be a drop-out, a budget skip
+  // or a salvaged answer.
+  for (const [slot, count] of abortCounts) {
+    if (count > 1) contradiction(slot, `slot \`${slot}\` carries ${count} discover-stage \`turn-host-aborted\` warnings`)
+  }
+  for (const slot of hostAborted.keys()) {
+    if (dropped.has(slot)) contradiction(slot, `slot \`${slot}\` is both \`turn-host-aborted\` and \`model-dropped-out\``)
+    if (skipped.has(slot)) contradiction(slot, `slot \`${slot}\` is both \`turn-host-aborted\` and in \`skippedForBudget\``)
+    if (salvaged.has(slot)) contradiction(slot, `slot \`${slot}\` is both \`turn-host-aborted\` and a \`partial-envelope\` answer`)
+  }
   for (const slot of salvaged.keys()) {
     if (dropped.has(slot)) contradiction(slot, `slot \`${slot}\` is both \`model-dropped-out\` and a \`partial-envelope\` answer`)
     if (skipped.has(slot)) contradiction(slot, `slot \`${slot}\` is both in \`skippedForBudget\` and a \`partial-envelope\` answer`)
   }
 
-  const answeredPool = pool.filter((id) => !dropped.has(id) && !skipped.has(id))
-  const answeredLens = lens.filter((slot) => !dropped.has(slot.slot) && !skipped.has(slot.slot))
+  const unanswered = (id: string) => dropped.has(id) || hostAborted.has(id) || skipped.has(id)
+  const answeredPool = pool.filter((id) => !unanswered(id))
+  const answeredLens = lens.filter((slot) => !unanswered(slot.slot))
   if (answeredPool.length !== record.answered) {
     both.push(
       `the derived answered pool slots [${quoted(answeredPool)}] number ${answeredPool.length}, but ` +
@@ -892,6 +916,7 @@ function accountSlots(record: ScorableRecord): SlotIdentity {
   const count = (slot: string) => record.pool.filter((finding) => finding.author === slot).length
   const stateOf = (slot: string): Pick<SlotAccount, "state" | "note"> => {
     if (dropped.has(slot)) return { state: "dropped", note: dropped.get(slot)! }
+    if (hostAborted.has(slot)) return { state: "host-aborted", note: hostAborted.get(slot)! }
     if (skipped.has(slot)) return { state: "skipped-for-budget", note: "`skippedForBudget`: the budget refused its turn" }
     const note = salvaged.get(slot)
     return { state: "answered", ...(note === undefined ? {} : { note }) }

@@ -129,6 +129,13 @@ const HOST_FAILED_ZERO_TOKENS =
   "object, which is the host's initial value and does not show that no request was billed, so the " +
   "zeros are not a known usage"
 
+/**
+ * Ledger #7 — the message of a `host-aborted` outcome that settled after the
+ * caller's own signal fired. The user's stop explains the abort, so the turn is
+ * reported as cancelled; the usage annotation is the settled one.
+ */
+const CANCELLED_AS_ABORTED = "the run was cancelled while this turn was in flight, and the host reported the turn aborted"
+
 const CANCELLED_IN_FLIGHT =
   "the run was cancelled while this turn was in flight, so the request was issued and " +
   "its usage was never reported"
@@ -307,7 +314,7 @@ type SettledOutcome<T> =
   | { ok: true; value: T }
   | {
       ok: false
-      failure: Extract<TurnFailure, "model-error" | "empty-response" | "schema-invalid">
+      failure: Extract<TurnFailure, "host-aborted" | "model-error" | "empty-response" | "schema-invalid">
       message: string
       raw?: unknown
     }
@@ -319,6 +326,12 @@ type SettledOutcome<T> =
  * failed. `raw` is present only for a schema rejection.
  */
 function classifySettled<T>(info: AssistantMessageLike | undefined, schema: ZodType<T>): SettledOutcome<T> {
+  if (isMessageAbortedError(info?.error)) {
+    // Ledger #7 — the host reported the turn aborted. Who aborted it, and why,
+    // is unknown; the stages give it no retry and do not blame the model.
+    return { ok: false, failure: "host-aborted", message: describeError(info?.error) }
+  }
+
   if (info?.error) {
     // Returned, not thrown — a domain outcome the caller retries once (AD-6b).
     return { ok: false, failure: "model-error", message: describeError(info.error) }
@@ -359,6 +372,19 @@ function classifySettled<T>(info: AssistantMessageLike | undefined, schema: ZodT
   }
 
   return { ok: true, value: parsed.data }
+}
+
+/**
+ * Ledger #7 — a structural match on the SDK's `MessageAbortedError` name only.
+ * Never a message substring: an `APIError` whose message mentions "aborted", or
+ * a thrown `AbortError`, stays what it is.
+ */
+function isMessageAbortedError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "MessageAbortedError"
+  )
 }
 
 function describeError(error: unknown): string {
@@ -994,10 +1020,20 @@ export class OpencodeModelBackend implements ModelBackend {
         ? {
             usageUnknown: {
               executionId,
-              why: outcome.failure === "model-error" ? HOST_ERROR_ZERO_TOKENS : HOST_FAILED_ZERO_TOKENS,
+              why:
+                outcome.failure === "model-error" || outcome.failure === "host-aborted"
+                  ? HOST_ERROR_ZERO_TOKENS
+                  : HOST_FAILED_ZERO_TOKENS,
             },
           }
         : usage
+    // Ledger #7 — THE USER'S STOP WINS. A host-reported abort that settles after
+    // the caller's signal fired is that stop arriving through the host, so the
+    // stage gets `cancelled` and latches the run's cancellation. The turn
+    // settled, so its usage annotation is the settled one above, not `abandoned`.
+    if (outcome.failure === "host-aborted" && signal?.aborted) {
+      return { ok: false, slot, failure: "cancelled", message: CANCELLED_AS_ABORTED, ...failed }
+    }
     return {
       ok: false,
       slot,
