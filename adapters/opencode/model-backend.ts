@@ -28,6 +28,7 @@ import {
   type CleanupUnresolved,
   type Envelope,
   type ModelBackend,
+  type TurnFailure,
   type UsageUnknown,
 } from "../../core/ports/model-backend.ts"
 
@@ -109,6 +110,24 @@ const HOST_REPORTED_NO_USAGE = "the turn settled and the host reported no usage 
 const HOST_ERROR_ZERO_TOKENS =
   "the turn ended in a host error and the host reported an all-zero token object, which it " +
   "also reports for an errored turn that made requests, so the zeros are not a known usage"
+
+/**
+ * Ledger #93 — the same rule for a turn that sent its prompt and ended without a
+ * usable structured payload: `empty-response`, or `schema-invalid` from a
+ * malformed JSON string or a schema rejection. The rule is by analogy with
+ * 2-8c6's observed host-error case, not from a live observation of these
+ * branches: the all-zero token object is the host's initial value, so it does
+ * not show that no request was billed. A successful all-zero turn stays a known
+ * zero.
+ *
+ * The cost is stated rather than hidden: a genuinely free failed turn reads as
+ * unknown too, and under `stopOnUnknownUsage` it halts admission, so its AD-6b
+ * retry is refused. That is the direction the protocol's stop rule requires.
+ */
+const HOST_FAILED_ZERO_TOKENS =
+  "the turn ended without a usable structured payload and the host reported an all-zero token " +
+  "object, which is the host's initial value and does not show that no request was billed, so the " +
+  "zeros are not a known usage"
 
 const CANCELLED_IN_FLIGHT =
   "the run was cancelled while this turn was in flight, so the request was issued and " +
@@ -278,6 +297,68 @@ function isAllZero(tokens: TokenUsage): boolean {
     tokens.cacheRead === 0 &&
     tokens.cacheWrite === 0
   )
+}
+
+/**
+ * How a settled assistant message classifies, before any usage is attached:
+ * the value it parsed to, or the failure it settles as.
+ */
+type SettledOutcome<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false
+      failure: Extract<TurnFailure, "model-error" | "empty-response" | "schema-invalid">
+      message: string
+      raw?: unknown
+    }
+
+/**
+ * The one classification of a settled message: host error, then no structured
+ * payload, then a string that is not JSON, then the schema. Pure, so the settled
+ * path and the late-usage continuation cannot disagree about which replies
+ * failed. `raw` is present only for a schema rejection.
+ */
+function classifySettled<T>(info: AssistantMessageLike | undefined, schema: ZodType<T>): SettledOutcome<T> {
+  if (info?.error) {
+    // Returned, not thrown — a domain outcome the caller retries once (AD-6b).
+    return { ok: false, failure: "model-error", message: describeError(info.error) }
+  }
+
+  if (info?.structured === undefined || info.structured === null) {
+    return { ok: false, failure: "empty-response", message: "the model returned no structured payload" }
+  }
+
+  // Hosts have been observed handing `structured` back as a JSON string rather
+  // than a parsed object. Treating that as schema-invalid would drop every
+  // model in the run for a transport detail.
+  let payload: unknown = info.structured
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload)
+    } catch {
+      return {
+        ok: false,
+        failure: "schema-invalid",
+        message: "structured payload arrived as a string that is not valid JSON",
+      }
+    }
+  }
+
+  // AD-12 — the envelope is validated. AD-11 — the prose inside it is not.
+  const parsed = schema.safeParse(payload)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      failure: "schema-invalid",
+      message: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      // Handed back unvalidated so `discover` can salvage the items that ARE
+      // valid instead of losing the model — and the denominator — over one
+      // malformed field (AD-6a). The stage re-validates every item it keeps.
+      raw: payload,
+    }
+  }
+
+  return { ok: true, value: parsed.data }
 }
 
 function describeError(error: unknown): string {
@@ -796,7 +877,7 @@ export class OpencodeModelBackend implements ModelBackend {
         // attaches no continuation to anything and a fresh install holds no
         // abandoned promise for a run that has already finished.
         this.lateUsage && !metered
-          ? (settled: PromptResultLike) => this.reportLateUsage(executionId, settled)
+          ? (settled: PromptResultLike) => this.reportLateUsage(executionId, settled, schema)
           : undefined,
       )
     } catch (error) {
@@ -891,67 +972,40 @@ export class OpencodeModelBackend implements ModelBackend {
     // `mapTokens`'s per-field `?? 0` for a PRESENT object stays, and that is not
     // an inconsistency: a host that reported `{ input: 7 }` said the other four
     // were zero, which is a different fact from a host that reported no `tokens`
-    // object at all. The first is knowledge; the second was an invention.
+    // object at all. The first is knowledge; the second was an invention. On a
+    // FAILED turn an all-zero object, including `{}`, is not knowledge either
+    // (story 2-8c6, ledger #93): it is the host's initial value, and the failure
+    // branch below replaces it with `usageUnknown`. The defaulting stands only
+    // where the object is not all zero or the turn succeeded.
     const usage: UsageAnnotation = info?.tokens
       ? { tokens: mapTokens(info.tokens) }
       : { usageUnknown: { executionId, why: HOST_REPORTED_NO_USAGE } }
 
-    if (info?.error) {
-      // Story 2-8c6 — on an errored turn an all-zero token object is the host's
-      // initializer, not a known zero. Any non-zero field is still knowledge.
-      const errored: UsageAnnotation =
-        "tokens" in usage && isAllZero(usage.tokens)
-          ? { usageUnknown: { executionId, why: HOST_ERROR_ZERO_TOKENS } }
-          : usage
-      // Returned, not thrown — a domain outcome the caller retries once (AD-6b).
-      return { ok: false, slot, failure: "model-error", message: describeError(info.error), ...errored }
-    }
+    const outcome = classifySettled(info, schema)
+    if (outcome.ok) return { ok: true, slot, value: outcome.value, ...usage }
 
-    if (info?.structured === undefined || info.structured === null) {
-      return {
-        ok: false,
-        slot,
-        failure: "empty-response",
-        message: "the model returned no structured payload",
-        ...usage,
-      }
+    // Story 2-8c6 and ledger #93 — on a turn that sent its prompt and then
+    // failed (a host error, no structured payload, a string that is not JSON, a
+    // schema rejection) an all-zero token object is the host's initializer, not
+    // a known zero. Any non-zero field is still knowledge, and a successful
+    // all-zero turn above stays a known zero.
+    const failed: UsageAnnotation =
+      "tokens" in usage && isAllZero(usage.tokens)
+        ? {
+            usageUnknown: {
+              executionId,
+              why: outcome.failure === "model-error" ? HOST_ERROR_ZERO_TOKENS : HOST_FAILED_ZERO_TOKENS,
+            },
+          }
+        : usage
+    return {
+      ok: false,
+      slot,
+      failure: outcome.failure,
+      message: outcome.message,
+      ...failed,
+      ...("raw" in outcome ? { raw: outcome.raw } : {}),
     }
-
-    // Hosts have been observed handing `structured` back as a JSON string rather
-    // than a parsed object. Treating that as schema-invalid would drop every
-    // model in the run for a transport detail.
-    let payload: unknown = info.structured
-    if (typeof payload === "string") {
-      try {
-        payload = JSON.parse(payload)
-      } catch {
-        return {
-          ok: false,
-          slot,
-          failure: "schema-invalid",
-          message: "structured payload arrived as a string that is not valid JSON",
-          ...usage,
-        }
-      }
-    }
-
-    // AD-12 — the envelope is validated. AD-11 — the prose inside it is not.
-    const parsed = schema.safeParse(payload)
-    if (!parsed.success) {
-      return {
-        ok: false,
-        slot,
-        failure: "schema-invalid",
-        message: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
-        ...usage,
-        // Handed back unvalidated so `discover` can salvage the items that ARE
-        // valid instead of losing the model — and the denominator — over one
-        // malformed field (AD-6a). The stage re-validates every item it keeps.
-        raw: payload,
-      }
-    }
-
-    return { ok: true, slot, value: parsed.data, ...usage }
   }
 
   /**
@@ -972,16 +1026,27 @@ export class OpencodeModelBackend implements ModelBackend {
    * strictly worse, because `reconcileLateUsage` would move the unknown into
    * `entries` with a zero bill and the run would then read as COMPLETE.
    *
-   * It uses the same `mapTokens` the settled path uses, so an early and a late
-   * payload cannot be mapped two ways, and the same story 2-8c6 rule: a late
-   * message that carries an error and an all-zero token object reports nothing,
-   * because those zeros are the host's initializer, not a known usage.
+   * It uses the same `mapTokens` and the same `classifySettled` the settled
+   * path uses, so an early and a late payload cannot be mapped or classified two
+   * ways, and the same story 2-8c6 / ledger #93 rule: a late message with an
+   * all-zero token object that would settle as any failure (host error, no
+   * structured payload, a string that is not JSON, a schema rejection, or a
+   * top-level `error` the prompt path settles as `transport-error`) reports
+   * nothing, because those zeros are the host's initializer, not a known usage.
+   * Any non-zero field is reported without classifying, and an all-zero message
+   * that would settle `ok` is reported as a known zero.
    */
-  private reportLateUsage(executionId: string, settled: PromptResultLike): void {
+  private reportLateUsage(executionId: string, settled: PromptResultLike, schema: ZodType<unknown>): void {
     const info = settled?.data?.info
     if (!info?.tokens) return
     const tokens = mapTokens(info.tokens)
-    if (info.error && isAllZero(tokens)) return
+    if (isAllZero(tokens)) {
+      // Only an all-zero reply needs to know how it would settle. A top-level
+      // `error` or a missing `data` settles as `transport-error` on the prompt
+      // path, which is a failure too.
+      if (settled.error || !settled.data) return
+      if (!classifySettled(info, schema).ok) return
+    }
     this.lateUsage?.report({ executionId, tokens })
   }
 }

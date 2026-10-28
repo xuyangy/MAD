@@ -1887,16 +1887,20 @@ is allowed by design.
 
 ### Failed-turn settlement and the host-error record (story 2-8c6)
 
-**The settlement rule.** When a settled host message carries an error and its `tokens` object maps to
-all zeros (input, output, reasoning, cache read, cache write), `OpencodeModelBackend` settles the turn
-`unknown`, not `usage`. opencode zero-initializes that object and leaves it at zero on a failed turn,
-whether the turn failed before any request (the live pilot's `Token refresh failed: 401`,
-`ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json`) or after six (story 2-8c3b's persistent-500
-attempt), so the zeros are not knowledge. An errored turn with any non-zero field keeps its tokens.
-`empty-response`, `schema-invalid` and successful turns are unchanged. The failure stays `model-error`,
-so AD-6b's retry classification does not move. A metered turn (story 2-8c2) takes the meter's figure
-instead, whatever the host reported: the meter sees every physical request, so a metered turn with 0
-physical requests is a known zero.
+**The settlement rule.** When a turn sent its prompt, settled as a failure, and its `tokens` object
+maps to all zeros (input, output, reasoning, cache read, cache write; `{}` included),
+`OpencodeModelBackend` settles the turn `unknown`, not `usage`. The failures it covers are a host error
+(`model-error`), no structured payload (`empty-response`), and `schema-invalid` from a structured
+payload that is a string but not valid JSON or that the schema rejects. opencode zero-initializes that
+object and leaves it at zero on a failed turn, whether the turn failed before any request (the live
+pilot's `Token refresh failed: 401`, `ablation/evidence/oauth-pilot-diagnosis-2026-09-28.json`) or
+after six (story 2-8c3b's persistent-500 attempt), so the zeros are not knowledge. That was observed
+for host errors; the `empty-response` and `schema-invalid` cases follow by analogy (ledger #93), not
+from a live observation. A failed turn with any non-zero field keeps its tokens, and a successful turn
+is unchanged: an all-zero successful turn is a known zero. Failure kinds are unchanged, so AD-6b's
+retry classification does not move. A metered turn (story 2-8c2) takes the meter's figure instead,
+whatever the host reported: the meter sees every physical request, so a metered turn with 0 physical
+requests is a known zero.
 
 **Route effects.**
 
@@ -1905,9 +1909,11 @@ physical requests is a known zero.
   it among the unknown diagnostics. The pilot's stop reason stays "ended in an error".
 - The api-key relay route (`paired`, `accounting-probe`): unchanged; the meter decides.
 - Unmetered tokens mode (`ablation/live.ts`, the adversarial runner): the journal latches its
-  UNKNOWN-amount halt on such a turn, as the protocol's stop rule requires for a potentially billed
-  execution. The failure kind, and so AD-6b's retry classification, is unchanged, but the halt refuses
-  every later admission, so no AD-6b retry follows such a turn on this route.
+  UNKNOWN-amount halt on such a turn, host error, empty reply or malformed reply alike, as the
+  protocol's stop rule requires for a potentially billed execution. The failure kind, and so AD-6b's
+  retry classification, is unchanged, but the halt refuses every later admission, so no AD-6b retry
+  follows such a turn on this route, including the retry an empty or malformed reply would otherwise
+  get. A genuinely free failed turn halts the run too; that is the direction the stop rule requires.
 - An ordinary review (the plugin): the ledger records an unknown execution, and the run reads
   usage-incomplete.
 
