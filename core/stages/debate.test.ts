@@ -2405,6 +2405,9 @@ describe("debate — a host-reported abort (ledger #7)", () => {
       error: "MessageAbortedError: aborted",
       findings: ["f-1"],
     })
+    // No position was received; that is not worded as an abstention it chose.
+    expect(aborted[0]!.message).not.toContain("abstention")
+    expect(aborted[0]!.message).toContain("take no exit this round")
     // An issued abort counts as a turn: every call was an issued turn.
     expect(result.turns).toBe(backend.calls.length)
   })

@@ -1594,7 +1594,62 @@ describe("discover — a host-reported abort (ledger #7)", () => {
     expect(discovered.cancelled).toBe(true)
     const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
     expect(reduced.message).toContain("Only 1 of 3 roster model(s) answered.")
-    expect(reduced.message).toContain("The remaining 1 were never asked: you stopped the run.")
+    // The cancelled turn was issued, so it is not "never asked".
+    expect(reduced.message).toContain("1 did not answer because the run was cancelled.")
+    expect(reduced.message).not.toContain("never asked")
+    expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
+  })
+
+  test("host abort + budget skip + cancellation: each cause has its own count, none is folded into another", async () => {
+    // cap 200 -> discovery ceiling floor(200 * 0.3) = 60 = two billed turns, one
+    // slot at a time: the abort and the cancelled turn bill, the third is refused.
+    const { result } = runCapped(
+      rosterOf(3, THREE_MODELS),
+      {
+        "discovery-1": [{ kind: "fail", failure: "host-aborted" }],
+        "discovery-2": [{ kind: "fail", failure: "cancelled" }],
+        "discovery-3": [{ kind: "ok", value: ONE_FINDING }],
+      },
+      200,
+    )
+    const discovered = await result
+    expect(discovered.skippedForBudget).toEqual(["discovery-3"])
+    expect(discovered.cancelled).toBe(true)
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("Only 0 of 3 roster model(s) answered.")
+    expect(reduced.message).toContain("1 did not answer because the run was cancelled.")
+    expect(reduced.message).toContain("1 were never asked: the budget ran out before their turn.")
+    expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
+    expect(reduced.message).not.toContain("you stopped the run")
+    expect(reduced.message).not.toContain("The remaining")
+  })
+
+  test("a stop before a slot was asked is still 'never asked', beside a host abort", async () => {
+    const roster = rosterOf(2, THREE_MODELS)
+    const controller = new AbortController()
+    // discovery-1's turn settles host-aborted and the user stops the run while
+    // it is out; with one slot at a time, discovery-2 is then never issued.
+    const backend: ModelBackend = {
+      capabilities: () => ({ tools: true }),
+      async runTurn(slot) {
+        controller.abort()
+        return { ok: false, slot, failure: "host-aborted", message: "MessageAbortedError: aborted", tokens: tokens() }
+      },
+    }
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+      limiter: createLimiter(1),
+      signal: controller.signal,
+    })
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("1 were never asked: you stopped the run.")
+    // Not "the remaining": the aborted slot is not one of the stop's.
+    expect(reduced.message).not.toContain("The remaining")
     expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
   })
 

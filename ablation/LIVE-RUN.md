@@ -1898,9 +1898,11 @@ turn, whether the turn failed before any request (the live pilot's `Token refres
 attempt), so the zeros are not knowledge. That was observed for host errors; the `empty-response` and
 `schema-invalid` cases follow by analogy (ledger #93), not from a live observation. A failed turn with
 any non-zero field keeps its tokens, and a successful turn is unchanged: an all-zero successful turn is
-a known zero. Failure kinds are unchanged, so AD-6b's retry classification does not move. A metered
-turn (story 2-8c2) takes the meter's figure instead, whatever the host reported: the meter sees every
-physical request, so a metered turn with 0 physical requests is a known zero.
+a known zero. This usage rule changes no failure kind, so it moves no AD-6b retry classification; the
+one exception is the host-abort classification and its no-retry rule below (ledger #7), which are a
+separate rule. A metered turn (story 2-8c2) takes the meter's figure instead, whatever the host
+reported: the meter sees every physical request, so a metered turn with 0 physical requests is a known
+zero.
 
 **A host-reported abort (ledger #7).** A settled message whose `error.name` is `MessageAbortedError`
 settles as `host-aborted`, matched on the name alone: an `APIError` whose message mentions an abort, or

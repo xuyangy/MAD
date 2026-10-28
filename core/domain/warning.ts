@@ -395,7 +395,7 @@ export function hostAbortedWarning(input: {
       `HOST-ABORTED TURN: the host reported the ${input.turn} turn for \`${input.model}\` ` +
       `(slot ${input.slot}) aborted. Who initiated the abort, and why, is not known. The turn ` +
       `was not retried and gave no answer; ${input.consequence} The slot is not treated as a ` +
-      `dropped-out model, and the run was not stopped.`,
+      `dropped-out model, and this host abort did not itself mark the run cancelled.`,
     detail: {
       // First, so every canonical key below wins over a stage's extra key.
       ...input.extra,

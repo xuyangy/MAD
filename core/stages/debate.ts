@@ -1151,10 +1151,12 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         }
 
         // Ledger #7 — A HOST-ABORTED TURN IS NOT A DROP-OUT AND NOT A STOP. The
-        // host reported this round's turn aborted, initiator unknown. The seat
-        // abstains for this round only: it is not added to
-        // `droppedOutThisStage`, so it is seated again in any later round, and
-        // the round's `cancelled` flag is untouched.
+        // host reported this round's turn aborted, initiator unknown, so no
+        // position was received from this seat. That is not an abstention it
+        // chose: every room it was seated in takes no exit this round (the hold
+        // below the round). It is not added to `droppedOutThisStage`, so any
+        // later round that was already planned keeps its ordinary policy and
+        // seats it again, and the round's `cancelled` flag is untouched.
         if (outcome.envelope.failure === "host-aborted") {
           for (const room of outcome.rooms) hostAbortedThisRound.add(room)
           warnings.push(
@@ -1167,8 +1169,8 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
               turn: `debate round ${round}`,
               extra: { round, findings: outcome.rooms.map((room) => room.finding.id) },
               consequence:
-                `its silence this round is an abstention on the finding(s) it was seated for, ` +
-                `and it is seated again in any later round.`,
+                `no position was received from it this round, so the finding(s) it was seated for ` +
+                `take no exit this round, and any later planned round seats it as usual.`,
             }),
           )
           continue

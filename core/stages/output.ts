@@ -1429,12 +1429,33 @@ export function renderRunRecord(record: RunRecord): string {
     // never asked did not drop out.
     if (record.cancelled && record.answered === 0) {
       lines.push("  NOTHING WAS EXAMINED — you stopped this run before any model answered.")
-      lines.push(
-        `  No model failed and no model was retried; the run stopped during the ` +
-          `${record.cancelled.stage} stage.`,
-      )
+      if (!anyDroppedOut) {
+        lines.push(
+          `  No model failed and no model was retried; the run stopped during the ` +
+            `${record.cancelled.stage} stage.`,
+        )
+      } else {
+        // Ledger #7 review — A STOP DOES NOT ERASE A FAILURE. "No model failed"
+        // printed under a `model-dropped-out` warning is the report contradicting
+        // itself; the stop is named, and so is the failure, each as its own fact.
+        lines.push(`  The run stopped during the ${record.cancelled.stage} stage.`)
+        const droppedOutPool = discoverySlotsWith("model-dropped-out")
+        lines.push(
+          droppedOutPool > 0
+            ? `  Before the stop, ${droppedOutPool} pool slot(s) failed or dropped out; see the warnings ` +
+                `above for which models failed and why.`
+            : `  Before the stop, slot(s) failed or dropped out; see the warnings above for which ` +
+                `models failed and why.`,
+        )
+      }
       // A later user stop does not erase an earlier host-reported abort.
       if (hostAbortedPool > 0) lines.push(`  Before the stop, ${hostAbortedClause}`)
+      // Nor a budget skip: those slots were never asked for a reason of their own.
+      if (skippedForBudget > 0) {
+        lines.push(
+          `  ${skippedForBudget} slot(s) were never asked at all, to stay inside the token budget.`,
+        )
+      }
     } else if (hostAbortedPool > 0 && record.answered === 0) {
       // Ledger #7 — neither "before any model was asked" (a host-aborted turn was
       // issued) nor "every slot failed or dropped out" (a host abort is not a
@@ -1452,8 +1473,17 @@ export function renderRunRecord(record: RunRecord): string {
         ) || (record.skippedForBudget ?? []).includes(slot)
       const lensAnswered = record.roster.lensSlots.filter((lensSlot) => !discoveryLost(lensSlot.slot)).length
       if (lensAnswered > 0) {
+        // What the lens raised is read off the record's pre-cluster pool, never
+        // inferred from the empty resolved list: a lens finding the budget or a
+        // stop left undecided is in the UNRESOLVED section, not absent.
+        const lensRaised = record.pool.filter((finding) => finding.source === "lens").length
         lines.push("  NO POOL MODEL ANSWERED — this is not a clean review.")
-        lines.push(`  ${lensAnswered} lens slot(s) answered and raised nothing; no pool model examined the change.`)
+        lines.push(
+          lensRaised === 0
+            ? `  ${lensAnswered} lens slot(s) answered and raised nothing; no pool model examined the change.`
+            : `  ${lensAnswered} lens slot(s) answered and raised ${lensRaised} finding(s), none of them ` +
+                `decided (see UNRESOLVED below); no pool model examined the change.`,
+        )
       } else {
         lines.push("  NO MODEL ANSWERED — this is not a clean review; nothing was examined.")
       }

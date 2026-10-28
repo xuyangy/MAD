@@ -568,6 +568,8 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const skippedForBudget: string[] = []
   /** Ledger #7 — slots, pool and lens, whose turn the host reported aborted. */
   const hostAborted: string[] = []
+  /** AD-6f — slots whose outcome was the user's stop, and whether a turn of theirs was issued. */
+  const cancelledSlots: { slot: string; issued: boolean }[] = []
   /** Story 2-5c — the admission's reason for each slot it refused, by slot. */
   const admissionRefusals = new Map<string, string>()
   let answered = 0
@@ -627,7 +629,13 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       // The denominator still shrinks, because this slot genuinely did not
       // answer and AD-6(a) counts answers rather than requests. What must not
       // happen — and does not — is a model being named as the cause.
-      if (!envelope.ok && envelope.failure === "cancelled") return false
+      if (!envelope.ok && envelope.failure === "cancelled") {
+        // Whether this slot's turn went out: a stop caught before the first
+        // attempt issued nothing, one reported by the backend came back from a
+        // turn that was issued.
+        cancelledSlots.push({ slot: rosterSlot.slot, issued: outcome.attempts > 0 })
+        return false
+      }
 
       // Ledger #7 — A HOST-ABORTED TURN IS NOT A DROP-OUT EITHER. The host
       // reported the turn aborted and nothing says who aborted it or why, so the
@@ -849,12 +857,24 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         : poolHostAbortedCount === 1
           ? ` 1 did not answer: the host reported its turn aborted.`
           : ` ${poolHostAbortedCount} did not answer: the host reported their turns aborted.`
-    // AD-6f — the stop's clause, argued at the top of this block. A
-    // host-aborted slot was asked, so it is not among the ones the stop left
-    // unasked.
-    const unaskedByStop = roster.slots.length - answered - poolHostAbortedCount
+    // AD-6f — the stop's clause, argued at the top of this block. Counted off
+    // the pool slots whose OWN outcome was the stop, never as the remainder:
+    // a slot that dropped out, was refused by the budget or the admission, or
+    // whose turn the host reported aborted has its own cause and its own
+    // sentence. And a stop is "never asked" only when no turn of that slot was
+    // issued; one that went out and was then stopped did not answer because the
+    // run was cancelled.
+    const poolCancelled = cancelledSlots.filter((entry) => poolIds.has(entry.slot))
+    const stoppedUnasked = poolCancelled.filter((entry) => !entry.issued).length
+    const stoppedInFlight = poolCancelled.length - stoppedUnasked
+    const otherwiseLost = roster.slots.length - answered - poolCancelled.length
     const becauseStopped =
-      cancelled && unaskedByStop > 0 ? ` The remaining ${unaskedByStop} were never asked: you stopped the run.` : ""
+      (stoppedUnasked === 0
+        ? ""
+        : otherwiseLost === 0 && stoppedInFlight === 0
+          ? ` The remaining ${stoppedUnasked} were never asked: you stopped the run.`
+          : ` ${stoppedUnasked} were never asked: you stopped the run.`) +
+      (stoppedInFlight === 0 ? "" : ` ${stoppedInFlight} did not answer because the run was cancelled.`)
     warnings.push({
       code: "denominator-reduced",
       stage: "discover",

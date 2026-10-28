@@ -3231,3 +3231,102 @@ describe("review — a host-reported discovery abort (ledger #7)", () => {
     expect(rendered).not.toContain("you stopped")
   })
 })
+
+describe("review — a host abort beside other causes keeps every cause (ledger #7 review)", () => {
+  const THREE: [string, string][] = [
+    ["anthropic", "claude-sonnet-4-5"],
+    ["openai", "gpt-5"],
+    ["google", "gemini-2.5-pro"],
+  ]
+  const fail = (failure: "host-aborted" | "model-error" | "cancelled") => ({ kind: "fail" as const, failure })
+
+  test("a host abort followed by a real later cancellation: both are reported, neither erases the other", async () => {
+    const resolved = setup(THREE, 3)
+    const controller = new AbortController()
+    let started = 0
+    const backend = new FakeBackend(
+      {
+        "discovery-1": [fail("host-aborted")],
+        "discovery-2": [{ kind: "ok", value: ENVELOPE }],
+        "discovery-3": [{ kind: "ok", value: ENVELOPE }],
+      },
+      {},
+      {},
+      () => {
+        // The three discovery turns run; the user stops on the next turn.
+        started += 1
+        if (started === 4) controller.abort()
+      },
+    )
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      maxConcurrency: 1,
+      signal: controller.signal,
+    })
+
+    expect(record.cancelled).toBeDefined()
+    expect(record.cancelled!.stage).not.toBe("discover")
+    expect(rendered).toContain("RUN CANCELLED")
+    expect(rendered).toContain("HOST-ABORTED TURN")
+    expect(rendered).toContain("this host abort did not itself mark the run cancelled")
+    expect(rendered).not.toContain("the run was not stopped")
+    expect(rendered).toContain("1 did not answer: the host reported its turn aborted.")
+  })
+
+  test("MIXED: host abort + model failure + cancellation — each cause counted once, no 'No model failed'", async () => {
+    const resolved = setup(THREE, 3)
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [fail("host-aborted")],
+        "discovery-2": [fail("model-error")],
+        "discovery-3": [fail("cancelled")],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.cancelled).toEqual({ stage: "discover" })
+    const reduced = record.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("Only 0 of 3 roster model(s) answered.")
+    // The cancelled slot's turn was issued, so it is not "never asked"; the
+    // failed and aborted slots are not counted as the stop's.
+    expect(reduced.message).toContain("1 did not answer because the run was cancelled.")
+    expect(reduced.message).toContain("1 did not answer: the host reported its turn aborted.")
+    expect(reduced.message).not.toContain("never asked")
+
+    expect(rendered).toContain("MODEL DROPPED OUT")
+    expect(rendered).not.toContain("No model failed and no model was retried")
+    expect(rendered).toContain("The run stopped during the discover stage.")
+    expect(rendered).toContain("Before the stop, 1 pool slot(s) failed or dropped out")
+    expect(rendered).toContain("Before the stop, 1 pool slot(s) did not answer discovery: the host reported")
+  })
+
+  test("LENS: every pool slot host-aborted, the lens's finding stranded by the budget — it is not 'raised nothing'", async () => {
+    const resolved = setup(THREE, 3, ["security"])
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        "discovery-1": [fail("host-aborted")],
+        "discovery-2": [fail("host-aborted")],
+        "discovery-3": [fail("host-aborted")],
+        "discovery-lens-security": [{ kind: "ok", value: ENVELOPE }],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      tokenCap: 120,
+      spendShares: { discover: 1 },
+    })
+
+    expect(record.findings.filter((f) => f.source === "lens" && f.unresolved)).toHaveLength(1)
+    expect(rendered).toContain("NO POOL MODEL ANSWERED — this is not a clean review.")
+    expect(rendered).toContain("1 lens slot(s) answered and raised 1 finding(s), none of them decided")
+    expect(rendered).not.toContain("raised nothing")
+  })
+})

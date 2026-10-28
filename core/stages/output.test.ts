@@ -3322,6 +3322,29 @@ describe("AD-6 — an empty finding list with a host-reported discovery abort (l
     expect(rendered).toContain("no model is named as failing for them. So this is not a clean review of the whole roster.")
   })
 
+  test("host abort + budget skip + a later stop: every cause keeps its own line", () => {
+    const rec = pooled(0)
+    rec.cancelled = { stage: "discover" }
+    rec.ledger.cap = 100
+    rec.skippedForBudget = ["discovery-3"]
+    rec.warnings = [aborted("discovery-1")]
+    const rendered = output(rec)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
+    expect(rendered).toContain(`Before the stop, 1 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("1 slot(s) were never asked at all, to stay inside the token budget.")
+  })
+
+  test("host abort + model failure + a later stop: 'No model failed' is never printed", () => {
+    const rec = pooled(0)
+    rec.cancelled = { stage: "discover" }
+    rec.warnings = [aborted("discovery-1"), droppedOut("discovery-2")]
+    const rendered = output(rec)
+    expect(rendered).not.toContain("No model failed and no model was retried")
+    expect(rendered).toContain("The run stopped during the discover stage.")
+    expect(rendered).toContain("Before the stop, 1 pool slot(s) failed or dropped out")
+    expect(rendered).toContain(`Before the stop, 1 ${HOST_CLAUSE}`)
+  })
+
   test("a later user stop does not erase an earlier host abort", () => {
     const none = pooled(0)
     none.cancelled = { stage: "discover" }

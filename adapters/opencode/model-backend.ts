@@ -131,8 +131,9 @@ const HOST_FAILED_ZERO_TOKENS =
 
 /**
  * Ledger #7 — the message of a `host-aborted` outcome that settled after the
- * caller's own signal fired. The user's stop explains the abort, so the turn is
- * reported as cancelled; the usage annotation is the settled one.
+ * caller's own signal fired. It states the two facts observed, the user's stop
+ * and the host's abort report, without claiming one caused the other; the turn
+ * is reported as cancelled and its usage annotation is the settled one.
  */
 const CANCELLED_AS_ABORTED = "the run was cancelled while this turn was in flight, and the host reported the turn aborted"
 
@@ -1027,10 +1028,12 @@ export class OpencodeModelBackend implements ModelBackend {
             },
           }
         : usage
-    // Ledger #7 — THE USER'S STOP WINS. A host-reported abort that settles after
-    // the caller's signal fired is that stop arriving through the host, so the
-    // stage gets `cancelled` and latches the run's cancellation. The turn
-    // settled, so its usage annotation is the settled one above, not `abandoned`.
+    // Ledger #7 — THE USER'S STOP TAKES PRECEDENCE. Two facts are observed here:
+    // the caller's signal has fired, which is evidence of a user stop, and the
+    // host reported this turn aborted. The first does not prove it caused the
+    // second, but a run the user stopped is reported as stopped, so the stage
+    // gets `cancelled` and latches the run's cancellation. The turn settled, so
+    // its usage annotation is the settled one above, not `abandoned`.
     if (outcome.failure === "host-aborted" && signal?.aborted) {
       return { ok: false, slot, failure: "cancelled", message: CANCELLED_AS_ABORTED, ...failed }
     }
