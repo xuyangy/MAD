@@ -63,8 +63,8 @@
  * signal available here about DESCENDANTS: the signal goes to the child MAD
  * spawned, and a credential helper or an external diff driver git left behind
  * never receives it. Such a descendant inherits the write end of the pipes, so
- * output that never reaches EOF after the child is gone means something else is
- * still holding it. Reading that as "confirmed gone" would be a claim about a
+ * output that never reaches EOF after the child's own exit was observed means
+ * something else may still be holding it. Reading that as "confirmed gone" would be a claim about a
  * process MAD cannot see, so it is reported as unresolved instead — which
  * quarantines.
  *
@@ -200,8 +200,9 @@ export type BlameExecOutcome =
   | { kind: "terminated"; why: string; pid: number; observed: ObservedExit }
   /**
    * The deadline passed and the cleanup budget passed with the process, a
-   * descendant or a held pipe still unaccounted for. It MAY STILL BE RUNNING.
-   * This is the outcome that quarantines the adapter.
+   * descendant or a held pipe still unaccounted for. With no exit observed, the
+   * process MAY STILL BE RUNNING; with its exit observed, something it started
+   * may be. This is the outcome that quarantines the adapter.
    */
   | { kind: "cleanup-unresolved"; why: string; pid: number }
   /**
@@ -540,15 +541,9 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
       why:
         cleanup.kind === "unresolved"
           ? `\`${options.argv.join(" ")}\` was stopped while running as process ${pid} and ${tried}, but ` +
-            `${options.cleanupMs}ms later ${cleanup.why}: ` +
-            // AN OBSERVED EXIT SAYS THE CHILD ENDED. What stays unconfirmed is
-            // whatever still holds its output, not the child itself.
-            (cleanup.observed === undefined
-              ? `TERMINATION IS UNCONFIRMED and the process may still be running`
-              : `process ${pid} itself ended${describeObserved(cleanup.observed)}, but CLEANUP IS UNCONFIRMED and ` +
-                `something that inherited its output may still be running`)
+            `${options.cleanupMs}ms later ${cleanup.why}: ${unresolvedState(pid, cleanup.observed)}`
           : `\`${options.argv.join(" ")}\` was stopped while running as process ${pid}, ${tried}, and process ` +
-            `${pid} and its output were accounted for${describeObserved(cleanup.observed)}`,
+            `${pid} and its output were accounted for${describeObserved(pid, cleanup.observed)}`,
     }
   }
 
@@ -563,8 +558,7 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
         pid,
         why:
           `\`${options.argv.join(" ")}\` did not return within ${options.deadlineMs}ms and ${tried}, ` +
-          `but ${options.cleanupMs}ms later ${cleanup.why}: TERMINATION IS UNCONFIRMED and the process ` +
-          `may still be running`,
+          `but ${options.cleanupMs}ms later ${cleanup.why}: ${unresolvedState(pid, cleanup.observed)}`,
       }
     }
     return {
@@ -573,7 +567,7 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
       observed: cleanup.observed,
       why:
         `\`${options.argv.join(" ")}\` did not return within ${options.deadlineMs}ms, ${tried}, and ` +
-        `process ${pid} and its output were accounted for${describeObserved(cleanup.observed)}`,
+        `process ${pid} and its output were accounted for${describeObserved(pid, cleanup.observed)}`,
     }
   }
 
@@ -689,20 +683,27 @@ async function accountFor(
 
   if (settled === "timeout") {
     const outstanding: string[] = []
-    if (!parts.exit.settled()) outstanding.push(`process ${child.pid} had not been reaped`)
+    // "NOT SETTLED", NOT "NOT REAPED": the handle can carry an observed status
+    // or signal while the exit read itself is still pending, and both are true.
+    if (!parts.exit.settled()) outstanding.push(`the exit read for process ${child.pid} had not settled`)
     const pipes: string[] = []
     if (!parts.out.settled()) pipes.push("stdout")
     if (!parts.err.settled()) pipes.push("stderr")
     if (pipes.length > 0) outstanding.push(`its ${pipes.join(" and ")} pipe(s) were still open`)
-    // THE DESCENDANT SENTENCE BELONGS TO THE PIPES AND ONLY TO THEM. Appending
-    // it to an unreaped process would explain an open pipe that is not part of
-    // this failure, and a reason that explains the wrong thing is one a reader
-    // acts on wrongly.
+    // THE DESCENDANT SENTENCE BELONGS TO THE PIPES AND ONLY TO THEM, and it says
+    // "may": an open pipe is evidence that something holds it, not of what.
+    // Only with the child's own exit observed can the holder be narrowed to
+    // something it started; otherwise the child itself may be the holder.
+    const observed = observedOf(child)
+    const exitObserved = observed.exitCode !== null || observed.signal !== null
     return unresolved(
-      pipes.length > 0
-        ? `${outstanding.join(" and ")} — an open pipe after the child is gone means something that ` +
-            `inherited it is still running, and no signal sent here reaches it`
-        : outstanding.join(" and "),
+      pipes.length === 0
+        ? outstanding.join(" and ")
+        : exitObserved
+          ? `${outstanding.join(" and ")} — with process ${child.pid}'s own exit observed, an open pipe means ` +
+            `something that inherited it may still be running, and no signal sent here reaches it`
+          : `${outstanding.join(" and ")} — an open pipe may be held by process ${child.pid} or by something ` +
+            `that inherited it`,
     )
   }
 
@@ -752,19 +753,36 @@ async function accountFor(
 /**
  * The observed exit or signal, in words, or `""` when neither was seen.
  *
- * WORDED SO IT CANNOT BE READ AS AN EXECUTION. The number is real and is
- * preserved — a reader comparing two timed-out blames wants it — but it is
- * introduced as what the OS reported about a process MAD killed, not as what git
- * returned, because a racing late exit of zero is still a blame that produced
- * nothing MAD waited for.
+ * WORDED SO IT CANNOT BE READ AS AN EXECUTION OR AS A SUCCESSFUL KILL. The
+ * number is real and is preserved — a reader comparing two timed-out blames
+ * wants it — but it is introduced as what the OS reported for process N, not
+ * as what git returned, because a racing late exit of zero is still a blame
+ * that produced nothing MAD waited for. Whether SIGKILL was sent is stated by
+ * the caller's own clause, never implied here.
  */
-function describeObserved(observed: ObservedExit): string {
+function describeObserved(pid: number, observed: ObservedExit): string {
   const parts: string[] = []
   if (observed.signal !== null) parts.push(`signal ${observed.signal}`)
   if (observed.exitCode !== null) parts.push(`status ${observed.exitCode}`)
   return parts.length === 0
     ? ""
-    : ` (the OS reported ${parts.join(" and ")} for the killed process, which is not evidence that git ran)`
+    : ` (the OS reported ${parts.join(" and ")} for process ${pid}, which is not evidence that git ran)`
+}
+
+/**
+ * What an unresolved cleanup leaves standing, after the cleanup reason itself.
+ *
+ * - The child's own exit or signal observed: process N was seen to end, but its
+ *   cleanup was not confirmed, so something it started may still be running.
+ *   What is outstanding is named by the cleanup reason before this clause.
+ * - Nothing observed: termination is unconfirmed, and process N may still be
+ *   running.
+ */
+function unresolvedState(pid: number, observed: ObservedExit | undefined): string {
+  return observed === undefined
+    ? `TERMINATION IS UNCONFIRMED and process ${pid} may still be running`
+    : `process ${pid} was seen to end${describeObserved(pid, observed)}, but MAD could not confirm its cleanup, ` +
+        `so something it started may still be running`
 }
 
 function messageOf(error: unknown): string {

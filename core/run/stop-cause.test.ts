@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test"
 import { MadStop, stopCauseOf } from "../domain/stop-cause.ts"
 import { selectRoster } from "../roster/select.ts"
 import { candidate, fakeChange, fakeClock, FakeBackend, type SlotScript, type SlotStep } from "../test-support/fakes.ts"
-import { review } from "./review.ts"
+import { ISSUED_TURNS_MAY_BILL, review } from "./review.ts"
 
 const FINDING = {
   findings: [
@@ -89,8 +89,15 @@ describe("a run MAD stopped (CAP-3)", () => {
     expect(rendered).toContain(`NOTHING WAS EXAMINED — ${MAD_STOPPED_THIS} before any model answered.`)
     expect(rendered).not.toContain("you stopped")
     const warning = record.warnings.find((w) => w.code === "run-cancelled")!
-    expect(warning.message).toContain("Turns already issued may still have run and been billed.")
+    // MAD's own stop keeps its message, byte for byte.
+    expect(warning.message).toBe(
+      `RUN CANCELLED: ${MAD_STOPPED_THIS} during the discover stage. It is NOT a finished review — the findings ` +
+        "below are what MAD had at that moment, and anything left undecided is in the UNRESOLVED section with the " +
+        "stage it stopped at. MAD never prompted the session whose rules differed, started no turn after the stop " +
+        "and retried no model. Turns already issued may still have run and been billed.",
+    )
     expect(warning.message).not.toContain("No model failed")
+    expect(warning.message).not.toContain(ISSUED_TURNS_MAY_BILL)
   })
 
   test("MID-DISCOVERY: the slots never asked say MAD stopped the run", async () => {
@@ -179,7 +186,7 @@ describe("a run MAD stopped (CAP-3)", () => {
     expect(rendered).not.toContain("you stopped")
   })
 
-  test("THE USER'S STOP IS UNCHANGED: the same runs with a plain abort keep every user sentence and no cause", async () => {
+  test("THE USER'S STOP: a plain abort keeps the user's wording and records no cause", async () => {
     const controller = new AbortController()
     controller.abort()
     const { record, rendered } = await run(new FakeBackend(scripts(FINDING, FINDING, FINDING)), controller.signal)
@@ -187,7 +194,55 @@ describe("a run MAD stopped (CAP-3)", () => {
     expect(rendered).toContain("RUN CANCELLED — you stopped this run during the discover stage.")
     expect(rendered).not.toContain("MAD stopped")
     expect(record.warnings.find((w) => w.code === "run-cancelled")!.message).toContain(
-      "No model failed, and no model was retried after you stopped.",
+      "MAD started no turn and retried no model after it observed the stop.",
     )
+  })
+
+  test("CAP-5 (#160) — THE USER'S STOP AFTER A FAILED FIRST ATTEMPT: no 'No model failed', no exhaustive-warnings claim", async () => {
+    const controller = new AbortController()
+    let calls = 0
+    const backend = new FakeBackend(
+      {
+        "discovery-1": [{ kind: "fail", failure: "model-error", message: "provider error" }, { kind: "ok", value: FINDING }],
+        "discovery-2": [{ kind: "ok", value: FINDING }],
+        "discovery-3": [{ kind: "ok", value: FINDING }],
+      },
+      {},
+      {},
+      () => {
+        calls += 1
+        // The first turn fails; the user stops the run before the retry.
+        if (calls === 1) queueMicrotask(() => controller.abort())
+      },
+    )
+
+    const { record, rendered } = await run(backend, controller.signal)
+
+    expect(calls).toBe(1)
+    expect(record.answered).toBe(0)
+    expect(record.cancelled).toEqual({ stage: "discover" })
+    // The failed attempt left no drop-out behind.
+    expect(record.warnings.some((w) => w.code === "model-dropped-out")).toBe(false)
+    const message = record.warnings.find((w) => w.code === "run-cancelled")!.message
+    expect(message).toBe(
+      "RUN CANCELLED: you stopped this run during the discover stage. It is NOT a finished review — the findings " +
+        "below are what MAD had at that moment, and anything left undecided is in the UNRESOLVED section with the " +
+        "stage it stopped at. MAD started no turn and retried no model after it observed the stop. The warnings " +
+        "report the model failures MAD recorded; a model whose first attempt failed and whose retry the stop " +
+        `cancelled may not be among them. ${ISSUED_TURNS_MAY_BILL}`,
+    )
+    expect(ISSUED_TURNS_MAY_BILL).toBe("Turns already issued may continue on the host and may be billed.")
+    for (const claim of [
+      "No model failed",
+      "no model failed",
+      "every failure",
+      "all failures",
+      "turns were aborted",
+      "were cancelled on the host",
+      "stops waiting",
+    ]) {
+      expect(rendered).not.toContain(claim)
+    }
+    expect(rendered).toContain("  The run stopped during the discover stage; MAD started no turn and retried no model after it observed the stop.")
   })
 })

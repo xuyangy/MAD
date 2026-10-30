@@ -258,9 +258,11 @@ function cleanupWords(cleanup: ChangeReadCleanup, exitObserved: boolean): string
     case "confirmed":
       return "confirmed — the process and its pipes were accounted for"
     case "unresolved":
-      // An observed exit or signal says the process ended; what it left holding its output did not.
+      // An observed exit or signal says the process ended; it does not confirm
+      // its cleanup, and does not say which part of it is outstanding.
       return exitObserved
-        ? "UNRESOLVED — the process ended, but something holding its output may still be running"
+        ? "UNRESOLVED — the process was seen to end, but MAD could not confirm its cleanup, so something it " +
+            "started may still be running"
         : "UNRESOLVED — the process may still be running"
     case "not-applicable":
       return "not applicable — no cleanup was needed"

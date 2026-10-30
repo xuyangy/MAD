@@ -341,7 +341,10 @@ describe("what the LAUNCHER actually does — measured, not assumed (story 2-7c)
     expect(outcome.kind).toBe("cleanup-unresolved")
     if (outcome.kind !== "cleanup-unresolved") return
     expect(outcome.why).toContain("pipe(s) were still open")
-    expect(outcome.why).toContain("TERMINATION IS UNCONFIRMED")
+    // The shell's own end was observed; what may still run is what it started.
+    expect(outcome.why).toContain(`process ${outcome.pid} was seen to end`)
+    expect(outcome.why).toContain("so something it started may still be running")
+    expect(outcome.why).not.toContain("TERMINATION IS UNCONFIRMED")
   })
 
   test("A GENEROUS DEADLINE DOES NOT FIRE — the non-vacuous sibling", async () => {

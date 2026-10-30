@@ -84,6 +84,10 @@ export const WARNING_CODES = [
   /**
    * AD-6a / AD-15 (story 8) — THE BUDGET TRUNCATED DISCOVERY.
    *
+   * Story 2-5c / CAP-5 — or an experiment's admission did, or both did: the
+   * message's title names whichever the stage recorded, and `detail.admission`
+   * maps each admission-refused slot to its reason.
+   *
    * The thirteenth code, and a degradation for `run-cancelled`'s reason exactly:
    * a roster MAD chose not to finish asking is a PARTIAL run, which is what AD-6
    * governs. Stories 2A, 3 and 4 each declined a new code because a clamp or a

@@ -44,8 +44,9 @@ import { join } from "node:path"
 
 import { createOpencodeClient } from "@opencode-ai/sdk"
 
+import { ISSUED_TURNS_MAY_BILL } from "../../core/run/review.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
-import { clearBlameQuarantineForTests, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
+import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 import { OMIT, startFakeHost, type FakeHost, type FakeHostOptions } from "./test-support/fake-host.ts"
@@ -208,6 +209,13 @@ const FEE_FACT_CHECK = {
   findings: "Line 1 multiplies by 0.01; the committed version multiplied by 0.1.",
   verdict: "upheld",
   evidenceKind: "line-cite",
+}
+
+/** CAP-5 — the two issued-turn billing disclosures: the core's portable one and the plugin's OpenCode note. */
+/** A pre-model stopped answer says nothing about billing at all. */
+function expectNoBillingDisclosure(output: string): void {
+  expect(output).not.toMatch(/billed/i)
+  expect(output).not.toContain(ISSUED_TURNS_NOTE.trim())
 }
 
 describe("acceptance — the snapshot sees what porcelain status hides", () => {
@@ -442,7 +450,7 @@ describe("acceptance — option-shaped targets and configured filters are refuse
         expect(run.result.title).toBe("MAD — unsupported target")
         expect(run.result.output).toContain('starts with "-"')
         expect(await counted.launches()).toBe(0)
-        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0 })
+        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 })
         await expect(stat(written)).rejects.toThrow()
       } finally {
         await control.dispose()
@@ -640,6 +648,12 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         expect(run.result.output).toContain(`RUN CANCELLED — ${MAD_STOPPED} during the discover stage.`)
         expect(run.result.output).not.toContain("you stopped")
         expect(run.result.output).toContain("Turns already issued may still have run and been billed.")
+        // A discovery turn was issued before MAD's stop: the OpenCode note sits
+        // beside the core's own sentence, outside the span, and nothing was aborted.
+        expect(run.result.output).not.toContain(ISSUED_TURNS_MAY_BILL)
+        expect(run.result.output).toContain(ISSUED_TURNS_NOTE)
+        expect(materialSpans(run.result.output).some((span) => span.body.includes(ISSUED_TURNS_NOTE.trim()))).toBe(false)
+        expect(run.host.counts.abort).toBe(0)
         expect(run.result.metadata?.cancelled).toBe("discover")
         expect(run.result.metadata?.warnings).toContain("run-cancelled")
         // The mismatched session's delete failed: it stays guarded.
@@ -714,6 +728,10 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         expect(run.host.counts.prompt).toBe(0)
         expect(run.result.title).toStartWith("MAD review — CANCELLED during discover — partial review")
         expect(run.result.output).toContain("RUN CANCELLED — you stopped this run during the discover stage.")
+        // Cancelled inside review() before any prompt: the core's portable
+        // sentence stands, and the OpenCode note about issued turns is absent.
+        expect(run.result.output).toContain(ISSUED_TURNS_MAY_BILL)
+        expect(run.result.output).not.toContain(ISSUED_TURNS_NOTE.trim())
         expect(run.result.output).not.toContain("MAD STOPPED THIS RUN")
         expect(run.result.output).not.toContain("MAD stopped")
         // The probe, the mismatched session and the valid one are deleted; the
@@ -789,6 +807,7 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         expect(run.result.output).toContain("MAD completed no review and asked no model")
         expect(run.result.output).toContain("a session may exist on the host")
         expect(run.result.output).toContain("that deletion is not confirmed in this answer")
+        expectNoBillingDisclosure(run.result.output)
         // A late answer's tracking and failed delete are covered in
         // `session-policy.test.ts`; this host stops with the scenario.
       } finally {
@@ -846,6 +865,75 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         expect(run.result.output).toContain("RUN CANCELLED — you stopped this run during the discover stage.")
         expect(run.result.output).not.toContain("MAD STOPPED THIS RUN")
         expect(run.result.output).not.toContain("MAD stopped")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A USER STOP MID-MODEL: the portable billing warning in the report and the OpenCode note outside the span",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      try {
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            holdPrompt: () => {
+              stop.abort()
+              return undefined
+            },
+          },
+          {},
+          undefined,
+          undefined,
+          stop.signal,
+        )
+        expect(run.changed).toEqual([])
+        expect(run.host.counts.prompt).toBeGreaterThan(0)
+        expect(run.result.metadata?.cancelled).toBe("discover")
+        const output = run.result.output
+        // The portable sentence is the core's, inside the framed report; the
+        // OpenCode note is MAD's own, outside it.
+        const spans = materialSpans(output)
+        expect(spans).toHaveLength(1)
+        const report = spans[0]!
+        expect(report.body).toContain(ISSUED_TURNS_MAY_BILL)
+        expect(report.body).toContain("MAD started no turn and retried no model after it observed the stop.")
+        expect(report.body).not.toContain(ISSUED_TURNS_NOTE.trim())
+        const closingFence = output.indexOf(`\n${fenceOf(output, "review report")}`, report.end)
+        expect(closingFence).toBeGreaterThanOrEqual(report.end)
+        const after = output.slice(closingFence)
+        expect(after).toContain(SUBMODULE_SCOPE_NOTE)
+        expect(after).toContain(ISSUED_TURNS_NOTE)
+        expect(after.indexOf(ISSUED_TURNS_NOTE)).toBeGreaterThan(after.indexOf(SUBMODULE_SCOPE_NOTE))
+        expect(output.split(ISSUED_TURNS_NOTE)).toHaveLength(2)
+        // MAD stopped waiting; it did not abort the host's request.
+        expect(run.host.counts.abort).toBe(0)
+        for (const claim of ["No model failed", "killed process", "were cancelled", "not billed"]) {
+          expect(output).not.toContain(claim)
+        }
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A FINISHED REVIEW carries neither billing disclosure",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, { discovery: [FEE_FINDING] })
+        expect(run.result.metadata?.cancelled).toBeUndefined()
+        // A finished report counts billed turns, so only the stop disclosures are checked.
+        expect(run.result.output).not.toContain(ISSUED_TURNS_MAY_BILL)
+        expect(run.result.output).not.toContain("may still have run and been billed")
+        expect(run.result.output).not.toContain(ISSUED_TURNS_NOTE.trim())
       } finally {
         await repo.remove()
       }
@@ -952,8 +1040,9 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         expectClean(run)
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toBe("MAD reviewed nothing: the review was stopped before MAD read anything or asked any model.")
+        expectNoBillingDisclosure(run.result.output)
         expect(await counted.launches()).toBe(0)
-        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0 })
+        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 })
       } finally {
         await counted.dispose()
         await repo.remove()
@@ -980,6 +1069,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         expectClean(run)
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toContain("before it read any repository content or asked any model")
+        expectNoBillingDisclosure(run.result.output)
         expect(await counted.launches()).toBe(0)
         expect(run.host.counts.create).toBe(0)
       } finally {
@@ -1014,6 +1104,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         expect(run.result.output).toContain("stopped (cancelled)")
         expect(run.result.output).toContain("Cleanup: confirmed")
         expect(run.host.counts.create).toBe(0)
+        expectNoBillingDisclosure(run.result.output)
       } finally {
         await slow.dispose()
         await repo.remove()
@@ -1117,6 +1208,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         expect(run.changed).toEqual([])
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toContain("before it read any repository content or asked any model")
+        expectNoBillingDisclosure(run.result.output)
         expect(await counted.launches()).toBe(0)
         expect(run.host.counts.create).toBe(0)
       } finally {
@@ -1488,7 +1580,7 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
         const note = run.result.output.slice(run.result.output.indexOf("When the review was stopped, MAD sent SIGKILL to its git blame"))
         const pid = /^When the review was stopped, MAD sent SIGKILL to its git blame \(process (\d+)\)\./.exec(note)?.[1]
         expect(pid).toBeDefined()
-        // The killed git was seen to end; a background process still holds its output.
+        // The git MAD sent SIGKILL to was seen to end; a background process still holds its output.
         expect(note).toContain(`Process ${pid} itself was seen to end, but MAD could not confirm its cleanup`)
         expect(note).toContain(
           "MAD will launch no further `git blame` or its filter preflight in this worktree from this opencode process.",

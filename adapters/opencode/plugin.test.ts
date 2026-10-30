@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test"
 
+import { emptyLedger, emptyTokenUsage } from "../../core/domain/run-record.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import {
   clampDiscoverySlots,
   clampLenses,
   clampPins,
   DEFAULT_DISCOVERY_SLOTS,
+  ISSUED_TURNS_NOTE,
+  issuedTurnsNote,
   MAX_DISCOVERY_SLOTS,
   MAX_LENS_SLOTS,
   truncatedListWarnings,
@@ -340,5 +343,27 @@ describe("the stopped-blame note (CAP-5, 5b)", () => {
         expect(note).not.toContain(fragment)
       }
     }
+  })
+})
+
+describe("the issued-turns billing note (CAP-5)", () => {
+  const unknown = { slot: "discovery-1", stage: "discover", attempt: 1, executionId: "exec-1", why: "abandoned" }
+  const counted = { slot: "discovery-1", stage: "discover" as const, attempt: 1, tokens: emptyTokenUsage() }
+
+  test("a cancelled run with no turn on its ledger gets no note", () => {
+    expect(issuedTurnsNote({ cancelled: { stage: "discover" }, ledger: emptyLedger() })).toBe("")
+  })
+
+  test("a cancelled run with an issued turn, counted or unknown, gets the note; MAD's own stop too", () => {
+    expect(issuedTurnsNote({ cancelled: { stage: "discover" }, ledger: { ...emptyLedger(), unknownUsage: [unknown] } })).toBe(
+      ISSUED_TURNS_NOTE,
+    )
+    expect(
+      issuedTurnsNote({ cancelled: { stage: "judge", cause: "session-policy" }, ledger: { ...emptyLedger(), entries: [counted] } }),
+    ).toBe(ISSUED_TURNS_NOTE)
+  })
+
+  test("a run that was not cancelled gets no note", () => {
+    expect(issuedTurnsNote({ ledger: { ...emptyLedger(), unknownUsage: [unknown] } })).toBe("")
   })
 })

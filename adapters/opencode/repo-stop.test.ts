@@ -285,8 +285,14 @@ describe("the change read stops when the review does (CAP-5)", () => {
       expect(error.cleanup).toBe("unresolved")
       expect(error.signal).toBe("SIGKILL")
       expect(error.status).toBeUndefined()
-      expect(error.message).toContain("process 5252 itself ended")
-      expect(error.message).not.toContain("the process may still be running")
+      expect(error.message).toContain("process 5252 was seen to end")
+      expect(error.message).toContain(
+        "Cleanup: UNRESOLVED — the process was seen to end, but MAD could not confirm its cleanup, so something it " +
+          "started may still be running.",
+      )
+      expect(error.message).not.toContain("holding its output")
+      expect(error.message).not.toContain("process 5252 may still be running")
+      expect(error.message).not.toContain("killed process")
       expect(changeReadQuarantineFor(dir)?.pid).toBe(5252)
     },
     TIMEOUT_MS,

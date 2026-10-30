@@ -26,7 +26,7 @@ import {
   type SlotScript,
   type SlotStep,
 } from "../test-support/fakes.ts"
-import { review } from "./review.ts"
+import { ISSUED_TURNS_MAY_BILL, review } from "./review.ts"
 
 const ENVELOPE = {
   findings: [
@@ -114,15 +114,12 @@ describe("AD-6f — a run the user stopped", () => {
     // review's single worst finding: story 2's sentence for an empty roster is
     // "Every slot in the roster failed or dropped out; nothing was examined. See
     // the warnings above for which models failed and why." Printed over a run the
-    // user stopped, three lines under a `run-cancelled` warning that says in as
-    // many words that no model failed, that is the report contradicting itself —
-    // and the half a reader reaches later blames three providers that were
-    // working and sends them to warnings that name none. It is the exact false
-    // degradation report this whole story exists to remove, and the test asserted
-    // it rather than catching it. Both halves are pinned now: the true sentence
-    // is present and the false one CANNOT come back.
+    // user stopped before any model answered, it blames three providers that
+    // were working and sends them to warnings that name none. Both halves are
+    // pinned: the true sentence is present and the false one CANNOT come back.
     expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
-    expect(rendered).toContain("No model failed and no model was retried")
+    expect(rendered).toContain("The run stopped during the discover stage; MAD started no turn and retried no model after it observed the stop.")
+    expect(rendered).not.toContain("No model failed")
     expect(rendered).not.toContain("NO MODEL ANSWERED")
     expect(rendered).not.toContain("failed or dropped out")
 
@@ -563,7 +560,9 @@ describe("AD-6f — a run the user stopped", () => {
 
     expect(rendered).toContain("WARNINGS — this run is degraded")
     expect(rendered).toContain("[discover/run-cancelled]")
-    expect(rendered).toContain("No model failed, and no model was retried after you stopped.")
+    expect(rendered).toContain("MAD started no turn and retried no model after it observed the stop.")
+    expect(rendered).toContain(ISSUED_TURNS_MAY_BILL)
+    expect(rendered).not.toContain("No model failed")
   })
 
   test("STOPPED BETWEEN DEBATE ROUNDS: the next round is not issued, and not counted", async () => {

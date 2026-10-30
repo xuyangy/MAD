@@ -800,6 +800,14 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // Story 2-5c — when the experiment's admission refused every skipped slot,
     // the run's own ceiling did not, so the sentence names the admission instead.
     const admissionReasons = [...new Set(admissionRefusals.values())]
+    // CAP-5 — THE TITLE NAMES THE SAME CAUSE AS THE BODY: the budget, the
+    // admission, or both.
+    const title =
+      admissionRefusals.size === 0
+        ? "BUDGET TRUNCATED DISCOVERY"
+        : admissionRefusals.size === skippedForBudget.length
+          ? "ADMISSION TRUNCATED DISCOVERY"
+          : "BUDGET AND ADMISSION TRUNCATED DISCOVERY"
     const cause =
       admissionRefusals.size === skippedForBudget.length
         ? `the experiment's admission refused them (${admissionReasons.join("; ")})`
@@ -809,7 +817,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       code: "discovery-truncated",
       stage: "discover",
       message:
-        `BUDGET TRUNCATED DISCOVERY: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
+        `${title}: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
         `were never asked, because ${cause}. THOSE SLOTS were not skipped because a ` +
         `model failed — they were never asked at all. This run examined the change with fewer ` +
         `models than it had available.`,
@@ -848,7 +856,11 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         ? ""
         : poolAdmissionRefused === poolSkippedCount
           ? ` ${poolSkippedCount} were never asked: the experiment's admission refused their turn.`
-          : ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
+          : poolAdmissionRefused === 0
+            ? ` ${poolSkippedCount} were never asked: the budget ran out before their turn.`
+            : // CAP-5 — a mixed set names both causes, neither alone.
+              ` ${poolSkippedCount} were never asked: the budget ran out before their turn, or the experiment's ` +
+              `admission refused it.`
     // Ledger #7 — THE THIRD KNOWN CAUSE: the host reported a pool turn aborted.
     // Worded without an actor, because the report does not know one.
     const poolHostAbortedCount = hostAborted.filter((slot) => poolIds.has(slot)).length

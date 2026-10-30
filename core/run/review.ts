@@ -464,6 +464,13 @@ function clampedDials(
 }
 
 /**
+ * CAP-5 — the portable billing disclosure a user-stopped run carries. It says
+ * nothing about how a host treats a turn MAD stopped waiting for; an adapter
+ * that knows says so beside the report.
+ */
+export const ISSUED_TURNS_MAY_BILL = "Turns already issued may continue on the host and may be billed."
+
+/**
  * AD-6f — the ONE place a run records that the user stopped it.
  *
  * FIRST STAGE WINS. Every stage after the stop also sees an aborted signal and
@@ -485,10 +492,18 @@ function recordCancellation(record: RunRecord, stage: Stage, cause: StopCause): 
     stage,
     message:
       cause === "user"
-        ? `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
+        ? // CAP-5 (#160) — NO CLAIM THAT NO MODEL FAILED. The record keeps no
+          // per-attempt failure log: a first attempt that failed and whose retry
+          // the stop cancelled leaves no drop-out behind. The warnings report the
+          // failures MAD recorded, and this message says they may be incomplete.
+          // The billing sentence is portable: what a host does with a turn MAD
+          // stopped waiting for is the adapter's to say.
+          `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
           `review — the findings below are what MAD had at that moment, and anything left undecided ` +
-          `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
-          `was retried after you stopped.`
+          `is in the UNRESOLVED section with the stage it stopped at. MAD started no turn and retried ` +
+          `no model after it observed the stop. The warnings report the model failures MAD recorded; a ` +
+          `model whose first attempt failed and whose retry the stop cancelled may not be among them. ` +
+          ISSUED_TURNS_MAY_BILL
         : // CAP-3 — MAD's own stop. It says nothing about whether a model
           // failed: the run's other warnings report that, and the stop is not
           // evidence either way.

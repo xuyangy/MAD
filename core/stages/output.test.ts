@@ -2533,7 +2533,7 @@ describe("AD-6 — an empty finding list after a budget-truncated discovery (sto
 
     const rendered = output(starved)
     expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
-    expect(rendered).toContain("3 slot(s) were skipped to stay inside the token budget")
+    expect(rendered).toContain("1 pool slot(s) and 0 lens slot(s) were never asked, to stay inside the token budget.")
     expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
     expect(rendered).not.toContain("NO MODEL ANSWERED")
   })
@@ -2550,6 +2550,17 @@ describe("AD-6 — an empty finding list after a budget-truncated discovery (sto
     const rendered = output(both)
     expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
     expect(rendered).not.toContain("the budget ran out before any model was asked")
+  })
+
+  test("CAP-5 (#160) — A USER STOP WITH NO DROP-OUT: the stage and no retry after the stop, never 'No model failed'", () => {
+    // No drop-out is not no failure: a first attempt can fail and its retry be
+    // cancelled by the stop, which leaves no drop-out on the record.
+    const stopped = record([], 0)
+    stopped.cancelled = { stage: "discover" }
+    const rendered = output(stopped)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — you stopped this run before any model answered.")
+    expect(rendered).toContain("  The run stopped during the discover stage; MAD started no turn and retried no model after it observed the stop.")
+    expect(rendered).not.toContain("No model failed")
   })
 
   test("AN EMPTY RESULT OVER A TRUNCATED ROSTER IS NOT A CLEAN REVIEW, EVEN WHEN MODELS ANSWERED", () => {
@@ -2635,9 +2646,149 @@ describe("AD-6 — a run that lost a model AND was truncated says BOTH (code rev
     starved.skippedForBudget = ["discovery-1", "discovery-2", "discovery-3"]
 
     const rendered = output(starved)
-    expect(rendered).toContain("the budget ran out before any model was asked")
-    expect(rendered).toContain("No model failed and no model was retried")
+    expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+    expect(rendered).toContain("1 pool slot(s) and 0 lens slot(s) were never asked, to stay inside the token budget.")
     expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+  })
+
+  test("CAP-5 (#160) — THE BUDGET-ONLY PAGE MAKES NO NO-FAILURE OR NO-RETRY CLAIM", () => {
+    // A listed slot's FIRST attempt was refused, so it issued no turn; a refused
+    // retry is a drop-out (see `core/stages/discover.test.ts`). The record keeps
+    // no failure it did not warn about, so the page claims neither way.
+    const starved = record([], 0)
+    starved.ledger.cap = 0
+    starved.skippedForBudget = [starved.roster.slots[0]!.slot]
+    const rendered = output(starved)
+    expect(rendered).toContain("the budget ran out before any model was asked")
+    expect(rendered).not.toContain("No model failed")
+    expect(rendered).not.toContain("no model was retried")
+  })
+
+  test("CAP-5 (#160) — A LENS SLOT THE BUDGET DID NOT SKIP: the headline does not say no model was asked", () => {
+    // Every pool slot is skipped and none dropped out, but the experiment's
+    // admission is asked per slot and can admit a lens it refused the pool for.
+    // The lens turn was issued, so "before any model was asked" is not what the
+    // record supports.
+    const lensRun = record([], 0, ["security"])
+    lensRun.ledger.cap = 100
+    lensRun.skippedForBudget = lensRun.roster.slots.map((slot) => slot.slot)
+    expect(lensRun.roster.lensSlots.length).toBe(1)
+    const rendered = output(lensRun)
+    expect(rendered).not.toContain("before any model was asked")
+    expect(rendered).not.toContain("NOTHING WAS EXAMINED")
+    expect(rendered).toContain("NO POOL MODEL ANSWERED — this is not a clean review; no pool model examined the change.")
+    expect(rendered).toContain("1 pool slot(s) and 0 lens slot(s) were never asked, to stay inside the token budget.")
+    expect(rendered).toContain("1 lens slot(s) were asked, answered and raised nothing.")
+    expect(rendered).not.toContain("No model failed")
+    expect(rendered).not.toContain("no model was retried")
+    expect(rendered).not.toContain("Every slot in the roster failed or dropped out")
+  })
+
+  test("CAP-5 (#160) — A LENS SLOT THAT WAS ASKED AND RAISED A FINDING says so", () => {
+    const raised = lensFinding({ severity: "high", file: "a.ts", lens: "security" })
+    const lensRun = record([], 0, ["security"])
+    lensRun.pool = [raised]
+    lensRun.ledger.cap = 100
+    lensRun.skippedForBudget = lensRun.roster.slots.map((slot) => slot.slot)
+    const rendered = output(lensRun)
+    expect(rendered).toContain("NO POOL MODEL ANSWERED")
+    expect(rendered).toContain(
+      "1 lens slot(s) were asked and answered, raising 1 finding(s); see the sections below for what became of them.",
+    )
+  })
+
+  test("CAP-5 (#160) — A LENS SLOT THE HOST REPORTED ABORTED is asked, not answered", () => {
+    const lensRun = record([], 0, ["security"])
+    lensRun.ledger.cap = 100
+    lensRun.skippedForBudget = lensRun.roster.slots.map((slot) => slot.slot)
+    const lensSlot = lensRun.roster.lensSlots[0]!.slot
+    lensRun.warnings = [
+      hostAbortedWarning({
+        stage: "discover",
+        slot: lensSlot,
+        model: "provider/model",
+        attempts: 1,
+        error: "MessageAbortedError: aborted",
+        turn: "lens discovery",
+        consequence: "this lens's vantage is missing from discovery.",
+      }),
+    ]
+    const rendered = output(lensRun)
+    expect(rendered).toContain("NO POOL MODEL ANSWERED")
+    expect(rendered).toContain("1 lens slot(s) were asked and did not answer: the host reported their turn(s) aborted")
+    expect(rendered).not.toContain("answered and raised")
+  })
+
+  test("CAP-5 (#160) — A POOL SLOT NOT IN THE SKIPPED SET: the headline is not used", () => {
+    // The headline's invariant is checked on the roster itself, not inferred
+    // from the lens slots alone.
+    const { roster } = selectRoster([candidate("openai", "gpt-5"), candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 2,
+      lenses: [],
+      providerConfigKey: "provider",
+    })
+    const partial = { ...record([], 0), roster }
+    partial.ledger.cap = 100
+    partial.skippedForBudget = [roster.slots[0]!.slot]
+    const rendered = output(partial)
+    expect(rendered).not.toContain("before any model was asked")
+    expect(rendered).toContain("NO POOL MODEL ANSWERED")
+    expect(rendered).toContain("1 pool slot(s) and 0 lens slot(s) were never asked, to stay inside the token budget.")
+    expect(rendered).toContain("1 pool slot(s) were not skipped and did not answer; see the warnings above.")
+  })
+
+  test("CAP-5 — MIXED REFUSALS, nobody asked: the headline and the count name both causes", () => {
+    const lensRun = record([], 0, ["security"])
+    lensRun.ledger.cap = 100
+    const [pool, lens] = [lensRun.roster.slots[0]!.slot, lensRun.roster.lensSlots[0]!.slot]
+    lensRun.skippedForBudget = [pool, lens]
+    lensRun.warnings = [
+      {
+        code: "discovery-truncated",
+        stage: "discover",
+        message: "BUDGET AND ADMISSION TRUNCATED DISCOVERY",
+        detail: { slots: [pool, lens], admission: { [lens]: "refused by the experiment" } },
+      },
+    ]
+    const rendered = output(lensRun)
+    expect(rendered).toContain(
+      "  NOTHING WAS EXAMINED — the budget or the experiment's admission refused every slot before any model was asked.",
+    )
+    expect(rendered).toContain(
+      "  1 pool slot(s) and 1 lens slot(s) were never asked, to stay inside the token budget or because the " +
+        "experiment's admission refused them (each slot's NEVER ASKED mark in the ROSTER says which).",
+    )
+    expect(rendered).not.toContain("the budget ran out")
+  })
+
+  test("CAP-5 — A USER STOP OVER ADMISSION-REFUSED SLOTS does not blame the budget", () => {
+    const stopped = record([], 0)
+    const slot = stopped.roster.slots[0]!.slot
+    stopped.cancelled = { stage: "discover" }
+    stopped.skippedForBudget = [slot]
+    stopped.warnings = [
+      {
+        code: "discovery-truncated",
+        stage: "discover",
+        message: "ADMISSION TRUNCATED DISCOVERY",
+        detail: { slots: [slot], admission: { [slot]: "refused by the experiment" } },
+      },
+    ]
+    const rendered = output(stopped)
+    expect(rendered).toContain(
+      "  1 slot(s) were never asked at all, because the experiment's admission refused them (the " +
+        "discovery-truncated warning says why).",
+    )
+    expect(rendered).not.toContain("to stay inside the token budget")
+  })
+
+  test("CAP-5 (#160) — EVERY SLOT, LENS INCLUDED, SKIPPED: the headline stands", () => {
+    const lensRun = record([], 0, ["security"])
+    lensRun.ledger.cap = 0
+    lensRun.skippedForBudget = [...lensRun.roster.slots, ...lensRun.roster.lensSlots].map((slot) => slot.slot)
+    const rendered = output(lensRun)
+    expect(rendered).toContain("NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
+    expect(rendered).toContain("1 pool slot(s) and 1 lens slot(s) were never asked, to stay inside the token budget.")
   })
 
   test("the BUDGET block's skipped-slot line is scoped to its own slots", () => {

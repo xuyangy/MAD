@@ -20,6 +20,7 @@ import {
   usageIsComplete,
   type Preset,
 } from "../../core/budget/ledger.ts"
+import type { RunRecord } from "../../core/domain/run-record.ts"
 import type { Warning } from "../../core/domain/warning.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
 import { systemClock } from "../../core/ports/clock.ts"
@@ -918,7 +919,12 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               // THE SUBMODULE SCOPE NOTE sits outside the span too: a fixed
               // sentence of MAD's, because the read policy reads a submodule as
               // its commit pointer only and the report itself never says so.
-              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`,
+              // THE ORDER, all of it MAD's own text outside the span: the policy
+              // stop note (before the span), then the framed report, then the
+              // submodule scope note, the probe cleanup note, the issued-turns
+              // billing note (`issuedTurnsNote`), the stopped-blame note and the
+              // artifact note. Each is empty when it does not apply.
+              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${issuedTurnsNote(record)}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`,
               metadata: {
                 runId: record.runId,
                 answered: record.answered,
@@ -1014,6 +1020,33 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
 /** What the read policy did not read (`./git-read-policy.ts`, SUBMODULES). */
 export const SUBMODULE_SCOPE_NOTE =
   "\n\nMAD reviewed submodules as commit pointers only: uncommitted changes inside a submodule were not read or reviewed."
+
+/**
+ * CAP-5 — what a stopped run's model turns may still cost on this host. MAD's
+ * own sentence, outside the span. `OpencodeModelBackend` stops waiting for a
+ * turn it issued and never aborts the host request (no `session.abort` call),
+ * so the request may keep running and be billed. The core's own warning says
+ * the portable half; this adds the OpenCode mechanism beside it.
+ */
+export const ISSUED_TURNS_NOTE =
+  "\n\nIn OpenCode, MAD stops waiting for model turns it already issued but does not abort them, so they may " +
+  "keep running on the host and be billed."
+
+/**
+ * The note, for a cancelled run whose ledger shows at least one counted turn or
+ * one turn of unknown usage. A turn MAD stopped waiting for is recorded as
+ * unknown usage, so a turn that may still be in flight is always counted here.
+ *
+ * LIMITATION: a turn the host already answered with an HTTP error leaves no
+ * ledger entry, so a run whose only issued turns ended that way gets no note.
+ * Such a turn has finished, so it is not in flight and needs none. A stop
+ * before `review()` never reaches this function.
+ */
+export function issuedTurnsNote(record: Pick<RunRecord, "cancelled" | "ledger">): string {
+  if (record.cancelled === undefined) return ""
+  // The unknown count is the accountant's answer (`unknownUsageCount`), not one counted here.
+  return record.ledger.entries.length + unknownUsageCount(record.ledger) > 0 ? ISSUED_TURNS_NOTE : ""
+}
 
 /**
  * CAP-5 — the fact the stopped-blame note is written from: the first fact this

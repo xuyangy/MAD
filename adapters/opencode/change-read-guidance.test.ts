@@ -107,9 +107,12 @@ describe("changeReadStopGuidance", () => {
     expect(error.message.endsWith("No change was read.")).toBe(true)
   })
 
-  test("cancelled with unresolved cleanup and an observed exit: git ended, what holds its output did not confirm", () => {
+  test("cancelled with unresolved cleanup and an observed exit: git was seen to end, its cleanup unconfirmed", () => {
     const text = changeReadStopGuidance(stop({ stop: "cancelled", cleanup: "unresolved", pid: 7, signal: "SIGKILL" }))
-    expect(text).toContain("Git's own process ended, but MAD could not confirm that nothing it started still holds its output.")
+    expect(text).toContain(
+      "Git's own process was seen to end, but MAD could not confirm its cleanup, so something it started may still be running.",
+    )
+    expect(text).not.toContain("holds its output")
     expect(text).not.toContain("could not confirm that git ended")
     expect(text).toContain(`This worktree is now ${QUARANTINE_LINE}`)
   })

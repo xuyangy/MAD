@@ -50,12 +50,12 @@ export function changeReadStopGuidance(error: ChangeReadStopped): string {
       if (error.cleanup !== "unresolved") {
         return `The review was stopped, so nothing was reviewed. Run it again when you want a review.`
       }
-      // An observed exit or signal says git's own process ended; what stays
-      // unconfirmed is anything that inherited its output.
+      // An observed exit or signal says git's own process ended; its cleanup
+      // stays unconfirmed, so something it started may still be running.
       return (
         (error.status !== undefined || error.signal !== undefined
-          ? `The review was stopped while git was running. Git's own process ended, but MAD could not confirm ` +
-            `that nothing it started still holds its output.`
+          ? `The review was stopped while git was running. Git's own process was seen to end, but MAD could ` +
+            `not confirm its cleanup, so something it started may still be running.`
           : `The review was stopped while git was running, and MAD could not confirm that git ended.`) +
         ` This worktree is now QUARANTINED: MAD reads nothing in it until opencode restarts. ${restart(error.pid)}`
       )

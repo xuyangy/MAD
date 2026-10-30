@@ -10,6 +10,8 @@
  *   `permission` echoed back as a real host stores it (`echo` overrides that).
  * - `POST /session/:id/message` — a schema-valid fake provider answer.
  * - `DELETE /session/:id` — the backend's bounded dispose.
+ * - `POST /session/:id/abort` — counted and answered, so a test can assert MAD
+ *   never sends it (CAP-5: a stop is disclosed, not aborted on the host).
  *
  * The answer to a prompt is chosen from what the request ASKS for, never from a
  * call counter. A judge turn is recognised by its instruction text
@@ -89,7 +91,7 @@ export interface FakeHost {
   /** `http://127.0.0.1:<ephemeral port>` — no fixed port is assumed. */
   readonly url: string
   readonly origin: string
-  readonly counts: { providers: number; create: number; prompt: number; delete: number }
+  readonly counts: { providers: number; create: number; prompt: number; delete: number; abort: number }
   /** Every `POST /session` body, in order, as JSON. */
   readonly creates: unknown[]
   /** The ids handed out, in create order. */
@@ -120,7 +122,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
-  const counts = { providers: 0, create: 0, prompt: 0, delete: 0 }
+  const counts = { providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 }
   const problems: string[] = []
   const open = new Set<string>()
   const creates: unknown[] = []
@@ -221,6 +223,10 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
       }
       const message = /^\/session\/([^/]+)\/message$/.exec(path)
       if (request.method === "POST" && message) return prompt(decodeURIComponent(message[1]!), request)
+      if (request.method === "POST" && /^\/session\/[^/]+\/abort$/.test(path)) {
+        counts.abort++
+        return json(true)
+      }
       const session = /^\/session\/([^/]+)$/.exec(path)
       if (request.method === "DELETE" && session) {
         counts.delete++

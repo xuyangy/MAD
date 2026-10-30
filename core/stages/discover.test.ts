@@ -1679,3 +1679,63 @@ describe("discover — a host-reported abort (ledger #7)", () => {
     expect(aborted.detail!.slot).toBe("discovery-lens-security")
   })
 })
+
+// CAP-5 (#160) — what the record keeps, and does not keep, about a failure.
+describe("discover — a failure the record does not keep, and what a budget skip proves", () => {
+  test("A FAILED FIRST ATTEMPT WHOSE RETRY THE STOP CANCELLED leaves no drop-out behind", async () => {
+    const controller = new AbortController()
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]])
+    const backend = new FakeBackend(
+      { "discovery-1": [{ kind: "fail", failure: "model-error", message: "provider error" }, { kind: "ok", value: ONE_FINDING }] },
+      {},
+      {},
+      () => controller.abort(),
+    )
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+      signal: controller.signal,
+    })
+    // The first attempt was issued and failed; the retry was never issued.
+    expect(backend.calls).toHaveLength(1)
+    expect(discovered.cancelled).toBe(true)
+    expect(discovered.answered).toBe(0)
+    expect(discovered.droppedOut).toEqual([])
+    expect(discovered.skippedForBudget).toEqual([])
+    // Nothing on the stage's result records that a model failed.
+    expect(discovered.warnings.some((warning) => warning.code === "model-dropped-out")).toBe(false)
+  })
+
+  test("A BUDGET SKIP ISSUED NO TURN: a slot is listed only when its first attempt was refused", async () => {
+    // The refused-retry half is pinned above ("failed once, and the budget
+    // refused the retry"): a slot whose retry is refused is a drop-out, never a
+    // skip. Here every pool slot is refused at its first attempt.
+    const admission = fakeAdmission((request) => !request.slot.startsWith("discovery-lens-"))
+    const roster = rosterOf(1, [["anthropic", "claude-sonnet-4-5"]], ["security"])
+    const backend = new FakeBackend({
+      "discovery-lens-security": [{ kind: "ok", value: { findings: [] } }],
+    })
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      resolveLens: fakeResolveLens,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(),
+      admission: admission.admission,
+    })
+    expect(discovered.skippedForBudget).toEqual(["discovery-1"])
+    expect(backend.calls.map((call) => call.slot)).not.toContain("discovery-1")
+    // BUT A LENS SLOT CAN STILL BE ASKED on this run: the admission is asked per
+    // slot. The pool answered nothing and nothing dropped out, which is the
+    // output's budget-only branch, so its headline cannot say no model was asked.
+    expect(backend.calls.map((call) => call.slot)).toEqual(["discovery-lens-security"])
+    expect(discovered.answered).toBe(0)
+    expect(discovered.droppedOut).toEqual([])
+  })
+})

@@ -232,7 +232,8 @@ describe("the deadline terminates, and says which of the two facts it got", () =
       expect(outcome.pid).toBe(9191)
       // The operator recovers by checking this process, so the reason has to say
       // it may still be running rather than that it stopped.
-      expect(outcome.why).toContain("may still be running")
+      expect(outcome.why).toContain("TERMINATION IS UNCONFIRMED and process 9191 may still be running")
+      expect(outcome.why).not.toContain("seen to end")
     }
   })
 })

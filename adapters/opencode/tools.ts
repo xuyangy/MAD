@@ -74,7 +74,7 @@
  *
  * A TIMEOUT IS NOT AN EXIT. A blame MAD stopped waiting for carries NO exit code
  * into the evidence — not a real one, and certainly not a synthesized `124`.
- * Whatever the OS reported about the killed process is preserved in the failure
+ * Whatever the OS reported for the process is preserved in the failure
  * TEXT, where a reader can use it, and never in the structured evidence, where
  * `core/judge/blame.ts` would have to decide what it meant. The reading is
  * `unknown`, which is what it is.

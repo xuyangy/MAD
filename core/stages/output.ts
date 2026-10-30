@@ -265,6 +265,50 @@ export function rankFindings(findings: Finding[]): Finding[] {
  * than replacing it: `source: lens` is the field, and WHICH lens found it is the
  * fact AD-17(e) actually requires.
  */
+/**
+ * CAP-5 — WHICH REFUSAL LEFT A SLOT UNASKED, AS THE RECORD STATES IT.
+ * `skippedForBudget` holds every slot whose first attempt was refused, by the
+ * run's own budget OR by an experiment's admission (`core/stages/discover.ts`).
+ * The `discovery-truncated` warning's `detail.admission` names, by slot, the
+ * ones the admission refused; every other listed slot was refused by the
+ * budget. A record without that detail had no admission refusal.
+ */
+function admissionRefusedSlots(record: RunRecord): Set<string> {
+  const refused = new Set<string>()
+  for (const warning of record.warnings) {
+    if (warning.code !== "discovery-truncated") continue
+    const admission = warning.detail?.admission
+    if (typeof admission === "object" && admission !== null) {
+      for (const slot of Object.keys(admission)) refused.add(slot)
+    }
+  }
+  return refused
+}
+
+type SkipCause = "budget" | "admission" | "mixed"
+
+function skipCauseOf(record: RunRecord, slots: readonly string[]): SkipCause {
+  const admission = admissionRefusedSlots(record)
+  const byAdmission = slots.filter((slot) => admission.has(slot)).length
+  if (byAdmission === 0) return "budget"
+  return byAdmission === slots.length ? "admission" : "mixed"
+}
+
+/** Why the slots were never asked, as a clause that follows "were never asked". */
+function whyUnasked(cause: SkipCause): string {
+  switch (cause) {
+    case "budget":
+      return "to stay inside the token budget"
+    case "admission":
+      return "because the experiment's admission refused them (the discovery-truncated warning says why)"
+    case "mixed":
+      return (
+        "to stay inside the token budget or because the experiment's admission refused them (each slot's " +
+        "NEVER ASKED mark in the ROSTER says which)"
+      )
+  }
+}
+
 function renderRaisedBy(finding: Finding): string {
   if (finding.source !== "lens") return `      raised by: ${finding.author}  (source: pool)`
   return (
@@ -1295,6 +1339,9 @@ export function renderRunRecord(record: RunRecord): string {
   // pool slot reading as coverage that ran — the same false statement F4 was
   // raised to remove, one list up.
   const skipped = new Set(record.skippedForBudget ?? [])
+  const refusedByAdmission = admissionRefusedSlots(record)
+  const refuser = (slot: string): string =>
+    refusedByAdmission.has(slot) ? "the experiment's admission refused this slot" : "the budget refused this slot"
   for (const slot of record.roster.slots) {
     const lineage = slot.lineage.verified ? slot.lineage.label : "lineage unverified"
     const also =
@@ -1302,7 +1349,7 @@ export function renderRunRecord(record: RunRecord): string {
         ? ` [also reachable via ${slot.alsoAvailableVia.join(", ")}; deduped, one slot only]`
         : ""
     const refused = skipped.has(slot.slot)
-      ? ` — NEVER ASKED: the budget refused this slot, so it contributed no coverage`
+      ? ` — NEVER ASKED: ${refuser(slot.slot)}, so it contributed no coverage`
       : ""
     lines.push(`  ${slot.slot}: ${slot.providerId}/${slot.modelId} — ${lineage}${also}${refused}`)
   }
@@ -1323,7 +1370,7 @@ export function renderRunRecord(record: RunRecord): string {
     if (skipped.has(lensSlot.slot)) {
       lines.push(
         `  ${lensSlot.slot}: ${lensSlot.providerId}/${lensSlot.modelId} — lens \`${lensSlot.lens}\`, ` +
-          `NEVER ASKED: the budget refused this slot, so it contributed no coverage${generated}`,
+          `NEVER ASKED: ${refuser(lensSlot.slot)}, so it contributed no coverage${generated}`,
       )
       continue
     }
@@ -1408,6 +1455,8 @@ export function renderRunRecord(record: RunRecord): string {
   // discovery stage already raised is the signal (AD-6b).
   const anyDroppedOut = record.warnings.some((warning) => warning.code === "model-dropped-out")
   const skippedForBudget = record.skippedForBudget?.length ?? 0
+  // CAP-5 — the cause the record supports for those slots, never assumed to be the budget.
+  const unaskedBecause = whyUnasked(skipCauseOf(record, record.skippedForBudget ?? []))
   // Ledger #7 — A THIRD, SEPARATE CAUSE: the host reported a POOL slot's
   // discovery turn aborted. Counted off the discovery stage's
   // `turn-host-aborted` warnings for roster pool slots only, so a lens turn or a
@@ -1437,8 +1486,7 @@ export function renderRunRecord(record: RunRecord): string {
     // IT" ARE A THIRD PAIR OF OPPOSITE FACTS. Until this branch existed, a run
     // the user cancelled before any slot answered printed "Every slot in the
     // roster failed or dropped out" three lines below a `run-cancelled` warning
-    // saying no model failed — the report contradicting itself, with the half a
-    // reader reaches later blaming providers that were working. That is the
+    // — the report blaming providers that were never asked. That is the
     // exact false degradation report story 7A exists to remove, and it was one
     // render further down than the story looked. `record.cancelled` is checked
     // FIRST because a stop explains the empty roster completely: a slot that was
@@ -1452,14 +1500,16 @@ export function renderRunRecord(record: RunRecord): string {
         // warnings report what did fail.
         lines.push(`  The run stopped during the ${record.cancelled.stage} stage.`)
       } else if (!anyDroppedOut) {
+        // CAP-5 (#160) — NO DROP-OUT IS NOT NO FAILURE. A first attempt can
+        // fail and its retry be cancelled by the stop, which leaves no drop-out
+        // on the record; the warnings report what MAD recorded.
         lines.push(
-          `  No model failed and no model was retried; the run stopped during the ` +
-            `${record.cancelled.stage} stage.`,
+          `  The run stopped during the ${record.cancelled.stage} stage; MAD started no turn and retried no ` +
+            `model after it observed the stop.`,
         )
       } else {
-        // Ledger #7 review — A STOP DOES NOT ERASE A FAILURE. "No model failed"
-        // printed under a `model-dropped-out` warning is the report contradicting
-        // itself; the stop is named, and so is the failure, each as its own fact.
+        // Ledger #7 review — A STOP DOES NOT ERASE A FAILURE. The stop is named,
+        // and so is the failure, each as its own fact.
         lines.push(`  The run stopped during the ${record.cancelled.stage} stage.`)
         const droppedOutPool = discoverySlotsWith("model-dropped-out")
         lines.push(
@@ -1475,7 +1525,7 @@ export function renderRunRecord(record: RunRecord): string {
       // Nor a budget skip: those slots were never asked for a reason of their own.
       if (skippedForBudget > 0) {
         lines.push(
-          `  ${skippedForBudget} slot(s) were never asked at all, to stay inside the token budget.`,
+          `  ${skippedForBudget} slot(s) were never asked at all, ${unaskedBecause}.`,
         )
       }
     } else if (hostAbortedPool > 0 && record.answered === 0) {
@@ -1529,39 +1579,87 @@ export function renderRunRecord(record: RunRecord): string {
       }
       if (skippedForBudget > 0) {
         lines.push(
-          `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
-            `token budget — those were not skipped because a model failed.`,
+          `  ${skippedForBudget} further slot(s) were never asked at all, ${unaskedBecause} — those were ` +
+            `not skipped because a model failed.`,
         )
       }
     } else if (skippedForBudget > 0 && record.answered === 0 && !anyDroppedOut) {
-      // AD-15 / AD-6 (story 8) — THE SAME DEFECT, RE-OPENED BY A SECOND CAUSE.
-      // 7A fixed this branch for cancellation and the fix was cause-specific:
-      // once the budget can refuse a discovery turn, a run whose whole roster
-      // went unasked lands back on "Every slot in the roster failed or dropped
-      // out" — naming providers that never failed, three lines under a
-      // `discovery-truncated` warning saying no model failed. Ordered AFTER the
+      // AD-15 / AD-6 (story 8) — A RUN WHOSE POOL THE BUDGET LEFT UNASKED. Without
+      // this branch it would land on "Every slot in the roster failed or dropped
+      // out", naming providers that never failed. Ordered AFTER the
       // cancellation branch (a stop explains an empty roster completely and is
       // the user's own action) and BEFORE the bare `answered === 0`, which is
       // the branch that would otherwise catch it.
       //
-      // `!anyDroppedOut` IS LOAD-BEARING (code review 2026-09-06, four verifiers
-      // reproduced it end to end). Without it this branch fires on a MIXED run —
+      // `!anyDroppedOut` IS LOAD-BEARING (code review 2026-09-06). A MIXED run —
       // one slot burns both attempts and blows discovery's share, the rest are
-      // then refused — and prints "No model failed and no model was retried"
-      // three lines under a `model-dropped-out` warning naming the model that
-      // did. Worse, the causality is backwards: the drop-out is what exhausted
-      // the share that refused the others. A stop explains an empty roster
-      // completely; the budget explains only the slots it lists, which is why
-      // this guard is narrower than the cancellation guard above it.
+      // then refused — falls through to the branch below and is reported
+      // ADDITIVELY, with the drop-out first because it is what exhausted the
+      // share that refused the others.
       //
-      // The mixed case falls through to the branch below and is reported
-      // ADDITIVELY, which is the shape `core/stages/discover.ts` already chose
-      // for `denominator-reduced`'s two clauses in this same diff.
-      lines.push("  NOTHING WAS EXAMINED — the budget ran out before any model was asked.")
-      lines.push(
-        `  No model failed and no model was retried; ${skippedForBudget} slot(s) ` +
-          `were skipped to stay inside the token budget.`,
-      )
+      // CAP-5 (#160) — ONLY WHAT THE RECORD SUPPORTS. A slot is listed in
+      // `skippedForBudget` only when its FIRST attempt was refused
+      // (`core/stages/discover.ts` `runWithOneRetry`; a refused retry is a
+      // drop-out), so a listed slot issued no turn. The record says nothing
+      // about failures it did not keep, so this branch claims none and claims no
+      // absence of them. A LENS slot can still have been asked here: the
+      // experiment's admission is asked per slot and may refuse the pool and
+      // admit a lens. "Before any model was asked" is said only when every
+      // roster slot, pool and lens, is listed.
+      const skippedSlots = new Set(record.skippedForBudget ?? [])
+      const poolSkipped = record.roster.slots.filter((rosterSlot) => skippedSlots.has(rosterSlot.slot)).length
+      const lensSkipped = record.roster.lensSlots.filter((lensSlot) => skippedSlots.has(lensSlot.slot)).length
+      const poolNotSkipped = record.roster.slots.length - poolSkipped
+      const lensNotSkipped = record.roster.lensSlots.filter((lensSlot) => !skippedSlots.has(lensSlot.slot))
+      const cause = skipCauseOf(record, record.skippedForBudget ?? [])
+      const skippedLine =
+        `  ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) were never asked, ${whyUnasked(cause)}.`
+      if (poolNotSkipped === 0 && lensNotSkipped.length === 0) {
+        lines.push(
+          cause === "budget"
+            ? "  NOTHING WAS EXAMINED — the budget ran out before any model was asked."
+            : cause === "admission"
+              ? "  NOTHING WAS EXAMINED — the experiment's admission refused every slot before any model was asked."
+              : "  NOTHING WAS EXAMINED — the budget or the experiment's admission refused every slot before any " +
+                "model was asked.",
+        )
+        lines.push(skippedLine)
+      } else {
+        lines.push("  NO POOL MODEL ANSWERED — this is not a clean review; no pool model examined the change.")
+        lines.push(skippedLine)
+        if (poolNotSkipped > 0) {
+          lines.push(`  ${poolNotSkipped} pool slot(s) were not skipped and did not answer; see the warnings above.`)
+        }
+        if (lensNotSkipped.length > 0) {
+          // No drop-out reaches this branch, and a stop takes the branch above,
+          // so a lens slot that was not skipped either answered or had its turn
+          // reported aborted by the host.
+          const lensHostAborted = lensNotSkipped.filter((lensSlot) =>
+            record.warnings.some(
+              (warning) =>
+                warning.stage === "discover" &&
+                warning.code === "turn-host-aborted" &&
+                warning.detail?.slot === lensSlot.slot,
+            ),
+          ).length
+          const lensAnswered = lensNotSkipped.length - lensHostAborted
+          const lensRaised = record.pool.filter((finding) => finding.source === "lens").length
+          if (lensAnswered > 0) {
+            lines.push(
+              lensRaised === 0
+                ? `  ${lensAnswered} lens slot(s) were asked, answered and raised nothing.`
+                : `  ${lensAnswered} lens slot(s) were asked and answered, raising ${lensRaised} finding(s); ` +
+                    `see the sections below for what became of them.`,
+            )
+          }
+          if (lensHostAborted > 0) {
+            lines.push(
+              `  ${lensHostAborted} lens slot(s) were asked and did not answer: the host reported their turn(s) ` +
+                `aborted; see the warnings above.`,
+            )
+          }
+        }
+      }
     } else if (record.answered === 0) {
       lines.push("  NO MODEL ANSWERED — this is not a clean review.")
       lines.push("  Every slot in the roster failed or dropped out; nothing was examined.")
@@ -1571,8 +1669,8 @@ export function renderRunRecord(record: RunRecord): string {
         // the budget at once, and the order matters to a reader: the drop-out
         // came first and is what left nothing for the rest.
         lines.push(
-          `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
-            `token budget — those were not skipped because a model failed.`,
+          `  ${skippedForBudget} further slot(s) were never asked at all, ${unaskedBecause} — those were ` +
+            `not skipped because a model failed.`,
         )
       }
     } else if (record.cancelled) {
@@ -1607,8 +1705,8 @@ export function renderRunRecord(record: RunRecord): string {
     // its own budget clause with the drop-out ordering a reader needs there.
     if (skippedForBudget > 0 && record.answered > 0) {
       lines.push(
-        `  ${skippedForBudget} further slot(s) were never asked at all, to stay inside the ` +
-          `token budget — so this is not a clean review of the whole roster.`,
+        `  ${skippedForBudget} further slot(s) were never asked at all, ${unaskedBecause} — so this is ` +
+          `not a clean review of the whole roster.`,
       )
     }
     // Ledger #7 — the same bound, for the host-aborted cause, in its own clause.
@@ -2012,9 +2110,16 @@ function budgetBlock(record: RunRecord): string[] {
       skippedLenses > 0 && skippedPool > 0
         ? ` (${skippedPool} pool, ${skippedLenses} lens)`
         : ""
+    const cause = skipCauseOf(record, record.skippedForBudget)
+    const why =
+      cause === "budget"
+        ? "to stay inside discovery's share"
+        : cause === "admission"
+          ? "because the experiment's admission refused them"
+          : "to stay inside discovery's share or because the experiment's admission refused them"
     lines.push(
-      `  ${record.skippedForBudget.length} discovery slot(s)${split} were never asked, to stay inside ` +
-        `discovery's share — those slots were not skipped because a model failed.`,
+      `  ${record.skippedForBudget.length} discovery slot(s)${split} were never asked, ${why} — those slots ` +
+        `were not skipped because a model failed.`,
     )
   }
   return lines
