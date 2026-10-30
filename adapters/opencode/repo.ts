@@ -48,6 +48,24 @@ import type { ChangeSet, Repo } from "../../core/ports/repo.ts"
 import { deadlineProblem } from "../../core/ports/observation-wait.ts"
 
 import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame } from "./blame-exec.ts"
+import {
+  inputReason,
+  lineSafeName,
+  parseNulNames,
+  precheckUntracked,
+  type InputFs,
+  type InputProblem,
+} from "./change-input.ts"
+import {
+  configuredFilters,
+  FILTER_PREFLIGHT,
+  filterRefusalReason,
+  readOnlyGitArgv,
+  readOnlyGitEnv,
+  unsupportedTargetReason,
+  usesReadOnlyPolicy,
+  type GitReadPolicy,
+} from "./git-read-policy.ts"
 
 /** The total execution budget of one `change()`. An operational limit, not a measured latency. */
 export const DEFAULT_CHANGE_READ_BUDGET_MS = 60_000
@@ -57,6 +75,10 @@ export const DEFAULT_CHANGE_READ_CLEANUP_MS = 5_000
 
 export interface OpencodeRepoOptions {
   worktree: string
+  /** `"read-only"` unless given; see `GitReadPolicy`. */
+  gitReadPolicy?: GitReadPolicy
+  /** CAP-4 — the precheck's file-system calls. Test seam; the default is `node:fs`. */
+  inputFs?: InputFs
   /**
    * How each git read is started. Defaults to the launcher's `Bun.spawn`: the
    * inherited environment with `PWD` repaired, piped output and stdin
@@ -78,9 +100,43 @@ export interface OpencodeRepoOptions {
  * a commit, or omitted for the working tree plus the index.
  */
 export class GitError extends Error {
+  /** What git said, trimmed, or a fixed phrase when it said nothing. */
+  readonly detail: string
   constructor(command: string, stderr: string) {
-    super(`${command} failed: ${stderr.trim() || "git reported no detail"}`)
+    const detail = stderr.trim() || "git reported no detail"
+    super(`${command} failed: ${detail}`)
     this.name = "GitError"
+    this.detail = detail
+  }
+}
+
+/**
+ * The read refused its input before running anything that could act on it: a
+ * target git would parse as an option, or a repository whose config defines
+ * executable filters (`./git-read-policy.ts`). Neither is a git failure, and
+ * neither is a stopped read.
+ */
+export class ChangeReadRefused extends Error {
+  constructor(
+    readonly refusal: "unsupported-target" | "unsupported-config" | "unsupported-input",
+    /** The reason, as one clause with no closing full stop. */
+    readonly why: string,
+  ) {
+    super(`MAD refused to read this change: ${why}.`)
+    this.name = "ChangeReadRefused"
+  }
+}
+
+/**
+ * The filter preflight returned, but not with an answer: git could not read
+ * the config (a malformed config file, say), or printed something that is not
+ * a list of config keys. No content was read. A `GitError`, so a caller that
+ * only knows `GitError` still sees a failed git read.
+ */
+export class FilterPreflightFailed extends GitError {
+  constructor(detail: string) {
+    super("git config (filter preflight)", detail)
+    this.name = "FilterPreflightFailed"
   }
 }
 
@@ -106,6 +162,18 @@ export type ChangeReadStopKind =
   | "stderr-unread"
   /** The worktree is quarantined, so the read was not launched. */
   | "quarantined"
+  /**
+   * CAP-5 — the caller's stop. Nothing was started after it was seen; a read
+   * it caught running was killed under the bounded cleanup, whose outcome
+   * `cleanup` reports.
+   */
+  | "cancelled"
+  /**
+   * CAP-4 — the file-system check of an untracked entry did not answer within
+   * the budget. No process ran; the check may still complete, and anything it
+   * opens is closed.
+   */
+  | "check-unanswered"
 
 /**
  * Whether the stopping read's process and pipes were accounted for:
@@ -126,6 +194,7 @@ export interface ChangeReadStoppedFacts {
   operation: string
   stop: ChangeReadStopKind
   why: string
+  /** Git reads that returned cleanly before this one, the filter preflight included. */
   readsCompleted: number
   cleanup: ChangeReadCleanup
   pid?: number
@@ -133,6 +202,12 @@ export interface ChangeReadStoppedFacts {
   signal?: string
   /** Present when the stop is `quarantined`: the fact that latched it. */
   quarantine?: ChangeReadQuarantine
+  /**
+   * How much of the change's text MAD had read when this read stopped: `some`
+   * once `git diff` was accepted, `possibly` once it was launched but not
+   * accepted (its output may have been read and not used). Absent: none.
+   */
+  contentRead?: "some" | "possibly"
 }
 
 /**
@@ -156,7 +231,15 @@ export class ChangeReadStopped extends Error {
   constructor(facts: ChangeReadStoppedFacts) {
     super(
       `${facts.operation} stopped (${facts.stop}) after ${facts.readsCompleted} completed read(s): ${facts.why}. ` +
-        `Cleanup: ${cleanupWords(facts.cleanup)}. No change was read.`,
+        `Cleanup: ${cleanupWords(facts.cleanup, facts.status !== undefined || facts.signal !== undefined)}. ${
+          facts.operation === "change read"
+            ? "The change was read, but none of it was returned for review."
+            : facts.contentRead === "some"
+              ? "Part of the change was read, but none of it was returned for review."
+              : facts.contentRead === "possibly"
+                ? "Some of the change may have been read, but none of it was returned for review."
+                : "No change was read."
+        }`,
     )
     this.name = "ChangeReadStopped"
     this.operation = facts.operation
@@ -170,12 +253,15 @@ export class ChangeReadStopped extends Error {
   }
 }
 
-function cleanupWords(cleanup: ChangeReadCleanup): string {
+function cleanupWords(cleanup: ChangeReadCleanup, exitObserved: boolean): string {
   switch (cleanup) {
     case "confirmed":
       return "confirmed — the process and its pipes were accounted for"
     case "unresolved":
-      return "UNRESOLVED — the process may still be running"
+      // An observed exit or signal says the process ended; what it left holding its output did not.
+      return exitObserved
+        ? "UNRESOLVED — the process ended, but something holding its output may still be running"
+        : "UNRESOLVED — the process may still be running"
     case "not-applicable":
       return "not applicable — no cleanup was needed"
   }
@@ -203,6 +289,7 @@ function latch(worktree: string, fact: ChangeReadQuarantine): void {
 
 export function opencodeRepo(options: OpencodeRepoOptions): Repo {
   const worktree = options.worktree
+  const readOnly = usesReadOnlyPolicy(options.gitReadPolicy)
   const budgetMs = options.readBudgetMs ?? DEFAULT_CHANGE_READ_BUDGET_MS
   const cleanupMs = options.cleanupMs ?? DEFAULT_CHANGE_READ_CLEANUP_MS
   const now = options.now ?? (() => performance.now())
@@ -222,18 +309,57 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
   return {
     root: () => worktree,
 
-    async change(target?: string): Promise<ChangeSet> {
+    async change(target?: string, signal?: AbortSignal): Promise<ChangeSet> {
       const start = now()
       let readsCompleted = 0
+      let contentRead: ChangeReadStoppedFacts["contentRead"]
 
-      const stopped = (operation: string, facts: Omit<ChangeReadStoppedFacts, "operation" | "readsCompleted">) =>
-        new ChangeReadStopped({ operation, readsCompleted, ...facts })
+      const stopped = (
+        operation: string,
+        facts: Omit<ChangeReadStoppedFacts, "operation" | "readsCompleted" | "contentRead">,
+      ) =>
+        new ChangeReadStopped({ operation, readsCompleted, ...(contentRead === undefined ? {} : { contentRead }), ...facts })
+
+      // CAP-5 — A STOP THAT LANDED AS THE LAST READ FINISHED is not hidden
+      // behind the result, under either read policy: the change was read, and
+      // nothing reviews it.
+      const unlessStopped = (change: ChangeSet): ChangeSet => {
+        if (signal?.aborted) {
+          throw stopped("change read", {
+            stop: "cancelled",
+            cleanup: "not-applicable",
+            why: "the review was stopped as the change read finished, so the change was read but nothing reviews it",
+          })
+        }
+        return change
+      }
 
       /**
-       * One bounded git read. `acceptOne` is for `--no-index`, which exits 1
-       * whenever the files differ.
+       * One bounded git read under the read policy (`./git-read-policy.ts`).
+       * `acceptOne` is for `--no-index`, which exits 1 whenever the files
+       * differ, and for the filter preflight, which exits 1 when nothing
+       * matches. `argv` is the subcommand; the policy supplies `git` and its
+       * overrides.
        */
       async function git(operation: string, argv: string[], acceptOne = false): Promise<string> {
+        return (await read(operation, argv, acceptOne)).stdout
+      }
+
+      async function read(
+        operation: string,
+        argv: string[],
+        acceptOne: boolean,
+        keepLeadingBom = false,
+      ): Promise<{ stdout: string; exitCode: number }> {
+        // CAP-5 — THE CALLER'S STOP, before anything else: nothing starts after it.
+        if (signal?.aborted) {
+          throw stopped(operation, {
+            stop: "cancelled",
+            cleanup: "not-applicable",
+            why: `the review was stopped before ${operation}, so nothing was launched`,
+          })
+        }
+
         // IMMEDIATELY BEFORE EVERY SPAWN: another invocation may have latched
         // this worktree while this one was between reads.
         const latched = UNRESOLVED_CHANGE_READ.get(worktree)
@@ -259,13 +385,20 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         }
 
         const outcome = await runBoundedBlame({
-          argv: ["git", ...argv],
+          ...(readOnly ? { argv: readOnlyGitArgv(argv), env: readOnlyGitEnv(process.env) } : { argv: ["git", ...argv] }),
           cwd: worktree,
           deadlineMs: remaining,
           cleanupMs,
+          ...(keepLeadingBom ? { keepLeadingBom } : {}),
+          ...(signal === undefined ? {} : { signal }),
           ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
         })
-        const stdout = accept(operation, outcome, acceptOne)
+        // A LAUNCHED `git diff` MAY HAVE PASSED CHANGE TEXT TO MAD before it
+        // stopped or failed, so from here "No change was read" is not claimed.
+        const launched =
+          outcome.kind !== "refused" && outcome.kind !== "launch-failed" && !(outcome.kind === "stopped" && !outcome.launched)
+        if (operation === "git diff" && launched) contentRead ??= "possibly"
+        const accepted = accept(operation, outcome, acceptOne)
 
         // THE FINAL-READ BOUNDARY. A read that came back after the budget had
         // passed is not used, the last one included. The launcher already
@@ -282,11 +415,15 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
           })
         }
         readsCompleted += 1
-        return stdout
+        return accepted
       }
 
       /** Map one launcher outcome to stdout, or throw. Checked in the documented order. */
-      function accept(operation: string, outcome: BlameExecOutcome, acceptOne: boolean): string {
+      function accept(
+        operation: string,
+        outcome: BlameExecOutcome,
+        acceptOne: boolean,
+      ): { stdout: string; exitCode: number } {
         switch (outcome.kind) {
           case "refused":
           case "launch-failed":
@@ -318,6 +455,32 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
               cleanup: "unresolved",
               why: outcome.why,
               ...pidOf(outcome.pid),
+            })
+          case "stopped":
+            // CAP-5 — the caller's stop, before or during this read.
+            if (!outcome.launched) {
+              throw stopped(operation, {
+                stop: "cancelled",
+                cleanup: "not-applicable",
+                why: `the review was stopped before ${operation}, so nothing was launched`,
+              })
+            }
+            if (outcome.cleanup.kind === "unresolved") {
+              latch(worktree, { operation, why: outcome.why, ...pidOf(outcome.pid) })
+              throw stopped(operation, {
+                stop: "cancelled",
+                cleanup: "unresolved",
+                why: outcome.why,
+                ...pidOf(outcome.pid),
+                ...(outcome.cleanup.observed === undefined ? {} : observedOf(outcome.cleanup.observed)),
+              })
+            }
+            throw stopped(operation, {
+              stop: "cancelled",
+              cleanup: "confirmed",
+              why: outcome.why,
+              ...pidOf(outcome.pid),
+              ...observedOf(outcome.cleanup.observed),
             })
           case "returned":
             break
@@ -357,17 +520,153 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         }
 
         // 4. A clean return.
-        return outcome.stdout
+        return { stdout: outcome.stdout, exitCode: outcome.exitCode }
       }
 
-      // `--` terminates option parsing, so a target shaped like a flag is
-      // treated as a revision and rejected by git rather than consumed by it.
+      /** CAP-4 — an input refusal, naming the entry line-safely with a fixed reason. */
+      const refuseInput = (problem: InputProblem, name?: string): ChangeReadRefused =>
+        new ChangeReadRefused(
+          "unsupported-input",
+          name === undefined ? inputReason(problem) : `the untracked entry ${lineSafeName(name)}: ${inputReason(problem)}`,
+        )
+
+      /**
+       * CAP-4 — the names and the untracked files under the read-only policy:
+       * `-z` names parsed strictly, each untracked entry checked before git
+       * reads it, and every read validated. Anything that fails refuses the
+       * whole change; nothing is skipped.
+       */
+      async function readInputStrictly(diff: string): Promise<{ files: string[]; untrackedDiff: string }> {
+        // A name may start with U+FEFF, which the default decoding drops, so
+        // both listings keep it.
+        const listed = parseNulNames(
+          (await read("git diff --name-only", ["diff", "--name-only", "-z", ...range], false, true)).stdout,
+        )
+        if ("problem" in listed) throw refuseInput(listed.problem)
+        const files = listed.names
+        // LISTED BUT EMPTY is missing material, never "nothing to review".
+        if (files.length > 0 && diff.length === 0) throw refuseInput("no-change-text")
+
+        // `git diff` cannot see untracked files, so a change made entirely of
+        // new files would otherwise review as empty. An explicit ref range is
+        // history and has none.
+        let untrackedDiff = ""
+        if (target) return { files, untrackedDiff }
+        const others = parseNulNames(
+          (await read("git ls-files", ["ls-files", "-z", "--others", "--exclude-standard"], false, true)).stdout,
+        )
+        if ("problem" in others) throw refuseInput(others.problem)
+
+        for (const file of others.names) {
+          const operation = `check of untracked entry ${lineSafeName(file)}`
+          const waitMs = Math.floor(budgetMs - (now() - start))
+          if (waitMs < 1) {
+            throw stopped(operation, {
+              stop: "budget-exhausted",
+              cleanup: "not-applicable",
+              why: `budget exhausted before ${operation}: the ${budgetMs}ms change read budget was spent, so nothing was checked`,
+            })
+          }
+          if (signal?.aborted) {
+            throw stopped(operation, {
+              stop: "cancelled",
+              cleanup: "not-applicable",
+              why: `the review was stopped before ${operation}, so nothing was checked`,
+            })
+          }
+          const checked = await precheckUntracked(worktree, file, waitMs, options.inputFs, signal)
+          if ("stopped" in checked) {
+            throw stopped(operation, {
+              stop: "cancelled",
+              cleanup: "not-applicable",
+              why:
+                `the review was stopped during ${operation}. MAD stopped waiting and started nothing further; ` +
+                `an operation already started may still complete, and MAD attempts to close any file it opened`,
+            })
+          }
+          if ("unanswered" in checked) {
+            throw stopped(operation, {
+              stop: "check-unanswered",
+              cleanup: "not-applicable",
+              why:
+                `the file system did not answer within the ${waitMs}ms left of the ${budgetMs}ms change read ` +
+                `budget. MAD stopped waiting and started nothing further; an operation already started may still ` +
+                `complete, and MAD attempts to close any file it opened`,
+            })
+          }
+          if ("problem" in checked) throw refuseInput(checked.problem, file)
+
+          let read: { stdout: string; exitCode: number }
+          try {
+            read = await readNoIndex(file)
+          } catch (error) {
+            // Git refused this one file: its read, not a bad ref. A stopped
+            // read stays a stopped read.
+            if (error instanceof GitError) throw refuseInput("git-unread", file)
+            throw error
+          }
+          // A listed entry with no output vanished or changed after its
+          // check: an empty file still has a header.
+          if (read.stdout.length === 0) throw refuseInput("changed", file)
+          untrackedDiff += read.stdout
+          files.push(file)
+        }
+        return { files, untrackedDiff }
+      }
+
+      /** `--no-index` against /dev/null, which exits 1 whenever the files differ. */
+      const readNoIndex = (file: string) =>
+        read(
+          `git diff --no-index -- /dev/null ${lineSafeName(file)}`,
+          ["diff", "--unified=8", "--no-index", "--", "/dev/null", file],
+          true,
+        )
+
+      // A target git would parse as an option is refused before anything runs:
+      // the target sits before `--`, where git still reads options, and
+      // `--output=<path>` would write a file.
+      const targetProblem = unsupportedTargetReason(target)
+      if (targetProblem !== undefined) throw new ChangeReadRefused("unsupported-target", targetProblem)
+
+      // THE FILTER PREFLIGHT, before any read of content. Exit 1 is "none
+      // configured"; anything that is neither that nor a parsable match is an
+      // error, never "none".
+      // A preflight that STOPPED is a stopped read like any other.
+      if (readOnly) {
+        let preflight: { stdout: string; exitCode: number }
+        try {
+          preflight = await read("git config (filter preflight)", [...FILTER_PREFLIGHT], true)
+        } catch (error) {
+          if (error instanceof GitError) throw new FilterPreflightFailed(error.detail)
+          throw error
+        }
+        const filters = configuredFilters(preflight.exitCode, preflight.stdout)
+        if (filters.kind === "configured") {
+          throw new ChangeReadRefused("unsupported-config", filterRefusalReason(filters.drivers))
+        }
+        if (filters.kind === "unknown") {
+          throw new FilterPreflightFailed("its output could not be read as config keys")
+        }
+      }
+
       const range = target ? [target, "--"] : ["HEAD", "--"]
+      // Under the read policy a submodule is read as its commit pointer only,
+      // and the description says so, because "no change" and a review both
+      // repeat it to the user.
+      const submodules = "submodules as commit pointers only, their uncommitted contents not read"
       const description = target
-        ? `git diff ${target}`
-        : "working tree (git diff HEAD, plus untracked files)"
+        ? `git diff ${target}${readOnly ? ` (${submodules})` : ""}`
+        : `working tree (git diff HEAD, plus untracked files${readOnly ? `; ${submodules}` : ""})`
 
       const diff = await git("git diff", ["diff", "--unified=8", ...range])
+      contentRead = "some"
+      if (readOnly) {
+        const { files, untrackedDiff } = await readInputStrictly(diff)
+        return unlessStopped({ description, files, diff: diff + untrackedDiff })
+      }
+
+      // UNDER `inherit`, the historical parse, byte for byte: the harness
+      // keeps what it measured (CAP-4 applies to the read-only policy only).
       const nameOnly = await git("git diff --name-only", ["diff", "--name-only", ...range])
 
       const files = nameOnly
@@ -399,7 +698,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         }
       }
 
-      return { description, files, diff: diff + untrackedDiff }
+      return unlessStopped({ description, files, diff: diff + untrackedDiff })
     },
   }
 }

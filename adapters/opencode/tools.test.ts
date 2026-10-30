@@ -24,6 +24,8 @@
 import { describe, expect, test } from "bun:test"
 
 import { runBoundedBlame, type SpawnBlame, type SpawnedBlame } from "./blame-exec.ts"
+import { readOnlyGitArgv } from "./git-read-policy.ts"
+import { answeringPreflight } from "./test-support/preflight.ts"
 import { blameFailureOutcome } from "../../core/judge/blame.ts"
 import { toolFailureEvidence } from "../../core/ports/tool-observation.ts"
 import { blameQuarantineFor, clearBlameQuarantineForTests, latchBlameQuarantine } from "./plugin.ts"
@@ -123,7 +125,14 @@ function fakeSpawn(replies: { match: string; reply: ProcessReply }[]) {
     return child
   }
 
-  return { spawn, launches, killed, settleExit: (code: number) => settleExit(code) }
+  return {
+    spawn: answeringPreflight(spawn),
+    /** The same fake with the filter preflight left to `replies`, for tests about the preflight. */
+    seesPreflight: spawn,
+    launches,
+    killed,
+    settleExit: (code: number) => settleExit(code),
+  }
 }
 
 /** A stream that yields a prefix and then ERRORS, as a torn read does. */
@@ -181,7 +190,8 @@ describe("opencodeTools.blame", () => {
 
     expect(out).toBe(PORCELAIN)
     expect(launches).toHaveLength(1)
-    expect(launches[0]!.cmd).toEqual(["git", "blame", "-L", "12,12", "--porcelain", "--", "src/pay.ts"])
+    // Under the read policy's argv (`./git-read-policy.ts`).
+    expect(launches[0]!.cmd).toEqual(readOnlyGitArgv(["blame", "-L", "12,12", "--porcelain", "--", "src/pay.ts"]))
     // THE WORKTREE IS AN EXPLICIT ARGUMENT TO THE LAUNCH, rather than a binding
     // retained on a shared shell object — which is what keeps two adapters in one
     // process from taking each other's directory.
@@ -286,7 +296,7 @@ describe("opencodeTools.blame", () => {
 describe("bounded termination and the quarantine it can leave behind (story 2-7c)", () => {
   test("A BLAME THAT DOES NOT RETURN IS KILLED, and the failure carries NO exit code", async () => {
     const { spawn, killed } = fakeSpawn([{ match: "blame", reply: { hang: true } }])
-    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5, blameCleanupTimeoutMs: 50 })
+    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5, blameCleanupTimeoutMs: 50, now: () => 0 })
 
     const error = await rejection(tools.blame("src/pay.ts", 1, 1))
 
@@ -472,7 +482,11 @@ describe("T6 / AD-16 — read-only BY CONSTRUCTION, asserted structurally", () =
     const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
     await opencodeTools({ worktree: "/repo", spawn }).blame("src/pay.ts", 1, 4)
     expect(launches).toHaveLength(1)
-    expect(launches[0]!.cmd.slice(0, 2)).toEqual(["git", "blame"])
+    expect(launches[0]!.cmd).toEqual(readOnlyGitArgv(["blame", "-L", "1,4", "--porcelain", "--", "src/pay.ts"]))
+    // The policy adds only global options and `-c` overrides before it, so
+    // `blame` is still the one subcommand.
+    const words = launches[0]!.cmd.filter((arg, i, all) => !arg.startsWith("-") && all[i - 1] !== "-c")
+    expect(words.slice(0, 2)).toEqual(["git", "blame"])
   })
 
   test("it builds no material span — the CORE frames, the adapter executes (AD-1/AD-18)", async () => {
@@ -527,15 +541,17 @@ describe("THE SHIPPED DEADLINES, pinned by value and by wiring (story 2-7c)", ()
   test("AND THE EXECUTION DEADLINE IS THE ONE A DEFAULT CONSTRUCTION USES", async () => {
     const { spawn } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
     // No deadline options at all — exactly what `adapters/opencode/plugin.ts`
-    // constructs, since there is no user-facing dial for either.
-    const tools = opencodeTools({ worktree: "/repo", spawn })
+    // constructs, since there is no user-facing dial for either. The clock is
+    // frozen so the preflight uses none of the deadline blame inherits.
+    const tools = opencodeTools({ worktree: "/repo", spawn, now: () => 0 })
 
     const { registered } = await withTimersWatched(
       () => undefined,
       () => tools.blame("src/pay.ts", 12, 12),
     )
 
-    expect(registered).toEqual([60_000])
+    // The filter preflight runs under the deadline, then blame under what is left.
+    expect(registered).toEqual([60_000, 60_000])
   })
 
   test("AND THE CLEANUP BUDGET IS THE ONE A DEFAULT CONSTRUCTION USES", async () => {
@@ -544,7 +560,7 @@ describe("THE SHIPPED DEADLINES, pinned by value and by wiring (story 2-7c)", ()
     // child is released the moment that timer is registered, so this asserts the
     // registered duration without waiting five seconds for it.
     const { spawn, settleExit, killed } = fakeSpawn([{ match: "blame", reply: { hang: true, unkillable: true } }])
-    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5 })
+    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5, now: () => 0 })
 
     const { registered } = await withTimersWatched(
       (ms) => {
@@ -554,7 +570,8 @@ describe("THE SHIPPED DEADLINES, pinned by value and by wiring (story 2-7c)", ()
     )
 
     expect(killed).toEqual([9])
-    expect(registered).toEqual([5, 5_000])
+    // The filter preflight's deadline, then blame's, then blame's cleanup.
+    expect(registered).toEqual([5, 5, 5_000])
   })
 })
 
@@ -885,7 +902,7 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
     let quarantined: { pid: number; why: string } | undefined
     const tools = opencodeTools({
       worktree: "/repo",
-      spawn: locked.spawn,
+      spawn: answeringPreflight(locked.spawn),
       blameTimeoutMs: 20,
       blameCleanupTimeoutMs: 20,
       onCleanupUnresolved: (fact) => (quarantined = fact),
@@ -915,7 +932,7 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
     const locked = lockedPipe("stderr")
     const tools = opencodeTools({
       worktree: "/repo",
-      spawn: locked.spawn,
+      spawn: answeringPreflight(locked.spawn),
       blameTimeoutMs: 20,
       blameCleanupTimeoutMs: 20,
     })
@@ -951,5 +968,178 @@ describe("A PIPE THAT CANNOT EVEN BE OPENED (story 2-7c)", () => {
   test("AND AN OPENABLE PIPE STILL READS — the non-vacuous sibling", async () => {
     const { spawn } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN, exitCode: 0 } }])
     expect(await opencodeTools({ worktree: "/repo", spawn }).blame("src/pay.ts", 1, 1)).toBe(PORCELAIN)
+  })
+})
+
+describe("the filter preflight before blame (CAP-2)", () => {
+  const PREFLIGHT = "--get-regexp"
+
+  test("A HUNG PREFLIGHT is killed at the deadline, and blame is never launched", async () => {
+    const { seesPreflight, launches, killed } = fakeSpawn([{ match: PREFLIGHT, reply: { hang: true } }])
+    const tools = opencodeTools({ worktree: "/repo", spawn: seesPreflight, blameTimeoutMs: 5, blameCleanupTimeoutMs: 50 })
+
+    const error = await rejection(tools.blame("src/pay.ts", 1, 1))
+
+    expect(killed).toEqual([9])
+    expect(launches).toHaveLength(1)
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+    expect(error.message).toContain("the filter preflight did not complete, so blame was not run")
+  })
+
+  test("A SIGNALLED PREFLIGHT is no answer, whatever status came with it", async () => {
+    const { seesPreflight, launches } = fakeSpawn([{ match: PREFLIGHT, reply: { exitCode: 1, signal: "SIGKILL" } }])
+    const error = await rejection(opencodeTools({ worktree: "/repo", spawn: seesPreflight }).blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(1)
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+    expect(error.message).toContain("did not return cleanly")
+  })
+
+  test("A PREFLIGHT WHOSE CLEANUP CANNOT BE CONFIRMED quarantines the adapter", async () => {
+    const { seesPreflight, launches } = fakeSpawn([{ match: PREFLIGHT, reply: { hang: true, unkillable: true } }])
+    const unresolved: string[] = []
+    const tools = opencodeTools({
+      worktree: "/repo",
+      spawn: seesPreflight,
+      blameTimeoutMs: 5,
+      blameCleanupTimeoutMs: 5,
+      onCleanupUnresolved: (fact) => unresolved.push(fact.operation),
+    })
+
+    await rejection(tools.blame("src/pay.ts", 1, 1))
+    const later = await rejection(tools.blame("src/pay.ts", 1, 1))
+
+    expect(unresolved).toEqual(["git config (filter preflight)"])
+    expect(later.message).toContain("refusing to launch")
+    expect(launches).toHaveLength(1)
+  })
+
+  test("A PREFLIGHT GIT CANNOT START is blame's own proved launch failure", async () => {
+    const { seesPreflight, launches } = fakeSpawn([{ match: PREFLIGHT, reply: { refuse: "no such file or directory" } }])
+    const error = await rejection(opencodeTools({ worktree: "/repo", spawn: seesPreflight }).blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(1)
+    expect(toolFailureEvidence(error)).toEqual({ stage: "shell", launch: "failed" })
+    expect(error.message).toContain("the command could not be started")
+  })
+
+  test("A PREFLIGHT THAT PRINTS SOMETHING OTHER THAN CONFIG KEYS is no answer", async () => {
+    const { seesPreflight, launches } = fakeSpawn([{ match: PREFLIGHT, reply: { exitCode: 0, stdout: "not a key" } }])
+    const error = await rejection(opencodeTools({ worktree: "/repo", spawn: seesPreflight }).blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(1)
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+    expect(error.message).toContain("filter preflight failed (status 0)")
+  })
+
+  test("ONE DEADLINE: blame gets what the preflight left of it", async () => {
+    const { spawn } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+    const readings = [0, 1_000]
+    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5_000, now: () => readings.shift() ?? 1_000 })
+    const registered: number[] = []
+    const realSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((handler: never, ms: never, ...rest: never[]) => {
+      registered.push(ms as unknown as number)
+      return realSetTimeout(handler, ms, ...rest)
+    }) as typeof setTimeout
+    try {
+      expect(await tools.blame("src/pay.ts", 12, 12)).toBe(PORCELAIN)
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    expect(registered).toEqual([5_000, 4_000])
+  })
+
+  test("A PREFLIGHT THAT USED THE WHOLE DEADLINE leaves blame unlaunched", async () => {
+    const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+    const readings = [0, 5_000]
+    const tools = opencodeTools({ worktree: "/repo", spawn, blameTimeoutMs: 5_000, now: () => readings.shift() ?? 5_000 })
+
+    const error = await rejection(tools.blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(0)
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+    expect(error.message).toContain("less than 1ms of the 5000ms blame deadline was left")
+  })
+
+  test("A QUARANTINE LATCHED WHILE THIS CALL'S PREFLIGHT RAN stops its blame launch", async () => {
+    // Call A's preflight exit cannot be read and the kill is never confirmed,
+    // so A quarantines the adapter. Call B's preflight started while the
+    // adapter was clear, and is held until A has quarantined it, then answers
+    // "none configured".
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const preflights: number[] = []
+    const blames: string[][] = []
+    const spawn: SpawnBlame = (request) => {
+      if (!request.cmd.includes("--get-regexp")) {
+        blames.push(request.cmd)
+        return { pid: 3, stdout: streamOf(PORCELAIN), stderr: streamOf(""), exited: Promise.resolve(0), exitCode: 0, signalCode: null, kill: () => undefined }
+      }
+      preflights.push(preflights.length)
+      if (preflights.length === 1) {
+        const exited = Promise.reject(new Error("the exit status could not be read"))
+        exited.catch(() => undefined)
+        return { pid: 1, stdout: streamOf(""), stderr: streamOf(""), exited, exitCode: null, signalCode: null, kill: () => undefined }
+      }
+      return { pid: 2, stdout: streamOf(""), stderr: streamOf(""), exited: held.then(() => 1), exitCode: 1, signalCode: null, kill: () => undefined }
+    }
+    const tools = opencodeTools({
+      worktree: "/repo",
+      spawn,
+      blameCleanupTimeoutMs: 5,
+      onCleanupUnresolved: () => release(),
+    })
+
+    const a = rejection(tools.blame("src/pay.ts", 1, 1))
+    const b = rejection(tools.blame("src/pay.ts", 1, 1))
+    await a
+    const error = await b
+
+    expect(preflights).toHaveLength(2)
+    expect(blames).toEqual([])
+    expect(error.message).toContain("refusing to launch")
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+  })
+
+  test("A SLOW INVOCATION WRITE that uses up the deadline stops the launch, and no outcome is invented", async () => {
+    const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN } }])
+    let clockMs = 0
+    const written: string[] = []
+    const observer = {
+      request: async () => undefined,
+      outcome: async () => undefined,
+      invoked: async () => {
+        written.push("invoked")
+        clockMs = 6_000
+      },
+      shellOutcome: async () => {
+        written.push("shellOutcome")
+      },
+      failed: () => undefined,
+      takeFailures: () => [],
+    }
+    const tools = opencodeTools({
+      worktree: "/repo",
+      spawn,
+      blameTimeoutMs: 5_000,
+      now: () => clockMs,
+      toolObservation: observer,
+    })
+
+    const error = await rejection(tools.blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(0)
+    expect(written).toEqual(["invoked"])
+    expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
+    expect(error.message).toContain("less than 1ms of the 5000ms blame deadline was left")
+  })
+
+  test("an unknown gitReadPolicy is refused at construction, never treated as inherit", () => {
+    expect(() => opencodeTools({ worktree: "/repo", gitReadPolicy: "Inherit" as never })).toThrow(
+      'gitReadPolicy must be "read-only" or "inherit"',
+    )
   })
 })

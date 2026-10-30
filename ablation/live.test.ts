@@ -331,6 +331,33 @@ describe("a change read that stops ends the live ablation before any arm", () =>
     }
   })
 
+  test("THE CHANGE READ KEEPS ITS HISTORICAL GIT: inherit, even when the caller asks for read-only", async () => {
+    const seen: { cmd: string[]; env: unknown }[] = []
+    const refusing: SpawnBlame = (request) => {
+      seen.push({ cmd: request.cmd, env: request.env })
+      throw new Error("no such file or directory")
+    }
+    const server = countingServer()
+    try {
+      const error = await runLiveAblation({
+        pin: { providerId: "p1", modelId: "m1" },
+        serverUrl: server.url,
+        directory: "/tmp/mad-live-test-inherit",
+        createClient: stubClient as never,
+        repo: { spawn: refusing, gitReadPolicy: "read-only" },
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+
+      expect(error).toBeInstanceOf(ChangeReadStopped)
+      // No filter preflight, no policy argv, no policy environment.
+      expect(seen).toEqual([{ cmd: ["git", "diff", "--unified=8", "HEAD", "--"], env: undefined }])
+    } finally {
+      server.stop()
+    }
+  })
+
   test("AND A RUN THAT GETS PAST THE CHANGE DOES REACH THE SERVER — the non-vacuous sibling", async () => {
     const server = countingServer()
     try {

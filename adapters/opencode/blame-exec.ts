@@ -114,7 +114,7 @@ export interface SpawnedBlame {
 }
 
 /** How a process is started. Injected in tests; the default is `Bun.spawn`. */
-export type SpawnBlame = (request: { cmd: string[]; cwd: string }) => SpawnedBlame
+export type SpawnBlame = (request: { cmd: string[]; cwd: string; env?: Record<string, string | undefined> }) => SpawnedBlame
 
 /**
  * `"ignore"` RATHER THAN INHERIT, and it is a deliberate difference from the
@@ -140,7 +140,12 @@ export interface ObservedExit {
 /** Whether the process and the resources it held were accounted for. */
 export type CleanupState =
   | { kind: "confirmed"; observed: ObservedExit }
-  | { kind: "unresolved"; why: string }
+  /**
+   * `observed` is present when the child's own exit or signal was seen even
+   * though cleanup was not confirmed: a reaped child whose pipe a descendant
+   * still holds, for instance.
+   */
+  | { kind: "unresolved"; why: string; observed?: ObservedExit }
 
 /**
  * The outcomes a bounded blame can end as. They are kept apart because the
@@ -199,6 +204,16 @@ export type BlameExecOutcome =
    * This is the outcome that quarantines the adapter.
    */
   | { kind: "cleanup-unresolved"; why: string; pid: number }
+  /**
+   * CAP-5 — THE CALLER'S STOP. Only a caller that passes `signal` can see it.
+   * `launched: false`: the stop had fired before the spawn, and nothing was
+   * started. `launched: true`: the stop won the race against the exit and the
+   * deadline; SIGKILL was sent or could not be (`killError`), and `cleanup`
+   * says whether MAD's own child and its pipes were then accounted for. It
+   * says nothing about descendants.
+   */
+  | { kind: "stopped"; launched: false }
+  | { kind: "stopped"; launched: true; why: string; pid: number; killError: string | null; cleanup: CleanupState }
 
 export interface BlameExecOptions {
   /** The exact argv, program included. Handed over element for element. */
@@ -209,8 +224,28 @@ export interface BlameExecOptions {
   deadlineMs: number
   /** How long after the kill MAD waits to account for the child and its pipes. */
   cleanupMs: number
+  /**
+   * The child's environment, `PWD` aside. Omitted means this process's
+   * environment, unchanged. The ordinary review's git reads pass the read
+   * policy's environment (`./git-read-policy.ts`); every other caller omits it.
+   */
+  env?: Record<string, string | undefined>
   /** Test seam. Defaults to `Bun.spawn` with piped output and no inherited stdin. */
   spawn?: SpawnBlame
+  /**
+   * CAP-5 — the caller's stop. Fired before the spawn, nothing is started.
+   * Fired while the child runs, it is handled as an early deadline: the same
+   * kill and the same bounded cleanup, reported as `stopped`. Omitted, nothing
+   * changes.
+   */
+  signal?: AbortSignal
+  /**
+   * CAP-4 — keep a leading U+FEFF in stdout. The default decoder drops it as
+   * a byte-order mark, which turns a first listed file name that starts with
+   * U+FEFF into a different name. Only the change read's strict name listings
+   * set it; every other caller decodes as before.
+   */
+  keepLeadingBom?: boolean
 }
 
 /** SIGKILL. The number rather than the name, so the seam takes one shape only. */
@@ -272,6 +307,7 @@ function track<T>(promise: Promise<T>): Tracked<T> {
 function readPipe(
   stream: SpawnedBlame["stdout"],
   name: string,
+  keepLeadingBom = false,
 ): { read: Tracked<PipeRead>; release: () => void; setupFailure: string | null } {
   const unusable = (why: string, unreadEnd: boolean) => ({
     read: track(Promise.resolve<PipeRead>({ ok: false, why, unreadEnd })),
@@ -325,7 +361,7 @@ function readPipe(
         joined.set(chunk, at)
         at += chunk.length
       }
-      return { ok: true, text: new TextDecoder().decode(joined) }
+      return { ok: true, text: new TextDecoder("utf-8", { ignoreBOM: keepLeadingBom }).decode(joined) }
     })(),
   )
   return {
@@ -374,8 +410,9 @@ const defaultSpawn: SpawnBlame = (request) =>
     // parent's `PWD` while actually running somewhere else. Bun's `$` keeps the
     // two in step, `scripts/probe-host-shell.ts` measured the difference, and
     // this is what closes it. Nothing else in the environment is added, removed
-    // or rewritten.
-    env: { ...process.env, PWD: request.cwd },
+    // or rewritten, unless the caller supplied its own environment, which then
+    // replaces this process's whole environment (`PWD` still corrected).
+    env: { ...(request.env ?? process.env), PWD: request.cwd },
   }) as unknown as SpawnedBlame
 
 /**
@@ -398,11 +435,18 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     if (problem !== null) return { kind: "refused", why: `nothing was launched: ${problem}` }
   }
 
+  // CAP-5 — A STOP THAT HAS ALREADY FIRED STARTS NOTHING.
+  if (options.signal?.aborted) return { kind: "stopped", launched: false }
+
   const spawn = options.spawn ?? defaultSpawn
 
   let child: SpawnedBlame
   try {
-    child = spawn({ cmd: [...options.argv], cwd: options.cwd })
+    child = spawn({
+      cmd: [...options.argv],
+      cwd: options.cwd,
+      ...(options.env === undefined ? {} : { env: options.env }),
+    })
   } catch (error) {
     // A SPAWN THAT FAILED IS PROOF NOTHING RAN, which is the one thing the old
     // shell could never give: `nothrow()` turned a missing command into an
@@ -415,7 +459,7 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
   // reach a halt reason as `undefined`. `-1` is never a real pid, and the
   // reasons below say "process -1" rather than pretending to identify one.
   const pid = Number.isInteger(child.pid) && child.pid > 0 ? child.pid : -1
-  const out = readPipe(child.stdout, "stdout")
+  const out = readPipe(child.stdout, "stdout", options.keepLeadingBom === true)
   const err = readPipe(child.stderr, "stderr")
   // TAGGED, SO A REJECTED EXIT IS NEVER READ AS AN EXIT.
   const exit = track(
@@ -459,16 +503,53 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
   const finished = Promise.all([exit.promise, out.read.promise, err.read.promise])
 
   let timer: ReturnType<typeof setTimeout> | undefined
-  let raced: Awaited<typeof finished> | "deadline"
+  let onStop: (() => void) | undefined
+  let raced: Awaited<typeof finished> | "deadline" | "stopped"
   try {
-    raced = await Promise.race<Awaited<typeof finished> | "deadline">([
+    raced = await Promise.race<Awaited<typeof finished> | "deadline" | "stopped">([
       finished,
       new Promise<"deadline">((resolve) => {
         timer = setTimeout(() => resolve("deadline"), options.deadlineMs)
       }),
+      new Promise<"stopped">((resolve) => {
+        const signal = options.signal
+        if (signal === undefined) return
+        onStop = () => resolve("stopped")
+        signal.addEventListener("abort", onStop, { once: true })
+        // A STOP THAT FIRED AFTER THE PRE-LAUNCH CHECK, during the spawn or
+        // the pipe setup, is not missed: no event fires for it again.
+        if (signal.aborted) resolve("stopped")
+      }),
     ])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+    if (onStop !== undefined) options.signal?.removeEventListener("abort", onStop)
+  }
+
+  if (raced === "stopped") {
+    const killError = forceKill(child)
+    const cleanup = await accountFor(child, { exit, out: out.read, err: err.read }, options.cleanupMs)
+    releaseReads()
+    const tried = killError === null ? `it was sent SIGKILL` : `SIGKILL could not be sent (${killError})`
+    return {
+      kind: "stopped",
+      launched: true,
+      pid,
+      killError,
+      cleanup,
+      why:
+        cleanup.kind === "unresolved"
+          ? `\`${options.argv.join(" ")}\` was stopped while running as process ${pid} and ${tried}, but ` +
+            `${options.cleanupMs}ms later ${cleanup.why}: ` +
+            // AN OBSERVED EXIT SAYS THE CHILD ENDED. What stays unconfirmed is
+            // whatever still holds its output, not the child itself.
+            (cleanup.observed === undefined
+              ? `TERMINATION IS UNCONFIRMED and the process may still be running`
+              : `process ${pid} itself ended${describeObserved(cleanup.observed)}, but CLEANUP IS UNCONFIRMED and ` +
+                `something that inherited its output may still be running`)
+          : `\`${options.argv.join(" ")}\` was stopped while running as process ${pid}, ${tried}, and process ` +
+            `${pid} and its output were accounted for${describeObserved(cleanup.observed)}`,
+    }
   }
 
   if (raced === "deadline") {
@@ -585,6 +666,14 @@ async function accountFor(
   parts: { exit: Tracked<ExitRead>; out: Tracked<PipeRead>; err: Tracked<PipeRead> },
   cleanupMs: number,
 ): Promise<CleanupState> {
+  // WHAT THE CHILD REPORTED IS KEPT EVEN WHEN CLEANUP IS NOT CONFIRMED: an
+  // observed exit or signal is a fact, and an unresolved pipe does not unmake it.
+  const unresolved = (why: string): CleanupState => {
+    const observed = observedOf(child)
+    return observed.exitCode === null && observed.signal === null
+      ? { kind: "unresolved", why }
+      : { kind: "unresolved", why, observed }
+  }
   let timer: ReturnType<typeof setTimeout> | undefined
   let settled: "settled" | "timeout"
   try {
@@ -605,18 +694,16 @@ async function accountFor(
     if (!parts.out.settled()) pipes.push("stdout")
     if (!parts.err.settled()) pipes.push("stderr")
     if (pipes.length > 0) outstanding.push(`its ${pipes.join(" and ")} pipe(s) were still open`)
-    return {
-      kind: "unresolved",
-      // THE DESCENDANT SENTENCE BELONGS TO THE PIPES AND ONLY TO THEM. Appending
-      // it to an unreaped process would explain an open pipe that is not part of
-      // this failure, and a reason that explains the wrong thing is one a reader
-      // acts on wrongly.
-      why:
-        pipes.length > 0
-          ? `${outstanding.join(" and ")} — an open pipe after the child is gone means something that ` +
+    // THE DESCENDANT SENTENCE BELONGS TO THE PIPES AND ONLY TO THEM. Appending
+    // it to an unreaped process would explain an open pipe that is not part of
+    // this failure, and a reason that explains the wrong thing is one a reader
+    // acts on wrongly.
+    return unresolved(
+      pipes.length > 0
+        ? `${outstanding.join(" and ")} — an open pipe after the child is gone means something that ` +
             `inherited it is still running, and no signal sent here reaches it`
-          : outstanding.join(" and "),
-    }
+        : outstanding.join(" and "),
+    )
   }
 
   // SETTLING IS NOT REACHING THE END. A pipe whose reader could not be acquired
@@ -653,14 +740,12 @@ async function accountFor(
 
   if (unseen.length > 0) {
     const ended = exitConfirmed.ok ? `process ${child.pid} was accounted for, but ` : `${exitConfirmed.why}, and `
-    return {
-      kind: "unresolved",
-      why:
-        `${ended}the end of its ${unseen.join(" and ")} was never observed — an unread pipe is not a ` +
+    return unresolved(
+      `${ended}the end of its ${unseen.join(" and ")} was never observed — an unread pipe is not a ` +
         `closed one, so nothing here rules out a descendant still holding it`,
-    }
+    )
   }
-  if (!exitConfirmed.ok) return { kind: "unresolved", why: exitConfirmed.why }
+  if (!exitConfirmed.ok) return unresolved(exitConfirmed.why)
   return { kind: "confirmed", observed: exitConfirmed.observed }
 }
 

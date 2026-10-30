@@ -72,6 +72,7 @@
  * it. The stage returns the array it was given.
  */
 
+import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
 import {
@@ -834,11 +835,13 @@ function exitFor(
  * AD-6(f) splits everywhere else, surviving in the one function the story's own
  * Code Map told a reader to read first.
  */
-export type StrandCause = "budget" | "cancellation"
+export type StrandCause = "budget" | "cancellation" | "mad-stop"
 
 const CAUSE_CLAUSE: Record<StrandCause, string> = {
   budget: "before the budget ran out",
   cancellation: "before you stopped the run",
+  // CAP-3 — MAD stopped the run itself (`core/domain/stop-cause.ts`).
+  "mad-stop": `before ${stoppedTheRun("session-policy")}`,
 }
 
 export function carriedClause(
@@ -1387,8 +1390,8 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         stage: "debate",
         message:
           `RUN CANCELLED DURING DEBATE: ${stranded.length} contested finding(s) were still ` +
-          `undecided when you stopped the run, ${where}. ` +
-          `${carriedClause(stranded.length, withPositions, "cancellation")}`,
+          `undecided when ${stoppedTheRun(stopCauseOf(input.signal))}, ${where}. ` +
+          `${carriedClause(stranded.length, withPositions, stopCauseOf(input.signal) === "user" ? "cancellation" : "mad-stop")}`,
         detail: {
           cause: "cancelled",
           roundsRun: rounds,

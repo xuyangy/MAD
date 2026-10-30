@@ -108,6 +108,15 @@ import {
 import type { CommandResult, GrepHit, Tools } from "../../core/ports/tools.ts"
 import type { SpawnBlame } from "./blame-exec.ts"
 import { runBoundedBlame } from "./blame-exec.ts"
+import {
+  configuredFilters,
+  FILTER_PREFLIGHT,
+  filterRefusalReason,
+  readOnlyGitArgv,
+  readOnlyGitEnv,
+  usesReadOnlyPolicy,
+  type GitReadPolicy,
+} from "./git-read-policy.ts"
 import { GitError } from "./repo.ts"
 
 type Shell = PluginInput["$"]
@@ -187,6 +196,13 @@ export interface OpencodeToolsOptions {
    * a failure carries the evidence the core cannot see for itself.
    */
   toolObservation?: ToolObservation
+  /** `"read-only"` unless given; see `GitReadPolicy`. */
+  gitReadPolicy?: GitReadPolicy
+  /**
+   * A monotonic clock in milliseconds, for the blame deadline the filter
+   * preflight and blame share. Default `performance.now`.
+   */
+  now?: () => number
   /**
    * The clock the trace's timestamps come from. Optional, defaulting to the same
    * `systemClock()` an ordinary run uses.
@@ -318,6 +334,8 @@ function withEvidence(error: GitError, evidence: ToolFailureEvidence): GitError 
 export function opencodeTools(options: OpencodeToolsOptions): Tools {
   const observation = options.toolObservation
   const clock = options.clock ?? systemClock()
+  const readOnly = usesReadOnlyPolicy(options.gitReadPolicy)
+  const now = options.now ?? (() => performance.now())
   const blameTimeoutMs = options.blameTimeoutMs ?? DEFAULT_BLAME_TIMEOUT_MS
   const cleanupTimeoutMs = options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS
   const observationTimeoutMs = options.observationTimeoutMs ?? OBSERVATION_WRITE_TIMEOUT_MS
@@ -406,6 +424,69 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
   }
 
   /**
+   * THE FILTER PREFLIGHT (`./git-read-policy.ts`), before blame reads any
+   * content. It runs under the blame call's deadline, and blame then gets only
+   * what is left of it; each launch has the full cleanup budget. Blame
+   * itself has not run when this refuses, so the evidence is `pre-shell` and
+   * `not-attempted`, and no invocation is observed. A preflight whose process
+   * could not be accounted for quarantines the adapter like any other launch.
+   *
+   * ONE EXCEPTION: git could not be started at all. That is the same proved
+   * non-execution blame's own launch would meet, so it is reported exactly as
+   * that launch's failure is, invocation included (`"launch-failed"`).
+   */
+  async function filterPreflight(command: string): Promise<"clear" | { launchFailed: string }> {
+    const refuse = (why: string) =>
+      withEvidence(new GitError(command, why), { stage: "pre-shell", launch: "not-attempted" })
+    const outcome = await runBoundedBlame({
+      argv: readOnlyGitArgv(FILTER_PREFLIGHT),
+      env: readOnlyGitEnv(process.env),
+      cwd: options.worktree,
+      deadlineMs: blameTimeoutMs,
+      cleanupMs: cleanupTimeoutMs,
+      ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+    })
+    if (outcome.kind === "cleanup-unresolved") {
+      quarantine({ operation: "git config (filter preflight)", why: outcome.why, pid: outcome.pid })
+    }
+    if (outcome.kind === "observation-failed" && outcome.cleanup.kind === "unresolved") {
+      quarantine({
+        operation: "git config (filter preflight)",
+        why: `${outcome.why}. ${outcome.cleanup.why}`,
+        pid: outcome.pid,
+      })
+    }
+    if (outcome.kind === "launch-failed") return { launchFailed: outcome.why }
+    if (outcome.kind === "stopped") {
+      // CAP-5 — the run's stop. A launched preflight whose cleanup is not
+      // accounted for quarantines like any other launch.
+      if (outcome.launched && outcome.cleanup.kind === "unresolved") {
+        quarantine({ operation: "git config (filter preflight)", why: outcome.why, pid: outcome.pid })
+      }
+      throw refuse(
+        outcome.launched
+          ? `the review was stopped during the filter preflight, so blame was not run: ${outcome.why}`
+          : `the review was stopped before the filter preflight, so blame was not run`,
+      )
+    }
+    if (outcome.kind !== "returned") {
+      throw refuse(`the filter preflight did not complete, so blame was not run: ${outcome.why}`)
+    }
+    if (outcome.signal !== null || outcome.stderrFailure !== null) {
+      throw refuse(`the filter preflight did not return cleanly, so blame was not run`)
+    }
+    const filters = configuredFilters(outcome.exitCode, outcome.stdout)
+    if (filters.kind === "configured") throw refuse(filterRefusalReason(filters.drivers))
+    if (filters.kind === "unknown") {
+      throw refuse(
+        `the filter preflight failed (status ${outcome.exitCode}), so blame was not run: ` +
+          `${outcome.stderr.trim() || "git reported no detail"}`,
+      )
+    }
+    return "clear"
+  }
+
+  /**
    * Run one git command under a deadline, and say what happened.
    *
    * THE INVOCATION AND THE RETURN ARE TWO FACTS (story 2-7a). The invocation is
@@ -421,28 +502,73 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
    * than as a zero.
    */
   async function git(command: string, argv: string[], args: BlameArguments): Promise<string> {
-    if (quarantined !== null) {
-      // NOTHING IS LAUNCHED WHILE QUARANTINED, and the refusal is proved rather
-      // than assumed: `pre-shell` plus `not-attempted` is the one evidence shape
-      // that means "no process was started", which is what actually happened.
-      throw withEvidence(
+    // NOTHING IS LAUNCHED WHILE QUARANTINED, and the refusal is proved rather
+    // than assumed: `pre-shell` plus `not-attempted` is the one evidence shape
+    // that means "no process was started", which is what actually happened.
+    const quarantineRefusal = (latched: BlameCleanupUnresolved) =>
+      withEvidence(
         new GitError(
           command,
-          `refusing to launch: an earlier ${quarantined.operation} could not be confirmed terminated, ` +
-            `so this adapter launches nothing further. ${quarantined.why}`,
+          `refusing to launch: an earlier ${latched.operation} could not be confirmed terminated, ` +
+            `so this adapter launches nothing further. ${latched.why}`,
         ),
         { stage: "pre-shell", launch: "not-attempted" },
       )
+    if (quarantined !== null) throw quarantineRefusal(quarantined)
+
+    if (argv[0] !== "git") throw new Error(`blame argv must start with "git", not ${JSON.stringify(argv[0])}`)
+
+    const startedAt = now()
+    const preflight = readOnly ? await filterPreflight(command) : "clear"
+
+    /**
+     * Under the read policy, what stops blame from launching now: a quarantine
+     * another call latched while this one awaited, or a deadline with under
+     * 1 ms left. Checked after the preflight and again after the invocation
+     * write, immediately before the launch. Refusals are `pre-shell` and
+     * `not-attempted` either way: no blame process was started.
+     */
+    const launchRefusal = (): { refusal: GitError } | { deadlineMs: number } => {
+      if (!readOnly) return { deadlineMs: blameTimeoutMs }
+      if (quarantined !== null) return { refusal: quarantineRefusal(quarantined) }
+      const deadlineMs = Math.floor(blameTimeoutMs - (now() - startedAt))
+      if (deadlineMs >= 1) return { deadlineMs }
+      return {
+        refusal: withEvidence(
+          new GitError(command, `less than 1ms of the ${blameTimeoutMs}ms blame deadline was left, so blame was not run`),
+          { stage: "pre-shell", launch: "not-attempted" },
+        ),
+      }
     }
 
+    // Refused here, nothing is observed as invoked.
+    if (preflight === "clear") {
+      const beforeInvoked = launchRefusal()
+      if ("refusal" in beforeInvoked) throw beforeInvoked.refusal
+    }
+
+    const launched = readOnly ? readOnlyGitArgv(argv.slice(1)) : argv
     await observe("invoked", (sink) =>
-      sink.invoked({ tool: "blame", args, argv: [...argv], at: clock.now() }),
+      sink.invoked({ tool: "blame", args, argv: [...launched], at: clock.now() }),
     )
 
+    if (preflight !== "clear") {
+      throw withEvidence(new GitError(command, `the command could not be started: ${preflight.launchFailed}`), {
+        stage: "shell",
+        launch: "failed",
+      })
+    }
+
+    // Refused here, the invocation stays recorded with no outcome, which is
+    // what a trace reader already takes for a call that did not complete.
+    const atLaunch = launchRefusal()
+    if ("refusal" in atLaunch) throw atLaunch.refusal
+
     const outcome = await runBoundedBlame({
-      argv,
+      argv: launched,
+      ...(readOnly ? { env: readOnlyGitEnv(process.env) } : {}),
       cwd: options.worktree,
-      deadlineMs: blameTimeoutMs,
+      deadlineMs: atLaunch.deadlineMs,
       cleanupMs: cleanupTimeoutMs,
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     })
@@ -456,6 +582,20 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
         stage: "pre-shell",
         launch: "not-attempted",
       })
+    }
+
+    if (outcome.kind === "stopped") {
+      // CAP-5 — the run's stop. Not launched is a proved non-execution;
+      // stopped while running is a call MAD stopped waiting for, read as
+      // `unknown`, and unresolved cleanup quarantines.
+      if (!outcome.launched) {
+        throw withEvidence(new GitError(command, `the review was stopped before blame was launched`), {
+          stage: "pre-shell",
+          launch: "not-attempted",
+        })
+      }
+      if (outcome.cleanup.kind === "unresolved") quarantine({ operation: command, why: outcome.why, pid: outcome.pid })
+      throw withEvidence(new GitError(command, outcome.why), { stage: "shell", launch: "unproved" })
     }
 
     if (outcome.kind === "launch-failed") {

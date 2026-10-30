@@ -34,11 +34,19 @@ import {
   refusalFor,
   type ArtifactOutcome,
 } from "./artifacts.ts"
-import { OpencodeModelBackend } from "./model-backend.ts"
+import { OpencodeModelBackend, type PolicyProbe } from "./model-backend.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
 import { changeReadStopGuidance } from "./change-read-guidance.ts"
-import { ChangeReadStopped, opencodeRepo } from "./repo.ts"
+import { unsupportedTargetReason } from "./git-read-policy.ts"
+import { ChangeReadRefused, ChangeReadStopped, FilterPreflightFailed, opencodeRepo } from "./repo.ts"
 import { opencodeTools, type BlameCleanupUnresolved } from "./tools.ts"
+import { MadStop } from "../../core/domain/stop-cause.ts"
+import {
+  describeReviewPermission,
+  READ_ONLY_SESSION_NOTICE,
+  REVIEW_SESSION_PERMISSION,
+  ReviewSessionGuard,
+} from "./session-policy.ts"
 import { resolveRoster } from "./roster.ts"
 
 /**
@@ -302,8 +310,43 @@ export function clearBlameQuarantineForTests(worktree: string): void {
   UNRESOLVED_BLAME_CLEANUP.delete(worktree)
 }
 
-export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
+/**
+ * CAP-5 — THE PRE-MODEL STOPPED ANSWERS, one per phase, each saying only what
+ * is true at that point. None of them is ever "nothing to review".
+ */
+function stoppedBeforeReading(): { title: string; output: string } {
   return {
+    title: "MAD — review stopped",
+    output: "MAD reviewed nothing: the review was stopped before MAD read anything or asked any model.",
+  }
+}
+
+function stoppedAfterRoster(): { title: string; output: string } {
+  return {
+    title: "MAD — review stopped",
+    output:
+      "MAD reviewed nothing: the review was stopped after MAD read the host's model list, before it read any " +
+      "repository content or asked any model.",
+  }
+}
+
+function stoppedAfterRead(disclosure = ""): { title: string; output: string } {
+  return {
+    title: "MAD — review stopped",
+    output: `MAD completed no review and asked no model: the review was stopped before any model was asked.${disclosure}`,
+  }
+}
+
+export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
+  // CAP-3 — ONE GUARD PER PLUGIN INSTANCE, shared by every review it runs and
+  // by the hook below, so a session is covered from its creation until the host
+  // confirms its deletion, whichever review created it.
+  const sessionGuard = new ReviewSessionGuard()
+  return {
+    // CAP-3 — the second control. The permission rules are the first; this
+    // refuses every tool the host routes here for a session MAD created, and
+    // leaves every other session alone.
+    "tool.execute.before": sessionGuard.beforeTool,
     tool: {
       // The user-facing entry point. Invocation surface is the host's
       // (host-integration.md); MAD supplies the behaviour behind it.
@@ -389,394 +432,549 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             ),
         },
         async execute(args, context) {
-          // Belt and braces: the schema bounds it, and so does this, because the
-          // value arrives from a model call and each slot costs real money.
-          const slots = clampDiscoverySlots(args.slots)
-          // CAP-7 (story 8) — RESOLVED BEFORE THE ROSTER, because the lens half
-          // of a preset is a roster decision and `resolveRoster` is what turns a
-          // lens list into slots.
-          //
-          // THE WORD IS CLAMPED TWICE AND THAT IS NOT THE PROPERTY AT STAKE
-          // (code review 2026-09-06). `review()` clamps it again for the
-          // threshold and concurrency halves; `clampPreset` is a total function
-          // over the same input, so the two cannot disagree. What must not
-          // happen twice is the DIALS being derived — `dials` below is the only
-          // lens list, and `record.preset` is the only word that reaches a
-          // report.
-          //
-          // `args.lenses !== undefined` and NOT `args.lenses?.length`: an
-          // explicit `lenses: []` under `paranoid` is a caller declining the lens
-          // pass, and a truthiness test would silently sell them three billed
-          // discovery turns they just refused.
-          const preset = clampPreset(args.preset)
-          const dials = PRESET_DIALS[preset]
-          // NAMED, so the truncation warning can inspect the list that was
-          // ACTUALLY clamped (ledger triage 2026-09-09). `truncatedListWarnings`
-          // used to read `args.lenses`, which is `undefined` on the path where
-          // the PRESET supplies the list — so a preset naming more than
-          // `MAX_LENS_SLOTS` lenses would truncate with nothing said, in the one
-          // layer whose whole job is to say what it dropped. Latent while the
-          // largest preset list is `paranoid`'s three; a silent clamp on a
-          // billed dial should not wait for a preset table to grow.
-          const requestedLenses = args.lenses !== undefined ? args.lenses : [...dials.lenses]
-          const lenses = clampLenses(requestedLenses)
-          // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
-          // clamp deliberately discards nothing a user asked for.
-          const pins = clampPins(args.models)
-
-          let resolved
+          // CAP-5 — THE RUN'S OWN STOP, made at entry and linked to the host's,
+          // so every step below sees one signal. A session whose permission
+          // rules come back different aborts it too (story 3), so the core's
+          // existing cancellation stops new turns. Its listener is released in
+          // `finally`, whatever path leaves.
+          const runControl = new AbortController()
+          const forwardHostStop = () => runControl.abort(context.abort.reason)
+          if (context.abort.aborted) forwardHostStop()
+          else context.abort.addEventListener("abort", forwardHostStop, { once: true })
           try {
-            resolved = await resolveRoster(client, slots, lenses, pins)
-          } catch (error) {
-            if (error instanceof NoCandidatesError) {
-              // Matrix row "No providers": fail with guidance, not a stack trace.
-              return { title: "MAD — no providers configured", output: error.message }
-            }
-            // Anything else — a transport failure reading the host's config, say
-            // — is still the user's problem to act on, not a stack trace to read.
-            return {
-              title: "MAD — could not resolve a roster",
-              output:
-                `MAD could not work out which models to review with.\n\n` +
-                `${error instanceof Error ? error.message : String(error)}\n\n` +
-                `Check that opencode can reach your configured providers, then try again.`,
-            }
-          }
+            // CAP-5 — A STOP THAT HAS ALREADY FIRED DOES NO WORK AT ALL: no
+            // roster read, no git, no probe, no model.
+            if (runControl.signal.aborted) return stoppedBeforeReading()
 
-          // Every git read of the change is bounded under one total budget, and
-          // a worktree whose read left a process unaccounted for is quarantined
-          // in `repo.ts` itself, so no latch is carried in here.
-          const repo = opencodeRepo({ worktree })
-          // CAP-8 / AD-13's FIRST route (story 10) — the OTHER repo-facing port,
-          // built here beside `Repo` because both read the same worktree and
-          // have the same read-only guarantee.
-          //
-          // STORY 2-7a — THE OBSERVER GOES TO BOTH HALVES FROM ONE VALUE. The
-          // judge owns the decision to ask for a tool call; only this adapter
-          // knows whether a shell ran. A caller that wired one and not the other
-          // would get half a trace and no error, so the same variable is handed
-          // to the factory here and to `review()` below.
-          //
-          // NO ORDINARY RUN SUPPLIES ONE, and none is built here: the
-          // implementation belongs to the evaluation harness (story 2-7b), which
-          // constructs ITS tools through this same `opencodeTools` factory rather
-          // than through a second imitation of this wiring. `undefined` is a
-          // supported value and the record it produces is the unobserved one.
-          const toolObservation: ToolObservation | undefined = undefined
-          // STORY 2-7c — THE PER-WORKTREE CLEANUP LATCH. Carried IN so a retry
-          // after an unconfirmed termination refuses rather than launching
-          // beside a process nobody can account for, and carried OUT so this
-          // invocation's own unconfirmed cleanup latches the next one. The
-          // refusal rides the existing `blame-unavailable` warning with the
-          // reason and the pid inside it; no new code and no new surface.
-          const alreadyUnresolved = blameQuarantineFor(worktree)
-          const tools = opencodeTools({
-            $,
-            worktree,
-            toolObservation,
-            ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
-            onCleanupUnresolved: (fact) => latchBlameQuarantine(worktree, fact),
-          })
-          let change
-          try {
-            change = await repo.change(args.target)
-          } catch (error) {
-            // A READ THAT DID NOT RETURN CLEANLY is not a bad ref, and the
-            // bad-ref hint would send the user after the wrong fix.
-            if (error instanceof ChangeReadStopped) {
+            // CAP-2 — A TARGET GIT WOULD READ AS AN OPTION IS REFUSED FIRST, before
+            // the roster read, any git process or any model request.
+            const targetProblem = unsupportedTargetReason(args.target)
+            if (targetProblem !== undefined) {
+              return {
+                title: "MAD — unsupported target",
+                output: `MAD did not review anything: ${targetProblem}.`,
+              }
+            }
+            // Belt and braces: the schema bounds it, and so does this, because the
+            // value arrives from a model call and each slot costs real money.
+            const slots = clampDiscoverySlots(args.slots)
+            // CAP-7 (story 8) — RESOLVED BEFORE THE ROSTER, because the lens half
+            // of a preset is a roster decision and `resolveRoster` is what turns a
+            // lens list into slots.
+            //
+            // THE WORD IS CLAMPED TWICE AND THAT IS NOT THE PROPERTY AT STAKE
+            // (code review 2026-09-06). `review()` clamps it again for the
+            // threshold and concurrency halves; `clampPreset` is a total function
+            // over the same input, so the two cannot disagree. What must not
+            // happen twice is the DIALS being derived — `dials` below is the only
+            // lens list, and `record.preset` is the only word that reaches a
+            // report.
+            //
+            // `args.lenses !== undefined` and NOT `args.lenses?.length`: an
+            // explicit `lenses: []` under `paranoid` is a caller declining the lens
+            // pass, and a truthiness test would silently sell them three billed
+            // discovery turns they just refused.
+            const preset = clampPreset(args.preset)
+            const dials = PRESET_DIALS[preset]
+            // NAMED, so the truncation warning can inspect the list that was
+            // ACTUALLY clamped (ledger triage 2026-09-09). `truncatedListWarnings`
+            // used to read `args.lenses`, which is `undefined` on the path where
+            // the PRESET supplies the list — so a preset naming more than
+            // `MAX_LENS_SLOTS` lenses would truncate with nothing said, in the one
+            // layer whose whole job is to say what it dropped. Latent while the
+            // largest preset list is `paranoid`'s three; a silent clamp on a
+            // billed dial should not wait for a preset table to grow.
+            const requestedLenses = args.lenses !== undefined ? args.lenses : [...dials.lenses]
+            const lenses = clampLenses(requestedLenses)
+            // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
+            // clamp deliberately discards nothing a user asked for.
+            const pins = clampPins(args.models)
+
+            let resolved
+            try {
+              resolved = await resolveRoster(client, slots, lenses, pins)
+            } catch (error) {
+              // CAP-5 — a roster failure that lands after the stop does not hide it.
+              if (runControl.signal.aborted) return stoppedAfterRoster()
+              if (error instanceof NoCandidatesError) {
+                // Matrix row "No providers": fail with guidance, not a stack trace.
+                return { title: "MAD — no providers configured", output: error.message }
+              }
+              // Anything else — a transport failure reading the host's config, say
+              // — is still the user's problem to act on, not a stack trace to read.
+              return {
+                title: "MAD — could not resolve a roster",
+                output:
+                  `MAD could not work out which models to review with.\n\n` +
+                  `${error instanceof Error ? error.message : String(error)}\n\n` +
+                  `Check that opencode can reach your configured providers, then try again.`,
+              }
+            }
+
+            // Every git read of the change is bounded under one total budget, and
+            // a worktree whose read left a process unaccounted for is quarantined
+            // in `repo.ts` itself, so no latch is carried in here.
+            // CAP-5 — the roster read is a host request already made; nothing
+            // after it starts once the stop is seen.
+            if (runControl.signal.aborted) return stoppedAfterRoster()
+
+            const repo = opencodeRepo({ worktree })
+            // CAP-8 / AD-13's FIRST route (story 10) — the OTHER repo-facing port,
+            // built here beside `Repo` because both read the same worktree and
+            // have the same read-only guarantee.
+            //
+            // STORY 2-7a — THE OBSERVER GOES TO BOTH HALVES FROM ONE VALUE. The
+            // judge owns the decision to ask for a tool call; only this adapter
+            // knows whether a shell ran. A caller that wired one and not the other
+            // would get half a trace and no error, so the same variable is handed
+            // to the factory here and to `review()` below.
+            //
+            // NO ORDINARY RUN SUPPLIES ONE, and none is built here: the
+            // implementation belongs to the evaluation harness (story 2-7b), which
+            // constructs ITS tools through this same `opencodeTools` factory rather
+            // than through a second imitation of this wiring. `undefined` is a
+            // supported value and the record it produces is the unobserved one.
+            const toolObservation: ToolObservation | undefined = undefined
+            // STORY 2-7c — THE PER-WORKTREE CLEANUP LATCH. Carried IN so a retry
+            // after an unconfirmed termination refuses rather than launching
+            // beside a process nobody can account for, and carried OUT so this
+            // invocation's own unconfirmed cleanup latches the next one. The
+            // refusal rides the existing `blame-unavailable` warning with the
+            // reason and the pid inside it; no new code and no new surface.
+            const alreadyUnresolved = blameQuarantineFor(worktree)
+            const tools = opencodeTools({
+              $,
+              worktree,
+              toolObservation,
+              ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
+              onCleanupUnresolved: (fact) => latchBlameQuarantine(worktree, fact),
+            })
+            let change
+            try {
+              change = await repo.change(args.target, runControl.signal)
+            } catch (error) {
+              // CAP-5 — STOPPED WHILE READING THE CHANGE. What may have run, its
+              // cleanup in the stop's own words, and that nothing was reviewed;
+              // never "nothing to review".
+              if (error instanceof ChangeReadStopped && error.stop === "cancelled") {
+                return {
+                  title: "MAD — review stopped while reading the change",
+                  output:
+                    `MAD completed no review and asked no model: the review was stopped while MAD was reading ` +
+                    `the change.\n\n${error.message}\n\n${changeReadStopGuidance(error)}`,
+                }
+              }
+              // CAP-5 — A READ THAT ENDED ANOTHER WAY JUST BEFORE THE STOP. The
+              // stop is reported, and so is how the read ended, cleanup included.
+              if (runControl.signal.aborted) {
+                return {
+                  title: "MAD — review stopped while reading the change",
+                  output:
+                    `MAD completed no review and asked no model: the review was stopped while MAD was reading ` +
+                    `the change, after that read had ended without a change to review.\n\n` +
+                    `${error instanceof Error ? error.message : String(error)}` +
+                    (error instanceof ChangeReadStopped ? `\n\n${changeReadStopGuidance(error)}` : ""),
+                }
+              }
+              // REFUSED, NOT FAILED. The read policy declined this input before
+              // reading any content; neither the bad-ref hint nor stop guidance
+              // applies.
+              if (error instanceof ChangeReadRefused) {
+                // CAP-4 — an input refusal can come after some change text was
+                // read, so it says nothing was REVIEWED, not that nothing was read.
+                if (error.refusal === "unsupported-input") {
+                  return {
+                    title: "MAD — could not read the change input",
+                    output:
+                      `MAD reviewed nothing and asked no model: it refuses a change it cannot read exactly, and ` +
+                      `${error.why}. Fix what is named above, or pass a commit range as \`target\` to review history instead.`,
+                  }
+                }
+                return {
+                  title:
+                    error.refusal === "unsupported-target"
+                      ? "MAD — unsupported target"
+                      : "MAD — unsupported repository configuration",
+                  output: `MAD did not review anything: ${error.why}.`,
+                }
+              }
+              // THE PREFLIGHT COULD NOT ANSWER. The ref was never used, so the
+              // bad-ref hint does not apply; the config is what git could not read.
+              if (error instanceof FilterPreflightFailed) {
+                return {
+                  title: "MAD — could not check the repository's git config",
+                  output:
+                    `MAD did not review anything: before reading the change it checks the effective git config ` +
+                    `for executable filters, and that check did not give an answer, so nothing was read.\n\n` +
+                    `${error.message}\n\n` +
+                    `Check that \`git config --list --show-origin\` runs cleanly in this directory.`,
+                }
+              }
+              // A READ THAT DID NOT RETURN CLEANLY is not a bad ref, and the
+              // bad-ref hint would send the user after the wrong fix.
+              if (error instanceof ChangeReadStopped) {
+                return {
+                  title: "MAD — could not read the change",
+                  output:
+                    `MAD could not read the change to review.\n\n` +
+                    `${error.message}\n\n` +
+                    changeReadStopGuidance(error),
+                }
+              }
+              // A bad ref, or a directory that is not a git repo. Say which.
               return {
                 title: "MAD — could not read the change",
                 output:
                   `MAD could not read the change to review.\n\n` +
-                  `${error.message}\n\n` +
-                  changeReadStopGuidance(error),
+                  `${error instanceof Error ? error.message : String(error)}\n\n` +
+                  (args.target
+                    ? `Check that \`${args.target}\` is a valid git ref or ref range.`
+                    : `Check that this directory is a git repository with at least one commit.`),
               }
             }
-            // A bad ref, or a directory that is not a git repo. Say which.
-            return {
-              title: "MAD — could not read the change",
-              output:
-                `MAD could not read the change to review.\n\n` +
-                `${error instanceof Error ? error.message : String(error)}\n\n` +
-                (args.target
-                  ? `Check that \`${args.target}\` is a valid git ref or ref range.`
-                  : `Check that this directory is a git repository with at least one commit.`),
+
+            // CAP-5 — A STOP AFTER THE READ is not hidden behind its result.
+            if (runControl.signal.aborted) return stoppedAfterRead()
+
+            if (change.diff.trim().length === 0) {
+              return {
+                title: "MAD — nothing to review",
+                output: `No change found for ${change.description}. Make a change, or pass a ref range as \`target\`.`,
+              }
             }
-          }
 
-          if (change.diff.trim().length === 0) {
-            return {
-              title: "MAD — nothing to review",
-              output: `No change found for ${change.description}. Make a change, or pass a ref range as \`target\`.`,
-            }
-          }
-
-          // BOTH collections. `OpencodeModelBackend` builds its per-slot map
-          // from this array and `runTurn` THROWS on a slot it does not know;
-          // `runWithOneRetry` swallows that throw into a transport-error
-          // envelope, so passing only `slots` here would turn every lens slot
-          // into a silent double drop-out that looks like a flaky provider.
-          // Nothing type-checks this — `plugin-wiring.test.ts` is what does.
-          // AC2 (story 2.3) — ONE SINK PER REVIEW, AND THE SAME OBJECT BOTH
-          // WAYS.
-          //
-          // `OpencodeModelBackend` reports a bill that arrives after MAD stopped
-          // waiting for the turn INTO this object, from a continuation the
-          // critical path never awaits; `review()` drains THIS object
-          // immediately before it stamps `finishedAt`. The two halves are only a
-          // mechanism when they are the same sink — with two objects, or with
-          // none, every late bill is dropped and a turn MAD could have counted
-          // stays an unknown for the rest of the run's life.
-          //
-          // IT WAS MISSING HERE UNTIL 2026-09-11. Both ends shipped tested and
-          // mutation-verified in story 2.3 and `createLateUsageSink` had no
-          // caller outside tests, so the recovery existed and ran nowhere. Kept
-          // adjacent to the two constructor calls it joins, because the failure
-          // mode is silent: nothing throws, nothing is logged, and the token
-          // column is merely more pessimistic than it needs to be.
-          const lateUsage = createLateUsageSink()
-
-          const backend = new OpencodeModelBackend({
-            serverUrl,
-            directory,
-            slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
-            lateUsage,
-          })
-
-          // AD-16 amended (story 7A) — the turn recorder is constructed ONLY
-          // when the user turned the dump on. With the flag off `review()` gets
-          // the bare backend, so a fresh install allocates nothing and holds no
-          // prompt or answer in memory. The decorator satisfies the port and
-          // does nothing else: no retry, no swallowed failure, and the
-          // cancellation signal forwarded untouched — a stage cannot tell it is
-          // there, which is AD-16's "no stage learns that a file exists".
-          //
-          // The same `artifactRootFrom` the dump itself calls, on the same
-          // `process.env`, so the two cannot disagree about whether the flag is
-          // on.
-          //
-          // AND THE REFUSAL IS CHECKED HERE TOO (code review 2026-08-31). The
-          // gate used to read `artifactRootFrom` alone, so a user who pointed
-          // the variable at their own repository paid the memory cost of holding
-          // every prompt, instruction set and envelope for the whole run — and
-          // then got nothing, because the dump refused. The recorder is built
-          // only when there is a dump for it to feed.
-          const artifactRoot = artifactRootFrom(process.env)
-          const recorder =
-            artifactRoot !== undefined && refusalFor(artifactRoot, worktree) === undefined
-              ? createTurnRecorder()
-              : undefined
-
-          const { record, rendered } = await review({
-            roster: resolved.roster,
-            backend: recorder ? recorder.wrap(backend) : backend,
-            clock: systemClock(),
-            change,
-            // The same object the backend above reports into. See its comment.
-            lateUsage,
-            // The core DRIVES it; the core never constructs one (AD-1). This is
-            // the only place in the tree a `Tools` implementation is built.
-            tools,
-            // Story 2-7a — the core half of the same observer. See its
-            // construction above; the two must come from one value.
-            toolObservation,
-            // AD-6 — the adapter's OWN truncations ride in beside the roster's.
-            // `review()` copies `priorWarnings` onto the record verbatim, so this
-            // is the supported way for this layer to be heard at all.
-            priorWarnings: [
-              ...truncatedListWarnings({ models: args.models, lenses: requestedLenses }),
-              ...resolved.warnings,
-            ],
-            // CAP-7 (story 8) — the two user-facing dials, and the only two on
-            // this surface. BOTH ARE PASSED RAW. Neither is clamped here; the
-            // tool schema (`.int().min(0)` for the budget, `enum(PRESETS)` for
-            // the preset) is the only check on this side, and a schema check is
-            // not a clamp. The one clamp runs where AD-15 puts it, in the
-            // accountant that owns the dial.
+            // BOTH collections. `OpencodeModelBackend` builds its per-slot map
+            // from this array and `runTurn` THROWS on a slot it does not know;
+            // `runWithOneRetry` swallows that throw into a transport-error
+            // envelope, so passing only `slots` here would turn every lens slot
+            // into a silent double drop-out that looks like a flaky provider.
+            // Nothing type-checks this — `plugin-wiring.test.ts` is what does.
+            // AC2 (story 2.3) — ONE SINK PER REVIEW, AND THE SAME OBJECT BOTH
+            // WAYS.
             //
-            // Raw is not laziness, it is what makes `dial-clamped` work. Handing
-            // `review()` an already-clamped value makes `clampedDials` compare a
-            // value against itself and find nothing moved — which is how
-            // `clampPreset("thorough")` silently becoming `normal` stayed silent,
-            // one of the three defects `dial-clamped` was added to end (code
-            // review 2026-09-06).
+            // `OpencodeModelBackend` reports a bill that arrives after MAD stopped
+            // waiting for the turn INTO this object, from a continuation the
+            // critical path never awaits; `review()` drains THIS object
+            // immediately before it stamps `finishedAt`. The two halves are only a
+            // mechanism when they are the same sink — with two objects, or with
+            // none, every late bill is dropped and a turn MAD could have counted
+            // stays an unknown for the rest of the run's life.
             //
-            // The cast is a cast and not a check. The schema refuses an unknown
-            // preset before `execute` runs, so it is covered on the shipped path;
-            // the seam is reachable by a JavaScript caller invoking `execute`
-            // directly, which is the same gap `clampLenses`' own header names,
-            // and `clampPreset` downstream is what answers it (code review
-            // 2026-09-08).
-            preset: args.preset as Preset | undefined,
-            tokenCap: args.budget,
-            // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
-            // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story
-            // `execute` took one parameter and never read it: pressing stop in
-            // opencode abandoned the RESULT while the fan-out kept billing. The
-            // core stops issuing turns when it fires and reports where it
-            // stopped; `OpencodeModelBackend` also races it against the existing
-            // per-turn deadline, which narrows the window without being relied
-            // on (AD-2: the signal is not load-bearing).
-            signal: context.abort,
-          })
+            // IT WAS MISSING HERE UNTIL 2026-09-11. Both ends shipped tested and
+            // mutation-verified in story 2.3 and `createLateUsageSink` had no
+            // caller outside tests, so the recovery existed and ran nowhere. Kept
+            // adjacent to the two constructor calls it joins, because the failure
+            // mode is silent: nothing throws, nothing is logged, and the token
+            // column is merely more pessimistic than it needs to be.
+            const lateUsage = createLateUsageSink()
 
-          // AD-16 amended (story 7A) — OFF UNLESS THE USER TURNED IT ON, and
-          // never inside the repository under review. It runs AFTER `review()`
-          // returns, on the finished record, so no stage can be affected by it
-          // and a failure here cannot cost the user their review. It is not a
-          // tool argument on purpose: see `adapters/opencode/artifacts.ts`.
-          //
-          // WRAPPED HERE AS WELL AS INSIDE (code review 2026-08-31). The story
-          // required its own try/catch at this call site and shipped without one,
-          // resting the guarantee entirely on the callee's "NEVER THROWS"
-          // header. That header is now true, and this is still here: the clause
-          // it protects — a dump failure must never cost the user their review —
-          // is worth two independent guards, and a later edit to `artifacts.ts`
-          // cannot quietly remove both.
-          let artifacts: ArtifactOutcome
-          try {
-            artifacts = await dumpRunArtifacts({
-              record,
-              change,
-              // The HUMAN render, deliberately unframed. The framed form below
-              // is for the host agent; a person opening `report.txt` in an
-              // editor is not the reader AD-18's notice sentence is addressed to.
-              rendered,
-              turns: recorder?.turns,
-              worktree,
+            let policyStop: { problem: string } | undefined
+
+            const backend = new OpencodeModelBackend({
+              serverUrl,
+              directory,
+              slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
+              lateUsage,
+              // CAP-3 — read-only review sessions (`./session-policy.ts`).
+              sessionPermission: REVIEW_SESSION_PERMISSION,
+              promptNotice: READ_ONLY_SESSION_NOTICE,
+              sessionGuard,
+              onPolicyMismatch: ({ problem }) => {
+                // THE FIRST STOP IS THE CAUSE. A mismatch that arrives after the
+                // run was already stopped (the user's stop, or an earlier
+                // mismatch) changes nothing; the backend still refuses and
+                // disposes that session.
+                if (runControl.signal.aborted) return
+                policyStop = { problem }
+                // The reason is what lets the core say MAD stopped the run.
+                runControl.abort(new MadStop("session-policy"))
+              },
             })
-          } catch (error) {
-            artifacts = {
-              kind: "failed",
-              directory: artifactRoot ?? "(unknown)",
-              error: error instanceof Error ? error.message : String(error),
+
+            // CAP-3 — ONE PROBE BEFORE ANY MODEL REQUEST. A host that does not
+            // record the rules is refused here, with nothing issued. A matching
+            // echo is the host's record, not proof that it enforces the rules.
+            // A run the host already stopped skips it, and a stop during it ends
+            // it: either way the review below sees the stop and issues nothing.
+            if (runControl.signal.aborted) return stoppedAfterRead()
+            const probe: PolicyProbe = await backend.probeSessionPolicy(runControl.signal)
+            const probeCleanupNote = probe.cleanupUnresolved
+              ? `\n\nMAD could not confirm that its policy-check session was deleted, so it may still exist on the host. ` +
+                `MAD keeps refusing tool calls on it.`
+              : !probe.ok && probe.sessionMayExist
+                ? `\n\nMAD's request to create its policy-check session had not answered when MAD moved on, so a ` +
+                  `session may exist on the host. If the host answers later with its id, MAD attempts to delete it and ` +
+                  `refuses tool calls on it; that deletion is not confirmed in this answer.`
+                : ""
+            // CAP-5 — stopped before or during the probe: no model was asked, and
+            // the probe's own cleanup facts are kept.
+            if (runControl.signal.aborted || (!probe.ok && probe.kind === "cancelled")) {
+              return stoppedAfterRead(probeCleanupNote)
             }
-          }
+            if (!probe.ok) {
+              return {
+                title:
+                  probe.kind === "different"
+                    ? "MAD — unsupported session policy"
+                    : "MAD — could not check the session policy",
+                output:
+                  `MAD did not review anything: it creates every review session with permission rules that deny ` +
+                  `all host tools (${describeReviewPermission()}), and ${probe.problem}. MAD does not run a review ` +
+                  `it cannot hold to those rules, so no model was asked anything.${probeCleanupNote}`,
+              }
+            }
 
-          // AD-6 reaches the headline too, not only the body. Two things this
-          // line must not do: denominate on the FILLED roster, which turns a
-          // 3-requested/1-filled host into a clean-looking "1/1"; and present a
-          // pre-clustering union as a plain finding count, which is the exact
-          // misreading the body's POOL — NOT YET MERGED notice exists to stop.
-          // The empty list is the third thing it must not do (code review
-          // 2026-08-15): `[].every(...)` is `true`, so a 2-model run that
-          // raised nothing used to title itself "0 pooled finding(s), not yet
-          // merged" — a claim about merging that no longer holds now that
-          // clustering always runs, and one the BODY never made
-          // (`pooledNotYetMerged` bails on an empty pool). Match its predicate.
-          const pooled =
-            record.answered > 1 &&
-            record.findings.length > 0 &&
-            record.findings.every((f) => f.clusterId === undefined)
-          const findingLabel = pooled ? "pooled finding(s), not yet merged" : "finding(s)"
-          // AD-17e reaches the headline too. The denominator stays the pool's:
-          // `answered` counts pool models only, and naming the lens count beside
-          // it is what stops a reader reading 5 turns into a 5-model roster.
-          const lensLabel =
-            record.roster.lensSlots.length > 0 ? ` + ${record.roster.lensSlots.length} lens` : ""
+            // AD-16 amended (story 7A) — the turn recorder is constructed ONLY
+            // when the user turned the dump on. With the flag off `review()` gets
+            // the bare backend, so a fresh install allocates nothing and holds no
+            // prompt or answer in memory. The decorator satisfies the port and
+            // does nothing else: no retry, no swallowed failure, and the
+            // cancellation signal forwarded untouched — a stage cannot tell it is
+            // there, which is AD-16's "no stage learns that a file exists".
+            //
+            // The same `artifactRootFrom` the dump itself calls, on the same
+            // `process.env`, so the two cannot disagree about whether the flag is
+            // on.
+            //
+            // AND THE REFUSAL IS CHECKED HERE TOO (code review 2026-08-31). The
+            // gate used to read `artifactRootFrom` alone, so a user who pointed
+            // the variable at their own repository paid the memory cost of holding
+            // every prompt, instruction set and envelope for the whole run — and
+            // then got nothing, because the dump refused. The recorder is built
+            // only when there is a dump for it to feed.
+            const artifactRoot = artifactRootFrom(process.env)
+            const recorder =
+              artifactRoot !== undefined && refusalFor(artifactRoot, worktree) === undefined
+                ? createTurnRecorder()
+                : undefined
 
-          // AD-6f — THE TITLE SAYS IT TOO. The header line inside the report
-          // says it and so does a warning, but the title is the line a user sees
-          // in the transcript without opening anything, and "a cancelled run
-          // must never render as a finished one" is not satisfied by a fact
-          // three scrolls down. It leads, because everything after it is a count
-          // taken from a review that did not finish.
-          const cancelledLabel = record.cancelled
-            ? `CANCELLED during ${record.cancelled.stage} — partial review: `
-            : ""
+            const { record, rendered } = await review({
+              roster: resolved.roster,
+              backend: recorder ? recorder.wrap(backend) : backend,
+              clock: systemClock(),
+              change,
+              // The same object the backend above reports into. See its comment.
+              lateUsage,
+              // The core DRIVES it; the core never constructs one (AD-1). This is
+              // the only place in the tree a `Tools` implementation is built.
+              tools,
+              // Story 2-7a — the core half of the same observer. See its
+              // construction above; the two must come from one value.
+              toolObservation,
+              // AD-6 — the adapter's OWN truncations ride in beside the roster's.
+              // `review()` copies `priorWarnings` onto the record verbatim, so this
+              // is the supported way for this layer to be heard at all.
+              priorWarnings: [
+                ...truncatedListWarnings({ models: args.models, lenses: requestedLenses }),
+                ...resolved.warnings,
+              ],
+              // CAP-7 (story 8) — the two user-facing dials, and the only two on
+              // this surface. BOTH ARE PASSED RAW. Neither is clamped here; the
+              // tool schema (`.int().min(0)` for the budget, `enum(PRESETS)` for
+              // the preset) is the only check on this side, and a schema check is
+              // not a clamp. The one clamp runs where AD-15 puts it, in the
+              // accountant that owns the dial.
+              //
+              // Raw is not laziness, it is what makes `dial-clamped` work. Handing
+              // `review()` an already-clamped value makes `clampedDials` compare a
+              // value against itself and find nothing moved — which is how
+              // `clampPreset("thorough")` silently becoming `normal` stayed silent,
+              // one of the three defects `dial-clamped` was added to end (code
+              // review 2026-09-06).
+              //
+              // The cast is a cast and not a check. The schema refuses an unknown
+              // preset before `execute` runs, so it is covered on the shipped path;
+              // the seam is reachable by a JavaScript caller invoking `execute`
+              // directly, which is the same gap `clampLenses`' own header names,
+              // and `clampPreset` downstream is what answers it (code review
+              // 2026-09-08).
+              preset: args.preset as Preset | undefined,
+              tokenCap: args.budget,
+              // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
+              // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story
+              // `execute` took one parameter and never read it: pressing stop in
+              // opencode abandoned the RESULT while the fan-out kept billing. The
+              // core stops issuing turns when it fires and reports where it
+              // stopped; `OpencodeModelBackend` also races it against the existing
+              // per-turn deadline, which narrows the window without being relied
+              // on (AD-2: the signal is not load-bearing).
+              signal: runControl.signal,
+            })
 
-          // AD-16 — the record stays in memory, and nothing is EVER written to
-          // the repo. The artifact dump above writes outside it, only when the
-          // user set the flag, and refuses anything that resolves inside the
-          // worktree.
-          return {
-            title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
-            // AD-18's EIGHTH SPAN (story 7). A tool's `output` is read by the
-            // calling agent, which is a model, and the report quotes every
-            // model-authored claim, argument and judge report the run produced.
-            // This is the ONE return site that carries MODEL prose; the four
-            // above are MAD-authored sentences, though three of them do
-            // interpolate text MAD did not write either — `error.message` from
-            // git or a provider, and `args.target` from whoever called the tool.
-            // That is a live boundary of its own, deliberately left open rather
-            // than claimed closed here. (It is filed in the planning ledger,
-            // which lives outside this repository — so this comment states the
-            // fact itself rather than pointing a reader at a file they cannot
-            // open. Code review 2026-08-30, second pass.)
-            // The framing belongs at this boundary and not in the render,
-            // because the same report also goes to a human, where a notice
-            // sentence is noise. `plugin-wiring.test.ts` fails if this reverts.
-            // THE ARTIFACT NOTE SITS OUTSIDE THE SPAN, and it is MAD's own
-            // sentence (AD-18). It is appended rather than interpolated so the
-            // framed report keeps exactly the bytes `frameForHostAgent`
-            // produced. `artifactNote` collapses the one value MAD does not
-            // author — a filesystem error message — to a single line, so it
-            // cannot forge a row of MAD's own; see the function below.
-            output: `${frameForHostAgent(rendered)}${artifactNote(artifacts)}`,
-            metadata: {
-              runId: record.runId,
-              answered: record.answered,
-              requested: record.roster.requested,
-              distinctLineages: record.roster.distinctLineages,
-              // AD-17c/e — reported separately from the roster's diversity, and
-              // never folded into it.
-              lensSlots: record.roster.lensSlots.map((s) => s.slot),
-              lensInstructions: record.lensInstructions,
-              warnings: record.warnings.map((w) => w.code),
-              tokens: record.ledger.total,
-              // FR10 / AC1 (story 2.3) — WHETHER THAT FIGURE IS THE WHOLE BILL,
-              // and TWO FIELDS rather than one, for `artifactsOutcome`'s reason
-              // exactly (see below): the boolean is the discriminant a host
-              // branches on, the count is the data. Folding them into one — a
-              // `tokens` of `null` when anything is unknown, say — would throw
-              // away the observed spend to report the gap, and a host that only
-              // wanted the number would learn nothing at all.
-              //
-              // WITHOUT THIS FIELD THE HOST CANNOT TELL. `record.ledger.total`
-              // is folded out of the turns MAD could COUNT, so a run that billed
-              // a turn whose usage never arrived hands back a total that looks
-              // exactly like a complete one — the direction that flatters MAD,
-              // at the boundary a calling agent reads instead of the report. The
-              // rendered report says it in prose (`core/stages/output.ts`); a
-              // machine should not have to match MAD's English to find out.
-              //
-              // BOTH ARE THE ACCOUNTANT'S ANSWERS (AD-15). This layer counts
-              // nothing: `usageIsComplete` and `unknownUsageCount` live beside
-              // `mayISpend` in `core/budget/ledger.ts` so the host, the renderer
-              // and the gate cannot disagree about what is missing.
-              //
-              // A COUNT AND NOT THE IDENTITIES, for `budgetSkipped`'s reason: a
-              // host branching on "is this figure short" needs the number, and
-              // the execution ids are already in the rendered report and in the
-              // `usage-unquantified` warning's `detail` for anyone who needs
-              // which.
-              usageComplete: usageIsComplete(record.ledger),
-              unknownUsageCount: unknownUsageCount(record.ledger),
-              // AD-6f — machine-readable beside the prose, for a host that wants
-              // to branch on it rather than read a title.
-              cancelled: record.cancelled?.stage,
-              // AD-15 amended — the peak this run was held to.
-              maxConcurrency: record.ledger.maxConcurrency,
-              // CAP-7 (story 8) — the two dials a caller set, and the one fact
-              // about the budget that changes what the review is WORTH.
-              //
-              // `budgetSkipped` is a COUNT and not the slot ids: a host branching
-              // on "was this review cut short" needs the number, and the ids are
-              // already in the rendered report and the `discovery-truncated`
-              // warning's detail for anyone who needs which.
-              preset: record.preset,
-              tokenCap: record.ledger.cap,
-              budgetSkipped: record.skippedForBudget?.length ?? 0,
-              // AD-16 — TWO FIELDS, NOT ONE OVERLOADED STRING (code review
-              // 2026-08-31). This used to be a single field holding either a
-              // directory path or the bare literal `"refused"`/`"failed"`, so a
-              // host could not tell "wrote to a directory" from "did not write"
-              // without string-matching MAD's own internal kind names — and a
-              // user whose scratch directory happened to be named `failed` broke
-              // it outright. The kind is the discriminant; the directory is data.
-              artifactsOutcome: artifacts.kind,
-              artifacts: artifacts.kind === "written" ? artifacts.directory : undefined,
-            },
+            // AD-16 amended (story 7A) — OFF UNLESS THE USER TURNED IT ON, and
+            // never inside the repository under review. It runs AFTER `review()`
+            // returns, on the finished record, so no stage can be affected by it
+            // and a failure here cannot cost the user their review. It is not a
+            // tool argument on purpose: see `adapters/opencode/artifacts.ts`.
+            //
+            // WRAPPED HERE AS WELL AS INSIDE (code review 2026-08-31). The story
+            // required its own try/catch at this call site and shipped without one,
+            // resting the guarantee entirely on the callee's "NEVER THROWS"
+            // header. That header is now true, and this is still here: the clause
+            // it protects — a dump failure must never cost the user their review —
+            // is worth two independent guards, and a later edit to `artifacts.ts`
+            // cannot quietly remove both.
+            let artifacts: ArtifactOutcome
+            try {
+              artifacts = await dumpRunArtifacts({
+                record,
+                change,
+                // The HUMAN render, deliberately unframed. The framed form below
+                // is for the host agent; a person opening `report.txt` in an
+                // editor is not the reader AD-18's notice sentence is addressed to.
+                rendered,
+                turns: recorder?.turns,
+                worktree,
+              })
+            } catch (error) {
+              artifacts = {
+                kind: "failed",
+                directory: artifactRoot ?? "(unknown)",
+                error: error instanceof Error ? error.message : String(error),
+              }
+            }
+
+            // AD-6 reaches the headline too, not only the body. Two things this
+            // line must not do: denominate on the FILLED roster, which turns a
+            // 3-requested/1-filled host into a clean-looking "1/1"; and present a
+            // pre-clustering union as a plain finding count, which is the exact
+            // misreading the body's POOL — NOT YET MERGED notice exists to stop.
+            // The empty list is the third thing it must not do (code review
+            // 2026-08-15): `[].every(...)` is `true`, so a 2-model run that
+            // raised nothing used to title itself "0 pooled finding(s), not yet
+            // merged" — a claim about merging that no longer holds now that
+            // clustering always runs, and one the BODY never made
+            // (`pooledNotYetMerged` bails on an empty pool). Match its predicate.
+            const pooled =
+              record.answered > 1 &&
+              record.findings.length > 0 &&
+              record.findings.every((f) => f.clusterId === undefined)
+            const findingLabel = pooled ? "pooled finding(s), not yet merged" : "finding(s)"
+            // AD-17e reaches the headline too. The denominator stays the pool's:
+            // `answered` counts pool models only, and naming the lens count beside
+            // it is what stops a reader reading 5 turns into a 5-model roster.
+            const lensLabel =
+              record.roster.lensSlots.length > 0 ? ` + ${record.roster.lensSlots.length} lens` : ""
+
+            // AD-6f — THE TITLE SAYS IT TOO. The header line inside the report
+            // says it and so does a warning, but the title is the line a user sees
+            // in the transcript without opening anything, and "a cancelled run
+            // must never render as a finished one" is not satisfied by a fact
+            // three scrolls down. It leads, because everything after it is a count
+            // taken from a review that did not finish.
+            const cancelledLabel =
+              record.cancelled && policyStop
+                ? `STOPPED BY MAD (unsupported session policy) during ${record.cancelled.stage} — partial review: `
+                : record.cancelled
+                  ? `CANCELLED during ${record.cancelled.stage} — partial review: `
+                  : ""
+            // CAP-3 — WHICH RULE FAILED, outside the span and in MAD's words only.
+            // The report itself already says MAD stopped the run (the core reads
+            // the `MadStop` reason); this names the rules and the fixed way the
+            // host's answer differed.
+            const policyStopNote = policyStop
+              ? `MAD STOPPED THIS RUN: a review session came back from the host with permission rules that were ` +
+                `not the ones MAD sent (${policyStop.problem}). Rules MAD sends: ${describeReviewPermission()}.\n\n`
+              : ""
+
+            // AD-16 — the record stays in memory, and nothing is EVER written to
+            // the repo. The artifact dump above writes outside it, only when the
+            // user set the flag, and refuses anything that resolves inside the
+            // worktree.
+            return {
+              title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
+              // AD-18's EIGHTH SPAN (story 7). A tool's `output` is read by the
+              // calling agent, which is a model, and the report quotes every
+              // model-authored claim, argument and judge report the run produced.
+              // This is the ONE return site that carries MODEL prose; the four
+              // above are MAD-authored sentences, though three of them do
+              // interpolate text MAD did not write either — `error.message` from
+              // git or a provider, and `args.target` from whoever called the tool.
+              // That is a live boundary of its own, deliberately left open rather
+              // than claimed closed here. (It is filed in the planning ledger,
+              // which lives outside this repository — so this comment states the
+              // fact itself rather than pointing a reader at a file they cannot
+              // open. Code review 2026-08-30, second pass.)
+              // The framing belongs at this boundary and not in the render,
+              // because the same report also goes to a human, where a notice
+              // sentence is noise. `plugin-wiring.test.ts` fails if this reverts.
+              // THE ARTIFACT NOTE SITS OUTSIDE THE SPAN, and it is MAD's own
+              // sentence (AD-18). It is appended rather than interpolated so the
+              // framed report keeps exactly the bytes `frameForHostAgent`
+              // produced. `artifactNote` collapses the one value MAD does not
+              // author — a filesystem error message — to a single line, so it
+              // cannot forge a row of MAD's own; see the function below.
+              // THE SUBMODULE SCOPE NOTE sits outside the span too: a fixed
+              // sentence of MAD's, because the read policy reads a submodule as
+              // its commit pointer only and the report itself never says so.
+              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${artifactNote(artifacts)}`,
+              metadata: {
+                runId: record.runId,
+                answered: record.answered,
+                requested: record.roster.requested,
+                distinctLineages: record.roster.distinctLineages,
+                // AD-17c/e — reported separately from the roster's diversity, and
+                // never folded into it.
+                lensSlots: record.roster.lensSlots.map((s) => s.slot),
+                lensInstructions: record.lensInstructions,
+                warnings: record.warnings.map((w) => w.code),
+                tokens: record.ledger.total,
+                // FR10 / AC1 (story 2.3) — WHETHER THAT FIGURE IS THE WHOLE BILL,
+                // and TWO FIELDS rather than one, for `artifactsOutcome`'s reason
+                // exactly (see below): the boolean is the discriminant a host
+                // branches on, the count is the data. Folding them into one — a
+                // `tokens` of `null` when anything is unknown, say — would throw
+                // away the observed spend to report the gap, and a host that only
+                // wanted the number would learn nothing at all.
+                //
+                // WITHOUT THIS FIELD THE HOST CANNOT TELL. `record.ledger.total`
+                // is folded out of the turns MAD could COUNT, so a run that billed
+                // a turn whose usage never arrived hands back a total that looks
+                // exactly like a complete one — the direction that flatters MAD,
+                // at the boundary a calling agent reads instead of the report. The
+                // rendered report says it in prose (`core/stages/output.ts`); a
+                // machine should not have to match MAD's English to find out.
+                //
+                // BOTH ARE THE ACCOUNTANT'S ANSWERS (AD-15). This layer counts
+                // nothing: `usageIsComplete` and `unknownUsageCount` live beside
+                // `mayISpend` in `core/budget/ledger.ts` so the host, the renderer
+                // and the gate cannot disagree about what is missing.
+                //
+                // A COUNT AND NOT THE IDENTITIES, for `budgetSkipped`'s reason: a
+                // host branching on "is this figure short" needs the number, and
+                // the execution ids are already in the rendered report and in the
+                // `usage-unquantified` warning's `detail` for anyone who needs
+                // which.
+                usageComplete: usageIsComplete(record.ledger),
+                unknownUsageCount: unknownUsageCount(record.ledger),
+                // AD-6f — machine-readable beside the prose, for a host that wants
+                // to branch on it rather than read a title.
+                cancelled: record.cancelled?.stage,
+                // AD-15 amended — the peak this run was held to.
+                maxConcurrency: record.ledger.maxConcurrency,
+                // CAP-7 (story 8) — the two dials a caller set, and the one fact
+                // about the budget that changes what the review is WORTH.
+                //
+                // `budgetSkipped` is a COUNT and not the slot ids: a host branching
+                // on "was this review cut short" needs the number, and the ids are
+                // already in the rendered report and the `discovery-truncated`
+                // warning's detail for anyone who needs which.
+                preset: record.preset,
+                tokenCap: record.ledger.cap,
+                budgetSkipped: record.skippedForBudget?.length ?? 0,
+                // AD-16 — TWO FIELDS, NOT ONE OVERLOADED STRING (code review
+                // 2026-08-31). This used to be a single field holding either a
+                // directory path or the bare literal `"refused"`/`"failed"`, so a
+                // host could not tell "wrote to a directory" from "did not write"
+                // without string-matching MAD's own internal kind names — and a
+                // user whose scratch directory happened to be named `failed` broke
+                // it outright. The kind is the discriminant; the directory is data.
+                artifactsOutcome: artifacts.kind,
+                artifacts: artifacts.kind === "written" ? artifacts.directory : undefined,
+              },
+            }
+          } finally {
+            context.abort.removeEventListener("abort", forwardHostStop)
           }
         },
       }),
@@ -802,6 +1000,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
  * diagnostic line costs more than it buys (the same call story 7 recorded for
  * this file's four other `output:` sites).
  */
+/** What the read policy did not read (`./git-read-policy.ts`, SUBMODULES). */
+export const SUBMODULE_SCOPE_NOTE =
+  "\n\nMAD reviewed submodules as commit pointers only: uncommitted changes inside a submodule were not read or reviewed."
+
 function artifactNote(outcome: ArtifactOutcome): string {
   switch (outcome.kind) {
     case "off":

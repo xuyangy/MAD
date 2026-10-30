@@ -198,6 +198,9 @@ function describe(outcome: Awaited<ReturnType<typeof capture>>): string {
       return `observation-failed: ${outcome.why}`
     case "cleanup-unresolved":
       return `cleanup-unresolved: ${outcome.why}`
+    case "stopped":
+      // The probe passes no stop signal, so this cannot be reached.
+      return outcome.launched ? `stopped (no stop signal is passed here): ${outcome.why}` : `stopped before launch (no stop signal is passed here)`
     default:
       // EXHAUSTIVE, AND CHECKED AT COMPILE TIME. This report is read as a
       // readiness ledger, so an outcome that fell through to a `default` would be

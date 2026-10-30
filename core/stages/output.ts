@@ -97,6 +97,7 @@
  * multi-model run says so (`pooledNotYetMerged`).
  */
 
+import { stoppedTheRun, stoppedThisRun } from "../domain/stop-cause.ts"
 import {
   budgetReport,
   ceilingNamed,
@@ -705,7 +706,7 @@ function judgeSummary(record: RunRecord): string[] {
   const stranded: string[] = []
   if (strandedByBudget > 0) stranded.push(`${strandedByBudget} stranded by the budget`)
   if (counts.unresolvedByCancellation > 0) {
-    stranded.push(`${counts.unresolvedByCancellation} left undecided when you stopped the run`)
+    stranded.push(`${counts.unresolvedByCancellation} left undecided when ${stoppedTheRun(record.cancelled?.cause ?? "user")}`)
   }
   if (counts.notExamined > 0) stranded.push(`${counts.notExamined} never examined`)
 
@@ -1266,7 +1267,7 @@ export function renderRunRecord(record: RunRecord): string {
   // is deliberately MAD-authored and interpolates only `Stage`, which is a
   // closed union of MAD's own words — nothing here can be written by a model.
   if (record.cancelled) {
-    lines.push(`RUN CANCELLED — you stopped this run during the ${record.cancelled.stage} stage.`)
+    lines.push(`RUN CANCELLED — ${stoppedThisRun(record.cancelled.cause ?? "user")} during the ${record.cancelled.stage} stage.`)
     lines.push(`This is a PARTIAL review. See the warnings and the UNRESOLVED section below.`)
     lines.push("=".repeat(60))
   }
@@ -1428,8 +1429,14 @@ export function renderRunRecord(record: RunRecord): string {
     // FIRST because a stop explains the empty roster completely: a slot that was
     // never asked did not drop out.
     if (record.cancelled && record.answered === 0) {
-      lines.push("  NOTHING WAS EXAMINED — you stopped this run before any model answered.")
-      if (!anyDroppedOut) {
+      lines.push(`  NOTHING WAS EXAMINED — ${stoppedThisRun(record.cancelled.cause ?? "user")} before any model answered.`)
+      if (record.cancelled.cause !== undefined) {
+        // CAP-3 — MAD'S OWN STOP CLAIMS NOTHING ABOUT FAILURES. A first attempt
+        // can fail and its retry be cancelled by the stop, which leaves no
+        // drop-out on the record and still is not "no model failed"; the
+        // warnings report what did fail.
+        lines.push(`  The run stopped during the ${record.cancelled.stage} stage.`)
+      } else if (!anyDroppedOut) {
         lines.push(
           `  No model failed and no model was retried; the run stopped during the ` +
             `${record.cancelled.stage} stage.`,
@@ -1560,7 +1567,7 @@ export function renderRunRecord(record: RunRecord): string {
       // claim as "nothing was found" over one that ran to completion.
       lines.push(
         `  No findings were raised by the ${record.answered} model(s) that answered ` +
-          `before you stopped the run.`,
+          `before ${stoppedTheRun(record.cancelled.cause ?? "user")}.`,
       )
     } else {
       lines.push(`  No findings were raised by the ${record.answered} model(s) that answered.`)

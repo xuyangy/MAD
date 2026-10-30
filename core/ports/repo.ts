@@ -18,6 +18,10 @@ export interface ChangeSet {
 export interface Repo {
   /** Absolute path to the worktree root; loci are relative to it. */
   root(): string
-  /** The change under review. `target` is host syntax, e.g. a git ref range. */
-  change(target?: string): Promise<ChangeSet>
+  /**
+   * The change under review. `target` is host syntax, e.g. a git ref range.
+   * `signal` is the caller's stop: once it has fired no further read starts,
+   * and a read in progress is stopped. Omitted, reads run as they always have.
+   */
+  change(target?: string, signal?: AbortSignal): Promise<ChangeSet>
 }

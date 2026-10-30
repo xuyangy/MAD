@@ -33,7 +33,11 @@ import {
   MadPlugin,
   MAX_DISCOVERY_SLOTS,
   MAX_LENS_SLOTS,
+  SUBMODULE_SCOPE_NOTE,
 } from "./plugin.ts"
+import { isolateGitHome } from "./test-support/git-home.ts"
+
+isolateGitHome()
 
 function model(id: string) {
   return { id, name: id, capabilities: { toolcall: true }, limit: { context: 200000 }, cost: { input: 3, output: 15 } }
@@ -81,7 +85,33 @@ async function setupGit(cwd: string, argv: string[]): Promise<void> {
  */
 let worktree = ""
 
+/**
+ * A host that answers ONLY the session-policy probe (CAP-3): its create is
+ * echoed with MAD's rules, and its delete succeeds. Every turn's create answers
+ * 500, so every slot is a transport-error drop-out, which is a domain outcome,
+ * not an exception (AD-2, spine Errors) — the condition these tests are about.
+ */
+let probeOnlyHost: ReturnType<typeof Bun.serve> | undefined
+const PROBE_TITLE = "MAD session policy probe"
+function startProbeOnlyHost(): ReturnType<typeof Bun.serve> {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname
+      if (request.method === "POST" && path === "/session") {
+        const body = (await request.json().catch(() => ({}))) as { title?: string; permission?: unknown }
+        if (body.title !== PROBE_TITLE) return Response.json({ name: "UnknownError", data: {} }, { status: 500 })
+        return Response.json({ id: "ses_probe", title: PROBE_TITLE, directory: ".", permission: body.permission })
+      }
+      if (request.method === "DELETE" && path.startsWith("/session/")) return Response.json(true)
+      return Response.json({ name: "NotFound", data: {} }, { status: 404 })
+    },
+  })
+}
+
 beforeAll(async () => {
+  probeOnlyHost = startProbeOnlyHost()
   worktree = await mkdtemp(join(tmpdir(), "mad-wiring-repo-"))
   await setupGit(worktree, ["init", "-q"])
   await mkdir(join(worktree, "src"))
@@ -99,6 +129,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await probeOnlyHost?.stop(true)
   if (worktree !== "") await rm(worktree, { recursive: true, force: true })
 })
 
@@ -145,9 +176,8 @@ async function executeWith(
     client: fakeClient(),
     directory: ".",
     worktree,
-    // Deliberately unreachable: every turn becomes a transport-error drop-out,
-    // which is a domain outcome, not an exception (AD-2, spine Errors).
-    serverUrl: "http://127.0.0.1:1",
+    // Answers the probe only: every turn becomes a transport-error drop-out.
+    serverUrl: `http://127.0.0.1:${probeOnlyHost!.port}`,
     $: fakeShell(),
   } as never)
   const tool = (plugin as {
@@ -374,11 +404,12 @@ describe("mad_review.execute — THE REPORT LEAVES FRAMED (AD-18's eighth span, 
 
     const longestRun = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length))
     expect(openerFence.length).toBeGreaterThan(longestRun)
-    // The closing fence is the LAST line, which also pins that story 7A's
-    // artifact note is silent when the flag is off — the default, and what a
-    // fresh install runs. (Set `MAD_ARTIFACTS` in your shell and this line is
-    // the one that tells you: the note is appended after the span, outside it.)
-    expect(result.output.split("\n").at(-1)).toBe(openerFence)
+    // The closing fence is followed only by the fixed submodule scope note,
+    // which also pins that story 7A's artifact note is silent when the flag is
+    // off — the default, and what a fresh install runs. (Set `MAD_ARTIFACTS` in
+    // your shell and this line is the one that tells you: the note is appended
+    // after the span, outside it.)
+    expect(result.output.endsWith(`\n${openerFence}${SUBMODULE_SCOPE_NOTE}`)).toBe(true)
   })
 })
 
@@ -392,17 +423,13 @@ describe("mad_review.execute — run control reaches the host boundary (story 7A
     controller.abort()
     const result = await executeWith({}, controller.signal)
 
-    // AD-6f — the TITLE says it, because that is the line a user sees without
-    // opening anything, and it LEADS, because every count after it comes from a
-    // review that did not finish.
-    expect(result.title).toContain("CANCELLED during discover")
-    expect(result.title).toContain("partial review")
-    expect(result.metadata?.cancelled).toBe("discover")
-
-    // And the report inside the span says so too, on its first lines.
-    const body = materialSpans(result.output)[0]!.body
-    expect(body).toContain("RUN CANCELLED")
-    expect(body.indexOf("RUN CANCELLED")).toBeLessThan(body.indexOf("ROSTER"))
+    // CAP-5 — A STOP THAT HAS ALREADY FIRED DOES NO WORK: no roster read, no
+    // git, no probe, no model. The answer says so and is never a review.
+    expect(result.title).toBe("MAD — review stopped")
+    expect(result.output).toBe(
+      "MAD reviewed nothing: the review was stopped before MAD read anything or asked any model.",
+    )
+    expect(result.metadata).toBeUndefined()
   })
 
   test("an un-cancelled run's title is unchanged", async () => {
@@ -978,12 +1005,12 @@ describe("mad_review.execute — one late-usage sink, reaching the backend and r
 
     expect(source).toContain("const lateUsage = createLateUsageSink()")
     // Onto the backend, so there is somewhere to report.
-    expect(source).toContain("slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,")
+    expect(source).toContain("slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n              lateUsage,")
     // And onto the run, so there is something to drain. A bare `lateUsage,` in
     // the `review({...})` literal is the same identifier, which is the whole
     // point — two `createLateUsageSink()` calls would satisfy a weaker assertion
     // and recover nothing.
-    expect(source).toContain("// The same object the backend above reports into. See its comment.\n            lateUsage,")
+    expect(source).toContain("// The same object the backend above reports into. See its comment.\n              lateUsage,")
     // Exactly one construction in the file.
     expect(source.split("createLateUsageSink()").length - 1).toBe(1)
   })
@@ -993,17 +1020,17 @@ describe("mad_review.execute — one late-usage sink, reaching the backend and r
     const reverted = (await pluginSource())
       .replace("const lateUsage = createLateUsageSink()\n", "")
       .replace(
-        "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,",
+        "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n              lateUsage,",
         "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],",
       )
       .replace(
-        "// The same object the backend above reports into. See its comment.\n            lateUsage,\n",
+        "// The same object the backend above reports into. See its comment.\n              lateUsage,\n",
         "",
       )
 
     expect(reverted).not.toContain("const lateUsage = createLateUsageSink()")
     expect(reverted).not.toContain(
-      "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n            lateUsage,",
+      "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n              lateUsage,",
     )
     expect(reverted.split("createLateUsageSink()").length - 1).toBe(0)
   })

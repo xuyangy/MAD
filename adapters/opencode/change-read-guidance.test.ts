@@ -106,4 +106,30 @@ describe("changeReadStopGuidance", () => {
     expect(text).not.toContain("`git diff` (terminated)")
     expect(error.message.endsWith("No change was read.")).toBe(true)
   })
+
+  test("cancelled with unresolved cleanup and an observed exit: git ended, what holds its output did not confirm", () => {
+    const text = changeReadStopGuidance(stop({ stop: "cancelled", cleanup: "unresolved", pid: 7, signal: "SIGKILL" }))
+    expect(text).toContain("Git's own process ended, but MAD could not confirm that nothing it started still holds its output.")
+    expect(text).not.toContain("could not confirm that git ended")
+    expect(text).toContain(`This worktree is now ${QUARANTINE_LINE}`)
+  })
+
+  test("cancelled with unresolved cleanup and nothing observed: it cannot confirm git ended", () => {
+    const text = changeReadStopGuidance(stop({ stop: "cancelled", cleanup: "unresolved", pid: 7 }))
+    expect(text).toContain("MAD could not confirm that git ended.")
+    expect(text).toContain(`This worktree is now ${QUARANTINE_LINE}`)
+  })
+
+  test("the message's ending follows how much of the change was read", () => {
+    expect(stop({ stop: "cancelled" }).message).toEndWith("No change was read.")
+    expect(stop({ stop: "cancelled", contentRead: "possibly" }).message).toEndWith(
+      "Some of the change may have been read, but none of it was returned for review.",
+    )
+    expect(stop({ stop: "cancelled", contentRead: "some" }).message).toEndWith(
+      "Part of the change was read, but none of it was returned for review.",
+    )
+    expect(stop({ stop: "cancelled", operation: "change read", contentRead: "some" }).message).toEndWith(
+      "The change was read, but none of it was returned for review.",
+    )
+  })
 })

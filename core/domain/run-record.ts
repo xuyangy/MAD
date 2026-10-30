@@ -466,7 +466,15 @@ export interface RunRecord {
    * budget carries `unresolved` with a budget reason (AD-6d, AD-6f: same
    * section, distinct causes).
    */
-  cancelled?: { stage: Stage }
+  cancelled?: {
+    stage: Stage
+    /**
+     * CAP-3 — present only when MAD stopped the run itself
+     * (`./stop-cause.ts`). Absent is the user's stop, the shape every earlier
+     * record has.
+     */
+    cause?: "session-policy"
+  }
   /**
    * CAP-7 (story 8) — the preset this run resolved its dials from, when a caller
    * named one.

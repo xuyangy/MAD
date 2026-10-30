@@ -795,9 +795,13 @@ async function execute(
     // directory — so no run can move another run's `$`. The shell is handed over
     // because `opencodeTools` keeps it on its construction surface, and these
     // runs stay strictly sequential.
+    // `gitReadPolicy: "inherit"`: the suite keeps its historical git behaviour
+    // and does not measure the plugin's read policy
+    // (`adapters/opencode/git-read-policy.ts`).
     const tools = opencodeTools({
       $: input.shell,
       worktree,
+      gitReadPolicy: "inherit",
       toolObservation: observer,
       ...(input.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: input.observationTimeoutMs }),
       clock: input.clock,

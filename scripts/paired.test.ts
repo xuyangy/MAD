@@ -2885,3 +2885,22 @@ describe("the OAuth route's measured host binary and frozen protocol hash (retro
     expect(tripped).toEqual([])
   })
 })
+
+describe("paired blocks keep the tool's historical git", () => {
+  test("productionTools selects inherit, even when the caller asks for read-only", async () => {
+    const seen: { cmd: string[]; env: unknown }[] = []
+    const refusing: SpawnBlame = (request) => {
+      seen.push({ cmd: request.cmd, env: request.env })
+      throw new Error("no such file or directory")
+    }
+    const wiring = productionTools({ worktree: "/repo", spawn: refusing, gitReadPolicy: "read-only" })!
+
+    await wiring.tools.blame("src/pay.ts", 1, 1).then(
+      () => undefined,
+      () => undefined,
+    )
+
+    // No filter preflight, no policy argv, no policy environment.
+    expect(seen).toEqual([{ cmd: ["git", "blame", "-L", "1,1", "--porcelain", "--", "src/pay.ts"], env: undefined }])
+  })
+})

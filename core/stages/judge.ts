@@ -80,6 +80,7 @@
  * story 8's; it is filed in `deferred-work.md` rather than guessed at here.
  */
 
+import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
 import {
@@ -2158,8 +2159,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       code: "unresolved-findings",
       stage: "judge",
       message:
-        `RUN CANCELLED DURING JUDGING: ${counts.unresolvedByCancellation} finding(s) were still undecided when you ` +
-        `stopped the run. They are reported in the UNRESOLVED section with whatever earlier steps ` +
+        `RUN CANCELLED DURING JUDGING: ${counts.unresolvedByCancellation} finding(s) were still undecided when ` +
+        `${stoppedTheRun(stopCauseOf(input.signal))}. They are reported in the UNRESOLVED section with whatever earlier steps ` +
         `produced for them — nothing was dropped, and no model was asked again.`,
       detail: { cause: "cancelled", unresolved: counts.unresolvedByCancellation },
     })

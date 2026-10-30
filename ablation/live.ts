@@ -188,9 +188,13 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
   // given its change already knows what it is reviewing. Its reads are bounded
   // under one total budget, and a read that stops raises `ChangeReadStopped`
   // here, before the calibration and before any arm runs.
+  // `gitReadPolicy: "inherit"` AFTER the spread, so no caller option can
+  // replace it: the harness keeps its historical git behaviour and does not
+  // measure the plugin's read policy (`adapters/opencode/git-read-policy.ts`).
   const repo = opencodeRepo({
     ...options.repo,
     worktree: options.worktree ?? options.directory,
+    gitReadPolicy: "inherit",
   })
   const change = options.change ?? (await repo.change(options.target))
 

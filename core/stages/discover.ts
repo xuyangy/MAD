@@ -80,6 +80,7 @@
  * stage could ship the exact failure story 7A exists to prevent.
  */
 
+import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
 import {
@@ -872,8 +873,8 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       (stoppedUnasked === 0
         ? ""
         : otherwiseLost === 0 && stoppedInFlight === 0
-          ? ` The remaining ${stoppedUnasked} were never asked: you stopped the run.`
-          : ` ${stoppedUnasked} were never asked: you stopped the run.`) +
+          ? ` The remaining ${stoppedUnasked} were never asked: ${stoppedTheRun(stopCauseOf(input.signal))}.`
+          : ` ${stoppedUnasked} were never asked: ${stoppedTheRun(stopCauseOf(input.signal))}.`) +
       (stoppedInFlight === 0 ? "" : ` ${stoppedInFlight} did not answer because the run was cancelled.`)
     warnings.push({
       code: "denominator-reduced",

@@ -242,6 +242,20 @@ export function gitOutcomeOf(command: string, outcome: BlameExecOutcome): GitOut
           `\`${command}\` did not return before its deadline; termination is UNCONFIRMED and the process may still be running — ` +
           `check ${processOf(outcome.pid)} by hand: ${outcome.why}`,
       }
+    case "stopped":
+      // This module passes no stop signal, so a stop is a wiring fault. A
+      // launched one is reported with its own cleanup fact.
+      return outcome.launched
+        ? {
+            exitCode: null,
+            termination: outcome.cleanup.kind === "confirmed" ? "confirmed" : "unconfirmed",
+            reason: `\`${command}\` was stopped by a signal this module never passes: ${outcome.why}`,
+          }
+        : {
+            exitCode: null,
+            termination: "confirmed",
+            reason: `\`${command}\` was not launched: a stop signal this module never passes had fired`,
+          }
     default: {
       const unhandled: never = outcome
       return {

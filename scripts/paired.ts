@@ -272,8 +272,11 @@ export interface ToolsWiring {
 /** Builds the Tools port. The default is `opencodeTools` with the options exactly as given. */
 export type ToolsFactory = (options: OpencodeToolsOptions) => ToolsWiring | undefined
 
+// `gitReadPolicy: "inherit"` AFTER the spread, so no caller option can replace
+// it: paired blocks keep their historical git behaviour and do not measure the
+// plugin's read policy (`adapters/opencode/git-read-policy.ts`).
 export const productionTools: ToolsFactory = (options) => ({
-  tools: opencodeTools(options),
+  tools: opencodeTools({ ...options, gitReadPolicy: "inherit" }),
   adapter: PRODUCTION_TOOLS_ADAPTER,
   blameTimeoutMs: options.blameTimeoutMs ?? DEFAULT_BLAME_TIMEOUT_MS,
   blameCleanupTimeoutMs: options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS,
@@ -943,6 +946,11 @@ export function nonReturnedReason(command: string, outcome: BlameExecOutcome): s
         `\`${command}\` timed out; termination is UNCONFIRMED and the process may still be running — ` +
         `check process ${outcome.pid} by hand: ${outcome.why}`
       )
+    case "stopped":
+      // This launcher passes no stop signal, so a stop is a wiring fault.
+      return outcome.launched
+        ? `\`${command}\` was stopped by a signal this launcher never passes: ${outcome.why}`
+        : `\`${command}\` was not launched: a stop signal this launcher never passes had fired`
     default: {
       const unhandled: never = outcome
       return `\`${command}\` ended with an outcome this launcher does not know: ${JSON.stringify(unhandled)}`

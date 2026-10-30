@@ -21,6 +21,7 @@ import type { RosterSlot } from "../../core/domain/roster.ts"
 import type { TokenUsage } from "../../core/domain/run-record.ts"
 import type { AdmittedTurn } from "../../core/ports/admission.ts"
 import type { LateUsageReporter } from "../../core/ports/late-usage.ts"
+import { permissionEchoProblem, type PermissionRule } from "./session-policy.ts"
 import {
   abandonedTurn,
   cancelledTurn,
@@ -246,6 +247,64 @@ export interface OpencodeBackendOptions {
    * reported, because the meter's figure is final.
    */
   meter?: RequestMeterPort
+  /**
+   * CAP-3 — the permission rules every session is created with
+   * (`./session-policy.ts`). With them, the host's echo is checked after each
+   * `session.create`, and a session whose echo differs is never prompted.
+   * Only the shipped plugin passes them; absent, sessions are created as before.
+   */
+  sessionPermission?: readonly PermissionRule[]
+  /** CAP-3 — appended to every prompt's system text. Only the shipped plugin passes one. */
+  promptNotice?: string
+  /**
+   * CAP-3 — told each session id as soon as `session.create` returns it, before
+   * any prompt, and again only when the host confirmed its deletion.
+   */
+  sessionGuard?: { track(sessionID: string): void; deleted(sessionID: string): void }
+  /**
+   * CAP-3 — called once per session whose echoed rules differ from
+   * `sessionPermission`, before that session is disposed. The slot's turn
+   * returns the pre-issue `cancelled` envelope: no prompt was sent.
+   */
+  onPolicyMismatch?: (fact: { slot: string; problem: string }) => void
+}
+
+/** CAP-3 — what the policy probe found. `problem` is MAD's fixed wording. */
+export type PolicyProbe =
+  | { ok: true; cleanupUnresolved?: CleanupUnresolved }
+  | {
+      ok: false
+      /**
+       * `unchecked`: no usable session came back, so nothing was learned.
+       * `different`: a session came back with other rules. `cancelled`: the
+       * run was stopped before or during the check.
+       */
+      kind: "unchecked" | "different" | "cancelled"
+      problem: string
+      /**
+       * The create had not answered when the probe returned, so a session may
+       * exist on the host. A later answer with an id is tracked and its
+       * deletion attempted; nothing confirms that deletion here.
+       */
+      sessionMayExist?: true
+      cleanupUnresolved?: CleanupUnresolved
+    }
+
+/**
+ * The probe's request did not return a usable session. Whether the host made
+ * one anyway is not known, and the wording does not claim either.
+ */
+const UNCHECKED_PROBE =
+  "the request to create a session to check them on did not return a usable session, so MAD could not " +
+  "confirm the host records them (if the host created a session anyway, MAD has no id to delete it by)"
+
+/** A non-empty string id from a create answer, or `undefined`. Nothing else is a session identity. */
+function usableSessionID(answer: unknown): string | undefined {
+  if (typeof answer !== "object" || answer === null) return undefined
+  const data = (answer as { data?: unknown }).data
+  if (typeof data !== "object" || data === null) return undefined
+  const id = (data as { id?: unknown }).id
+  return typeof id === "string" && id.length > 0 ? id : undefined
 }
 
 /** Story 2-8c2 — what a meter measured for one attempt's physical requests. */
@@ -568,6 +627,10 @@ export class OpencodeModelBackend implements ModelBackend {
   private readonly lateUsage: LateUsageReporter | undefined
   private readonly executionIdPrefix: string
   private readonly meter: RequestMeterPort | undefined
+  private readonly sessionPermission: readonly PermissionRule[] | undefined
+  private readonly promptNotice: string | undefined
+  private readonly sessionGuard: OpencodeBackendOptions["sessionGuard"]
+  private readonly onPolicyMismatch: OpencodeBackendOptions["onPolicyMismatch"]
 
   /**
    * How many `executionId`s this backend has minted. See `nextExecutionId`.
@@ -593,6 +656,88 @@ export class OpencodeModelBackend implements ModelBackend {
     this.lateUsage = options.lateUsage
     this.executionIdPrefix = options.executionIdPrefix ?? ""
     this.meter = options.meter
+    this.sessionPermission = options.sessionPermission
+    this.promptNotice = options.promptNotice
+    this.sessionGuard = options.sessionGuard
+    this.onPolicyMismatch = options.onPolicyMismatch
+  }
+
+  /**
+   * CAP-3 — creates one session with `sessionPermission`, checks the host's
+   * echo and deletes the session under the same bounded dispose as a turn. No
+   * prompt is sent. The plugin calls it once before any model request, so an
+   * unsupported host is refused with nothing issued. A matching echo is the
+   * host's record of the rules, not proof that it enforces them.
+   */
+  async probeSessionPolicy(signal?: AbortSignal): Promise<PolicyProbe> {
+    if (this.sessionPermission === undefined) return { ok: true }
+    if (signal?.aborted) return { ok: false, kind: "cancelled", problem: "the run was stopped before the check" }
+    const rules = this.sessionPermission
+    type Created = { data?: { id?: unknown; permission?: unknown }; error?: unknown }
+    let request: Promise<Created>
+    try {
+      request = this.client.session.create({
+        directory: this.directory,
+        title: "MAD session policy probe",
+        permission: [...rules],
+      }) as Promise<Created>
+    } catch {
+      return { ok: false, kind: "unchecked", problem: UNCHECKED_PROBE }
+    }
+
+    // BOUNDED BY THE CLEANUP BUDGET, the same one local host round trip a
+    // delete gets, AND BY THE RUN'S STOP. Whatever wins, the create keeps a
+    // continuation: an answer that arrives later with a usable id is tracked
+    // and deleted, never prompted, and a late failure is consumed here.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let stopListener: (() => void) | undefined
+    const outcome = await Promise.race<{ answer: Created } | { failed: true } | "timeout" | "stopped">([
+      request.then(
+        (answer) => ({ answer }),
+        () => ({ failed: true as const }),
+      ),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), this.cleanupTimeoutMs)
+      }),
+      new Promise<"stopped">((resolve) => {
+        if (!signal) return
+        stopListener = () => resolve("stopped")
+        signal.addEventListener("abort", stopListener, { once: true })
+      }),
+    ])
+    if (timer) clearTimeout(timer)
+    if (stopListener) signal?.removeEventListener("abort", stopListener)
+
+    if (outcome === "timeout" || outcome === "stopped") {
+      void request.then(
+        async (late) => {
+          const lateID = usableSessionID(late)
+          if (lateID === undefined) return
+          this.sessionGuard?.track(lateID)
+          await this.disposeSession(lateID)
+        },
+        () => undefined,
+      )
+      return outcome === "stopped"
+        ? { ok: false, kind: "cancelled", problem: "the run was stopped during the check", sessionMayExist: true }
+        : {
+            ok: false,
+            kind: "unchecked",
+            problem:
+              `the request to create a session to check them on did not answer within ${this.cleanupTimeoutMs}ms, so ` +
+              `MAD could not confirm the host records them`,
+            sessionMayExist: true,
+          }
+    }
+    if ("failed" in outcome) return { ok: false, kind: "unchecked", problem: UNCHECKED_PROBE }
+    const created = outcome.answer
+    const sessionID = created.error ? undefined : usableSessionID(created)
+    if (sessionID === undefined) return { ok: false, kind: "unchecked", problem: UNCHECKED_PROBE }
+    this.sessionGuard?.track(sessionID)
+    const problem = permissionEchoProblem(created.data?.permission, rules)
+    const unresolved = await this.disposeSession(sessionID)
+    const cleanup = unresolved ? { cleanupUnresolved: unresolved } : {}
+    return problem === null ? { ok: true, ...cleanup } : { ok: false, kind: "different", problem, ...cleanup }
   }
 
   /**
@@ -672,8 +817,13 @@ export class OpencodeModelBackend implements ModelBackend {
       const deletion = deletable.delete?.({ sessionID, directory: this.directory })
       // A client with no `delete` at all is not an unresolved cleanup: there was
       // never a request to resolve. (The v1 client's shape is why this call is
-      // optional in the first place.)
-      if (deletion === undefined) return undefined
+      // optional in the first place.) Under the policy it is: the session
+      // exists and nothing can confirm it is gone, so it stays guarded.
+      if (deletion === undefined) {
+        return this.sessionPermission === undefined
+          ? undefined
+          : { why: "the session was not deleted: this host client has no session.delete" }
+      }
 
       // `Promise.race` attaches a handler to every entry, so a rejection that
       // arrives after the timer already won is CONSUMED here rather than
@@ -681,7 +831,26 @@ export class OpencodeModelBackend implements ModelBackend {
       // as an unhandled rejection in a run that has moved on.
       const outcome = await Promise.race<"deleted" | "unresolved" | { refused: unknown }>([
         deletion.then(
-          () => "deleted" as const,
+          (answer: unknown) => {
+            // CAP-3 — AN ANSWER CARRYING AN ERROR IS NOT A DELETION. The SDK
+            // resolves a 4xx or 5xx as `{ error }` rather than rejecting. Under
+            // the session policy (the plugin path only) the session is then
+            // reported as not deleted and stays guarded. Without it, the answer
+            // counts as deleted, as it always has.
+            const refusedAnswer = typeof answer === "object" && answer !== null && "error" in answer && answer.error
+            if (this.sessionPermission === undefined) {
+              if (!refusedAnswer) this.sessionGuard?.deleted(sessionID)
+              return "deleted" as const
+            }
+            // Under the policy only `{ data: true }`, the SDK's boolean answer,
+            // confirms a deletion. An error, `false`, `{}` or `null` does not,
+            // and the session stays guarded. A confirmation that arrives after
+            // the deadline still releases the guard: the session is gone.
+            const confirmed = typeof answer === "object" && answer !== null && (answer as { data?: unknown }).data === true
+            if (!confirmed) return { refused: refusedAnswer ? (answer as { error: unknown }).error : "the host did not confirm the deletion" }
+            this.sessionGuard?.deleted(sessionID)
+            return "deleted" as const
+          },
           (error: unknown) => ({ refused: error }),
         ),
         new Promise<"unresolved">((resolve) => {
@@ -761,11 +930,22 @@ export class OpencodeModelBackend implements ModelBackend {
     if (signal?.aborted) return cancelledTurn<T>(slot)
 
     let sessionID: string
+    let echoed: unknown
     try {
       const created = await this.client.session.create({
         directory: this.directory,
         title: `MAD ${slot}`,
+        ...(this.sessionPermission === undefined ? {} : { permission: [...this.sessionPermission] }),
       })
+      // CAP-3 — UNDER THE POLICY, ONLY A NON-EMPTY STRING IS A SESSION ID. A
+      // create the host refused is a transport failure, as before. A create
+      // that succeeded without a usable id is the host answering outside the
+      // contract MAD checks, so it stops the run like a differing echo, and
+      // nothing is tracked, prompted or deleted: there is no id to do it by.
+      if (this.sessionPermission !== undefined && !created.error && usableSessionID(created) === undefined) {
+        this.onPolicyMismatch?.({ slot, problem: "the host answered a session create without a usable session id" })
+        return cancelledTurn<T>(slot)
+      }
       if (created.error || !created.data?.id) {
         return {
           ok: false,
@@ -775,8 +955,35 @@ export class OpencodeModelBackend implements ModelBackend {
         }
       }
       sessionID = created.data.id
+      // CAP-3 — TRACKED BEFORE ANYTHING ELSE CAN HAPPEN TO IT, so the guard
+      // covers the session from its first moment until its deletion is confirmed.
+      this.sessionGuard?.track(sessionID)
+      echoed = created.data.permission
     } catch (error) {
       return { ok: false, slot, failure: "transport-error", message: describeError(error) }
+    }
+
+    // CAP-3 — A SESSION WHOSE RULES DIFFER IS NEVER PROMPTED. Its slot gets the
+    // pre-issue cancellation, which is what it is: nothing was sent, nothing was
+    // billed. The callback is what stops the run; this envelope only answers
+    // for this one slot.
+    if (this.sessionPermission !== undefined) {
+      const problem = permissionEchoProblem(echoed, this.sessionPermission)
+      if (problem !== null) {
+        this.onPolicyMismatch?.({ slot, problem })
+        const unresolved = await this.disposeSession(sessionID)
+        const refused = cancelledTurn<T>(slot)
+        return unresolved ? { ...refused, cleanupUnresolved: unresolved } : refused
+      }
+      // A STOP THAT LANDED WHILE THE CREATE WAS IN FLIGHT, another session's
+      // mismatch included: the session is disposed unprompted, and the turn is
+      // the pre-issue cancellation it is. Nothing awaits between here and the
+      // prompt.
+      if (signal?.aborted) {
+        const unresolved = await this.disposeSession(sessionID)
+        const refused = cancelledTurn<T>(slot)
+        return unresolved ? { ...refused, cleanupUnresolved: unresolved } : refused
+      }
     }
 
     // AC3 (story 2.3) — ONE DISPOSE PER ATTEMPT, BOUNDED, AND ITS OUTCOME
@@ -892,7 +1099,7 @@ export class OpencodeModelBackend implements ModelBackend {
           sessionID,
           directory: this.directory,
           model: { providerID: rosterSlot.providerId, modelID: rosterSlot.modelId },
-          system: instructions,
+          system: this.promptNotice === undefined ? instructions : `${instructions}\n\n${this.promptNotice}`,
           // AD-12 — structured output; this is the whole reason for the v2 client.
           format: { type: "json_schema", schema: jsonSchema },
           ...(this.tools ? { tools: this.tools } : {}),

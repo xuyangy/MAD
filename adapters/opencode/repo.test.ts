@@ -21,15 +21,23 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { SpawnBlame, SpawnedBlame } from "./blame-exec.ts"
+import { FILTER_PREFLIGHT, readOnlyGitArgv } from "./git-read-policy.ts"
+import { answeringPreflight } from "./test-support/preflight.ts"
+import type { InputFs } from "./change-input.ts"
 import {
+  ChangeReadRefused,
   ChangeReadStopped,
   changeReadQuarantineFor,
+  FilterPreflightFailed,
   clearChangeReadQuarantineForTests,
   DEFAULT_CHANGE_READ_BUDGET_MS,
   DEFAULT_CHANGE_READ_CLEANUP_MS,
   GitError,
   opencodeRepo,
 } from "./repo.ts"
+import { isolateGitHome } from "./test-support/git-home.ts"
+
+isolateGitHome()
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -143,13 +151,25 @@ function fakeSpawn(route: (argv: string) => Reply, onSpawn?: (argv: string[]) =>
       kill: () => undefined,
     }
   }
-  return { spawn, spawned }
+  return {
+    spawn: answeringPreflight(spawn),
+    /** The same fake with the filter preflight left to `route`, for tests about the preflight. */
+    seesPreflight: spawn,
+    spawned,
+  }
 }
 
 /** A healthy working tree: a tracked edit, no untracked files. */
+/** CAP-4 — every untracked entry these scripted tests list is a readable regular file. */
+const FILES: InputFs = {
+  supported: true,
+  lstat: async () => "file",
+  openNoFollow: async () => ({ kind: async () => "file" as const, close: async () => undefined }),
+}
+
 const DIFF = "--- a/src/pay.ts\n+++ b/src/pay.ts\n@@ -1 +1 @@\n-a\n+b\n"
 const healthy = (argv: string): Reply => {
-  if (argv.includes("--name-only")) return { stdout: "src/pay.ts\n" }
+  if (argv.includes("--name-only")) return { stdout: "src/pay.ts\0" }
   if (argv.includes("ls-files")) return { stdout: "" }
   return { stdout: DIFF }
 }
@@ -206,17 +226,27 @@ describe("opencodeRepo.change — real repositories", () => {
     const spawned: string[][] = []
     const recording: SpawnBlame = (request) => {
       spawned.push(request.cmd)
-      return Bun.spawn({ cmd: request.cmd, cwd: request.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" }) as unknown as SpawnedBlame
+      return Bun.spawn({
+        cmd: request.cmd,
+        cwd: request.cwd,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        ...(request.env === undefined ? {} : { env: { ...request.env, PWD: request.cwd } }),
+      }) as unknown as SpawnedBlame
     }
     const change = await opencodeRepo({ worktree: repo, spawn: recording }).change("HEAD")
 
-    expect(change.description).toBe("git diff HEAD")
+    expect(change.description).toBe("git diff HEAD (submodules as commit pointers only, their uncommitted contents not read)")
     expect(change.files).toEqual(["src/pay.ts"])
     expect(change.diff).toContain("+const a = 2")
     expect(change.diff).not.toContain("brand-new.ts")
-    expect(spawned.map((argv) => argv.join(" "))).toEqual([
-      "git diff --unified=8 HEAD --",
-      "git diff --name-only HEAD --",
+    // The read policy's filter preflight first, then the two reads, each
+    // under the policy's argv (`./git-read-policy.ts`).
+    expect(spawned).toEqual([
+      readOnlyGitArgv(FILTER_PREFLIGHT),
+      readOnlyGitArgv(["diff", "--unified=8", "HEAD", "--"]),
+      readOnlyGitArgv(["diff", "--name-only", "-z", "HEAD", "--"]),
     ])
   })
 
@@ -236,12 +266,28 @@ describe("opencodeRepo.change — real repositories", () => {
 })
 
 describe("opencodeRepo.change — argv and selection", () => {
-  test("the target is passed as a revision, terminated so it cannot be read as a flag", async () => {
-    const { spawn, spawned } = fakeSpawn(() => ({ stdout: DIFF }))
-    await opencodeRepo({ worktree: keyed(freshWorktree()), spawn }).change("--output=/tmp/pwned")
+  test("a target git would read as an option is refused before anything is spawned", async () => {
+    // `--` does not protect a target placed before it: git still reads options
+    // there, and `--output=<path>` writes a file (ledger #156). So it is refused.
+    for (const target of ["--output=/tmp/pwned", "-p", "-", "--"]) {
+      const seen: string[][] = []
+      const spawn: SpawnBlame = (request) => {
+        seen.push(request.cmd)
+        throw new Error("nothing may be spawned for an option-shaped target")
+      }
+      const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change(target)
+      await expect(change).rejects.toBeInstanceOf(ChangeReadRefused)
+      await expect(change).rejects.toThrow("starts with \"-\"")
+      expect(seen).toEqual([])
+    }
+  })
 
-    const argv = spawned.find((cmd) => cmd.includes("--output=/tmp/pwned"))!
-    expect(argv.indexOf("--output=/tmp/pwned")).toBeLessThan(argv.lastIndexOf("--"))
+  test("an ordinary target is passed unchanged as a revision, before the terminating `--`", async () => {
+    const { spawn, spawned } = fakeSpawn((argv) => ({ stdout: argv.includes("--name-only") ? "src/pay.ts\0" : DIFF }))
+    await opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change("main...HEAD")
+
+    const argv = spawned.find((cmd) => cmd.includes("main...HEAD"))!
+    expect(argv.indexOf("main...HEAD")).toBeLessThan(argv.lastIndexOf("--"))
     expect(argv.at(-1)).toBe("--")
   })
 
@@ -249,25 +295,27 @@ describe("opencodeRepo.change — argv and selection", () => {
     const odd = "src/a file; rm -rf $HOME.ts"
     const { spawn, spawned } = fakeSpawn((argv) => {
       if (argv.includes("--no-index")) return { stdout: `+++ b/${odd}\n+new\n`, status: 1 }
-      if (argv.includes("ls-files")) return { stdout: `${odd}\n` }
+      if (argv.includes("ls-files")) return { stdout: `${odd}\0` }
       return { stdout: "" }
     })
-    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn }).change()
+    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change()
 
     expect(change.files).toEqual([odd])
     expect(change.diff).toContain("+new")
-    expect(spawned.at(-1)).toEqual(["git", "diff", "--unified=8", "--no-index", "--", "/dev/null", odd])
+    expect(spawned.at(-1)).toEqual(readOnlyGitArgv(["diff", "--unified=8", "--no-index", "--", "/dev/null", odd]))
   })
 
-  test("a `--no-index` status of 2 or more is git's error, not an empty diff", async () => {
+  test("a `--no-index` status of 2 or more refuses that input by name, not as a bad ref and not as an empty diff", async () => {
     const { spawn } = fakeSpawn((argv) => {
       if (argv.includes("--no-index")) return { stderr: "error: could not access\n", status: 2 }
-      if (argv.includes("ls-files")) return { stdout: "src/gone.ts\n" }
+      if (argv.includes("ls-files")) return { stdout: "src/gone.ts\0" }
       return { stdout: "" }
     })
-    const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn }).change()
-    await expect(change).rejects.toThrow(GitError)
-    await expect(change).rejects.toThrow("could not access")
+    const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change()
+    await expect(change).rejects.toBeInstanceOf(ChangeReadRefused)
+    await expect(change).rejects.toThrow('the untracked entry "src/gone.ts": git could not read it')
+    // git's own stderr is not copied into the refusal.
+    await expect(change).rejects.not.toThrow("could not access")
   })
 
   test("root() is the worktree the loci are relative to", () => {
@@ -309,13 +357,16 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
       Bun.spawn({ cmd: ["sleep", "30"], cwd: request.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" }) as unknown as SpawnedBlame
 
     const started = performance.now()
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn: hang, readBudgetMs: 200, cleanupMs: 2_000 }).change())
+    const error = await stoppedBy(
+      opencodeRepo({ worktree, spawn: answeringPreflight(hang), readBudgetMs: 200, cleanupMs: 2_000 }).change(),
+    )
 
     expect(performance.now() - started).toBeLessThan(200 + 2_000 + 2_000)
     expect(error.stop).toBe("terminated")
     expect(error.cleanup).toBe("confirmed")
     expect(error.operation).toBe("git diff")
-    expect(error.readsCompleted).toBe(0)
+    // The filter preflight is the one completed read.
+    expect(error.readsCompleted).toBe(1)
     expect(error.pid).toBeGreaterThan(0)
     expect(error.message).toContain("accounted for")
     expect(error.message).not.toContain("no descendant")
@@ -326,7 +377,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const worktree = keyed(freshWorktree())
     const { spawn } = fakeSpawn(() => ({ stdout: "a flushed prefix", status: 0, signal: "SIGKILL" }))
 
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
 
     expect(error.stop).toBe("signalled")
     expect(error.status).toBe(0)
@@ -340,18 +391,19 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const worktree = keyed(freshWorktree())
     const { spawn } = fakeSpawn((argv) => {
       if (argv.includes("--no-index")) return { stdout: "+++ b/src/new.ts\n+par", status: 1, signal: "SIGTERM" }
-      if (argv.includes("ls-files")) return { stdout: "src/new.ts\n" }
+      if (argv.includes("ls-files")) return { stdout: "src/new.ts\0" }
       return { stdout: "" }
     })
 
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
 
     expect(error.stop).toBe("signalled")
     expect(error.operation).toContain("--no-index")
     expect(error.status).toBe(1)
     expect(error.signal).toBe("SIGTERM")
     expect(error.pid).toBeUndefined()
-    expect(error.readsCompleted).toBe(3)
+    // The filter preflight and three reads.
+    expect(error.readsCompleted).toBe(4)
     expect(changeReadQuarantineFor(worktree)).toBeUndefined()
   })
 
@@ -361,7 +413,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const reader = held.getReader()
     try {
       const { spawn } = fakeSpawn(() => ({ stdout: DIFF, stderr: held, status: 0 }))
-      const error = await stoppedBy(opencodeRepo({ worktree, spawn }).change())
+      const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
 
       expect(error.stop).toBe("stderr-unread")
       expect(error.status).toBe(0)
@@ -377,7 +429,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const reader = held.getReader()
     try {
       const { spawn } = fakeSpawn(() => ({ stderr: held, status: 128 }))
-      const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn }).change("nope...HEAD")
+      const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change("nope...HEAD")
       await expect(change).rejects.toThrow(GitError)
       await expect(change).rejects.toThrow("MAD could not read the command's stderr")
     } finally {
@@ -389,7 +441,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const worktree = keyed(freshWorktree())
     const { spawn } = fakeSpawn(() => ({ stdout: tornStream("--- a/src/pay.ts\n") }))
 
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn, cleanupMs: 50 }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES, cleanupMs: 50 }).change())
 
     expect(error.stop).toBe("observation-failed")
     expect(error.cleanup).toBe("unresolved")
@@ -402,7 +454,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     // No pipe at all: the read failed, but no inherited write end is left to reason about.
     const { spawn } = fakeSpawn(() => ({ stdout: null }))
 
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn, cleanupMs: 50 }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES, cleanupMs: 50 }).change())
 
     expect(error.stop).toBe("observation-failed")
     expect(error.cleanup).toBe("confirmed")
@@ -414,7 +466,7 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     const spawn: SpawnBlame = () => {
       throw new Error("No such file or directory")
     }
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
     expect(error.stop).toBe("launch-failed")
     expect(error.pid).toBeUndefined()
     expect(error.status).toBeUndefined()
@@ -483,7 +535,7 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     const { spawn, spawned } = fakeSpawn(
       (argv) => {
         if (argv.includes("--no-index")) return { stdout: "+x\n", status: 1 }
-        if (argv.includes("ls-files")) return { stdout: "a.ts\nb.ts\n" }
+        if (argv.includes("ls-files")) return { stdout: "a.ts\0b.ts\0" }
         return { stdout: "" }
       },
       () => {
@@ -492,14 +544,16 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     )
 
     const error = await stoppedBy(
-      opencodeRepo({ worktree: keyed(freshWorktree()), spawn, readBudgetMs: 100, now: () => clock }).change(),
+      opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES, readBudgetMs: 100, now: () => clock }).change(),
     )
 
     expect(spawned).toHaveLength(4)
     expect(error.stop).toBe("budget-exhausted")
-    expect(error.operation).toBe("git diff --no-index -- /dev/null b.ts")
-    expect(error.message).toContain("budget exhausted before git diff --no-index -- /dev/null b.ts")
-    expect(error.readsCompleted).toBe(4)
+    // CAP-4 — the next step was b.ts's file-system check, which is not started either.
+    expect(error.operation).toBe('check of untracked entry "b.ts"')
+    expect(error.message).toContain('budget exhausted before check of untracked entry "b.ts"')
+    // The filter preflight and four reads.
+    expect(error.readsCompleted).toBe(5)
     expect(error.cleanup).toBe("not-applicable")
   })
 
@@ -515,7 +569,7 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     )
     const started = performance.now()
     const error = await stoppedBy(
-      opencodeRepo({ worktree: keyed(freshWorktree()), spawn, readBudgetMs: 100, cleanupMs: 20, now: () => clock }).change(),
+      opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES, readBudgetMs: 100, cleanupMs: 20, now: () => clock }).change(),
     )
     expect(error.operation).toBe("git ls-files")
     expect(error.stop).toBe("cleanup-unresolved")
@@ -535,12 +589,13 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     })
     const worktree = keyed(freshWorktree())
 
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn, readBudgetMs: 100, now: () => clock }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES, readBudgetMs: 100, now: () => clock }).change())
 
     expect(spawns).toBe(3)
     expect(error.stop).toBe("budget-passed")
     expect(error.operation).toBe("git ls-files")
-    expect(error.readsCompleted).toBe(2)
+    // The filter preflight and two reads.
+    expect(error.readsCompleted).toBe(3)
     expect(error.cleanup).toBe("not-applicable")
     expect(error.pid).toBeUndefined()
     expect(changeReadQuarantineFor(worktree)).toBeUndefined()
@@ -581,7 +636,7 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
     const { spawn } = fakeSpawn(healthy, () => {
       clock += 10
     })
-    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn, readBudgetMs: 100, now: () => clock }).change()
+    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES, readBudgetMs: 100, now: () => clock }).change()
     expect(change.files).toEqual(["src/pay.ts"])
     expect(change.diff).toBe(DIFF)
   })
@@ -594,7 +649,7 @@ describe("opencodeRepo.change — one budget for the whole read", () => {
 describe("opencodeRepo.change — the per-worktree quarantine", () => {
   const latchUnresolved = async (worktree: string) => {
     const { spawn } = fakeSpawn(() => ({ unkillable: true }))
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn, readBudgetMs: 20, cleanupMs: 20 }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES, readBudgetMs: 20, cleanupMs: 20 }).change())
     expect(error.stop).toBe("cleanup-unresolved")
     expect(error.pid).toBe(9191)
     return error
@@ -606,7 +661,7 @@ describe("opencodeRepo.change — the per-worktree quarantine", () => {
     expect(changeReadQuarantineFor(worktree)?.pid).toBe(9191)
 
     const { spawn, spawned } = fakeSpawn(healthy)
-    const error = await stoppedBy(opencodeRepo({ worktree, spawn }).change())
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
 
     expect(spawned).toHaveLength(0)
     expect(error.stop).toBe("quarantined")
@@ -618,7 +673,7 @@ describe("opencodeRepo.change — the per-worktree quarantine", () => {
   test("another worktree still reads", async () => {
     await latchUnresolved(keyed(freshWorktree()))
     const { spawn, spawned } = fakeSpawn(healthy)
-    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn }).change()
+    const change = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change()
     expect(change.files).toEqual(["src/pay.ts"])
     expect(spawned).toHaveLength(3)
   })
@@ -641,6 +696,11 @@ describe("opencodeRepo.change — the per-worktree quarantine", () => {
     const b = fakeSpawn(() => ({ stdout: tornStream("y"), holdUntil: second.held, pid: 2222 }))
     const runA = stoppedBy(opencodeRepo({ worktree, spawn: a.spawn, cleanupMs: 50 }).change())
     const runB = stoppedBy(opencodeRepo({ worktree, spawn: b.spawn, cleanupMs: 50 }).change())
+    // Each first reaches its `git diff` after the filter preflight returns.
+    for (let waited = 0; a.spawned.length < 1 || b.spawned.length < 1; waited++) {
+      if (waited > 5_000) throw new Error("neither invocation reached its first read")
+      await Bun.sleep(1)
+    }
     expect(a.spawned).toHaveLength(1)
     expect(b.spawned).toHaveLength(1)
 
@@ -692,6 +752,43 @@ describe("opencodeRepo.change — the per-worktree quarantine", () => {
     expect(aSpawns).toBe(1)
     expect(error.stop).toBe("quarantined")
     expect(error.operation).toBe("git diff --name-only")
-    expect(error.readsCompleted).toBe(1)
+    // The filter preflight and the first read.
+    expect(error.readsCompleted).toBe(2)
+  })
+})
+
+describe("the filter preflight before the change read (CAP-2)", () => {
+  test("a preflight git fails is FilterPreflightFailed, with git's detail, and nothing else runs", async () => {
+    const { seesPreflight, spawned } = fakeSpawn((argv) =>
+      argv.includes("--get-regexp") ? { status: 128, stderr: "fatal: bad config line 3" } : {},
+    )
+    const error = await opencodeRepo({ worktree: keyed(freshWorktree()), spawn: seesPreflight })
+      .change()
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+
+    expect(error).toBeInstanceOf(FilterPreflightFailed)
+    expect(error).toBeInstanceOf(GitError)
+    expect((error as Error).message).toBe("git config (filter preflight) failed: fatal: bad config line 3")
+    expect(spawned).toHaveLength(1)
+  })
+
+  test("a preflight that prints something other than config keys is FilterPreflightFailed, never none", async () => {
+    const { seesPreflight, spawned } = fakeSpawn((argv) =>
+      argv.includes("--get-regexp") ? { status: 0, stdout: "not a key" } : {},
+    )
+    const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn: seesPreflight }).change()
+
+    await expect(change).rejects.toBeInstanceOf(FilterPreflightFailed)
+    await expect(change).rejects.toThrow("its output could not be read as config keys")
+    expect(spawned).toHaveLength(1)
+  })
+
+  test("an unknown gitReadPolicy is refused at construction, never treated as inherit", () => {
+    expect(() => opencodeRepo({ worktree: "/repo", gitReadPolicy: "Inherit" as never })).toThrow(
+      'gitReadPolicy must be "read-only" or "inherit"',
+    )
   })
 })

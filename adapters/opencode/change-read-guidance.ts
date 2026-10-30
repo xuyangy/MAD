@@ -46,6 +46,26 @@ export function changeReadStopGuidance(error: ChangeReadStopped): string {
       return `Something outside MAD killed the git read, so its output was incomplete and was not used. Try again.`
     case "stderr-unread":
       return `MAD could not read git's diagnostics for this read, so its output was not used. Try again.`
+    case "cancelled":
+      if (error.cleanup !== "unresolved") {
+        return `The review was stopped, so nothing was reviewed. Run it again when you want a review.`
+      }
+      // An observed exit or signal says git's own process ended; what stays
+      // unconfirmed is anything that inherited its output.
+      return (
+        (error.status !== undefined || error.signal !== undefined
+          ? `The review was stopped while git was running. Git's own process ended, but MAD could not confirm ` +
+            `that nothing it started still holds its output.`
+          : `The review was stopped while git was running, and MAD could not confirm that git ended.`) +
+        ` This worktree is now QUARANTINED: MAD reads nothing in it until opencode restarts. ${restart(error.pid)}`
+      )
+    case "check-unanswered":
+      return (
+        `The file system did not answer MAD's check of an untracked file within the change read budget, so ` +
+        `MAD stopped waiting. An operation already started may still complete; MAD attempts to close any ` +
+        `file it opened, which this answer cannot confirm. Check that ` +
+        `the worktree's file system is responsive, then try again.`
+      )
     case "terminated":
     case "cleanup-unresolved":
     case "observation-failed":

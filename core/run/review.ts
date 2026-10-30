@@ -9,6 +9,7 @@
  * path.
  */
 
+import { MadStop, stopCauseOf, stoppedThisRun, type StopCause } from "../domain/stop-cause.ts"
 import type { Roster } from "../domain/roster.ts"
 import {
   clampConcurrency,
@@ -476,17 +477,26 @@ function clampedDials(
  * a field they own (AD-8), and only they know which of their findings had been
  * decided before the stop landed.
  */
-function recordCancellation(record: RunRecord, stage: Stage): void {
+function recordCancellation(record: RunRecord, stage: Stage, cause: StopCause): void {
   if (record.cancelled) return
-  record.cancelled = { stage }
+  record.cancelled = cause === "user" ? { stage } : { stage, cause }
   record.warnings.push({
     code: "run-cancelled",
     stage,
     message:
-      `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
-      `review — the findings below are what MAD had at that moment, and anything left undecided ` +
-      `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
-      `was retried after you stopped.`,
+      cause === "user"
+        ? `RUN CANCELLED: you stopped this run during the ${stage} stage. It is NOT a finished ` +
+          `review — the findings below are what MAD had at that moment, and anything left undecided ` +
+          `is in the UNRESOLVED section with the stage it stopped at. No model failed, and no model ` +
+          `was retried after you stopped.`
+        : // CAP-3 — MAD's own stop. It says nothing about whether a model
+          // failed: the run's other warnings report that, and the stop is not
+          // evidence either way.
+          `RUN CANCELLED: ${stoppedThisRun(cause)} during the ${stage} stage. It is NOT a finished ` +
+          `review — the findings below are what MAD had at that moment, and anything left undecided ` +
+          `is in the UNRESOLVED section with the stage it stopped at. MAD never prompted the session ` +
+          `whose rules differed, started no turn after the stop and retried no model. Turns already ` +
+          `issued may still have run and been billed.`,
     detail: { stage },
   })
 }
@@ -694,7 +704,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // lens instruction from one generated at run time.
   record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
-  if (discovered.cancelled) recordCancellation(record, "discover")
+  if (discovered.cancelled) recordCancellation(record, "discover", stopCauseOf(deps.signal))
 
   // ---- stage 2: cluster ----
   //
@@ -977,8 +987,13 @@ export async function continueReview(
   const { roster } = record
   const { backend, clock } = deps
   const limiter = createLimiter(record.ledger.maxConcurrency)
-  const signal = record.cancelled || prepared.stopRequested ? AbortSignal.abort() : deps.signal
-  const noteCancelled = (stage: Stage): void => recordCancellation(record, stage)
+  // The reason travels with a stop already recorded, so the stages below say
+  // who stopped the run (`core/domain/stop-cause.ts`).
+  const signal =
+    record.cancelled || prepared.stopRequested
+      ? AbortSignal.abort(record.cancelled?.cause ? new MadStop(record.cancelled.cause) : deps.signal?.reason)
+      : deps.signal
+  const noteCancelled = (stage: Stage): void => recordCancellation(record, stage, stopCauseOf(signal))
 
   // ---- stage 3: route ----
   //

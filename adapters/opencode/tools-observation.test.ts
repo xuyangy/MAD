@@ -57,7 +57,11 @@ import { judge } from "../../core/stages/judge.ts"
 import { fakeClock, FakeBackend } from "../../core/test-support/fakes.ts"
 import { OBSERVATION_WRITE_TIMEOUT_MS } from "../../core/ports/observation-wait.ts"
 import { runBoundedBlame } from "./blame-exec.ts"
+import { readOnlyGitArgv } from "./git-read-policy.ts"
 import { clipStderr, DEFAULT_BLAME_TIMEOUT_MS, launchEvidenceFrom, opencodeTools } from "./tools.ts"
+import { isolateGitHome } from "./test-support/git-home.ts"
+
+isolateGitHome()
 
 type Recorded =
   | { type: "request"; event: ToolRequestEvent }
@@ -155,7 +159,9 @@ describe("real git, observed — the invocation and the shell's return are two f
     expect(invoked[0]!.args).toEqual({ path: "pay.ts", startLine: 1, endLine: 2 })
     // The argv is kept raw, `--` included: a trace that recorded a pretty
     // rendering of the command could not later answer what was actually run.
-    expect(invoked[0]!.argv).toEqual(["git", "blame", "-L", "1,2", "--porcelain", "--", "pay.ts"])
+    // It is the read policy's argv (`./git-read-policy.ts`); the filter
+    // preflight before it is not a blame invocation and is not observed.
+    expect(invoked[0]!.argv).toEqual(readOnlyGitArgv(["blame", "-L", "1,2", "--porcelain", "--", "pay.ts"]))
 
     const shell = shells(trace.events)
     expect(shell).toHaveLength(1)
@@ -769,15 +775,17 @@ describe("BOUNDED OBSERVER WRITES, through the real judge and real git (story 2-
         clock: fakeClock(),
         ledger: emptyLedger(),
         runId: "run-1",
-        tools: opencodeTools({ $, worktree }),
+        // A frozen clock, so the preflight leaves blame the whole deadline.
+        tools: opencodeTools({ $, worktree, now: () => 0 }),
       })
     } finally {
       globalThis.setTimeout = realSetTimeout
     }
 
     // THE BLAME DEADLINE IS THERE AND IS MEANT TO BE — the blame bound applies
-    // to an ordinary run too. NO OBSERVATION TIMER exists beside it.
-    expect(timers).toEqual([DEFAULT_BLAME_TIMEOUT_MS])
+    // to an ordinary run too, to the filter preflight and to blame itself. NO
+    // OBSERVATION TIMER exists beside them.
+    expect(timers).toEqual([DEFAULT_BLAME_TIMEOUT_MS, DEFAULT_BLAME_TIMEOUT_MS])
     expect(timers).not.toContain(OBSERVATION_WRITE_TIMEOUT_MS)
     expect(result.warnings.some((w) => w.code === "tool-observation-failed")).toBe(false)
     expect(result.warnings.some((w) => w.code === "blame-unavailable")).toBe(false)
@@ -920,7 +928,7 @@ describe("THE SHIPPED OBSERVATION DEADLINE, at its wiring boundaries (story 2-7c
         clock: fakeClock(),
         ledger: emptyLedger(),
         runId: "run-1",
-        tools: opencodeTools({ $, worktree }),
+        tools: opencodeTools({ $, worktree, now: () => 0 }),
         toolObservation: trace.observer,
       }),
     )
@@ -934,13 +942,14 @@ describe("THE SHIPPED OBSERVATION DEADLINE, at its wiring boundaries (story 2-7c
 
   test("THE ADAPTER HELPER, WIRED: an adapter with an observer and no timeout option schedules 5,000 ms", async () => {
     const trace = memory()
-    const tools = opencodeTools({ $, worktree, toolObservation: trace.observer })
+    const tools = opencodeTools({ $, worktree, toolObservation: trace.observer, now: () => 0 })
 
     const registered = await timersOf(() => tools.blame("pay.ts", 1, 2))
 
-    // Two adapter observation writes at 5,000 ms, plus the 60,000 ms blame.
+    // Two adapter observation writes at 5,000 ms, plus the 60,000 ms filter
+    // preflight and the 60,000 ms blame.
     expect(registered.filter((ms) => ms === 5_000)).toHaveLength(2)
-    expect(registered.filter((ms) => ms === 60_000)).toHaveLength(1)
+    expect(registered.filter((ms) => ms === 60_000)).toHaveLength(2)
   })
 
   test("an observation deadline that cannot bound anything is refused at construction", async () => {
