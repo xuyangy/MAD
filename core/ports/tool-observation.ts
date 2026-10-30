@@ -326,6 +326,15 @@ export interface ToolFailureEvidence {
    */
   exitCode?: number
   launch: LaunchEvidence
+  /**
+   * CAP-5 — the call ended because the run's stop was observed, and no
+   * independent failure was observed first. Present only as `true`, and never
+   * beside `launch: "failed"`. A call
+   * that failed on its own and was then stopped carries no mark: its failure
+   * is the fact, and the stop does not replace it. The judge reads a marked
+   * failure as a cancellation of the finding, never as a blame failure.
+   */
+  stopped?: true
 }
 
 /** The property an adapter sets. Named once so the two sides cannot drift. */
@@ -348,12 +357,16 @@ export const TOOL_FAILURE_EVIDENCE = "toolFailure" as const
  * - A `shell` stage with no usable exit code keeps its evidence — the launch
  *   reading is still worth having — and `blameFailureOutcome` reads the missing
  *   exit as `unknown`, which is what it means.
+ * - `stopped` is kept only when it is exactly `true` and the launch did not
+ *   fail. Any other value is dropped, so the failure reads as an ordinary one
+ *   rather than as a stop. A launch the operating system refused is an
+ *   independently observed fact, so a stop mark beside it is dropped too.
  */
 export function toolFailureEvidence(error: unknown): ToolFailureEvidence | undefined {
   if (typeof error !== "object" || error === null) return undefined
   const carried = (error as Record<string, unknown>)[TOOL_FAILURE_EVIDENCE]
   if (typeof carried !== "object" || carried === null) return undefined
-  const { stage, exitCode, launch } = carried as Record<string, unknown>
+  const { stage, exitCode, launch, stopped } = carried as Record<string, unknown>
   if (stage !== "pre-shell" && stage !== "shell") return undefined
   if (launch !== "proved" && launch !== "failed" && launch !== "unproved" && launch !== "not-attempted") {
     return undefined
@@ -363,5 +376,6 @@ export function toolFailureEvidence(error: unknown): ToolFailureEvidence | undef
     stage,
     launch,
     ...(usableExit ? { exitCode: exitCode as number } : {}),
+    ...(stopped === true && launch !== "failed" ? { stopped: true as const } : {}),
   }
 }

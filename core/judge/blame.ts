@@ -76,6 +76,12 @@ export const BLAME_KIND = {
   failed: "judge-blame-failed",
   noLocus: "judge-blame-no-locus",
   noPort: "judge-blame-no-port",
+  /**
+   * CAP-5 — the adapter marked the failure as caused by the run's stop. The
+   * finding is cancelled, not decided without history, so this is neither a
+   * blame failure nor a citation.
+   */
+  stopped: "judge-blame-stopped",
 } as const
 
 /**
@@ -144,9 +150,10 @@ export function blameFailureOutcome(error: unknown, why: string): ToolTerminalOu
   // what it did afterwards is a separate fact, recorded beside the execution and
   // never instead of it. Reading this as `invoked-unknown` would discard an
   // execution the evidence establishes — the same undercount, one step along,
-  // that this mapping exists to prevent. Unreachable from the opencode adapter,
-  // where a proved launch means a zero exit and a zero exit does not throw;
-  // reachable from any other `Tools` implementation.
+  // that this mapping exists to prevent. The opencode adapter throws this shape
+  // in one case: git exited 0, and the run's stop had fired before blame
+  // returned, so git ran and MAD withheld its output from the judge. Any other
+  // `Tools` implementation may throw it too.
   if (evidence.launch === "proved") return { kind: "executed-failed", failure: why }
   if (evidence.exitCode === undefined) return { kind: "unknown", why }
   return { kind: "invoked-unknown", exitCode: evidence.exitCode, why }

@@ -257,7 +257,7 @@ function scriptedBackend(
  * is the finding's first and only skeptic (`pipeline-stages.md` §5).
  */
 async function blameArm(
-  options: { tools?: Tools; backendTools?: boolean; silentChecks?: boolean; noLines?: boolean } = {},
+  options: { tools?: Tools; backendTools?: boolean; silentChecks?: boolean; noLines?: boolean; signal?: AbortSignal } = {},
 ) {
   const recorded: Turn[] = []
   const resolved = selectRoster(CANDIDATES, { slots: 3, providerConfigKey: "provider" })
@@ -273,6 +273,7 @@ async function blameArm(
     priorWarnings: resolved.warnings,
     threshold: 0,
     ...(options.tools === undefined ? {} : { tools: options.tools }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   })
   return { ...result, recorded }
 }
@@ -451,7 +452,7 @@ describe("T2 — MAD EXECUTED IT, and that is not the same fact as VERIFIED", ()
 
     const reported = await blameArm()
     expect(reported.record.judgeCounts?.factChecksMadExecuted).toBe(0)
-    expect(reported.rendered).toContain("MAD ran no repository command itself in this run")
+    expect(reported.rendered).toContain("MAD produced no `git blame` citation of its own in this run")
   })
 
   test("MAD asked for exactly the lines the finding cites — no translation (AD's Locus convention)", async () => {
@@ -590,6 +591,67 @@ describe("T4 — a FAILED blame is reported, and never reads as a pass", () => {
   test("a failed blame still lets the run finish — AD-13 never refuses the run", async () => {
     const { record } = await blameArm({ tools: fakeTools({ fail: "fatal: bad revision" }) })
     expect(theFinding(record.findings).verdict).toBeDefined()
+  })
+})
+
+describe("CAP-5 (5b) — a blame the run's stop ended renders as its own step, never as a decision", () => {
+  test("the stopped step, no `GIT BLAME FAILED`, no verdict, and the finding left for the user", async () => {
+    const stop = new AbortController()
+    const tools = fakeTools({})
+    tools.blame = async () => {
+      stop.abort()
+      throw Object.assign(new Error("git blame failed: the review was stopped before blame was launched"), {
+        toolFailure: { stage: "pre-shell", launch: "not-attempted", stopped: true },
+      })
+    }
+    const { record, rendered, recorded } = await blameArm({ tools, signal: stop.signal })
+    const finding = theFinding(record.findings)
+
+    expect(finding.verdict).toBeUndefined()
+    expect(finding.unresolved?.reason).toContain("the run was cancelled")
+    expect(recorded.some((turn) => turn.role === "fact-check")).toBe(false)
+    expect(record.warnings.map((w) => w.code)).not.toContain("blame-unavailable")
+    expect(rendered).toContain("`git blame` STOPPED — the run was cancelled, so MAD produced no citation and decided nothing")
+    expect(rendered).not.toContain("GIT BLAME FAILED")
+    expect(rendered).toContain("Verdicts: 0 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+    expect(rendered).not.toContain("ran out of budget")
+    expect(rendered).toContain("1 finding(s) were left undecided because the run was cancelled")
+    expect(rendered).toContain("MAD produced no `git blame` citation of its own in this run")
+    expect(rendered).not.toContain("ran no repository command")
+  })
+})
+
+describe("CAP-5 (5b) — an unmarked blame failure, then a stop: the failure is kept and nothing claims a decision", () => {
+  test("`blame-unavailable` is raised, the finding is left undecided, and no sentence says it was decided", async () => {
+    const stop = new AbortController()
+    const tools = fakeTools({})
+    tools.blame = async () => {
+      stop.abort()
+      throw Object.assign(new Error("git blame failed: fatal: no such path 'src/payments/retry.ts' in HEAD"), {
+        toolFailure: { stage: "shell", exitCode: 128, launch: "unproved" },
+      })
+    }
+    const { record, rendered, recorded } = await blameArm({ tools, signal: stop.signal })
+    const finding = theFinding(record.findings)
+
+    expect(finding.verdict).toBeUndefined()
+    expect(finding.unresolved?.reason).toContain("the run was cancelled")
+    expect(recorded.some((turn) => turn.role === "fact-check")).toBe(false)
+    const warning = record.warnings.find((w) => w.code === "blame-unavailable")
+    expect(warning).toBeDefined()
+    expect(warning!.message).toContain("any verdict reached on them was reached without")
+    expect(warning!.message).toContain('THIS IS NOT "the history contradicts nothing"')
+    expect(rendered).toContain("GIT BLAME FAILED")
+    const failedEntry = finding.history.find((entry) => entry.kind === "judge-blame-failed")
+    expect(failedEntry?.body).toContain("missing from any verdict reached on this finding")
+    expect(rendered).toContain("UNRESOLVED — YOU DECIDE (1)")
+    expect(rendered).toContain("Verdicts: 0 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+    expect(rendered).not.toContain("were decided without")
+    expect(rendered).not.toContain("from every verdict below")
+    expect(rendered).not.toContain("ran out of budget")
+    expect(rendered).toContain("1 finding(s) were left undecided because the run was cancelled")
+    expect(rendered).toContain("MAD produced no `git blame` citation of its own in this run")
+    expect(rendered).not.toContain("ran no repository command")
   })
 })
 

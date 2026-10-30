@@ -201,7 +201,8 @@ export const WARNING_CODES = [
    *
    * A bad path, a line past the end of the file, an uncommitted line, a shallow
    * clone, or a worktree that is not a git repository. The citation the run
-   * would have carried does not exist, and the finding was decided without it.
+   * would have carried does not exist, and any verdict reached on the finding
+   * was reached without it.
    *
    * WHY IT MEETS THE BAR THE LAST FOUR CODES SET. **No existing code can carry
    * the fact without lying:** `fact-check-untooled` asserts that no model could

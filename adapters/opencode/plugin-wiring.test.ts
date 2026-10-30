@@ -730,8 +730,8 @@ describe("mad_review.execute — AD-6 `dial-clamped` actually reaches the caller
  * port directly into `review()`, so not one of them observes this file.
  *
  * The consequence of that gap is the whole story silently undone: MAD ships on
- * route two forever, every real run reports "MAD ran no repository command
- * itself in this run", `factChecksMadExecuted` is 0 — all supported values, so
+ * route two forever, every real run reports "MAD produced no `git blame`
+ * citation of its own in this run", `factChecksMadExecuted` is 0 — all supported values, so
  * nothing looks wrong — and CAP-8's success clause is dead in production.
  *
  * WHY THIS IS STRUCTURAL AND NOT BEHAVIOURAL, stated rather than hidden: the

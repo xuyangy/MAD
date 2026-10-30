@@ -810,29 +810,39 @@ function judgeSummary(record: RunRecord): string[] {
       //
       // The remainder clause is conditional for the same reason: with every
       // finding blamed there is no rest, and a sentence about "the rest" is then
-      // a claim about an empty set.
+      // a claim about an empty set. It names no check either: a finding the
+      // budget or a stop stranded was not checked at all, so it says only whose
+      // account any check on the rest is.
       `  ${counts.factChecksMadExecuted} finding(s) carry a \`git blame\` MAD RAN ITSELF over the`,
       `  lines they cite. That part is executed evidence, not a check a model reported running.`,
       ...(counts.factChecksMadExecuted < counts.judged
-        ? [`  The rest were checked by the model's own tools, on its own report.`]
+        ? [`  For the rest, any check above is the checking model's own account, on its own report.`]
         : []),
     )
   } else {
-    // AD-6 — the ABSENCE is stated too. A run where MAD executed nothing looks
-    // exactly like one where it executed everything unless somebody says so, and
-    // "every check here is a model's own account of what it did" is the single
-    // most useful sentence a reader can be given about how far to trust them.
+    // AD-6 — the ABSENCE OF A CITATION is stated too. The count holds usable
+    // citations only, so the sentence claims no more: MAD may have run a
+    // `git blame` that failed or was stopped, and no fact-check need have
+    // happened at all.
     lines.push(
-      `  MAD ran no repository command itself in this run: every check above is the checking`,
-      `  model's own account of what it opened and ran (AD-13's second route). That is a valid`,
-      `  route and it is not proof.`,
+      `  MAD produced no \`git blame\` citation of its own in this run: any check above is the`,
+      `  checking model's own account of what it opened and ran (AD-13's second route). That is`,
+      `  a valid route and it is not proof.`,
     )
   }
 
-  if (counts.unresolved > 0) {
+  // THE TWO CAUSES ARE COUNTED APART, as on the headline above: a finding the
+  // user's stop left undecided did not run out of budget.
+  if (strandedByBudget > 0) {
     lines.push(
-      `  ${counts.unresolved} finding(s) ran out of budget before a verdict and are in the`,
+      `  ${strandedByBudget} finding(s) ran out of budget before a verdict and are in the`,
       `  UNRESOLVED section below with whatever the earlier steps had produced.`,
+    )
+  }
+  if (counts.unresolvedByCancellation > 0) {
+    lines.push(
+      `  ${counts.unresolvedByCancellation} finding(s) were left undecided because the run was cancelled, and`,
+      `  are in the UNRESOLVED section below with whatever the earlier steps had produced.`,
     )
   }
 
@@ -1034,6 +1044,9 @@ function renderJudge(finding: Finding): string | undefined {
   const blameFailed = entries.some((entry) => entry.kind === BLAME_KIND.failed)
   const blameNoLocus = entries.some((entry) => entry.kind === BLAME_KIND.noLocus)
   const blameNoPort = entries.some((entry) => entry.kind === BLAME_KIND.noPort)
+  // CAP-5 — a blame the run's stop ended. Its own step: the finding was not
+  // decided, and no blame failure was observed.
+  const blameStopped = entries.some((entry) => entry.kind === BLAME_KIND.stopped)
 
   const steps: string[] = []
   // AD-13 stated in the render, not only in the warning: a reader scanning one
@@ -1045,7 +1058,9 @@ function renderJudge(finding: Finding): string | undefined {
   // how to read keeps its opening. AD-6: a failure gets shouty capitals and an
   // absence does not, because they are not the same fact.
   if (blamed) steps.push("`git blame` RUN BY MAD over the cited lines")
-  else if (blameFailed) steps.push("GIT BLAME FAILED — MAD produced no citation, and read nothing either way")
+  else if (blameStopped) {
+    steps.push("`git blame` STOPPED — the run was cancelled, so MAD produced no citation and decided nothing")
+  } else if (blameFailed) steps.push("GIT BLAME FAILED — MAD produced no citation, and read nothing either way")
   else if (blameNoLocus) steps.push("no line range to blame")
   else if (blameNoPort) steps.push("MAD ran nothing itself — the checker's own tools only")
   if (notExamined) {

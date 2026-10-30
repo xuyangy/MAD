@@ -2571,7 +2571,10 @@ describe("review — an ordinary run is the baseline run (story 2.5A)", () => {
       { slot: "discovery-2", attempt: 1, role: "fact-check" },
       { slot: "discovery-2", attempt: 2, role: "fact-check" },
     ])
-    expect(sha(rendered)).toBe("dfbf5414489b30b7d39e7714d38d3fa1200a990106aaafedbf5229346f448d93")
+    // The rendered capture differs from the ee33ae8 report in one sentence only:
+    // the judge summary's no-citation line, in its current wording ("MAD produced
+    // no `git blame` citation of its own in this run …").
+    expect(sha(rendered)).toBe("7f9ebc88feb33c2f62abb8170c58cf53b3cf447c6d3fcb38012bd76c779afa4d")
     expect(sha(JSON.stringify(record))).toBe("3c8e82676a8838f661bb457596224cb5ffa8a6242f7eaa5f0885948e8bc9ecec")
   })
 })

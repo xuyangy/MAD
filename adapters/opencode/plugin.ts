@@ -541,13 +541,24 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             // invocation's own unconfirmed cleanup latches the next one. The
             // refusal rides the existing `blame-unavailable` warning with the
             // reason and the pid inside it; no new code and no new surface.
+            //
+            // CAP-5 — THE RUN'S STOP REACHES BLAME. A launch this invocation's
+            // stop tried to end (SIGKILL sent or not) and could not account
+            // for is remembered here, whether or not an earlier fact already
+            // holds the worktree's latch, so the answer can say so outside the
+            // span.
             const alreadyUnresolved = blameQuarantineFor(worktree)
+            let stopLatchedBlame: BlameCleanupUnresolved | undefined
             const tools = opencodeTools({
               $,
               worktree,
               toolObservation,
+              signal: runControl.signal,
               ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
-              onCleanupUnresolved: (fact) => latchBlameQuarantine(worktree, fact),
+              onCleanupUnresolved: (fact) => {
+                latchBlameQuarantine(worktree, fact)
+                stopLatchedBlame = stopCausedBlameFact(stopLatchedBlame, fact)
+              },
             })
             let change
             try {
@@ -907,7 +918,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               // THE SUBMODULE SCOPE NOTE sits outside the span too: a fixed
               // sentence of MAD's, because the read policy reads a submodule as
               // its commit pointer only and the report itself never says so.
-              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${artifactNote(artifacts)}`,
+              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`,
               metadata: {
                 runId: record.runId,
                 answered: record.answered,
@@ -1003,6 +1014,56 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
 /** What the read policy did not read (`./git-read-policy.ts`, SUBMODULES). */
 export const SUBMODULE_SCOPE_NOTE =
   "\n\nMAD reviewed submodules as commit pointers only: uncommitted changes inside a submodule were not read or reviewed."
+
+/**
+ * CAP-5 — the fact the stopped-blame note is written from: the first fact this
+ * invocation's adapter reported that the run's stop caused. A fact with no
+ * `byStop` mark (a deadline's unconfirmed cleanup, say) is never one.
+ */
+export function stopCausedBlameFact(
+  current: BlameCleanupUnresolved | undefined,
+  fact: BlameCleanupUnresolved,
+): BlameCleanupUnresolved | undefined {
+  return current ?? (fact.byStop !== undefined ? fact : undefined)
+}
+
+/**
+ * CAP-5 — a launch the run's stop tried to end, whose cleanup MAD could not confirm.
+ * MAD's own sentence, outside the span, built only from MAD-authored parts:
+ * the operation is MAD's own constant, the pid is a number, and `byStop`
+ * carries the launcher's structured facts. The launcher's reason is left out
+ * because its argv carries the model-chosen path.
+ *
+ * - SIGKILL sent or not: "MAD sent SIGKILL to" against "MAD tried to stop …,
+ *   but SIGKILL could not be sent".
+ * - The child's own exit observed: process N itself was seen to end, but its
+ *   cleanup (the exit status read or its output) was not confirmed, so
+ *   something it started may still be running. The note does not say which
+ *   part is unresolved, because `exited` does not establish it. Otherwise MAD
+ *   could not confirm that process N ended, and it may still be running.
+ *
+ * The latch lives in this module's memory (`UNRESOLVED_BLAME_CLEANUP`), so
+ * restarting opencode clears it.
+ */
+export function stoppedBlameNote(fact: BlameCleanupUnresolved | undefined): string {
+  if (fact?.byStop === undefined) return ""
+  const { killSent, exited } = fact.byStop
+  const pid = fact.pid
+  const attempt = killSent
+    ? `When the review was stopped, MAD sent SIGKILL to its ${fact.operation} (process ${pid}).`
+    : `When the review was stopped, MAD tried to stop its ${fact.operation} (process ${pid}), but SIGKILL could not be sent.`
+  const state = exited
+    ? `Process ${pid} itself was seen to end, but MAD could not confirm its cleanup (its exit status read or its ` +
+      `output), so something it started may still be running.`
+    : `MAD could not confirm that process ${pid} ended, so it may still be running.`
+  const recovery = exited
+    ? `Look for processes that process ${pid} started`
+    : `Check process ${pid} by hand`
+  return (
+    `\n\n${attempt} ${state} MAD will launch no further \`git blame\` or its filter preflight in this worktree ` +
+    `from this opencode process. ${recovery}; restarting opencode clears this refusal.`
+  )
+}
 
 function artifactNote(outcome: ArtifactOutcome): string {
   switch (outcome.kind) {

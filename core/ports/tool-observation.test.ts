@@ -108,3 +108,39 @@ describe("toolFailureEvidence — what it accepts, and how narrowly", () => {
     ).toEqual({ stage: "shell", exitCode: 1, launch: "failed" })
   })
 })
+
+describe("toolFailureEvidence — the stop's mark (CAP-5, 5b)", () => {
+  test("`stopped: true` IS KEPT, on either stage, beside any launch reading but `failed`", () => {
+    expect(toolFailureEvidence(thrown({ stage: "pre-shell", launch: "not-attempted", stopped: true }))).toEqual({
+      stage: "pre-shell",
+      launch: "not-attempted",
+      stopped: true,
+    })
+    expect(toolFailureEvidence(thrown({ stage: "shell", exitCode: 0, launch: "proved", stopped: true }))).toEqual({
+      stage: "shell",
+      exitCode: 0,
+      launch: "proved",
+      stopped: true,
+    })
+  })
+
+  test("ANY OTHER VALUE IS DROPPED, so the failure reads as an ordinary one", () => {
+    for (const stopped of [false, "true", 1, null, {}]) {
+      expect(toolFailureEvidence(thrown({ stage: "shell", launch: "unproved", stopped }))).toEqual({
+        stage: "shell",
+        launch: "unproved",
+      })
+    }
+  })
+
+  test("A MARK BESIDE A LAUNCH FAILURE IS DROPPED: the refused launch is the observed fact", () => {
+    expect(toolFailureEvidence(thrown({ stage: "shell", launch: "failed", stopped: true }))).toEqual({
+      stage: "shell",
+      launch: "failed",
+    })
+  })
+
+  test("A MARK DOES NOT RESCUE A RECORD REFUSED WHOLE", () => {
+    expect(toolFailureEvidence(thrown({ stage: "spawn", launch: "unproved", stopped: true }))).toBeUndefined()
+  })
+})

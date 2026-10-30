@@ -2467,3 +2467,221 @@ describe("judge — a host-reported abort (ledger #7)", () => {
     expect(result.warnings.map((w) => w.code)).toContain("model-dropped-out")
   })
 })
+
+// ---------------------------------------------------------------------------
+// CAP-5, part 5b — a blame the run's stop ended is a cancellation, not a failure
+// ---------------------------------------------------------------------------
+
+describe("judge — a blame the adapter marked as stopped (CAP-5, 5b)", () => {
+  const PORCELAIN = [
+    "3333333333333333333333333333333333333333 1 12 1",
+    "author Ada",
+    "author-time 1700000000",
+    "author-tz +0000",
+    "summary the rate check",
+    "\tconst total = fee * rate",
+  ].join("\n")
+
+  function withLocus(id: string, startLine: number): Finding {
+    const f = finding({ id, route: "judge" })
+    f.locus = { file: "src/pay.ts", startLine, endLine: startLine + 2 }
+    return f
+  }
+
+  function failure(message: string, evidence: Record<string, unknown>): Error {
+    return Object.assign(new Error(message), { toolFailure: evidence })
+  }
+
+  /** A `Tools` whose first `blame` fires the stop and throws `error`; later calls return porcelain. */
+  function stoppingTools(error: Error, stop?: AbortController) {
+    let calls = 0
+    const tools = {
+      blame: async () => {
+        calls += 1
+        if (calls === 1) {
+          stop?.abort()
+          throw error
+        }
+        return PORCELAIN
+      },
+    } as never
+    return { tools, calls: () => calls }
+  }
+
+  /** An observer that keeps the terminal readings. */
+  function outcomes() {
+    const seen: ToolTerminalOutcome[] = []
+    const observer: ToolObservation = {
+      async request() {},
+      async outcome(event) {
+        seen.push(event.outcome)
+      },
+      async invoked() {},
+      async shellOutcome() {},
+      failed() {},
+      takeFailures: () => [],
+    }
+    return { observer, seen }
+  }
+
+  type Seen = { slot: string; role?: JudgeRoleTag; input: string }[]
+
+  const STOPPED_WHY =
+    "git blame failed: `git blame -L 12,14` was stopped while running as process 7 and it was sent SIGKILL, " +
+    "but 5000ms later its stdout was still open: TERMINATION IS UNCONFIRMED and the process may still be running"
+
+  test("A MARKED STOP: a stopped entry with the adapter's reason, the finding cancelled while judged, no fact-check, no blame failure", async () => {
+    const stop = new AbortController()
+    const { tools, calls } = stoppingTools(
+      failure(STOPPED_WHY, { stage: "shell", launch: "unproved", stopped: true }),
+      stop,
+    )
+    const seen: Seen = []
+    const trace = outcomes()
+    const first = withLocus("f-1", 12)
+    const second = withLocus("f-2", 20)
+
+    const result = await run([first, second], {
+      tools,
+      signal: stop.signal,
+      backend: recordingBackend(seen),
+      toolObservation: trace.observer,
+    })
+
+    expect(calls()).toBe(1)
+    expect(seen.filter((turn) => turn.role === "fact-check")).toEqual([])
+    const kinds = first.history.map((entry) => entry.kind)
+    expect(kinds).toContain("judge-blame-stopped")
+    expect(kinds).not.toContain("judge-blame-failed")
+    expect(kinds.at(-1)).toBe("run-cancelled")
+    const stoppedEntry = first.history.find((entry) => entry.kind === "judge-blame-stopped")!
+    expect(stoppedEntry.body).toContain("TERMINATION IS UNCONFIRMED")
+    expect(stoppedEntry.body).toContain("src/pay.ts:12-14")
+    expect(first.verdict).toBeUndefined()
+    // The first finding of the stage, with no model turn issued yet: MAD had
+    // already launched work for it, so it was cancelled while being judged.
+    expect(first.unresolved?.reason).toBe("the run was cancelled while it was being judged")
+    expect(second.verdict).toBeUndefined()
+    expect(second.history.map((entry) => entry.kind)).toContain("run-cancelled")
+    expect(result.warnings.map((w) => w.code)).not.toContain("blame-unavailable")
+    expect(result.cancelled).toBe(true)
+    expect(result.unresolvedByCancellation).toBe(2)
+    expect(result.factChecksMadExecuted).toBe(0)
+    // The terminal reading is written as for any other failure.
+    expect(trace.seen).toEqual([{ kind: "unknown", why: expect.stringContaining("was stopped while running") }])
+  })
+
+  test("GIT EXITED 0 AND MAD WITHHELD THE OUTPUT: one execution that failed, no citation counted", async () => {
+    const stop = new AbortController()
+    const { tools } = stoppingTools(
+      failure(
+        "git blame failed: git blame ran, but its output was not returned for use as evidence because the review was stopped",
+        { stage: "shell", exitCode: 0, launch: "proved", stopped: true },
+      ),
+      stop,
+    )
+    const trace = outcomes()
+    const first = withLocus("f-1", 12)
+
+    const result = await run([first], { tools, signal: stop.signal, toolObservation: trace.observer })
+
+    expect(trace.seen).toEqual([
+      { kind: "executed-failed", failure: expect.stringContaining("its output was not returned for use as evidence") },
+    ])
+    expect(result.factChecksMadExecuted).toBe(0)
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-stopped")
+    expect(first.history.map((entry) => entry.kind)).not.toContain("judge-blame-executed")
+  })
+
+  test("A MARKED STOP WITHOUT THE SIGNAL is a cancellation too, and the later finding takes the gate", async () => {
+    const { tools, calls } = stoppingTools(
+      failure("git blame failed: the review was stopped before blame was launched", {
+        stage: "pre-shell",
+        launch: "not-attempted",
+        stopped: true,
+      }),
+    )
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+    const second = withLocus("f-2", 20)
+
+    const result = await run([first, second], { tools, backend: recordingBackend(seen) })
+
+    expect(calls()).toBe(1)
+    expect(seen).toEqual([])
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-stopped")
+    expect(second.history.map((entry) => entry.kind).at(-1)).toBe("run-cancelled")
+    expect(second.history.map((entry) => entry.kind)).not.toContain("judge-blame-stopped")
+    expect(result.cancelled).toBe(true)
+    expect(result.unresolvedByCancellation).toBe(2)
+    expect(result.warnings.map((w) => w.code)).not.toContain("blame-unavailable")
+  })
+
+  test("AN ARGUED FINDING: the extractor answered, then the blame was stopped — stranded, no fact-check turn", async () => {
+    const { tools } = stoppingTools(
+      failure(STOPPED_WHY, { stage: "shell", launch: "unproved", stopped: true }),
+    )
+    const seen: Seen = []
+    const contested = argued()
+    contested.locus = { file: "src/pay.ts", startLine: 12, endLine: 14 }
+
+    const result = await run([contested], { tools, backend: recordingBackend(seen) })
+
+    expect(seen.map((turn) => turn.role)).toEqual(["evidence-extract"])
+    expect(contested.evidence).toBeDefined()
+    expect(contested.verdict).toBeUndefined()
+    expect(contested.history.map((entry) => entry.kind)).toContain("judge-blame-stopped")
+    expect(contested.unresolved?.reason).toBe("the run was cancelled while it was being judged")
+    expect(result.unresolvedByCancellation).toBe(1)
+  })
+
+  test("AN UNMARKED FAILURE, THEN THE STOP: `blame-unavailable` is raised, and the fact-check is cancelled before it is issued", async () => {
+    const stop = new AbortController()
+    const { tools } = stoppingTools(
+      failure("git blame failed: fatal: no such path", { stage: "shell", exitCode: 128, launch: "unproved" }),
+      stop,
+    )
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+
+    const result = await run([first], { tools, signal: stop.signal, backend: recordingBackend(seen) })
+
+    const kinds = first.history.map((entry) => entry.kind)
+    expect(kinds).toContain("judge-blame-failed")
+    expect(kinds).not.toContain("judge-blame-stopped")
+    expect(kinds.at(-1)).toBe("run-cancelled")
+    expect(seen.filter((turn) => turn.role === "fact-check")).toEqual([])
+    expect(first.verdict).toBeUndefined()
+    expect(result.cancelled).toBe(true)
+    expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
+  })
+
+  test("A MARK THAT IS NOT EXACTLY `true` is no mark: an ordinary blame failure, and the fact-check runs", async () => {
+    const { tools } = stoppingTools(failure("git blame failed: boom", { stage: "shell", launch: "unproved", stopped: "yes" }))
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+
+    const result = await run([first], { tools, backend: recordingBackend(seen) })
+
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-failed")
+    expect(seen.filter((turn) => turn.role === "fact-check")).toHaveLength(1)
+    expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
+    expect(result.cancelled).toBe(false)
+  })
+
+  test("A MARK BESIDE A LAUNCH FAILURE is no mark: the launch failure is an ordinary blame failure", async () => {
+    const { tools } = stoppingTools(
+      failure("git blame failed: the command could not be started: ENOENT", { stage: "shell", launch: "failed", stopped: true }),
+    )
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+
+    const result = await run([first], { tools, backend: recordingBackend(seen) })
+
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-failed")
+    expect(first.history.map((entry) => entry.kind)).not.toContain("judge-blame-stopped")
+    expect(seen.filter((turn) => turn.role === "fact-check")).toHaveLength(1)
+    expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
+    expect(result.cancelled).toBe(false)
+  })
+})

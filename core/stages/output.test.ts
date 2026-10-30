@@ -1363,6 +1363,61 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
     expect(rendered).toContain("2 finding(s) ran out of budget before a verdict")
   })
 
+  test("BUDGET ONLY: the budget line counts the budget's findings, and no cancellation line is printed", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, { ...JUDGE_COUNTS, judged: 5, unresolved: 2 }),
+    )
+    expect(rendered).toContain("2 finding(s) ran out of budget before a verdict")
+    expect(rendered).not.toContain("because the run was cancelled")
+  })
+
+  test("CANCELLED ONLY: no finding is said to have run out of budget", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        judged: 5,
+        unresolved: 2,
+        unresolvedByCancellation: 2,
+      }),
+    )
+    expect(rendered).not.toContain("ran out of budget")
+    expect(rendered).not.toContain("stranded by the budget")
+    expect(rendered).toContain(
+      "2 finding(s) were left undecided because the run was cancelled, and\n  are in the UNRESOLVED section below",
+    )
+  })
+
+  test("BUDGET AND CANCELLATION: each line counts its own cause, and the two sum to the unresolved total", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {
+        ...JUDGE_COUNTS,
+        judged: 6,
+        unresolved: 3,
+        unresolvedByCancellation: 1,
+      }),
+    )
+    expect(rendered).toContain("2 stranded by the budget, 1 left undecided when")
+    expect(rendered).toContain("2 finding(s) ran out of budget before a verdict")
+    expect(rendered).toContain("1 finding(s) were left undecided because the run was cancelled")
+  })
+
+  test("NO CITATION OF MAD'S OWN: the line claims no command was run or not run, and no check", () => {
+    const rendered = output(record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, JUDGE_COUNTS))
+    expect(rendered).toContain(
+      "MAD produced no `git blame` citation of its own in this run: any check above is the\n" +
+        "  checking model's own account of what it opened and ran (AD-13's second route).",
+    )
+    expect(rendered).not.toContain("ran no repository command")
+  })
+
+  test("SOME CITATIONS: the remainder line names no check that may not have happened", () => {
+    const rendered = output(
+      record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, { ...JUDGE_COUNTS, factChecksMadExecuted: 1 }),
+    )
+    expect(rendered).toContain("For the rest, any check above is the checking model's own account, on its own report.")
+    expect(rendered).not.toContain("The rest were checked")
+  })
+
   test("AD-6 — findings no surviving model could examine get their own count and line", () => {
     const rendered = output(
       record([], 1, [], 0.8, undefined, undefined, DEFAULT_MAX_ROUNDS, {

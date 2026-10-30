@@ -81,6 +81,20 @@
  *
  * AN UNCONFIRMED CLEANUP QUARANTINES THIS INSTANCE. See `onCleanupUnresolved`
  * below.
+ *
+ * ## THE RUN'S STOP REACHES BLAME (CAP-5)
+ *
+ * The construction-time `signal` is checked before every launch and handed to
+ * both launches, the filter preflight and blame. A stop observed before a
+ * launch starts nothing; one that lands while a launch runs sends it SIGKILL
+ * under the same bounded cleanup as the deadline, which may or may not confirm
+ * it ended; and blame output that returns after the stop has fired is not
+ * handed back, because it would reach the judge as evidence for a review the
+ * user stopped. Each of these failures carries
+ * `stopped: true` in its evidence, which the judge reads as a cancellation of
+ * the finding. A failure observed on its own before the stop (a signalled or
+ * non-zero exit, a filter refusal, a launch failure) keeps its own reading and
+ * carries no mark. With no signal, no stop is checked.
  */
 
 import type { PluginInput } from "@opencode-ai/plugin"
@@ -165,6 +179,21 @@ export interface BlameCleanupUnresolved {
   why: string
   /** The process MAD launched and cannot account for. */
   pid: number
+  /**
+   * CAP-5 — present when the run's stop tried to end the launch and its cleanup could
+   * then not be confirmed. Both fields are MAD's own structured facts from the
+   * launcher, never text: `killSent` is whether SIGKILL was sent (false when
+   * sending it failed), and `exited` is whether the child's own exit or signal
+   * was observed. An observed exit does not say which part of the cleanup is
+   * unresolved: the exit status read may still be pending, or a pipe may still
+   * be held by something the child started.
+   */
+  byStop?: { killSent: boolean; exited: boolean }
+}
+
+/** CAP-5 — the structured facts of a stop whose cleanup is unresolved. */
+function stopFacts(killError: string | null, cleanup: { observed?: unknown }): { killSent: boolean; exited: boolean } {
+  return { killSent: killError === null, exited: cleanup.observed !== undefined }
 }
 
 export interface OpencodeToolsOptions {
@@ -267,6 +296,14 @@ export interface OpencodeToolsOptions {
   quarantinedBy?: BlameCleanupUnresolved
   /** Test seam for the launcher. Defaults to the real one. */
   spawn?: SpawnBlame
+  /**
+   * CAP-5 — the run's stop, read only from construction; the `Tools` port
+   * takes no signal. Checked before every launch, after the range and
+   * quarantine checks; handed to the filter preflight and to blame; and
+   * checked again before blame output is returned. A failure it causes carries
+   * `stopped` in its evidence. With no signal, no stop is checked.
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -339,6 +376,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
   const blameTimeoutMs = options.blameTimeoutMs ?? DEFAULT_BLAME_TIMEOUT_MS
   const cleanupTimeoutMs = options.blameCleanupTimeoutMs ?? DEFAULT_BLAME_CLEANUP_TIMEOUT_MS
   const observationTimeoutMs = options.observationTimeoutMs ?? OBSERVATION_WRITE_TIMEOUT_MS
+  const signal = options.signal
   // REFUSED AT CONSTRUCTION, ALL THREE ALIKE. A zero, a negative, a `NaN` or a
   // value past the timer ceiling all schedule for right now, so an adapter built
   // with one would abandon every call it ever made while looking like it had a
@@ -434,10 +472,18 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
    * ONE EXCEPTION: git could not be started at all. That is the same proved
    * non-execution blame's own launch would meet, so it is reported exactly as
    * that launch's failure is, invocation included (`"launch-failed"`).
+   *
+   * CAP-5 — the preflight receives the run's stop. A `stopped` outcome refuses
+   * blame with the `stopped` mark. A preflight that returned a failure of its
+   * own keeps that failure, unmarked, even if the stop fired afterwards.
    */
   async function filterPreflight(command: string): Promise<"clear" | { launchFailed: string }> {
-    const refuse = (why: string) =>
-      withEvidence(new GitError(command, why), { stage: "pre-shell", launch: "not-attempted" })
+    const refuse = (why: string, stopped = false) =>
+      withEvidence(new GitError(command, why), {
+        stage: "pre-shell",
+        launch: "not-attempted",
+        ...(stopped ? { stopped: true as const } : {}),
+      })
     const outcome = await runBoundedBlame({
       argv: readOnlyGitArgv(FILTER_PREFLIGHT),
       env: readOnlyGitEnv(process.env),
@@ -445,6 +491,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       deadlineMs: blameTimeoutMs,
       cleanupMs: cleanupTimeoutMs,
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+      ...(signal === undefined ? {} : { signal }),
     })
     if (outcome.kind === "cleanup-unresolved") {
       quarantine({ operation: "git config (filter preflight)", why: outcome.why, pid: outcome.pid })
@@ -459,14 +506,21 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     if (outcome.kind === "launch-failed") return { launchFailed: outcome.why }
     if (outcome.kind === "stopped") {
       // CAP-5 — the run's stop. A launched preflight whose cleanup is not
-      // accounted for quarantines like any other launch.
+      // accounted for quarantines like any other launch, with a fact that
+      // names the stop as its cause.
       if (outcome.launched && outcome.cleanup.kind === "unresolved") {
-        quarantine({ operation: "git config (filter preflight)", why: outcome.why, pid: outcome.pid })
+        quarantine({
+          operation: "git config (filter preflight)",
+          why: outcome.why,
+          pid: outcome.pid,
+          byStop: stopFacts(outcome.killError, outcome.cleanup),
+        })
       }
       throw refuse(
         outcome.launched
           ? `the review was stopped during the filter preflight, so blame was not run: ${outcome.why}`
           : `the review was stopped before the filter preflight, so blame was not run`,
+        true,
       )
     }
     if (outcome.kind !== "returned") {
@@ -516,21 +570,33 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       )
     if (quarantined !== null) throw quarantineRefusal(quarantined)
 
+    // CAP-5 — THE STOP, AFTER THE QUARANTINE: nothing is launched and no
+    // invocation is observed.
+    const stopRefusal = () =>
+      withEvidence(new GitError(command, `the review was stopped before blame was launched`), {
+        stage: "pre-shell",
+        launch: "not-attempted",
+        stopped: true,
+      })
+    if (signal?.aborted) throw stopRefusal()
+
     if (argv[0] !== "git") throw new Error(`blame argv must start with "git", not ${JSON.stringify(argv[0])}`)
 
     const startedAt = now()
     const preflight = readOnly ? await filterPreflight(command) : "clear"
 
     /**
-     * Under the read policy, what stops blame from launching now: a quarantine
-     * another call latched while this one awaited, or a deadline with under
-     * 1 ms left. Checked after the preflight and again after the invocation
-     * write, immediately before the launch. Refusals are `pre-shell` and
+     * What stops blame from launching now. Under the read policy: a quarantine
+     * another call latched while this one awaited, then the run's stop, then a
+     * deadline with under 1 ms left. Under either policy: the run's stop.
+     * Checked after the preflight and again after the invocation write,
+     * immediately before the launch. Refusals are `pre-shell` and
      * `not-attempted` either way: no blame process was started.
      */
     const launchRefusal = (): { refusal: GitError } | { deadlineMs: number } => {
-      if (!readOnly) return { deadlineMs: blameTimeoutMs }
+      if (!readOnly) return signal?.aborted ? { refusal: stopRefusal() } : { deadlineMs: blameTimeoutMs }
       if (quarantined !== null) return { refusal: quarantineRefusal(quarantined) }
+      if (signal?.aborted) return { refusal: stopRefusal() }
       const deadlineMs = Math.floor(blameTimeoutMs - (now() - startedAt))
       if (deadlineMs >= 1) return { deadlineMs }
       return {
@@ -571,6 +637,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       deadlineMs: atLaunch.deadlineMs,
       cleanupMs: cleanupTimeoutMs,
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+      ...(signal === undefined ? {} : { signal }),
     })
 
     if (outcome.kind === "refused") {
@@ -587,15 +654,13 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     if (outcome.kind === "stopped") {
       // CAP-5 — the run's stop. Not launched is a proved non-execution;
       // stopped while running is a call MAD stopped waiting for, read as
-      // `unknown`, and unresolved cleanup quarantines.
-      if (!outcome.launched) {
-        throw withEvidence(new GitError(command, `the review was stopped before blame was launched`), {
-          stage: "pre-shell",
-          launch: "not-attempted",
-        })
+      // `unknown`, and unresolved cleanup quarantines with a fact that names
+      // the stop as its cause.
+      if (!outcome.launched) throw stopRefusal()
+      if (outcome.cleanup.kind === "unresolved") {
+        quarantine({ operation: command, why: outcome.why, pid: outcome.pid, byStop: stopFacts(outcome.killError, outcome.cleanup) })
       }
-      if (outcome.cleanup.kind === "unresolved") quarantine({ operation: command, why: outcome.why, pid: outcome.pid })
-      throw withEvidence(new GitError(command, outcome.why), { stage: "shell", launch: "unproved" })
+      throw withEvidence(new GitError(command, outcome.why), { stage: "shell", launch: "unproved", stopped: true })
     }
 
     if (outcome.kind === "launch-failed") {
@@ -690,6 +755,19 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
         exitCode: outcome.exitCode,
         launch,
       })
+    }
+
+    // CAP-5 — THE EXIT WON THE RACE, BUT THE STOP HAS FIRED SINCE. The outcome
+    // above is recorded as observed; the output is not handed back, because it
+    // would reach the judge as evidence for a review the user stopped.
+    if (signal?.aborted) {
+      throw withEvidence(
+        new GitError(
+          command,
+          `git blame ran, but its output was not returned for use as evidence because the review was stopped`,
+        ),
+        { stage: "shell", exitCode: outcome.exitCode, launch, stopped: true },
+      )
     }
     return outcome.stdout
   }

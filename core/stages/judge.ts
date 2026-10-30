@@ -130,6 +130,7 @@ import type {
   ToolRequestState,
   ToolTerminalOutcome,
 } from "../ports/tool-observation.ts"
+import { toolFailureEvidence } from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
 import { settlementOf, stageGatedTurn } from "./settlement.ts"
 import { material, oneLine } from "../prompt/material.ts"
@@ -1531,6 +1532,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     // must never read as "blame found no contradiction".
     let blameCitation: string | undefined
     let madExecuted = false
+    /** CAP-5 — the `Tools` implementation marked the blame's failure as the run's stop. */
+    let blameStopped = false
     const locus = finding.locus
     const blameAt = (): string =>
       locus === undefined
@@ -1599,15 +1602,14 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       })
       await observeOutcome(BLAME_OUTCOME.noLocus())
     } else {
-      // NO CANCELLATION CHECK HERE, and that is a measured answer rather than an
-      // omission (ledger triage 2026-09-09). The review filed "a cancelled run
-      // keeps spawning git for every remaining finding"; it does not. Two gates
-      // above already close it: the per-finding gate at the top of this loop
-      // strands every finding a stop arrives before, and on an argued finding
-      // the extractor turn between that gate and this block returns a cancelled
-      // envelope, which `stoppedHere` strands on. A guard added here was probed
-      // and could not be reached from either direction, so it was removed rather
-      // than left as a branch no run can enter.
+      // THE STOP IS OBSERVED BY THE ADAPTER; THIS BLOCK READS ITS MARK. A stop that lands before this finding is reached
+      // is stranded by the per-finding gate at the top of this loop, and on an
+      // argued finding by `stoppedHere` on the extractor's cancelled envelope.
+      // A stop that lands while the blame runs, or just before it launches, is
+      // the `Tools` implementation's to observe (CAP-5): it launches nothing
+      // after the stop, sends SIGKILL to a running blame, returns no output
+      // once the stop has fired, and marks its failure `stopped`. The catch below reads that
+      // mark and strands the finding as cancelled, with no fact-check turn.
 
       // THE RANGE ASKED OF GIT IS BOUNDED, not only the citation rendered from
       // it (ledger triage 2026-09-09). `MAX_BLAME_ROWS` trimmed the OUTPUT, so
@@ -1684,17 +1686,35 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         // reachable — `.nothrow()` alone would have delivered "" here and "" is
         // indistinguishable from "nothing contradicts the claim".
         const why = error instanceof Error ? error.message : String(error)
-        blameFailures.push(`${blameAt()} — ${oneLine(why)}`)
-        appendEntry(finding, {
-          stage: "judge",
-          actor: "mad",
-          at: clock.now(),
-          kind: BLAME_KIND.failed,
-          body:
-            `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
-            `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
-            `from every verdict below.`,
-        })
+        if (toolFailureEvidence(error)?.stopped === true) {
+          // CAP-5 — THE ADAPTER SAYS THE RUN'S STOP ENDED THIS CALL, and no
+          // independent failure came first. That is a cancellation of this
+          // finding, not a blame failure: no `blameFailures` entry, so no
+          // `blame-unavailable` warning claims the finding was decided without
+          // history. It is stranded below, after the terminal reading.
+          blameStopped = true
+          appendEntry(finding, {
+            stage: "judge",
+            actor: "mad",
+            at: clock.now(),
+            kind: BLAME_KIND.stopped,
+            body:
+              `GIT BLAME STOPPED for ${blameAt()}: ${oneLine(why)}. The run was cancelled, so no ` +
+              `citation was produced and this finding is left undecided.`,
+          })
+        } else {
+          blameFailures.push(`${blameAt()} — ${oneLine(why)}`)
+          appendEntry(finding, {
+            stage: "judge",
+            actor: "mad",
+            at: clock.now(),
+            kind: BLAME_KIND.failed,
+            body:
+              `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
+              `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
+              `from any verdict reached on this finding.`,
+          })
+        }
         // WHAT THE ADAPTER KNEW, WHERE IT SAID SO. A `Tools` implementation may
         // attach the evidence the core cannot see — whether a shell ran at all —
         // and without it the reading is `unknown`. A thrown call is never read
@@ -1703,6 +1723,18 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         terminal = blameFailureOutcome(error, oneLine(why))
       }
       if (terminal !== undefined) await observeOutcome(terminal)
+    }
+
+    // CAP-5 — A STOPPED BLAME STRANDS THE FINDING AS CANCELLED, as
+    // `stoppedHere` does, and no fact-check or later turn is allocated for it.
+    // It was cancelled WHILE IT WAS BEING JUDGED: MAD had already launched work
+    // for it, even when no model turn had been issued yet.
+    if (blameStopped) {
+      cancelled = true
+      counts.unresolved += 1
+      counts.unresolvedByCancellation += 1
+      strandCancelled(finding, clock.now(), `while it was being judged`)
+      continue
     }
 
     const factSlot = slots.byRole["fact-check"]
@@ -2049,9 +2081,9 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       code: "blame-unavailable",
       stage: "judge",
       message:
-        `MAD COULD NOT RUN \`git blame\`: ${blameFailures.length} attempt(s) failed, so those ` +
-        `findings were decided without the repository's own record of who last changed the lines ` +
-        `they cite. THIS IS NOT "the history contradicts nothing" — nothing was read either way. ` +
+        `MAD COULD NOT RUN \`git blame\`: ${blameFailures.length} attempt(s) failed, so no citation ` +
+        `was produced for those findings, and any verdict reached on them was reached without the ` +
+        `repository's own record of who last changed the lines they cite. THIS IS NOT "the history contradicts nothing" — nothing was read either way. ` +
         `A bad path, a line past the end of a file, an uncommitted line and a shallow clone all ` +
         `land here. Failures: ${failureExamples(blameFailures)}`,
       // THE FULL LIST LIVES HERE, and only here (code review 2026-09-09). The

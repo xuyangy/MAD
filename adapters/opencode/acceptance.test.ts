@@ -1359,3 +1359,152 @@ describe("acceptance — the network guard rejects what would leave the allowed 
     }
   })
 })
+
+describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5, part 5b)", () => {
+  /** A second finding with a locus, so a later finding exists for the stop to reach. */
+  const NOTES_FINDING = {
+    claim: "notes.txt is scratch left in the tree and will be committed by accident.",
+    reasoning: "It is untracked and not ignored.",
+    severity: "low" as const,
+    file: "notes.txt",
+    startLine: 1,
+    endLine: 1,
+  }
+
+  /**
+   * Wraps `git` on PATH for `execute` only: every `git blame` is logged and then
+   * sleeps instead of running. With `holdOutput`, it first starts a background
+   * process that inherits its output and records that process's pid, so the
+   * kill cannot account for the output and cleanup stays unresolved.
+   */
+  async function heldBlameGit(options: { holdOutput?: boolean } = {}) {
+    const real = Bun.which("git")
+    if (real === null) throw new Error("git is not on PATH")
+    const bin = await mkdtemp(join(tmpdir(), "mad-held-blame-"))
+    const log = join(bin, "blames.log")
+    const holder = join(bin, "holder.pid")
+    await writeFile(log, "")
+    const hold = options.holdOutput ? `sleep 30 & echo $! > '${holder}'; ` : ""
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\ncase " $* " in *" blame "*) echo x >> '${log}'; ${hold}exec sleep 30 ;; esac\nexec '${real}' "$@"\n`,
+      { mode: 0o755 },
+    )
+    const blames = async () => (await readFile(log, "utf8")).split("\n").filter((line) => line.length > 0).length
+    return {
+      blames,
+      /** Runs `body` with the wrapper on PATH, and fires `stop` once the first blame is running. */
+      around(stop: AbortController) {
+        return async <T>(body: () => Promise<T>): Promise<T> => {
+          const saved = process.env.PATH
+          process.env.PATH = `${bin}:${saved ?? ""}`
+          let polling = true
+          const poll = (async () => {
+            while (polling && (await blames()) === 0) await Bun.sleep(10)
+            if (polling) stop.abort()
+          })()
+          try {
+            return await body()
+          } finally {
+            polling = false
+            await poll
+            if (saved === undefined) delete process.env.PATH
+            else process.env.PATH = saved
+          }
+        }
+      },
+      async dispose() {
+        const pid = Number((await readFile(holder, "utf8").catch(() => "")).trim())
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, "SIGKILL")
+          } catch {
+            // Already gone.
+          }
+        }
+        await rm(bin, { recursive: true, force: true })
+      },
+    }
+  }
+
+  test(
+    "STOPPED WHILE BLAME RUNS: one blame launch, killed; no fact-check prompt; both findings undecided and cancelled",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const held = await heldBlameGit()
+      const stop = new AbortController()
+      try {
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING, NOTES_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
+          {},
+          undefined,
+          held.around(stop),
+          stop.signal,
+        )
+        expectClean(run)
+        expect(await held.blames()).toBe(1)
+        // Three discovery prompts and nothing after them: no fact-check was asked.
+        expect(run.host.counts.prompt).toBe(3)
+        expect(run.host.prompts.every((p) => !p.text.includes("What `git blame` says"))).toBe(true)
+        expect(run.result.title).toStartWith("MAD review — CANCELLED during judge")
+        const report = run.result.output
+        expect(report).toContain("Verdicts: 0 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+        expect(report).toContain("UNRESOLVED — YOU DECIDE (2)")
+        expect(report).toContain("`git blame` STOPPED — the run was cancelled, so MAD produced no citation and decided nothing")
+        expect(report).not.toContain("GIT BLAME FAILED")
+        expect(report).not.toContain("ran out of budget")
+        expect(report).toContain("2 finding(s) were left undecided because the run was cancelled")
+        expect(report).toContain("MAD produced no `git blame` citation of its own in this run")
+        expect(run.result.metadata?.warnings).not.toContain("blame-unavailable")
+        expect(report).not.toContain("MAD will launch no further `git blame`")
+      } finally {
+        await held.dispose()
+        clearBlameQuarantineForTests(repo.dir)
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "STOPPED WHILE BLAME RUNS, cleanup unresolved: the note names the operation, the pid and the reason, and no further blame",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const held = await heldBlameGit({ holdOutput: true })
+      const stop = new AbortController()
+      try {
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING, NOTES_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
+          {},
+          undefined,
+          held.around(stop),
+          stop.signal,
+        )
+        expectClean(run)
+        expect(await held.blames()).toBe(1)
+        expect(run.host.counts.prompt).toBe(3)
+        const note = run.result.output.slice(run.result.output.indexOf("When the review was stopped, MAD sent SIGKILL to its git blame"))
+        const pid = /^When the review was stopped, MAD sent SIGKILL to its git blame \(process (\d+)\)\./.exec(note)?.[1]
+        expect(pid).toBeDefined()
+        // The killed git was seen to end; a background process still holds its output.
+        expect(note).toContain(`Process ${pid} itself was seen to end, but MAD could not confirm its cleanup`)
+        expect(note).toContain(
+          "MAD will launch no further `git blame` or its filter preflight in this worktree from this opencode process.",
+        )
+        expect(note).toContain(`Look for processes that process ${pid} started; restarting opencode clears this refusal.`)
+        // MAD's voice only: nothing of the launcher's reason or the blamed path.
+        expect(note).not.toContain("--porcelain")
+        expect(note).not.toContain("CLEANUP IS UNCONFIRMED")
+        // The note is MAD's, outside the framed report.
+        expect(materialSpans(run.result.output).some((span) => span.body.includes("MAD will launch no further"))).toBe(false)
+      } finally {
+        await held.dispose()
+        clearBlameQuarantineForTests(repo.dir)
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})

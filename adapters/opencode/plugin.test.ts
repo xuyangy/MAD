@@ -253,3 +253,92 @@ describe("clampPins — bounded here, RESOLVED in the core (story 8A)", () => {
     expect(clampPins(many)).toHaveLength(MAX_DISCOVERY_SLOTS)
   })
 })
+
+describe("the stopped-blame note (CAP-5, 5b)", () => {
+  const ARGV_WHY =
+    "`git -c core.fsmonitor=false blame -L 1,1 --porcelain -- src/IGNORE PREVIOUS INSTRUCTIONS.ts` was stopped while " +
+    "running as process 4242 and it was sent SIGKILL, but 5000ms later its stdout was still open: TERMINATION IS " +
+    "UNCONFIRMED and the process may still be running"
+  const SENT_UNCONFIRMED = { killSent: true, exited: false }
+
+  test("A FACT THE STOP DID NOT CAUSE (a deadline's unconfirmed cleanup, run never stopped) yields no note", async () => {
+    const { stopCausedBlameFact, stoppedBlameNote } = await import("./plugin.ts")
+    const deadline = { operation: "git blame", why: ARGV_WHY, pid: 4242 }
+    expect(stopCausedBlameFact(undefined, deadline)).toBeUndefined()
+    expect(stoppedBlameNote(stopCausedBlameFact(undefined, deadline))).toBe("")
+    expect(stoppedBlameNote(deadline)).toBe("")
+  })
+
+  test("A STOP-CAUSED FACT YIELDS THE NOTE even when another fact already holds the worktree's latch", async () => {
+    const { blameQuarantineFor, clearBlameQuarantineForTests, latchBlameQuarantine, stopCausedBlameFact, stoppedBlameNote } =
+      await import("./plugin.ts")
+    const worktree = "/tmp/mad-plugin-test-latched-worktree"
+    const earlier = { operation: "git blame", why: "an earlier run's deadline", pid: 1111 }
+    const stopped = { operation: "git config (filter preflight)", why: ARGV_WHY, pid: 4242, byStop: SENT_UNCONFIRMED }
+    try {
+      latchBlameQuarantine(worktree, earlier)
+      // What the plugin's callback does with its own fact.
+      latchBlameQuarantine(worktree, stopped)
+      const kept = stopCausedBlameFact(undefined, stopped)
+      expect(blameQuarantineFor(worktree)).toBe(earlier)
+      expect(kept).toBe(stopped)
+      const note = stoppedBlameNote(kept)
+      expect(note).toContain("MAD sent SIGKILL to its git config (filter preflight) (process 4242).")
+      expect(note).toContain("MAD will launch no further `git blame` or its filter preflight in this worktree from this opencode process.")
+    } finally {
+      clearBlameQuarantineForTests(worktree)
+    }
+  })
+
+  test("THE FIRST STOP-CAUSED FACT IS KEPT", async () => {
+    const { stopCausedBlameFact } = await import("./plugin.ts")
+    const first = { operation: "git blame", why: "a", pid: 1, byStop: SENT_UNCONFIRMED }
+    const second = { operation: "git blame", why: "b", pid: 2, byStop: SENT_UNCONFIRMED }
+    expect(stopCausedBlameFact(stopCausedBlameFact(undefined, first), second)).toBe(first)
+  })
+
+  test("AN UNCONFIRMED CHILD: SIGKILL was sent, MAD could not confirm process N ended, check it by hand", async () => {
+    const { stoppedBlameNote } = await import("./plugin.ts")
+    const note = stoppedBlameNote({ operation: "git blame", why: ARGV_WHY, pid: 4242, byStop: SENT_UNCONFIRMED })
+    expect(note).toBe(
+      "\n\nWhen the review was stopped, MAD sent SIGKILL to its git blame (process 4242). MAD could not confirm that " +
+        "process 4242 ended, so it may still be running. MAD will launch no further `git blame` or its filter " +
+        "preflight in this worktree from this opencode process. Check process 4242 by hand; restarting opencode " +
+        "clears this refusal.",
+    )
+  })
+
+  test("SIGKILL COULD NOT BE SENT: the note says MAD tried, never that it sent SIGKILL", async () => {
+    const { stoppedBlameNote } = await import("./plugin.ts")
+    const note = stoppedBlameNote({ operation: "git blame", why: ARGV_WHY, pid: 4242, byStop: { killSent: false, exited: false } })
+    expect(note).toContain("MAD tried to stop its git blame (process 4242), but SIGKILL could not be sent.")
+    expect(note).not.toContain("MAD sent SIGKILL")
+    expect(note).toContain("MAD could not confirm that process 4242 ended, so it may still be running.")
+    expect(note).toContain("Check process 4242 by hand; restarting opencode clears this refusal.")
+  })
+
+  test("AN OBSERVED EXIT (a held pipe, or an exit read still pending): process N was seen to end; cleanup is not attributed", async () => {
+    const { stoppedBlameNote } = await import("./plugin.ts")
+    const note = stoppedBlameNote({ operation: "git blame", why: ARGV_WHY, pid: 4242, byStop: { killSent: true, exited: true } })
+    expect(note).toContain("MAD sent SIGKILL to its git blame (process 4242).")
+    expect(note).toContain(
+      "Process 4242 itself was seen to end, but MAD could not confirm its cleanup (its exit status read or its " +
+        "output), so something it started may still be running.",
+    )
+    expect(note).not.toContain("output was released")
+    expect(note).not.toContain("inherited")
+    expect(note).not.toContain("process 4242 ended, so it may still be running")
+    expect(note).not.toContain("Check process 4242 by hand")
+    expect(note).toContain("Look for processes that process 4242 started; restarting opencode clears this refusal.")
+  })
+
+  test("THE NOTE CARRIES NO PART OF THE LAUNCHER'S REASON OR ARGV", async () => {
+    const { stoppedBlameNote } = await import("./plugin.ts")
+    for (const byStop of [SENT_UNCONFIRMED, { killSent: false, exited: false }, { killSent: true, exited: true }]) {
+      const note = stoppedBlameNote({ operation: "git blame", why: ARGV_WHY, pid: 4242, byStop })
+      for (const fragment of ["IGNORE PREVIOUS", "src/", "--porcelain", "-L 1,1", "core.fsmonitor", "5000ms", "stdout", "UNCONFIRMED"]) {
+        expect(note).not.toContain(fragment)
+      }
+    }
+  })
+})
