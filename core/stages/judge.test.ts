@@ -2056,13 +2056,18 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
     expect(request.kind === "made" ? request.args.endLine : -1).not.toBe(MAX_BLAME_ROWS)
   })
 
-  test("THE REQUEST IS RECORDED BEFORE THE DELEGATION, not after it returns", async () => {
-    // Ordering, not wording. A request written after the call cannot distinguish
-    // a call that was never made from one whose answer never came back.
+  test("THE PORT IS CALLED, THEN THE REQUEST IS RECORDED, BEFORE THE ANSWER IS AWAITED (trace version 2)", async () => {
+    // Ordering, not wording. A request written after the call returns cannot
+    // distinguish a call that was never made from one whose answer never came
+    // back. The port's answer here is released only by the request write, so a
+    // judge that waited for the answer before recording the request would never
+    // finish.
     const order: string[] = []
+    let answer: () => void = () => undefined
     const trace: ToolObservation = {
       async request() {
         order.push("request")
+        answer()
       },
       async outcome() {
         order.push("outcome")
@@ -2073,15 +2078,20 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
       takeFailures: () => [],
     }
     const tools = {
-      blame: async () => {
+      blame: () => {
         order.push("blame")
-        return PORCELAIN
+        return new Promise<string>((resolve) => {
+          answer = () => {
+            order.push("answered")
+            resolve(PORCELAIN)
+          }
+        })
       },
     } as never
 
     await run([withLocus(12, 14)], { tools, toolObservation: trace })
 
-    expect(order).toEqual(["request", "blame", "outcome"])
+    expect(order).toEqual(["blame", "request", "answered", "outcome"])
   })
 
   test("ZERO ROWS: one EXECUTION and one failure, never a non-execution", async () => {
@@ -2202,10 +2212,12 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
   })
 
   test("THE JOIN IS BY ORDER, AND THIS IS WHAT PINS IT (story 2-7a)", async () => {
-    // The port says an adapter fact belongs to the last request written. That is
-    // true because this loop is SEQUENTIAL and awaits its request before
-    // delegating — not because the arguments identify the call: both findings
-    // below carry the same path and the same range, which is legal and ordinary.
+    // The port says an adapter fact belongs to its call's request: the one
+    // written next when the adapter writes it before its first await (trace
+    // version 2), otherwise the last one written. That is true because this loop
+    // is SEQUENTIAL and records each request before it awaits the call's answer,
+    // not because the arguments identify the call: both findings below carry the
+    // same path and the same range, which is legal and ordinary.
     //
     // A change that ran findings concurrently would interleave these events and
     // fail here, rather than silently mis-joining a trace whose halves then
@@ -2255,13 +2267,15 @@ describe("the tool-action trace — the four blame outcomes, observed (story 2-7
 
     await run([first, second], { tools, toolObservation: observer })
 
+    // The stub writes its invocation before its first await, as the real
+    // adapter does under the inherit policy, so it precedes its request.
     expect(events).toEqual([
-      "request f-1",
       "invoked",
+      "request f-1",
       "shell",
       "outcome f-1",
-      "request f-2",
       "invoked",
+      "request f-2",
       "shell",
       "outcome f-2",
     ])
@@ -2683,5 +2697,408 @@ describe("judge — a blame the adapter marked as stopped (CAP-5, 5b)", () => {
     expect(seen.filter((turn) => turn.role === "fact-check")).toHaveLength(1)
     expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
     expect(result.cancelled).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CAP-5 — a `made` blame request is always a call that happened: the stop is
+// gated before the call, and the request is recorded after it (trace version 2)
+// ---------------------------------------------------------------------------
+
+describe("judge — no evidence call after the stop is observed (CAP-5)", () => {
+  const PORCELAIN = [
+    "3333333333333333333333333333333333333333 1 12 1",
+    "author Ada",
+    "author-time 1700000000",
+    "author-tz +0000",
+    "summary the rate check",
+    "\tconst total = fee * rate",
+  ].join("\n")
+
+  function withLocus(id: string, startLine: number): Finding {
+    const f = finding({ id, route: "judge" })
+    f.locus = { file: "src/pay.ts", startLine, endLine: startLine + 2 }
+    return f
+  }
+
+  type Seen = { slot: string; role?: JudgeRoleTag; input: string }[]
+
+  /**
+   * What happened, in order: each request the sink received, and each call the
+   * port received. A `Tools` built with `signal` behaves as the adapter does
+   * after a stop: a call in flight when the stop fires fails with the
+   * adapter's `stopped` mark.
+   */
+  function recording(signal?: AbortSignal) {
+    const events: string[] = []
+    const requests: ToolRequestState[] = []
+    const terminal: ToolTerminalOutcome[] = []
+    const tools = {
+      blame: (path: string, startLine: number) => {
+        events.push(`blame ${path}:${startLine}`)
+        if (signal === undefined) return Promise.resolve(PORCELAIN)
+        return new Promise<string>((resolve, reject) => {
+          const stopped = () =>
+            reject(
+              Object.assign(new Error("git blame failed: the review was stopped while blame was running"), {
+                toolFailure: { stage: "shell", launch: "unproved", stopped: true },
+              }),
+            )
+          if (signal.aborted) return stopped()
+          signal.addEventListener("abort", stopped, { once: true })
+          setTimeout(() => resolve(PORCELAIN), 50)
+        })
+      },
+    }
+    /** An observer whose request write is `request`; the default resolves. */
+    const observer = (request: (event: ToolRequestEvent) => Promise<void> = async () => undefined): ToolObservation => ({
+      request(event) {
+        events.push(`request ${event.request.kind}`)
+        requests.push(event.request)
+        return request(event)
+      },
+      async outcome(event) {
+        terminal.push(event.outcome)
+      },
+      async invoked() {},
+      async shellOutcome() {},
+      failed() {},
+      takeFailures: () => [],
+    })
+    const calls = () => events.filter((event) => event.startsWith("blame ")).length
+    const made = () => requests.filter((request) => request.kind === "made").length
+    return { tools: tools as never, observer, events, requests, terminal, calls, made }
+  }
+
+  /** The judge's input with `input.tools` read through a getter, as `run` builds it otherwise. */
+  function inputWithToolsGetter(findings: Finding[], overrides: Partial<JudgeInput>, onRead: (reads: number) => void, tools: unknown) {
+    const slots = roster(THREE)
+    let reads = 0
+    const judgeInput: JudgeInput = {
+      findings,
+      roster: slots,
+      answeredSlots: slots.slots.map((s) => s.slot),
+      backend: new FakeBackend({}),
+      input: `# Change under review\n\n${material("change under review", "diff goes here")}`,
+      clock: fakeClock(),
+      ledger: emptyLedger() as BudgetLedger,
+      runId: "run-1",
+      ...overrides,
+    }
+    Object.defineProperty(judgeInput, "tools", {
+      enumerable: true,
+      get() {
+        reads += 1
+        onRead(reads)
+        return tools
+      },
+    })
+    return { judgeInput, reads: () => reads }
+  }
+
+  test("STOP BEFORE THE DECISION POINT, no observer: no port call, and the finding is stranded as the per-finding gate strands it", async () => {
+    // THE SEAM. With no observer, nothing injected is awaited between the
+    // per-finding gate and the decision point; the one injected read there is
+    // `input.tools`, read to choose the route. The stop fires on that read.
+    const stop = new AbortController()
+    const trace = recording()
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+    const { judgeInput, reads } = inputWithToolsGetter(
+      [first],
+      { signal: stop.signal, backend: recordingBackend(seen) },
+      (n) => n === 1 && stop.abort(),
+      trace.tools,
+    )
+
+    const result = await judge(judgeInput)
+
+    expect(reads()).toBe(1)
+    expect(trace.calls()).toBe(0)
+    expect(seen).toEqual([])
+    const kinds = first.history.map((entry) => entry.kind)
+    expect(kinds.at(-1)).toBe("run-cancelled")
+    expect(kinds.filter((kind) => kind.startsWith("judge-blame"))).toEqual([])
+    expect(first.unresolved?.reason).toBe("the run was cancelled before judging could start")
+    expect(result.cancelled).toBe(true)
+    expect(result.unresolvedByCancellation).toBe(1)
+    expect(result.warnings.map((w) => w.code)).not.toContain("blame-unavailable")
+  })
+
+  test("STOP BEFORE THE DECISION POINT, with an observer: no request is recorded, no outcome, no port call", async () => {
+    const stop = new AbortController()
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+    const { judgeInput } = inputWithToolsGetter(
+      [first],
+      { signal: stop.signal, toolObservation: trace.observer() },
+      (n) => n === 1 && stop.abort(),
+      trace.tools,
+    )
+
+    const result = await judge(judgeInput)
+
+    expect(trace.requests).toEqual([])
+    expect(trace.terminal).toEqual([])
+    expect(trace.calls()).toBe(0)
+    expect(first.unresolved?.reason).toBe("the run was cancelled before judging could start")
+    expect(result.unresolvedByCancellation).toBe(1)
+  })
+
+  test("THE PORT IS CALLED, THEN THE REQUEST REACHES THE SINK, and one made request is one call", async () => {
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+    const second = withLocus("f-2", 20)
+
+    await run([first, second], { tools: trace.tools, toolObservation: trace.observer() })
+
+    expect(trace.events).toEqual(["blame src/pay.ts:12", "request made", "blame src/pay.ts:20", "request made"])
+    expect(trace.made()).toBe(trace.calls())
+    expect(trace.terminal).toEqual([{ kind: "executed" }, { kind: "executed" }])
+  })
+
+  test("AN OBSERVER THAT ABORTS THE RUN SYNCHRONOUSLY in its request write: the port was called first, once, and the request it records is true", async () => {
+    const stop = new AbortController()
+    const trace = recording(stop.signal)
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+    const second = withLocus("f-2", 20)
+    // Records, aborts before returning, and answers at once.
+    const observer = trace.observer(() => {
+      trace.events.push("observer aborted")
+      stop.abort()
+      return Promise.resolve()
+    })
+
+    const result = await run([first, second], {
+      tools: trace.tools,
+      signal: stop.signal,
+      backend: recordingBackend(seen),
+      toolObservation: observer,
+    })
+
+    // The real order: the call, then the request write, inside which the stop fired.
+    expect(trace.events).toEqual(["blame src/pay.ts:12", "request made", "observer aborted"])
+    expect(trace.calls()).toBe(1)
+    expect(trace.made()).toBe(1)
+    expect(trace.requests).toEqual([{ kind: "made", args: { path: "src/pay.ts", startLine: 12, endLine: 14 } }])
+    // The port saw the stop on its call in flight; no later call or request.
+    expect(trace.terminal).toEqual([{ kind: "unknown", why: expect.stringContaining("was stopped while blame was running") }])
+    expect(seen).toEqual([])
+    expect(first.unresolved?.reason).toBe("the run was cancelled while it was being judged")
+    expect(second.history.map((entry) => entry.kind).at(-1)).toBe("run-cancelled")
+    expect(result.unresolvedByCancellation).toBe(2)
+  })
+
+  test("A STOP RAISED BY READING THE PORT'S METHOD: no call, no request, the finding stranded at the gate", async () => {
+    const stop = new AbortController()
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+    const tools = {}
+    Object.defineProperty(tools, "blame", {
+      get() {
+        trace.events.push("method read")
+        stop.abort()
+        return (trace.tools as { blame: unknown }).blame
+      },
+    })
+
+    const result = await run([first], { tools: tools as never, signal: stop.signal, toolObservation: trace.observer() })
+
+    expect(trace.events).toEqual(["method read"])
+    expect(trace.calls()).toBe(0)
+    expect(trace.made()).toBe(0)
+    expect(trace.terminal).toEqual([])
+    expect(first.unresolved?.reason).toBe("the run was cancelled before judging could start")
+    expect(result.unresolvedByCancellation).toBe(1)
+  })
+
+  test("A PORT WHOSE blame CANNOT BE READ: nothing is called, no request is recorded, and it is a blame failure", async () => {
+    const trace = recording()
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+    const tools = Object.defineProperty({}, "blame", {
+      get() {
+        throw new Error("unreadable method")
+      },
+    })
+
+    const result = await run([first], { tools: tools as never, backend: recordingBackend(seen), toolObservation: trace.observer() })
+
+    expect(trace.calls()).toBe(0)
+    expect(trace.made()).toBe(trace.calls())
+    expect(trace.requests).toEqual([])
+    expect(trace.terminal).toEqual([])
+    const failed = first.history.find((entry) => entry.kind === "judge-blame-failed")
+    expect(failed?.body).toContain("the port's blame method could not be read: unreadable method")
+    expect(failed?.body).toContain("MAD called nothing")
+    expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
+    // Not a stop: the finding goes on to its fact-check, with no citation.
+    expect(seen.map((turn) => turn.role)).toContain("fact-check")
+    expect(result.cancelled).toBe(false)
+  })
+
+  test("A PORT WHOSE blame IS NOT CALLABLE: nothing is called and no request is recorded", async () => {
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+
+    const result = await run([first], { tools: { blame: 42 } as never, toolObservation: trace.observer() })
+
+    expect(trace.made()).toBe(0)
+    expect(trace.requests).toEqual([])
+    expect(first.history.find((entry) => entry.kind === "judge-blame-failed")?.body).toContain("not callable (number)")
+    expect(result.warnings.map((w) => w.code)).toContain("blame-unavailable")
+  })
+
+  test("A METHOD WHOSE OWN call PROPERTY IS A GETTER: the getter is never consulted, so it cannot stop the run after the gate", async () => {
+    const stop = new AbortController()
+    const trace = recording()
+    let calls = 0
+    let calledAfterStop = false
+    let callReads = 0
+    const blame = function (this: unknown) {
+      calls += 1
+      calledAfterStop = stop.signal.aborted
+      return Promise.resolve(
+        [
+          "3333333333333333333333333333333333333333 12 12 1",
+          "author Ada",
+          "author-time 1700000000",
+          "author-tz +0000",
+          "summary the rate check",
+          "\tconst total = fee * rate",
+        ].join("\n"),
+      )
+    }
+    Object.defineProperty(blame, "call", {
+      get() {
+        callReads += 1
+        stop.abort()
+        return Function.prototype.call
+      },
+    })
+    const first = withLocus("f-1", 12)
+
+    await run([first], { tools: { blame } as never, signal: stop.signal, toolObservation: trace.observer() })
+
+    expect(callReads).toBe(0)
+    expect(calls).toBe(1)
+    expect(calledAfterStop).toBe(false)
+    expect(stop.signal.aborted).toBe(false)
+    expect(trace.made()).toBe(calls)
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-executed")
+  })
+
+  test("A STOP RAISED BY READING A CALL ARGUMENT: no call, no request, the finding stranded at the gate", async () => {
+    const stop = new AbortController()
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+    const locus = first.locus!
+    // The route check reads `startLine` once, past the per-finding gate; the
+    // second read is the call's own argument, and that is where the stop fires.
+    let startLineReads = 0
+    first.locus = {
+      file: locus.file,
+      get startLine() {
+        startLineReads += 1
+        if (startLineReads === 2) stop.abort()
+        return locus.startLine
+      },
+      endLine: locus.endLine,
+    } as never
+
+    const result = await run([first], { tools: trace.tools, signal: stop.signal, toolObservation: trace.observer() })
+
+    expect(startLineReads).toBe(2)
+    expect(trace.calls()).toBe(0)
+    expect(trace.made()).toBe(0)
+    expect(trace.terminal).toEqual([])
+    expect(first.unresolved?.reason).toBe("the run was cancelled before judging could start")
+    expect(result.unresolvedByCancellation).toBe(1)
+  })
+
+  test("A STOP WHILE THE REQUEST WRITE IS HELD lands after the call: one made request, one call, and the adapter's stopped mark cancels the finding", async () => {
+    const stop = new AbortController()
+    const trace = recording(stop.signal)
+    const seen: Seen = []
+    const first = withLocus("f-1", 12)
+    const second = withLocus("f-2", 20)
+    // The request write is held, and the stop fires while it is.
+    const observer = trace.observer(
+      () =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            stop.abort()
+            trace.events.push("request settled")
+            resolve()
+          }, 0),
+        ),
+    )
+
+    const result = await run([first, second], {
+      tools: trace.tools,
+      signal: stop.signal,
+      backend: recordingBackend(seen),
+      toolObservation: observer,
+    })
+
+    // The call was made first, then the request was written, then it settled.
+    expect(trace.events).toEqual(["blame src/pay.ts:12", "request made", "request settled"])
+    expect(trace.made()).toBe(1)
+    expect(trace.calls()).toBe(1)
+    expect(trace.terminal).toEqual([{ kind: "unknown", why: expect.stringContaining("was stopped while blame was running") }])
+    expect(seen).toEqual([])
+    const kinds = first.history.map((entry) => entry.kind)
+    expect(kinds).toContain("judge-blame-stopped")
+    expect(kinds).not.toContain("judge-blame-failed")
+    expect(first.unresolved?.reason).toBe("the run was cancelled while it was being judged")
+    expect(second.history.map((entry) => entry.kind).at(-1)).toBe("run-cancelled")
+    expect(result.cancelled).toBe(true)
+    expect(result.unresolvedByCancellation).toBe(2)
+    expect(result.warnings.map((w) => w.code)).not.toContain("blame-unavailable")
+  })
+
+  test("A REQUEST WRITE THAT REJECTS does not alter the call: one made attempt, one call, the failure reported, the citation kept", async () => {
+    const trace = recording()
+    const first = withLocus("f-1", 12)
+    const observer = trace.observer(() => Promise.reject(new Error("the trace refused the request line")))
+
+    const result = await run([first], { tools: trace.tools, toolObservation: observer })
+
+    expect(trace.events).toEqual(["blame src/pay.ts:12", "request made"])
+    expect(trace.made()).toBe(1)
+    expect(trace.calls()).toBe(1)
+    expect(trace.terminal).toEqual([{ kind: "executed" }])
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-executed")
+    const warning = result.warnings.find((w) => w.code === "tool-observation-failed")
+    expect(warning?.message).toContain("the trace refused the request line")
+  })
+
+  test("A REQUEST WRITE THAT TIMES OUT while the stop lands: one made attempt, one call, the timeout reported, the finding cancelled by the stopped mark", async () => {
+    const stop = new AbortController()
+    const trace = recording(stop.signal)
+    const first = withLocus("f-1", 12)
+    // The request write never answers; the stop fires while it is outstanding.
+    const observer = trace.observer(() => {
+      setTimeout(() => stop.abort(), 0)
+      return new Promise<void>(() => {})
+    })
+
+    const result = await run([first], {
+      tools: trace.tools,
+      signal: stop.signal,
+      toolObservation: observer,
+      observationTimeoutMs: 20,
+    })
+
+    expect(trace.made()).toBe(1)
+    expect(trace.calls()).toBe(1)
+    expect(trace.events.slice(0, 2)).toEqual(["blame src/pay.ts:12", "request made"])
+    expect(trace.terminal).toEqual([{ kind: "unknown", why: expect.stringContaining("was stopped while blame was running") }])
+    const warning = result.warnings.find((w) => w.code === "tool-observation-failed")
+    expect(warning?.message).toContain("the request observation was abandoned after 20ms")
+    expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-stopped")
+    expect(first.unresolved?.reason).toBe("the run was cancelled while it was being judged")
+    expect(result.unresolvedByCancellation).toBe(1)
   })
 })

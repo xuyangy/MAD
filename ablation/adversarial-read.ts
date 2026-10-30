@@ -232,6 +232,37 @@ export function assessToolRun(context: ToolRunContext, predicate: BlamePredicate
   const observations = new Map<string, Observation>()
   const order: Observation[] = []
   let open: Observation | undefined
+
+  // THE ORDER RULE DEPENDS ON THE TRACE VERSION (`TOOL_TRACE_VERSION`). In a
+  // version-1 trace every adapter fact follows its `made` request, so a fact
+  // with no open made request is an orphan. In a version-2 trace the judge
+  // calls the port before it records the request, so an adapter may write its
+  // invocation first. That one fact is held as PENDING, and joined to a
+  // request only when all of these hold:
+  //
+  // - the very next line of the run is that request, so no other request,
+  //   outcome or adapter fact came between them;
+  // - the request is `made`, a new observation, with identical arguments;
+  // - no earlier made observation with identical arguments still lacks its
+  //   terminal reading, so the join cannot be ambiguous.
+  //
+  // Anything else leaves the held fact an orphan. Only an invocation can be
+  // held: the adapter writes its shell outcome after the call returns, which
+  // is after the request. A run whose lines carry more than one version is read
+  // under the version-1 rule and is incomplete.
+  const versions = [...new Set(context.lines.map((line) => line.v))]
+  if (versions.length > 1) {
+    requestProblems.push(`this run's trace lines carry more than one version (${versions.join(", ")}), so their order cannot be read under one rule`)
+  }
+  const callFirst = versions.length === 1 && versions[0] === 2
+  const orphanFact = (line: TraceLine): void => {
+    requestProblems.push(`an ${line.type} fact at seq ${line.seq} follows no open made request (an orphan fact)`)
+  }
+  let pending: Extract<TraceLine, { type: "invoked" }> | undefined
+  const releasePending = (): void => {
+    if (pending !== undefined) orphanFact(pending)
+    pending = undefined
+  }
   // One sink per run numbers its lines 1..n. A gap or a repeat is a line lost or
   // duplicated, and either leaves both counts incomplete.
   for (const [index, line] of context.lines.entries()) {
@@ -241,8 +272,18 @@ export function assessToolRun(context: ToolRunContext, predicate: BlamePredicate
     }
   }
   for (const line of context.lines) {
+    if (pending !== undefined && line.type !== "request") releasePending()
     if (line.type === "request") {
       const { context: call, request } = line.event
+      const held = pending
+      pending = undefined
+      const joinsHeld =
+        held !== undefined &&
+        request.kind === "made" &&
+        !observations.has(call.observationId) &&
+        sameArgs(held.fact.args, request.args) &&
+        !order.some((earlier) => earlier.request.kind === "made" && earlier.terminal === undefined && sameArgs(earlier.request.args, request.args))
+      if (held !== undefined && !joinsHeld) orphanFact(held)
       if (call.runId !== context.runId) requestProblems.push(`request ${call.observationId} names run \`${call.runId}\`, not \`${context.runId}\` (a cross-run join)`)
       if (observations.has(call.observationId)) {
         requestProblems.push(`observation ${call.observationId} was requested twice (a duplicate context)`)
@@ -254,7 +295,7 @@ export function assessToolRun(context: ToolRunContext, predicate: BlamePredicate
         findingId: call.findingId,
         runId: call.runId,
         request: request as Observation["request"],
-        invoked: false,
+        invoked: joinsHeld,
         shell: false,
         problems: [],
       }
@@ -263,7 +304,11 @@ export function assessToolRun(context: ToolRunContext, predicate: BlamePredicate
       open = observation
     } else if (line.type === "invoked" || line.type === "shellOutcome") {
       if (open === undefined || open.terminal !== undefined || open.request.kind !== "made") {
-        requestProblems.push(`an ${line.type} fact at seq ${line.seq} follows no open made request (an orphan fact)`)
+        if (callFirst && line.type === "invoked") {
+          pending = line
+          continue
+        }
+        orphanFact(line)
         continue
       }
       if (!sameArgs(line.fact.args, open.request.args)) {
@@ -300,6 +345,7 @@ export function assessToolRun(context: ToolRunContext, predicate: BlamePredicate
       known.terminal = outcome
     }
   }
+  releasePending()
   if (open !== undefined && open.terminal === undefined) open.problems.push("no terminal outcome row")
 
   const requested = new Set(order.map((observation) => observation.findingId))

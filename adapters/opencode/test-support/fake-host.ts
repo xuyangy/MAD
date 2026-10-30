@@ -25,7 +25,7 @@
  */
 
 import type { Severity } from "../../../core/domain/finding.ts"
-import { DEFAULT_JUDGE_ANSWERS, judgeRoleOf } from "../../../core/test-support/fakes.ts"
+import { DEFAULT_JUDGE_ANSWERS, judgeRoleOf, type JudgeRoleTag } from "../../../core/test-support/fakes.ts"
 import { READ_ONLY_SESSION_NOTICE } from "../session-policy.ts"
 
 /** One model's entry in the provider list, in the host's `config.providers` shape. */
@@ -80,8 +80,22 @@ export interface FakeHostOptions {
   holdCreate?: (index: number) => Promise<void> | undefined
   /** Rewrites the `index`-th create's answer body, for answers a real host should not give. */
   createAnswer?: (answer: Record<string, unknown>, index: number) => unknown
-  /** Held before a prompt is answered, so a test can keep a turn in flight. */
-  holdPrompt?: (sessionID: string) => Promise<void> | undefined
+  /**
+   * Held before a prompt is answered, so a test can keep a turn in flight. It is
+   * handed the prompt as recorded in `prompts`, its judge role included, so a
+   * test can hold one kind of turn.
+   */
+  holdPrompt?: (sessionID: string, prompt: FakePrompt) => Promise<void> | undefined
+}
+
+/** One prompt as the fake host recorded it. */
+export interface FakePrompt {
+  sessionID: string
+  system: string
+  /** The prompt's text parts, joined. */
+  text: string
+  /** The judge role the instructions name; `undefined` for a discovery or other turn. */
+  role: JudgeRoleTag | undefined
 }
 
 /** Returned from `echo` to leave `permission` out of the session answer. */
@@ -96,8 +110,8 @@ export interface FakeHost {
   readonly creates: unknown[]
   /** The ids handed out, in create order. */
   readonly sessionIds: string[]
-  /** Every prompt's `system` text and joined text parts, in arrival order, with its session id. */
-  readonly prompts: { sessionID: string; system: string; text: string }[]
+  /** Every prompt, in arrival order. */
+  readonly prompts: FakePrompt[]
   /** Every request the fake could not answer honestly. Must be empty after a scenario. */
   readonly problems: string[]
   /** Sessions created and not yet deleted. */
@@ -117,6 +131,16 @@ function schemaKeys(format: unknown): string[] {
   return Object.keys(format.schema.properties).sort()
 }
 
+/**
+ * The judge role a turn's instructions name. The plugin appends its read-only
+ * notice after the instructions; the role is read from what comes before it.
+ */
+function roleOf(body: JsonObject): JudgeRoleTag | undefined {
+  const raw = typeof body.system === "string" ? body.system : ""
+  const suffix = `\n\n${READ_ONLY_SESSION_NOTICE}`
+  return judgeRoleOf(raw.endsWith(suffix) ? raw.slice(0, -suffix.length) : raw)
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 }
@@ -127,7 +151,7 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
   const open = new Set<string>()
   const creates: unknown[] = []
   const sessionIds: string[] = []
-  const prompts: { sessionID: string; system: string; text: string }[] = []
+  const prompts: FakePrompt[] = []
   let nextSession = 0
   const tokens = options.tokens ?? { input: 100, output: 50 }
 
@@ -136,14 +160,8 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
     return json({ name: "FakeHostError", data: { message: why } }, status)
   }
 
-  function answerFor(body: JsonObject): unknown | Response {
+  function answerFor(body: JsonObject, role: JudgeRoleTag | undefined): unknown | Response {
     const keys = schemaKeys(body.format).join(",")
-    // The plugin appends its read-only notice after the instructions; the role
-    // is read from what comes before it, exactly as before.
-    const raw = typeof body.system === "string" ? body.system : ""
-    const suffix = `\n\n${READ_ONLY_SESSION_NOTICE}`
-    const system = raw.endsWith(suffix) ? raw.slice(0, -suffix.length) : raw
-    const role = judgeRoleOf(system)
     if (role !== undefined) return options.judge !== undefined && role in options.judge ? options.judge[role] : DEFAULT_JUDGE_ANSWERS[role]
     if (keys === "findings") {
       if (options.discovery === undefined) return refuse("a discovery turn arrived and none is scripted")
@@ -164,14 +182,16 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
     if (!isObject(body) || !Array.isArray(body.parts) || !isObject(body.format) || !isObject(body.model)) {
       return refuse("prompt body lacks parts, format or model")
     }
-    prompts.push({
+    const recorded: FakePrompt = {
       sessionID,
       system: typeof body.system === "string" ? body.system : "",
       text: body.parts.map((part) => (isObject(part) && typeof part.text === "string" ? part.text : "")).join("\n"),
-    })
-    await options.holdPrompt?.(sessionID)
+      role: roleOf(body),
+    }
+    prompts.push(recorded)
+    await options.holdPrompt?.(sessionID, recorded)
     if (options.failPrompt?.(sessionID)) return json({ name: "UnknownError", data: { message: "fake prompt failure" } }, 500)
-    const answer = answerFor(body)
+    const answer = answerFor(body, recorded.role)
     if (answer instanceof Response) return answer
     return json({
       info: {

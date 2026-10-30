@@ -63,13 +63,20 @@
  * THE JOIN IS BY ORDER, AND THE ARGUMENTS ARE A CHECK ON IT, not the join
  * itself. Two findings can legitimately carry the same path and range, so
  * arguments alone do not identify a call. What makes the order well defined is
- * that the judge drives blame from one sequential loop and AWAITS its request
- * before delegating, so an adapter fact always belongs to the last request
- * written; `core/stages/judge.test.ts` pins that sequencing against two findings
+ * that the judge drives blame from one sequential loop: it calls the port, then
+ * writes the `made` request and awaits that write, before it awaits the call's
+ * answer and before it moves to the next finding. An adapter fact therefore
+ * belongs to the call of the last request written, or, when the adapter writes
+ * its invocation before its first await, to the request written immediately
+ * after it. The ablation trace records this as version 2
+ * (`ablation/tool-trace.ts` `TOOL_TRACE_VERSION`); in a version-1 trace the
+ * request was written before the call, so every adapter fact follows its
+ * request. `core/stages/judge.test.ts` pins the sequencing against two findings
  * with identical arguments, so a change that made the loop concurrent fails
  * there rather than silently mis-joining a trace. An implementation that finds
- * an adapter fact whose arguments disagree with the open request has detected a
- * broken join and should record an integrity failure rather than guess.
+ * an adapter fact whose arguments disagree with the request it joins has
+ * detected a broken join and should record an integrity failure rather than
+ * guess.
  *
  * There is no global current-call slot, and `Tools` method signatures are
  * unchanged (`core/ports/tools.ts:29-33`).
@@ -93,9 +100,9 @@
  *   five seconds, and no dial exposes it. What abandonment means to a caller:
  *
  *   - It is INCOMPLETE OBSERVATION AND NEVER A SUCCESSFUL DURABLE WRITE. The
- *     old guarantee — a request is durable before the delegation it describes —
- *     still holds for every write that SUCCEEDS, and is the only case it ever
- *     claimed. An abandoned write makes no claim in either direction: it did not
+ *     guarantee — a request is durable before the judge awaits the call it
+ *     describes — holds for every write that SUCCEEDS, and is the only case it
+ *     ever claimed. An abandoned write makes no claim in either direction: it did not
  *     fail, it did not succeed, and the physical write behind it MAY STILL BE
  *     RUNNING.
  *   - The caller may proceed WITHOUT that durability, and only under the failure
@@ -283,7 +290,11 @@ export interface ToolObservationFailure {
 }
 
 export interface ToolObservation {
-  /** CORE, before delegation, awaited. */
+  /**
+   * CORE, awaited. A `made` request is written right after the port is called
+   * and before its answer is awaited (trace version 2); the other two states at
+   * their decision point.
+   */
   request(event: ToolRequestEvent): Promise<void>
   /** CORE, once per observation. */
   outcome(event: ToolOutcomeEvent): Promise<void>

@@ -49,7 +49,14 @@ import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
 import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
-import { OMIT, startFakeHost, type FakeHost, type FakeHostOptions } from "./test-support/fake-host.ts"
+import { OMIT, startFakeHost, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
+import {
+  initiationRecorder,
+  isModelAllocation,
+  spawnCmdOf,
+  type Initiated,
+  type InitiationRecorder,
+} from "./test-support/initiation-recorder.ts"
 import { installNetworkGuard, type NetworkGuard } from "./test-support/network-guard.ts"
 import {
   differences,
@@ -108,21 +115,33 @@ interface Run {
  * run the shipped entry, snapshot again. Every step after the host starts is
  * inside `try`, so the guard comes off and the host stops whatever throws. The
  * guard is removed only after `execute` has settled, so no started work
- * outlives it. `serverUrl` defaults to the fake host; the guard test points it
- * elsewhere.
+ * outlives it.
  */
-async function runScenario(
-  repo: ReviewRepo,
-  hostOptions: FakeHostOptions,
-  args: Record<string, unknown> = {},
-  serverUrl?: string,
-  aroundExecute: <T>(body: () => Promise<T>) => Promise<T> = (body) => body(),
-  abort: AbortSignal = new AbortController().signal,
-): Promise<Run> {
+interface ScenarioOptions {
+  /** The `mad_review` arguments. Default none. */
+  args?: Record<string, unknown>
+  /** Defaults to the fake host; the guard test points it elsewhere. */
+  serverUrl?: string
+  /** Wraps `execute` only, so the snapshots run outside it. */
+  aroundExecute?: <T>(body: () => Promise<T>) => Promise<T>
+  /** The tool context's stop signal. Default one that never fires. */
+  abort?: AbortSignal
+  /**
+   * CAP-5 — handed every request the guard sees and wrapped outside
+   * `aroundExecute`. It logs from `execute`'s start until the guard comes off,
+   * so work that outlives `execute` is logged too; the after-snapshot's own git
+   * reads are exempt.
+   */
+  recorder?: InitiationRecorder
+}
+
+async function runScenario(repo: ReviewRepo, hostOptions: FakeHostOptions, options: ScenarioOptions = {}): Promise<Run> {
+  const { args = {}, serverUrl, aroundExecute = (body) => body(), abort = new AbortController().signal, recorder } = options
   const host = startFakeHost(hostOptions)
   let guard: NetworkGuard | undefined
   try {
-    guard = installNetworkGuard([host.origin])
+    recorder?.attach(host.url)
+    guard = installNetworkGuard([host.origin], recorder?.onRequest)
     const shellProblems: string[] = []
     clearChangeReadQuarantineForTests(repo.dir)
     clearBlameQuarantineForTests(repo.dir)
@@ -138,17 +157,55 @@ async function runScenario(
     const tool = (plugin as {
       tool?: Record<string, { execute: (a: never, c: never) => Promise<ToolResult> }>
     }).tool
-    const result = await aroundExecute(() =>
-      tool!.mad_review!.execute(args as never, { abort } as never),
-    )
-    const after = await snapshot(repo.dir)
+    const execute = () => aroundExecute(() => tool!.mad_review!.execute(args as never, { abort } as never))
+    const result = recorder === undefined ? await execute() : await recorder.around(execute)
+    const after = recorder === undefined ? await snapshot(repo.dir) : await recorder.exempt(() => snapshot(repo.dir))
     const beforeTool = (plugin as { "tool.execute.before": Run["beforeTool"] })["tool.execute.before"]
     return { result, host, beforeTool, guard, changed: differences(before, after), shellProblems }
   } finally {
+    recorder?.dispose()
     guard?.restore()
     await host.stop()
   }
 }
+
+type Child = ReturnType<typeof Bun.spawn>
+
+/**
+ * Replaces `Bun.spawn` for `body`'s span with one that passes every argument,
+ * in either call form, to the spawn it replaced, then hands `hook` the call's
+ * `cmd` and the child. `hook` may return a stand-in for the child. The spawn it
+ * replaced is restored whatever `body` throws.
+ */
+function spawnHook(hook: (cmd: string[], child: Child) => Child | void) {
+  return async <T>(body: () => Promise<T>): Promise<T> => {
+    const realSpawn = Bun.spawn
+    ;(Bun as { spawn: unknown }).spawn = (...args: unknown[]) => {
+      const child = (realSpawn as unknown as (...a: unknown[]) => Child)(...args)
+      return hook(spawnCmdOf(args), child) ?? child
+    }
+    try {
+      return await body()
+    } finally {
+      ;(Bun as { spawn: unknown }).spawn = realSpawn
+    }
+  }
+}
+
+/** `child` with `overrides` in place of those properties; every other method stays bound to `child`. */
+function overriding(child: Child, overrides: Partial<Record<keyof Child, unknown>>): Child {
+  return new Proxy(child, {
+    get(target, key) {
+      if (Object.hasOwn(overrides, key)) return overrides[key as keyof Child]
+      const value = Reflect.get(target, key, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+}
+
+/** Whether `cmd` is the working-tree `git diff --unified=8 HEAD`, the change read's first content read. */
+const isWorkingTreeDiff = (cmd: readonly string[]) =>
+  cmd.includes("--unified=8") && cmd.includes("HEAD") && !cmd.includes("--no-index")
 
 /** The checks every scenario ends with. */
 function expectClean(run: Run): void {
@@ -203,6 +260,16 @@ const FEE_FINDING = {
   endLine: 1,
 }
 
+/** A second finding with a locus, so a later finding exists for a stop to reach. */
+const NOTES_FINDING = {
+  claim: "notes.txt is scratch left in the tree and will be committed by accident.",
+  reasoning: "It is untracked and not ignored.",
+  severity: "low" as const,
+  file: "notes.txt",
+  startLine: 1,
+  endLine: 1,
+}
+
 /** A fact-check true to the one-line fixture, instead of the generic default. */
 const FEE_FACT_CHECK = {
   checks: ["opened src/pay.ts and read line 1"],
@@ -211,11 +278,53 @@ const FEE_FACT_CHECK = {
   evidenceKind: "line-cite",
 }
 
-/** CAP-5 — the two issued-turn billing disclosures: the core's portable one and the plugin's OpenCode note. */
-/** A pre-model stopped answer says nothing about billing at all. */
+/**
+ * CAP-5 — the plugin's OpenCode billing note, without the paragraph break it
+ * is appended with. Both helpers below look for this one form.
+ */
+const OPENCODE_BILLING_NOTE = ISSUED_TURNS_NOTE.trim()
+
+/** CAP-5 — a pre-model stopped answer says nothing about billing at all. */
 function expectNoBillingDisclosure(output: string): void {
   expect(output).not.toMatch(/billed/i)
-  expect(output).not.toContain(ISSUED_TURNS_NOTE.trim())
+  expect(output).not.toContain(OPENCODE_BILLING_NOTE)
+}
+
+/**
+ * CAP-5 — THE SNAPSHOT RULE. Exactly one stop marker was logged, and nothing
+ * logged after it is a git spawn, a model allocation or a request outside the
+ * host (`InitiationRecorder.violations`). Requests started before the marker,
+ * and cleanup after it, are allowed.
+ */
+function expectNothingStartedAfterStop(recorder: InitiationRecorder): void {
+  expect(recorder.log.filter((event) => event.kind === "stop")).toHaveLength(1)
+  expect(recorder.violations()).toEqual([])
+}
+
+/** CAP-5 (#107) — wording that would call a process killed. */
+const KILLED_CLAIMS = [/killed process/i, /process was killed/i, /MAD killed/i]
+
+/**
+ * CAP-5 — the output claims every stopped answer must make or avoid:
+ *
+ * - it is never the no-change answer;
+ * - it never says that no model failed (#160), in any case;
+ * - it never calls a process killed (#107; `KILLED_CLAIMS`);
+ * - with `issuedTurns` (the ledger shows an issued turn), the core's portable
+ *   billing sentence and the OpenCode note each appear exactly once; without
+ *   it, neither appears and nothing mentions billing.
+ */
+function expectStopClaims(result: ToolResult, issuedTurns: boolean): void {
+  expect(result.title).not.toBe("MAD — nothing to review")
+  expect(result.output).not.toContain("No change found")
+  expect(result.output).not.toMatch(/no model failed/i)
+  for (const claim of KILLED_CLAIMS) expect(result.output).not.toMatch(claim)
+  if (issuedTurns) {
+    expect(result.output.split(ISSUED_TURNS_MAY_BILL)).toHaveLength(2)
+    expect(result.output.split(OPENCODE_BILLING_NOTE)).toHaveLength(2)
+  } else {
+    expectNoBillingDisclosure(result.output)
+  }
 }
 
 describe("acceptance — the snapshot sees what porcelain status hides", () => {
@@ -442,10 +551,10 @@ describe("acceptance — option-shaped targets and configured filters are refuse
       const counted = await gitCounter()
       try {
         // Control: the same wrapper counts the git an ordinary review starts.
-        await runScenario(repo, { discovery: [FEE_FINDING] }, {}, undefined, control.around)
+        await runScenario(repo, { discovery: [FEE_FINDING] }, { aroundExecute: control.around })
         expect(await control.launches()).toBeGreaterThan(0)
 
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { target: `--output=${written}` }, undefined, counted.around)
+        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { args: { target: `--output=${written}` }, aroundExecute: counted.around })
         expectClean(run)
         expect(run.result.title).toBe("MAD — unsupported target")
         expect(run.result.output).toContain('starts with "-"')
@@ -477,7 +586,7 @@ describe("acceptance — option-shaped targets and configured filters are refuse
 
         const counted = await gitCounter()
         try {
-          const run = await runScenario(repo, { discovery: [FEE_FINDING] }, {}, undefined, counted.around)
+          const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { aroundExecute: counted.around })
           expectClean(run)
           expect(run.result.title).toBe("MAD — unsupported repository configuration")
           expect(run.result.output).toContain("does not support configured filters")
@@ -622,20 +731,26 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
       const held = new Promise<void>((resolve) => (release = resolve))
       try {
         let firstDiscovery: string | undefined
-        const run = await runScenario(repo, {
-          discovery: [FEE_FINDING],
-          echo: (requested, index) => (index === 2 ? [] : requested),
-          holdPrompt: (sessionID) => {
-            firstDiscovery ??= sessionID
-            return sessionID === firstDiscovery ? held : undefined
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            echo: (requested, index) => (index === 2 ? [] : requested),
+            holdPrompt: (sessionID) => {
+              firstDiscovery ??= sessionID
+              return sessionID === firstDiscovery ? held : undefined
+            },
+            failDelete: (sessionID) => sessionID === "ses_fake_3",
           },
-          failDelete: (sessionID) => sessionID === "ses_fake_3",
-        }, {}, undefined, async (body) => {
-          const settled = body()
-          // Released after the stop: a turn that answers late changes nothing.
-          setTimeout(release, 200)
-          return settled
-        })
+          {
+            aroundExecute: async (body) => {
+              const settled = body()
+              // Released after the stop: a turn that answers late changes nothing.
+              setTimeout(release, 200)
+              return settled
+            },
+          },
+        )
         expect(run.changed).toEqual([])
         const mismatched = run.host.sessionIds[2]!
         expect(mismatched).toBe("ses_fake_3")
@@ -652,7 +767,7 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         // beside the core's own sentence, outside the span, and nothing was aborted.
         expect(run.result.output).not.toContain(ISSUED_TURNS_MAY_BILL)
         expect(run.result.output).toContain(ISSUED_TURNS_NOTE)
-        expect(materialSpans(run.result.output).some((span) => span.body.includes(ISSUED_TURNS_NOTE.trim()))).toBe(false)
+        expect(materialSpans(run.result.output).some((span) => span.body.includes(OPENCODE_BILLING_NOTE))).toBe(false)
         expect(run.host.counts.abort).toBe(0)
         expect(run.result.metadata?.cancelled).toBe("discover")
         expect(run.result.metadata?.warnings).toContain("run-cancelled")
@@ -712,17 +827,17 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
             echo: (requested, index) => (index === 1 ? [] : requested),
             createAnswer: (answer, index) => (index === 2 ? { ...answer, id: 42 } : answer),
           },
-          {},
-          undefined,
-          async (body) => {
-            const settled = body()
-            setTimeout(() => {
-              stop.abort()
-              release()
-            }, 50)
-            return settled
+          {
+            aroundExecute: async (body) => {
+              const settled = body()
+              setTimeout(() => {
+                stop.abort()
+                release()
+              }, 50)
+              return settled
+            },
+            abort: stop.signal,
           },
-          stop.signal,
         )
         expect(run.changed).toEqual([])
         expect(run.host.counts.prompt).toBe(0)
@@ -731,7 +846,7 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         // Cancelled inside review() before any prompt: the core's portable
         // sentence stands, and the OpenCode note about issued turns is absent.
         expect(run.result.output).toContain(ISSUED_TURNS_MAY_BILL)
-        expect(run.result.output).not.toContain(ISSUED_TURNS_NOTE.trim())
+        expect(run.result.output).not.toContain(OPENCODE_BILLING_NOTE)
         expect(run.result.output).not.toContain("MAD STOPPED THIS RUN")
         expect(run.result.output).not.toContain("MAD stopped")
         // The probe, the mismatched session and the valid one are deleted; the
@@ -764,10 +879,9 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
               return false
             },
           },
-          {},
-          undefined,
-          undefined,
-          stop.signal,
+          {
+            abort: stop.signal,
+          },
         )
         expect(run.changed).toEqual([])
         expect(stop.signal.aborted).toBe(true)
@@ -792,14 +906,14 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING], holdCreate: (index) => (index === 0 ? held : undefined) },
-          {},
-          undefined,
-          async (body) => {
-            const settled = body()
-            setTimeout(() => stop.abort(), 50)
-            return settled
+          {
+            aroundExecute: async (body) => {
+              const settled = body()
+              setTimeout(() => stop.abort(), 50)
+              return settled
+            },
+            abort: stop.signal,
           },
-          stop.signal,
         )
         expect(run.changed).toEqual([])
         expect(run.host.counts.prompt).toBe(0)
@@ -855,10 +969,9 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
               return undefined
             },
           },
-          {},
-          undefined,
-          undefined,
-          stop.signal,
+          {
+            abort: stop.signal,
+          },
         )
         expect(run.changed).toEqual([])
         expect(run.result.title).toStartWith("MAD review — CANCELLED during discover — partial review")
@@ -877,22 +990,28 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
     async () => {
       const repo = await makeReviewRepo({ dirty: true })
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         const run = await runScenario(
           repo,
           {
             discovery: [FEE_FINDING],
             holdPrompt: () => {
-              stop.abort()
+              if (!stop.signal.aborted) recorder.fire(stop)
               return undefined
             },
           },
-          {},
-          undefined,
-          undefined,
-          stop.signal,
+          {
+            abort: stop.signal,
+            recorder,
+          },
         )
-        expect(run.changed).toEqual([])
+        expectClean(run)
+        // CAP-5 snapshot rule: prompts started before the marker are allowed; none after.
+        expectNothingStartedAfterStop(recorder)
+        expect(recorder.beforeStop().some((event) => event.kind === "host" && /\/message$/.test(event.path ?? ""))).toBe(true)
+        expectStopClaims(run.result, true)
+        expect(run.result.title).toStartWith("MAD review — CANCELLED during discover")
         expect(run.host.counts.prompt).toBeGreaterThan(0)
         expect(run.result.metadata?.cancelled).toBe("discover")
         const output = run.result.output
@@ -903,7 +1022,7 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         const report = spans[0]!
         expect(report.body).toContain(ISSUED_TURNS_MAY_BILL)
         expect(report.body).toContain("MAD started no turn and retried no model after it observed the stop.")
-        expect(report.body).not.toContain(ISSUED_TURNS_NOTE.trim())
+        expect(report.body).not.toContain(OPENCODE_BILLING_NOTE)
         const closingFence = output.indexOf(`\n${fenceOf(output, "review report")}`, report.end)
         expect(closingFence).toBeGreaterThanOrEqual(report.end)
         const after = output.slice(closingFence)
@@ -933,7 +1052,7 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         // A finished report counts billed turns, so only the stop disclosures are checked.
         expect(run.result.output).not.toContain(ISSUED_TURNS_MAY_BILL)
         expect(run.result.output).not.toContain("may still have run and been billed")
-        expect(run.result.output).not.toContain(ISSUED_TURNS_NOTE.trim())
+        expect(run.result.output).not.toContain(OPENCODE_BILLING_NOTE)
       } finally {
         await repo.remove()
       }
@@ -951,23 +1070,20 @@ describe("acceptance — the change input is read exactly or refused (CAP-4)", (
         await unlink(join(repo.dir, "notes.txt")).catch(() => undefined)
         await writeFile(join(repo.dir, "gone.ts"), "x\n")
         // The file is removed once it has been listed, before MAD checks it.
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, {}, undefined, async (body) => {
-          const realSpawn = Bun.spawn
-          ;(Bun as { spawn: unknown }).spawn = ((options: { cmd: string[] }) => {
-            const child = realSpawn(options as never)
-            if (!options.cmd.includes("ls-files")) return child
-            const exited = child.exited.then(async (code) => {
-              await unlink(join(repo.dir, "gone.ts")).catch(() => undefined)
-              return code
-            })
-            return new Proxy(child, { get: (target, key) => (key === "exited" ? exited : Reflect.get(target, key)) })
-          }) as never
-          try {
-            return await body()
-          } finally {
-            ;(Bun as { spawn: unknown }).spawn = realSpawn
-          }
-        })
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING] },
+          {
+            aroundExecute: spawnHook((cmd, child) => {
+              if (!cmd.includes("ls-files")) return
+              const exited = child.exited.then(async (code) => {
+                await unlink(join(repo.dir, "gone.ts")).catch(() => undefined)
+                return code
+              })
+              return overriding(child, { exited })
+            }),
+          },
+        )
         // The only change is the one this test made.
         expect(run.changed).toEqual(['removed "gone.ts"'])
         expect(run.result.title).toBe("MAD — could not read the change input")
@@ -1034,10 +1150,24 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
       const repo = await makeReviewRepo({ dirty: true })
       const counted = await gitCounter()
       const stop = new AbortController()
-      stop.abort()
+      const recorder = initiationRecorder()
+      recorder.fire(stop)
       try {
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { target: "--output=/tmp/x" }, undefined, counted.around, stop.signal)
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING] },
+          {
+            args: { target: "--output=/tmp/x" },
+            aroundExecute: counted.around,
+            abort: stop.signal,
+            recorder,
+          },
+        )
         expectClean(run)
+        // CAP-5 snapshot rule: the marker is the whole log.
+        expectNothingStartedAfterStop(recorder)
+        expect(recorder.log).toEqual([{ kind: "stop" }])
+        expectStopClaims(run.result, false)
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toBe("MAD reviewed nothing: the review was stopped before MAD read anything or asked any model.")
         expectNoBillingDisclosure(run.result.output)
@@ -1057,16 +1187,22 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
       const repo = await makeReviewRepo({ dirty: true })
       const counted = await gitCounter()
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         const run = await runScenario(
           repo,
-          { discovery: [FEE_FINDING], holdProviders: () => (stop.abort(), undefined) },
-          {},
-          undefined,
-          counted.around,
-          stop.signal,
+          { discovery: [FEE_FINDING], holdProviders: () => (recorder.fire(stop), undefined) },
+          {
+            aroundExecute: counted.around,
+            abort: stop.signal,
+            recorder,
+          },
         )
         expectClean(run)
+        // CAP-5 snapshot rule: the roster read was started before the marker; nothing after it.
+        expectNothingStartedAfterStop(recorder)
+        expect(recorder.beforeStop()).toEqual([expect.objectContaining({ kind: "host", method: "GET", path: "/config/providers" })])
+        expectStopClaims(run.result, false)
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toContain("before it read any repository content or asked any model")
         expectNoBillingDisclosure(run.result.output)
@@ -1086,22 +1222,58 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
       const repo = await makeReviewRepo({ dirty: true })
       const slow = await slowDiffGit()
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
+        // The stop fires, once, on an observed event: the launcher's first read
+        // of the slowed working-tree `git diff`'s output. The child has been
+        // launched and the launcher is waiting on it, so the stop lands while
+        // that read is running. No timer is involved.
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING] },
-          {},
-          undefined,
-          (body) => {
-            setTimeout(() => stop.abort(), 500)
-            return slow.around(body)
+          {
+            aroundExecute: (body) =>
+              spawnHook((cmd, child) => {
+                if (!isWorkingTreeDiff(cmd)) return
+                const stdout = child.stdout as unknown as ReadableStream<Uint8Array>
+                return overriding(child, {
+                  stdout: {
+                    getReader() {
+                      const reader = stdout.getReader()
+                      return new Proxy(reader, {
+                        get(target, key) {
+                          if (key === "read") {
+                            return () => {
+                              const pending = target.read()
+                              if (!stop.signal.aborted) recorder.fire(stop)
+                              return pending
+                            }
+                          }
+                          const value = Reflect.get(target, key, target)
+                          return typeof value === "function" ? value.bind(target) : value
+                        },
+                      })
+                    },
+                  },
+                })
+              })(() => slow.around(body)),
+            abort: stop.signal,
+            recorder,
           },
-          stop.signal,
         )
-        expect(run.changed).toEqual([])
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        const before = recorder.beforeStop()
+        const gits = before.filter((event) => event.kind === "git")
+        // The working-tree diff was the last read started, and it was started once.
+        expect(gits.filter((event) => isWorkingTreeDiff(event.cmd))).toHaveLength(1)
+        expect(isWorkingTreeDiff(gits.at(-1)!.cmd)).toBe(true)
+        expect(before.some((event) => event.kind === "host" && event.path === "/session")).toBe(false)
+        expectStopClaims(run.result, false)
         expect(run.result.title).toBe("MAD — review stopped while reading the change")
         expect(run.result.output).toContain("MAD completed no review and asked no model")
-        expect(run.result.output).toContain("stopped (cancelled)")
+        // The diff is reported stopped, not completed.
+        expect(run.result.output).toContain("git diff stopped (cancelled)")
         expect(run.result.output).toContain("Cleanup: confirmed")
         expect(run.host.counts.create).toBe(0)
         expectNoBillingDisclosure(run.result.output)
@@ -1131,7 +1303,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
           opened = true
           return realOpen(path)
         }
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, {}, undefined, undefined, stop.signal)
+        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { abort: stop.signal })
         expect(run.changed).toEqual([])
         expect(run.result.title).toBe("MAD — review stopped while reading the change")
         expect(run.result.output).toContain("an operation already started may still complete")
@@ -1151,6 +1323,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
     async () => {
       const repo = await makeReviewRepo({ dirty: false })
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         // The stop lands as the last git read of a clean tree exits. Which
         // check sees it first (the launcher's race or the plugin's check after
@@ -1158,25 +1331,17 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING] },
-          {},
-          undefined,
-          async (body) => {
-            const realSpawn = Bun.spawn
-            ;(Bun as { spawn: unknown }).spawn = ((options: { cmd: string[] }) => {
-              const child = realSpawn(options as never)
-              if (!options.cmd.includes("ls-files")) return child
-              void child.exited.then(() => stop.abort())
-              return child
-            }) as never
-            try {
-              return await body()
-            } finally {
-              ;(Bun as { spawn: unknown }).spawn = realSpawn
-            }
+          {
+            aroundExecute: spawnHook((cmd, child) => {
+              if (cmd.includes("ls-files")) void child.exited.then(() => recorder.fire(stop))
+            }),
+            abort: stop.signal,
+            recorder,
           },
-          stop.signal,
         )
-        expect(run.changed).toEqual([])
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, false)
         expect(run.result.title).toStartWith("MAD — review stopped")
         expect(run.result.title).not.toBe("MAD — nothing to review")
         expect(run.host.counts.create).toBe(0)
@@ -1192,20 +1357,24 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
       const repo = await makeReviewRepo({ dirty: true })
       const counted = await gitCounter()
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         const run = await runScenario(
           repo,
           {
             discovery: [FEE_FINDING],
-            holdProviders: () => (stop.abort(), undefined),
+            holdProviders: () => (recorder.fire(stop), undefined),
             failProviders: () => true,
           },
-          {},
-          undefined,
-          counted.around,
-          stop.signal,
+          {
+            aroundExecute: counted.around,
+            abort: stop.signal,
+            recorder,
+          },
         )
-        expect(run.changed).toEqual([])
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, false)
         expect(run.result.title).toBe("MAD — review stopped")
         expect(run.result.output).toContain("before it read any repository content or asked any model")
         expectNoBillingDisclosure(run.result.output)
@@ -1225,34 +1394,22 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
    * the race is settled, and the wrapped reader fires the stop there.
    */
   function stopAfterDiffExits(stop: AbortController, stderrUnreadable = false) {
-    return async <T>(body: () => Promise<T>): Promise<T> => {
-      const realSpawn = Bun.spawn
-      ;(Bun as { spawn: unknown }).spawn = ((options: { cmd: string[] }) => {
-        const child = realSpawn(options as never)
-        if (!options.cmd.includes("--unified=8")) return child
-        const wrap = (stream: ReadableStream<Uint8Array>, onCancel: () => void, failRead: boolean) => ({
-          getReader() {
-            const reader = stream.getReader()
-            return {
-              read: () => (failRead ? Promise.reject(new Error("EIO")) : reader.read()),
-              cancel: (reason?: unknown) => (onCancel(), reader.cancel(reason)),
-              releaseLock: () => reader.releaseLock(),
-            }
-          },
-        })
-        const stdout = wrap(child.stdout as unknown as ReadableStream<Uint8Array>, () => stop.abort(), false)
-        const stderr = wrap(child.stderr as unknown as ReadableStream<Uint8Array>, () => undefined, stderrUnreadable)
-        return new Proxy(child, {
-          get: (target, key) =>
-            key === "stdout" ? stdout : key === "stderr" ? stderr : Reflect.get(target, key),
-        })
-      }) as never
-      try {
-        return await body()
-      } finally {
-        ;(Bun as { spawn: unknown }).spawn = realSpawn
-      }
-    }
+    return spawnHook((cmd, child) => {
+      if (!cmd.includes("--unified=8")) return
+      const wrap = (stream: ReadableStream<Uint8Array>, onCancel: () => void, failRead: boolean) => ({
+        getReader() {
+          const reader = stream.getReader()
+          return {
+            read: () => (failRead ? Promise.reject(new Error("EIO")) : reader.read()),
+            cancel: (reason?: unknown) => (onCancel(), reader.cancel(reason)),
+            releaseLock: () => reader.releaseLock(),
+          }
+        },
+      })
+      const stdout = wrap(child.stdout as unknown as ReadableStream<Uint8Array>, () => stop.abort(), false)
+      const stderr = wrap(child.stderr as unknown as ReadableStream<Uint8Array>, () => undefined, stderrUnreadable)
+      return overriding(child, { stdout, stderr })
+    })
   }
 
   test(
@@ -1264,10 +1421,11 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING] },
-          { target: "no-such-ref" },
-          undefined,
-          stopAfterDiffExits(stop),
-          stop.signal,
+          {
+            args: { target: "no-such-ref" },
+            aroundExecute: stopAfterDiffExits(stop),
+            abort: stop.signal,
+          },
         )
         expect(run.changed).toEqual([])
         expect(run.result.title).toBe("MAD — review stopped while reading the change")
@@ -1291,10 +1449,10 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING] },
-          {},
-          undefined,
-          stopAfterDiffExits(stop, true),
-          stop.signal,
+          {
+            aroundExecute: stopAfterDiffExits(stop, true),
+            abort: stop.signal,
+          },
         )
         expect(run.changed).toEqual([])
         expect(run.result.title).toBe("MAD — review stopped while reading the change")
@@ -1335,7 +1493,7 @@ describe("acceptance — a filter preflight that cannot answer (CAP-2)", () => {
           }
         }
 
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, {}, undefined, brokenHome)
+        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { aroundExecute: brokenHome })
         expectClean(run)
         expect(run.result.title).toBe("MAD — could not check the repository's git config")
         expect(run.result.output).toContain("git config (filter preflight) failed:")
@@ -1363,7 +1521,7 @@ describe("acceptance — the network guard rejects what would leave the allowed 
       // anything listens there does not change the outcome.
       const elsewhere = "http://127.0.0.1:9"
       try {
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, {}, elsewhere)
+        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { serverUrl: elsewhere })
         expect(run.changed).toEqual([])
         expect(run.host.problems).toEqual([])
         expect([...run.host.openSessions]).toEqual([])
@@ -1453,16 +1611,6 @@ describe("acceptance — the network guard rejects what would leave the allowed 
 })
 
 describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5, part 5b)", () => {
-  /** A second finding with a locus, so a later finding exists for the stop to reach. */
-  const NOTES_FINDING = {
-    claim: "notes.txt is scratch left in the tree and will be committed by accident.",
-    reasoning: "It is untracked and not ignored.",
-    severity: "low" as const,
-    file: "notes.txt",
-    startLine: 1,
-    endLine: 1,
-  }
-
   /**
    * Wraps `git` on PATH for `execute` only: every `git blame` is logged and then
    * sleeps instead of running. With `holdOutput`, it first starts a background
@@ -1485,15 +1633,15 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
     const blames = async () => (await readFile(log, "utf8")).split("\n").filter((line) => line.length > 0).length
     return {
       blames,
-      /** Runs `body` with the wrapper on PATH, and fires `stop` once the first blame is running. */
-      around(stop: AbortController) {
+      /** Runs `body` with the wrapper on PATH, and calls `fire` once the first blame is running. */
+      around(fire: () => void) {
         return async <T>(body: () => Promise<T>): Promise<T> => {
           const saved = process.env.PATH
           process.env.PATH = `${bin}:${saved ?? ""}`
           let polling = true
           const poll = (async () => {
             while (polling && (await blames()) === 0) await Bun.sleep(10)
-            if (polling) stop.abort()
+            if (polling) fire()
           })()
           try {
             return await body()
@@ -1525,16 +1673,22 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
       const repo = await makeReviewRepo({ dirty: true })
       const held = await heldBlameGit()
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING, NOTES_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
-          {},
-          undefined,
-          held.around(stop),
-          stop.signal,
+          {
+            aroundExecute: held.around(() => recorder.fire(stop)),
+            abort: stop.signal,
+            recorder,
+          },
         )
         expectClean(run)
+        // CAP-5 snapshot rule: the held blame was started before the marker; nothing after it.
+        expectNothingStartedAfterStop(recorder)
+        expect(recorder.beforeStop().some((event) => event.kind === "git" && event.cmd.includes("blame"))).toBe(true)
+        expectStopClaims(run.result, true)
         expect(await held.blames()).toBe(1)
         // Three discovery prompts and nothing after them: no fact-check was asked.
         expect(run.host.counts.prompt).toBe(3)
@@ -1565,16 +1719,20 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
       const repo = await makeReviewRepo({ dirty: true })
       const held = await heldBlameGit({ holdOutput: true })
       const stop = new AbortController()
+      const recorder = initiationRecorder()
       try {
         const run = await runScenario(
           repo,
           { discovery: [FEE_FINDING, NOTES_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
-          {},
-          undefined,
-          held.around(stop),
-          stop.signal,
+          {
+            aroundExecute: held.around(() => recorder.fire(stop)),
+            abort: stop.signal,
+            recorder,
+          },
         )
         expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, true)
         expect(await held.blames()).toBe(1)
         expect(run.host.counts.prompt).toBe(3)
         const note = run.result.output.slice(run.result.output.indexOf("When the review was stopped, MAD sent SIGKILL to its git blame"))
@@ -1594,6 +1752,361 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
       } finally {
         await held.dispose()
         clearBlameQuarantineForTests(repo.dir)
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
+describe("acceptance — CAP-5 integration: the initiation recorder and the guard's hook", () => {
+  test(
+    "THE GUARD REPORTS EVERY REQUEST AS IT STARTS: a Request with no init, lowercase methods, string and URL inputs, and a blocked one",
+    async () => {
+      const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") })
+      const origin = `http://127.0.0.1:${server.port}`
+      const seen: { method: string; url: string }[] = []
+      const guard = installNetworkGuard([origin], (request) => seen.push(request))
+      try {
+        // The SDK's shape: a Request carrying the method, and no init.
+        await (await fetch(new Request(`${origin}/a`, { method: "post", body: "x" }))).text()
+        await (await fetch(`${origin}/b`)).text()
+        await (await fetch(new URL(`${origin}/c`), { method: "delete" })).text()
+        // An init's method wins over the Request's, as it does in `fetch`.
+        await (await fetch(new Request(`${origin}/d`), { method: "patch" })).text()
+        await expect(fetch("http://127.0.0.1:9/e")).rejects.toThrow("network blocked")
+        expect(seen).toEqual([
+          { method: "POST", url: `${origin}/a` },
+          { method: "GET", url: `${origin}/b` },
+          { method: "DELETE", url: `${origin}/c` },
+          { method: "PATCH", url: `${origin}/d` },
+          { method: "GET", url: "http://127.0.0.1:9/e" },
+        ])
+        expect(guard.blocked).toEqual(["http://127.0.0.1:9/e"])
+      } finally {
+        guard.restore()
+        await server.stop(true)
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test("A HOOK THAT THROWS makes that fetch reject rather than throw, and nothing is delegated", async () => {
+    const guard = installNetworkGuard(["http://127.0.0.1:1"], () => {
+      throw new Error("hook failed")
+    })
+    try {
+      // Checked by hand: bun's `toThrow` would await a returned promise.
+      let pending: Promise<Response> | undefined
+      let threw = false
+      try {
+        pending = fetch("http://127.0.0.1:1/x")
+      } catch {
+        threw = true
+      }
+      expect(threw).toBe(false)
+      await expect(pending!).rejects.toThrow("hook failed")
+      expect(guard.delegated()).toBe(0)
+    } finally {
+      guard.restore()
+    }
+  })
+
+  test("THE RECORDER LOGS BOTH SPAWN FORMS AND spawnSync, passing every argument on; other programs are not logged", async () => {
+    const recorder = initiationRecorder()
+    const realSpawn = Bun.spawn
+    const realSpawnSync = Bun.spawnSync
+    try {
+      await recorder.around(async () => {
+        // The second argument reaches the real spawn: with stdout ignored there is no stream.
+        const array = Bun.spawn(["git", "--version"], { stdout: "ignore", stderr: "ignore" })
+        expect(array.stdout).toBeFalsy()
+        await array.exited
+        const object = Bun.spawn({ cmd: ["git", "--version"], stdout: "pipe", stderr: "ignore" })
+        expect(await new Response(object.stdout).text()).toStartWith("git version")
+        const sync = Bun.spawnSync(["git", "--version"], { stdout: "ignore" })
+        expect(sync.stdout).toBeFalsy()
+        await Bun.spawn(["true"]).exited
+      })
+      expect(recorder.log).toEqual([
+        { kind: "git", cmd: ["git", "--version"] },
+        { kind: "git", cmd: ["git", "--version"] },
+        { kind: "git", cmd: ["git", "--version"] },
+      ])
+    } finally {
+      recorder.dispose()
+    }
+    expect(Bun.spawn).toBe(realSpawn)
+    expect(Bun.spawnSync).toBe(realSpawnSync)
+  })
+
+  test("THE RECORDER KEEPS LOGGING AFTER around SETTLES until dispose, exempts only what exempt runs, and refuses reentrance", async () => {
+    const recorder = initiationRecorder()
+    const realSpawn = Bun.spawn
+    try {
+      await recorder.around(async () => {
+        await recorder.exempt(() => Bun.spawn(["git", "--version"], { stdout: "ignore" }).exited)
+      })
+      // Detached work after the body has returned is still logged.
+      await Bun.spawn(["git", "--version"], { stdout: "ignore" }).exited
+      await expect(recorder.around(async () => undefined)).rejects.toThrow("already entered")
+      expect(recorder.log).toEqual([{ kind: "git", cmd: ["git", "--version"] }])
+      recorder.dispose()
+      expect(Bun.spawn).toBe(realSpawn)
+      await Bun.spawn(["git", "--version"], { stdout: "ignore" }).exited
+      expect(recorder.log).toHaveLength(1)
+    } finally {
+      recorder.dispose()
+    }
+  })
+
+  test("THE RECORDER RESTORES THE SPAWN FUNCTIONS AT ONCE when around's body throws", async () => {
+    const recorder = initiationRecorder()
+    const realSpawn = Bun.spawn
+    const realSpawnSync = Bun.spawnSync
+    await expect(
+      recorder.around(async () => {
+        throw new Error("body failed")
+      }),
+    ).rejects.toThrow("body failed")
+    expect(Bun.spawn).toBe(realSpawn)
+    expect(Bun.spawnSync).toBe(realSpawnSync)
+  })
+
+  test("THE RULE IS READ RELATIVE TO THE HOST'S BASE URL: every model-work route after the marker is a violation, cleanup is not", async () => {
+    const recorder = initiationRecorder()
+    recorder.attach("http://127.0.0.1:1/base/")
+    try {
+      await recorder.around(async () => {
+        const request = (method: string, path: string) => recorder.onRequest({ method, url: `http://127.0.0.1:1${path}` })
+        request("POST", "/base/session")
+        recorder.fire(new AbortController())
+        request("GET", "/base/session/s")
+        request("DELETE", "/base/session/s")
+        for (const route of ["message", "prompt_async", "command", "shell", "summarize", "init", "fork"]) {
+          request("POST", `/base/session/s/${route}`)
+        }
+        request("POST", "/base/session")
+        // Outside the base URL: not a host route at all, so a violation of its own.
+        request("POST", "/session")
+      })
+      expect(
+        recorder.violations().map((event) => (event.kind === "host" ? `${event.method} ${event.path ?? event.url}` : event.kind)),
+      ).toEqual([
+        "POST /session/s/message",
+        "POST /session/s/prompt_async",
+        "POST /session/s/command",
+        "POST /session/s/shell",
+        "POST /session/s/summarize",
+        "POST /session/s/init",
+        "POST /session/s/fork",
+        "POST /session",
+        "POST http://127.0.0.1:1/session",
+      ])
+      expect(recorder.beforeStop()).toEqual([
+        { kind: "host", method: "POST", url: "http://127.0.0.1:1/base/session", path: "/session" },
+      ])
+    } finally {
+      recorder.dispose()
+    }
+  })
+
+  test(
+    "THE RECORDER CATCHES WHAT STARTS AFTER THE MARKER through the real entry: a git spawn, and a create and a prompt in the SDK's request shape",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      let injected = false
+      const problems: string[] = []
+      try {
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            holdPrompt: async () => {
+              if (injected) return
+              injected = true
+              // The marker alone first, then the injections while the plugin is
+              // still waiting, then the stop itself: what follows the marker is
+              // caught whenever the abort lands.
+              recorder.fire(new AbortController())
+              await Bun.spawn({ cmd: ["git", "--version"], stdout: "ignore", stderr: "ignore" }).exited
+              const base = recorder.base!.replace(/\/+$/, "")
+              // As the SDK sends them: a Request carrying everything, and no init.
+              const send = (method: string, path: string, body?: unknown) =>
+                fetch(
+                  new Request(`${base}${path}?injected=1`, {
+                    method,
+                    headers: { "content-type": "application/json" },
+                    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+                  }),
+                )
+              const created = await send("POST", "/session", {})
+              if (!created.ok) problems.push(`the injected create answered ${created.status}`)
+              const id = ((await created.json()) as { id?: unknown }).id
+              if (typeof id !== "string") {
+                problems.push("the injected create carried no session id")
+              } else {
+                const prompted = await send("POST", `/session/${id}/message`, {
+                  parts: [{ type: "text", text: "injected after the marker" }],
+                  format: { type: "json_schema", schema: { type: "object", properties: { findings: {} } } },
+                  model: { providerID: "injected", modelID: "injected" },
+                })
+                if (!prompted.ok) problems.push(`the injected prompt answered ${prompted.status}`)
+                await prompted.body?.cancel()
+                const deleted = await send("DELETE", `/session/${id}`)
+                if (!deleted.ok) problems.push(`the injected delete answered ${deleted.status}`)
+                await deleted.body?.cancel()
+              }
+              stop.abort()
+            },
+          },
+          { abort: stop.signal, recorder },
+        )
+        expectClean(run)
+        expect(injected).toBe(true)
+        expect(problems).toEqual([])
+        // The run itself ends as the user's cancellation, during discovery.
+        expect(run.result.metadata?.cancelled).toBe("discover")
+        expect(run.result.title).toStartWith("MAD review — CANCELLED during discover")
+        const ours = (event: Initiated) =>
+          event.kind === "git" ? event.cmd.join(" ") === "git --version" : event.kind === "host" && event.url.includes("injected=1")
+        // The spawn, the create and the prompt are caught; the cleanup delete is not.
+        const caught = recorder.violations().filter(ours)
+        expect(caught.map((event) => (event.kind === "host" ? `${event.method} ${event.path}` : event.kind))).toEqual([
+          "git",
+          "POST /session",
+          expect.stringMatching(/^POST \/session\/[^/]+\/message$/),
+        ])
+        const afterStop = recorder.afterStop().filter(ours)
+        expect(afterStop.filter((event) => event.kind === "host" && event.method === "DELETE")).toHaveLength(1)
+        // None of them was started before the marker.
+        expect(recorder.beforeStop().some(ours)).toBe(false)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
+describe("acceptance — CAP-5 integration: nothing starts after the stop is observed", () => {
+  test(
+    "STOPPED BETWEEN GIT READS, once name-only has returned to the read: the next read is never launched, and no model is asked",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      // THE SEAM IS SYNCHRONOUS, AND IT DEPENDS ON repo.ts. The change read
+      // reads the clock on every call (`now` defaults to `() =>
+      // performance.now()`), and the first such reading after name-only's child
+      // has exited is the final-read check that follows `accept` in `read`: the
+      // outcome has been accepted and the next read's own stop check has not
+      // run. Only a clock reading from repo.ts fires the stop, so no other
+      // caller of `performance.now` can fire it early.
+      const realNow = performance.now
+      let nameOnlyExited = false
+      let seamReached = false
+      try {
+        performance.now = function now(this: Performance) {
+          if (nameOnlyExited && !stop.signal.aborted && (new Error().stack ?? "").includes("/adapters/opencode/repo.ts:")) {
+            seamReached = true
+            recorder.fire(stop)
+          }
+          return realNow.call(this)
+        }
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING] },
+          {
+            aroundExecute: spawnHook((cmd, child) => {
+              if (!cmd.includes("--name-only")) return
+              return overriding(child, { exited: child.exited.then((code) => ((nameOnlyExited = true), code)) })
+            }),
+            abort: stop.signal,
+            recorder,
+          },
+        )
+        expect(seamReached, "the between-reads seam was not reached: no repo.ts clock reading followed name-only's exit").toBe(
+          true,
+        )
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        const last = recorder.beforeStop().filter((event) => event.kind === "git").at(-1)
+        expect(last?.kind === "git" && last.cmd.includes("--name-only")).toBe(true)
+        expect(recorder.log.some((event) => event.kind === "git" && event.cmd.includes("ls-files"))).toBe(false)
+        expect(recorder.log.some((event) => event.kind === "host" && event.path === "/session")).toBe(false)
+        expect(run.host.counts.create).toBe(0)
+        expect(run.host.counts.prompt).toBe(0)
+        expect(run.result.title).toBe("MAD — review stopped while reading the change")
+        // The stop was observed before the next read, not during name-only.
+        expect(run.result.output).toContain("the review was stopped before git ls-files, so nothing was launched")
+        expect(run.result.output).toContain("Part of the change was read, but none of it was returned for review.")
+        expectStopClaims(run.result, false)
+      } finally {
+        performance.now = realNow
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "STOPPED WHILE A FACT-CHECK IS IN FLIGHT: no later create, prompt or blame; cancelled during judge, with both disclosures",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      let release: () => void = () => undefined
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const factChecks: FakePrompt[] = []
+      try {
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING, NOTES_FINDING],
+            judge: { "fact-check": FEE_FACT_CHECK },
+            // The fact-check is held, unanswered, while the stop lands.
+            holdPrompt: (_sessionID, prompt) => {
+              if (prompt.role !== "fact-check") return undefined
+              factChecks.push(prompt)
+              if (!stop.signal.aborted) recorder.fire(stop)
+              return held
+            },
+          },
+          { abort: stop.signal, recorder },
+        )
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        // One fact-check, the first finding's, was in flight when the stop
+        // fired, and MAD had run that finding's blame before asking it.
+        expect(factChecks).toHaveLength(1)
+        expect(factChecks[0]!.text).toContain(FEE_FINDING.claim)
+        const before = recorder.beforeStop()
+        const blames = recorder.log.filter((event) => event.kind === "git" && event.cmd.includes("blame"))
+        expect(blames).toHaveLength(1)
+        expect(before).toContain(blames[0]!)
+        expect(blames[0]!.kind === "git" && blames[0]!.cmd.includes("src/pay.ts")).toBe(true)
+        // The second finding got no blame and no judge turn. (Its file was read
+        // once, by the change read's `--no-index` diff, long before the marker.)
+        expect(blames.some((event) => event.kind === "git" && event.cmd.includes("notes.txt"))).toBe(false)
+        expect(run.host.prompts.filter((p) => p.role !== undefined && p.text.includes(NOTES_FINDING.claim))).toEqual([])
+        // Every prompt the host saw was started before the marker: three
+        // discovery turns and the fact-check. A verify-independently finding is
+        // judged by the fact-check alone, so no logic-eval was started.
+        const promptsBefore = before.filter((event) => isModelAllocation(event) && event.kind === "host" && event.path !== "/session")
+        expect(promptsBefore).toHaveLength(4)
+        expect(run.host.counts.prompt).toBe(4)
+        expect(run.host.prompts.map((p) => p.role)).toEqual([undefined, undefined, undefined, "fact-check"])
+        expect(run.result.title).toStartWith("MAD review — CANCELLED during judge")
+        expect(run.result.metadata?.cancelled).toBe("judge")
+        expect(run.result.output).toContain("RUN CANCELLED — you stopped this run during the judge stage.")
+        expect(run.result.output).toContain("notes.txt:1 — died at stage judge (the run was cancelled before it could be judged)")
+        expect(run.host.counts.abort).toBe(0)
+        expectStopClaims(run.result, true)
+      } finally {
+        release()
         await repo.remove()
       }
     },

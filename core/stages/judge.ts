@@ -136,6 +136,14 @@ import { settlementOf, stageGatedTurn } from "./settlement.ts"
 import { material, oneLine } from "../prompt/material.ts"
 import { exitReasonOf } from "./debate.ts"
 
+/**
+ * CAP-5 — `Reflect.apply` as it was when this module loaded. The blame call
+ * goes through it so that, after the last stop check, nothing the port can
+ * inject is consulted: not the method's own `call` or `apply`, and not a
+ * replaced global.
+ */
+const reflectApply = Reflect.apply
+
 // ---------------------------------------------------------------------------
 // Envelopes (AD-12) — each constrains ONLY what MAD computes on
 // ---------------------------------------------------------------------------
@@ -1010,8 +1018,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * Write one tool-action fact, or record that it could not be written.
    *
    * AWAITED BY EVERY CALLER, AND BOUNDED (story 2-7c). A SUCCESSFUL request
-   * write is still durable before the delegation it describes, which is what
-   * makes a trace carrying an invocation with no request in front of it an
+   * write is durable before the judge awaits the call it describes or moves to
+   * the next finding. The call itself starts first (trace version 2), so an
+   * adapter may write its invocation just before the request; the trace reader
+   * joins the two and still treats any other unjoined invocation as an
    * integrity failure rather than a race.
    *
    * WHAT A TIMEOUT CHANGES IS THE FAILED PATH ONLY. Past the deadline the write
@@ -1569,7 +1579,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       )
     }
 
-    if (input.tools === undefined) {
+    // READ ONCE: the port is read a single time here, and its method and the
+    // locus's fields once below, all before the stop is checked for the last time.
+    const tools = input.tools
+    if (tools === undefined) {
       await observeRequest({ kind: "unavailable", why: "no-port" })
       // AD-13's SECOND route, unchanged and still valid — this is not a
       // degradation and raises no warning. It is recorded because it is the ONLY
@@ -1602,15 +1615,26 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       })
       await observeOutcome(BLAME_OUTCOME.noLocus())
     } else {
-      // THE STOP IS OBSERVED BY THE ADAPTER; THIS BLOCK READS ITS MARK. A stop that lands before this finding is reached
-      // is stranded by the per-finding gate at the top of this loop, and on an
-      // argued finding by `stoppedHere` on the extractor's cancelled envelope.
-      // A stop that lands while the blame runs, or just before it launches, is
-      // the `Tools` implementation's to observe (CAP-5): it launches nothing
-      // after the stop, sends SIGKILL to a running blame, returns no output
-      // once the stop has fired, and marks its failure `stopped`. The catch below reads that
-      // mark and strands the finding as cancelled, with no fact-check turn.
-
+      // CAP-5 — WHERE THE STOP IS OBSERVED.
+      //
+      // - Before this finding is reached: the per-finding gate at the top of
+      //   this loop, and on an argued finding `stoppedHere` on the extractor's
+      //   cancelled envelope.
+      // - Up to the call: the gate just below. Everything the call needs is
+      //   read first, the port's method and the locus's fields included, so no
+      //   getter runs between the gate and the call. A stop seen there strands
+      //   the finding as the per-finding gate does, with no port call and no
+      //   request recorded.
+      // - From the call on: the port is called first, and only then is the
+      //   `made` request written (tool-trace version 2), so a request recorded
+      //   as made is always a call that happened. A stop raised while the
+      //   request is written, by the observer itself included, lands after the
+      //   call.
+      // - Once the call is delegated, the stop is the `Tools` implementation's
+      //   to observe: it launches nothing after the stop, sends SIGKILL to a
+      //   running blame, returns no output once the stop has fired, and marks
+      //   its failure `stopped`. The catch below reads that mark and strands the
+      //   finding as cancelled, with no fact-check turn.
       // THE RANGE ASKED OF GIT IS BOUNDED, not only the citation rendered from
       // it (ledger triage 2026-09-09). `MAX_BLAME_ROWS` trimmed the OUTPUT, so
       // a finding citing lines 1-20000 still asked git to blame twenty thousand
@@ -1620,109 +1644,170 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // finding whose locus spans more lines than this is not pointing at a
       // line. The citation states the narrowing, because a head that names a
       // range git was never asked about is a false sentence.
-      const askedEnd = Math.min(locus.endLine, locus.startLine + MAX_BLAME_ROWS - 1)
-
-      // BEFORE THE DELEGATION, AND AWAITED. The trace has to be able to tell a
-      // call that was never made from one whose answer never came back, which it
-      // cannot do if the request is written after the call returns. The range
-      // recorded is the one ASKED OF GIT, clamp applied: a trace naming the
-      // finding's own end line would name a range git was never asked about.
-      await observeRequest({
-        kind: "made",
-        args: { path: locus.file, startLine: locus.startLine, endLine: askedEnd },
-      })
-
-      // ONE TERMINAL READING PER CALL, EMITTED BELOW THE `catch` RATHER THAN
-      // INSIDE EITHER ARM. An observation failure must not be able to enter the
-      // blame failure path, and the two are kept apart here in control flow
-      // rather than by wording.
-      let terminal: ToolTerminalOutcome | undefined
+      const file = locus.file
+      const startLine = locus.startLine
+      const askedEnd = Math.min(locus.endLine, startLine + MAX_BLAME_ROWS - 1)
+      // THE METHOD IS READ BEFORE THE GATE. One that cannot be read, or is not
+      // callable, is the port's own failure, but nothing was entered, so it is
+      // not a call: no `made` request is recorded for it (see below).
+      let blame: unknown
+      let unreadable: string | undefined
       try {
-        const porcelain = await input.tools.blame(locus.file, locus.startLine, askedEnd)
-        const blamed = parseBlamePorcelain(porcelain)
-        if (blamed.length === 0) {
-          // GIT RAN AND SAID NOTHING USABLE, which is a failure and not an
-          // absence of contradiction. Treated exactly as a throw is.
-          blameFailures.push(`${blameAt()} — git blame produced no blamed lines`)
-          appendEntry(finding, {
-            stage: "judge",
-            actor: "mad",
-            at: clock.now(),
-            kind: BLAME_KIND.failed,
-            body:
-              `GIT BLAME PRODUCED NOTHING for ${blameAt()}: the command ran and returned no ` +
-              `blamed lines. No citation was produced, so nothing here was contradicted OR ` +
-              `confirmed by the repository's history.`,
-          })
-          // ONE EXECUTION AND ONE FAILURE, not a non-execution. The command ran;
-          // what it returned was unusable. `factChecksMadExecuted` keeps its own
-          // meaning — usable citations — and is deliberately not reconciled with
-          // this number.
-          terminal = BLAME_OUTCOME.noRows()
-        } else {
-          blameCitation = renderBlameCitation(locus.file, locus.startLine, askedEnd, blamed)
-          madExecuted = true
-          counts.factChecksMadExecuted += 1
-          // A HISTORY ENTRY, not a `Finding` field. AD-8's judge ownership list
-          // is `evidence`, `factCheck`, `logicEval`, `verdict` plus history and
-          // `unresolved`; widening it is a spine-level argument, not a story.
-          // The judge already carries MAD-authored provenance this way three
-          // times (`judge-anonymized`, `judge-not-examined`, the fact-check
-          // pair), and `core/stages/output.ts` already reads history kinds, so
-          // the renderer's extension point exists.
-          appendEntry(finding, {
-            stage: "judge",
-            actor: "mad",
-            at: clock.now(),
-            kind: BLAME_KIND.executed,
-            body: blameCitation,
-          })
-          terminal = BLAME_OUTCOME.executed()
-        }
+        blame = tools.blame
+        if (typeof blame !== "function") unreadable = `the port's blame is not callable (${typeof blame})`
       } catch (error) {
-        // A bad path, a line past end of file, an uncommitted line, a shallow
-        // clone, a worktree that is not a git repository. The adapter refuses to
-        // let a non-zero exit become empty output precisely so this branch is
-        // reachable — `.nothrow()` alone would have delivered "" here and "" is
-        // indistinguishable from "nothing contradicts the claim".
-        const why = error instanceof Error ? error.message : String(error)
-        if (toolFailureEvidence(error)?.stopped === true) {
-          // CAP-5 — THE ADAPTER SAYS THE RUN'S STOP ENDED THIS CALL, and no
-          // independent failure came first. That is a cancellation of this
-          // finding, not a blame failure: no `blameFailures` entry, so no
-          // `blame-unavailable` warning claims the finding was decided without
-          // history. It is stranded below, after the terminal reading.
-          blameStopped = true
-          appendEntry(finding, {
-            stage: "judge",
-            actor: "mad",
-            at: clock.now(),
-            kind: BLAME_KIND.stopped,
-            body:
-              `GIT BLAME STOPPED for ${blameAt()}: ${oneLine(why)}. The run was cancelled, so no ` +
-              `citation was produced and this finding is left undecided.`,
-          })
-        } else {
-          blameFailures.push(`${blameAt()} — ${oneLine(why)}`)
-          appendEntry(finding, {
-            stage: "judge",
-            actor: "mad",
-            at: clock.now(),
-            kind: BLAME_KIND.failed,
-            body:
-              `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
-              `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
-              `from any verdict reached on this finding.`,
-          })
-        }
-        // WHAT THE ADAPTER KNEW, WHERE IT SAID SO. A `Tools` implementation may
-        // attach the evidence the core cannot see — whether a shell ran at all —
-        // and without it the reading is `unknown`. A thrown call is never read
-        // as "git did not execute": that would turn a blind spot into a
-        // measurement.
-        terminal = blameFailureOutcome(error, oneLine(why))
+        unreadable = `the port's blame method could not be read: ${error instanceof Error ? error.message : String(error)}`
       }
-      if (terminal !== undefined) await observeOutcome(terminal)
+
+      if (signal?.aborted) {
+        cancelled = true
+        counts.unresolved += 1
+        counts.unresolvedByCancellation += 1
+        strandCancelled(finding, clock.now(), cancelledWhere())
+        continue
+      }
+
+      if (unreadable !== undefined) {
+        // NO METHOD WAS ENTERED, SO NO REQUEST IS RECORDED: `made` means the
+        // port was called. It is a blame failure like any other, with no
+        // citation, and the `blame-unavailable` warning says so. With no
+        // request there is no terminal reading either; a trace reader finds a
+        // finding that reached the judge with no request event, and reads the
+        // run as incomplete.
+        blameFailures.push(`${blameAt()} — ${oneLine(unreadable)}`)
+        appendEntry(finding, {
+          stage: "judge",
+          actor: "mad",
+          at: clock.now(),
+          kind: BLAME_KIND.failed,
+          body:
+            `GIT BLAME NOT RUN for ${blameAt()}: ${oneLine(unreadable)}, so MAD called nothing and ` +
+            `produced no citation. This is NOT "the history contradicts nothing" — it is one class ` +
+            `of evidence missing from any verdict reached on this finding.`,
+        })
+      } else {
+        // THE CALL FIRST, IN THE GATE'S TURN, on the port it was read from.
+        // `reflectApply` was captured at module load, so nothing injectable is
+        // consulted between the check above and the call. A synchronous throw
+        // becomes the call's rejection, and the rejection is handled at once, so
+        // neither a failing port nor a request write that hangs leaves it
+        // unhandled; the `await` below still sees it.
+        let delegated: Promise<string>
+        try {
+          delegated = Promise.resolve(
+            reflectApply(blame as Tools["blame"], tools, [file, startLine, askedEnd]) as Promise<string> | string,
+          )
+        } catch (error) {
+          delegated = Promise.reject(error)
+        }
+        delegated.catch(() => undefined)
+
+        // THEN THE REQUEST, NOW TRUE, AND AWAITED BEFORE THE ANSWER. A call whose
+        // answer never comes back still has its request on record. A request
+        // write that hangs, rejects or times out is kept as an observation
+        // failure and does not alter the call. The range recorded is the one
+        // ASKED OF GIT, clamp applied: a trace naming the finding's own end line
+        // would name a range git was never asked about. The `Tools`
+        // implementation may record its invocation before this request reaches
+        // the trace; `ablation/adversarial-read.ts` joins the two in version-2
+        // traces.
+        await observeRequest({
+          kind: "made",
+          args: { path: file, startLine, endLine: askedEnd },
+        })
+
+        // ONE TERMINAL READING PER CALL, EMITTED BELOW THE `catch` RATHER THAN
+        // INSIDE EITHER ARM. An observation failure must not be able to enter the
+        // blame failure path, and the two are kept apart here in control flow
+        // rather than by wording.
+        let terminal: ToolTerminalOutcome | undefined
+        try {
+          const porcelain = await delegated
+          const blamed = parseBlamePorcelain(porcelain)
+          if (blamed.length === 0) {
+            // GIT RAN AND SAID NOTHING USABLE, which is a failure and not an
+            // absence of contradiction. Treated exactly as a throw is.
+            blameFailures.push(`${blameAt()} — git blame produced no blamed lines`)
+            appendEntry(finding, {
+              stage: "judge",
+              actor: "mad",
+              at: clock.now(),
+              kind: BLAME_KIND.failed,
+              body:
+                `GIT BLAME PRODUCED NOTHING for ${blameAt()}: the command ran and returned no ` +
+                `blamed lines. No citation was produced, so nothing here was contradicted OR ` +
+                `confirmed by the repository's history.`,
+            })
+            // ONE EXECUTION AND ONE FAILURE, not a non-execution. The command ran;
+            // what it returned was unusable. `factChecksMadExecuted` keeps its own
+            // meaning — usable citations — and is deliberately not reconciled with
+            // this number.
+            terminal = BLAME_OUTCOME.noRows()
+          } else {
+            blameCitation = renderBlameCitation(locus.file, locus.startLine, askedEnd, blamed)
+            madExecuted = true
+            counts.factChecksMadExecuted += 1
+            // A HISTORY ENTRY, not a `Finding` field. AD-8's judge ownership list
+            // is `evidence`, `factCheck`, `logicEval`, `verdict` plus history and
+            // `unresolved`; widening it is a spine-level argument, not a story.
+            // The judge already carries MAD-authored provenance this way three
+            // times (`judge-anonymized`, `judge-not-examined`, the fact-check
+            // pair), and `core/stages/output.ts` already reads history kinds, so
+            // the renderer's extension point exists.
+            appendEntry(finding, {
+              stage: "judge",
+              actor: "mad",
+              at: clock.now(),
+              kind: BLAME_KIND.executed,
+              body: blameCitation,
+            })
+            terminal = BLAME_OUTCOME.executed()
+          }
+        } catch (error) {
+          // A bad path, a line past end of file, an uncommitted line, a shallow
+          // clone, a worktree that is not a git repository. The adapter refuses to
+          // let a non-zero exit become empty output precisely so this branch is
+          // reachable — `.nothrow()` alone would have delivered "" here and "" is
+          // indistinguishable from "nothing contradicts the claim".
+          const why = error instanceof Error ? error.message : String(error)
+          if (toolFailureEvidence(error)?.stopped === true) {
+            // CAP-5 — THE ADAPTER SAYS THE RUN'S STOP ENDED THIS CALL, and no
+            // independent failure came first. That is a cancellation of this
+            // finding, not a blame failure: no `blameFailures` entry, so no
+            // `blame-unavailable` warning claims the finding was decided without
+            // history. It is stranded below, after the terminal reading.
+            blameStopped = true
+            appendEntry(finding, {
+              stage: "judge",
+              actor: "mad",
+              at: clock.now(),
+              kind: BLAME_KIND.stopped,
+              body:
+                `GIT BLAME STOPPED for ${blameAt()}: ${oneLine(why)}. The run was cancelled, so no ` +
+                `citation was produced and this finding is left undecided.`,
+            })
+          } else {
+            blameFailures.push(`${blameAt()} — ${oneLine(why)}`)
+            appendEntry(finding, {
+              stage: "judge",
+              actor: "mad",
+              at: clock.now(),
+              kind: BLAME_KIND.failed,
+              body:
+                `GIT BLAME FAILED for ${blameAt()}: ${oneLine(why)}. No citation was produced. This ` +
+                `is NOT "the history contradicts nothing" — it is one class of evidence missing ` +
+                `from any verdict reached on this finding.`,
+            })
+          }
+          // WHAT THE ADAPTER KNEW, WHERE IT SAID SO. A `Tools` implementation may
+          // attach the evidence the core cannot see — whether a shell ran at all —
+          // and without it the reading is `unknown`. A thrown call is never read
+          // as "git did not execute": that would turn a blind spot into a
+          // measurement.
+          terminal = blameFailureOutcome(error, oneLine(why))
+        }
+        if (terminal !== undefined) await observeOutcome(terminal)
+      }
     }
 
     // CAP-5 — A STOPPED BLAME STRANDS THE FINDING AS CANCELLED, as

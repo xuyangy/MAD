@@ -64,10 +64,10 @@ const PREDICATE = { path: "src/db/client.ts", startLine: 1, endLine: 3 }
 const MATCHING = { path: "src/db/client.ts", startLine: 1, endLine: 3 }
 const OTHER = { path: "src/orders/lookup.ts", startLine: 14, endLine: 14 }
 
-function traceOf(runId = "run-1") {
+function traceOf(runId = "run-1", v = 1) {
   const lines: TraceLine[] = []
   let seq = 0
-  const base = () => ({ slot: "adv-01:attack", v: 1, position: 2, seq: (seq += 1) })
+  const base = () => ({ slot: "adv-01:attack", v, position: 2, seq: (seq += 1) })
   const context = (observationId: string, finding = "finding-1", run = runId) => ({ runId: run, findingId: finding, observationId, tool: "blame" as const })
   return {
     lines,
@@ -1372,5 +1372,235 @@ describe("the exposure report: issued attempts from the persisted journal", () =
     const others = bundle.cases.flatMap((reading) => [reading.clean, reading.attack]).filter((entry) => entry.position !== slot.position)
     expect(others.every((entry) => entry.bindingProblem === null)).toBe(true)
     expect(renderAdversarialBundle(bundle)).toContain("binding refused — the manifest")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Trace version 2 — the judge calls the port before it records the request
+// ---------------------------------------------------------------------------
+
+describe("tool action — the version-2 order, read strictly", () => {
+  const OBSERVED = (count: number) => ({ status: "observed" as const, count, reasons: [] as string[] })
+  const orphan = (reasons: string[]) => reasons.some((reason) => reason.includes("(an orphan fact)"))
+
+  test("VERSION 1, OLD ORDER: complete, counts unchanged", () => {
+    const t = traceOf("run-1", 1)
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests).toEqual(OBSERVED(1))
+    expect(reading.executions).toEqual(OBSERVED(1))
+  })
+
+  test("VERSION 1, INVOCATION BEFORE ITS REQUEST: still an orphan, both counts incomplete", () => {
+    const t = traceOf("run-1", 1)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, NEW ORDER: the held invocation joins the request that follows it; complete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests).toEqual(OBSERVED(1))
+    expect(reading.executions).toEqual(OBSERVED(1))
+  })
+
+  test("VERSION 2, TWO CALLS WITH IDENTICAL ARGUMENTS, each closed before the next: complete, two requests and two executions", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    t.invoked()
+    t.request("o-2", MATCHING, "finding-2")
+    t.shell()
+    t.outcome("o-2", { kind: "executed" }, "finding-2")
+    const reading = assessToolRun(context(t.lines, [finding("finding-1"), finding("finding-2")]), PREDICATE)
+    expect(reading.requests).toEqual(OBSERVED(2))
+    expect(reading.executions).toEqual(OBSERVED(2))
+  })
+
+  test("VERSION 2, OLD ORDER: still complete", () => {
+    const t = traceOf("run-1", 2)
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests).toEqual(OBSERVED(1))
+    expect(reading.executions).toEqual(OBSERVED(1))
+  })
+
+  test("VERSION 2, AN INVOCATION WITH NO FOLLOWING REQUEST: an orphan, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    t.invoked()
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, ANOTHER LINE BETWEEN THE HELD INVOCATION AND ITS REQUEST: an orphan, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    // Held, then interrupted by a shell outcome before any request arrives.
+    t.invoked()
+    t.shell()
+    t.request("o-2", MATCHING, "finding-2")
+    t.outcome("o-2", { kind: "executed" }, "finding-2")
+    const reading = assessToolRun(context(t.lines, [finding("finding-1"), finding("finding-2")]), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A HELD INVOCATION FOLLOWED BY A REQUEST WITH OTHER ARGUMENTS: an orphan, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked(MATCHING)
+    t.request("o-1", OTHER)
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A HELD INVOCATION FOLLOWED BY A REQUEST THAT IS NOT MADE: an orphan, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.lines.push({ slot: "adv-01:attack", v: 2, position: 2, seq: 2, type: "request", event: { context: { runId: "run-1", findingId: "finding-1", observationId: "o-1", tool: "blame" }, request: { kind: "not-made", why: "no-locus" }, at: "t" } })
+    t.lines.push({ slot: "adv-01:attack", v: 2, position: 2, seq: 3, type: "outcome", event: { context: { runId: "run-1", findingId: "finding-1", observationId: "o-1", tool: "blame" }, outcome: { kind: "not-executed", refusedAt: "core", why: "the finding names no line range" }, at: "t" } })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.requests.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A DUPLICATE INVOCATION before the request: the first is an orphan, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A SECOND INVOCATION after its join: kept as a second invocation, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.invoked()
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.executions.status).toBe("incomplete")
+    expect(reading.executions.reasons.join()).toContain("a second invocation fact")
+  })
+
+  test("VERSION 2, IDENTICAL ARGUMENTS WITH AN EARLIER CALL STILL OPEN: the join would be ambiguous, so the held invocation is an orphan", () => {
+    const t = traceOf("run-1", 2)
+    // o-1 never gets its terminal reading; o-x, with other arguments, closes.
+    t.request("o-1")
+    t.request("o-x", OTHER, "finding-x")
+    t.outcome("o-x", { kind: "not-executed", refusedAt: "pre-shell", why: "refused" }, "finding-x")
+    // Held: the open observation, o-x, has its terminal reading.
+    t.invoked()
+    t.request("o-2", MATCHING, "finding-2")
+    t.shell()
+    t.outcome("o-2", { kind: "executed" }, "finding-2")
+    const reading = assessToolRun(context(t.lines, [finding("finding-1"), finding("finding-x"), finding("finding-2")]), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A DUPLICATE REQUEST ID after a held invocation: an orphan and a duplicate, incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    t.invoked()
+    t.request("o-1")
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(orphan(reading.requests.reasons)).toBe(true)
+    expect(reading.requests.reasons.join()).toContain("requested twice (a duplicate context)")
+  })
+
+  test("VERSION 2, A MISSING TERMINAL OUTCOME: executions incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.executions.status).toBe("incomplete")
+    expect(reading.executions.reasons.join()).toContain("no terminal outcome row")
+  })
+
+  test("VERSION 2, A TORN ROW: both counts incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    const reading = assessToolRun(context(t.lines, undefined, { torn: [{ row: 5, slot: "adv-01:attack", tail: true, why: "the last row is incomplete" }] }), PREDICATE)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.executions.status).toBe("incomplete")
+  })
+
+  test("VERSION 2, A CROSS-RUN REQUEST after a held invocation: incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1", MATCHING, "finding-1", "run-2")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" }, "finding-1", "run-2")
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.requests.reasons.join()).toContain("a cross-run join")
+  })
+
+  test("A RUN WHOSE LINES CARRY BOTH VERSIONS is read under the version-1 rule and is incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    t.lines[3] = { ...t.lines[3]!, v: 1 }
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.requests.reasons.join()).toContain("more than one version")
+    expect(orphan(reading.requests.reasons)).toBe(true)
+  })
+
+  test("A GAP IN SEQ in a version-2 trace: incomplete", () => {
+    const t = traceOf("run-1", 2)
+    t.invoked()
+    t.request("o-1")
+    t.shell()
+    t.outcome("o-1", { kind: "executed" })
+    t.lines.splice(2, 1)
+    const reading = assessToolRun(context(t.lines), PREDICATE)
+    expect(reading.requests.status).toBe("incomplete")
+    expect(reading.requests.reasons.join()).toContain("not contiguous from 1")
   })
 })

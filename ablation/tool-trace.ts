@@ -98,8 +98,21 @@ import type {
 
 export const TOOL_TRACE_FILE = "tool-trace.jsonl"
 
-/** Bumped by hand when a trace line's shape changes. */
-export const TOOL_TRACE_VERSION = 1
+/**
+ * The version this sink writes. Bumped by hand when a trace line's shape, or
+ * the order its lines are written in, changes.
+ *
+ * - 1: the judge recorded the `made` request before it called the port, so
+ *   every adapter fact follows its request.
+ * - 2: the judge calls the port and then records the `made` request (story
+ *   2-7a, amended 2026-10-30). An adapter that records its invocation before
+ *   its first await can therefore write that fact before the request. The
+ *   lines' shape is unchanged.
+ */
+export const TOOL_TRACE_VERSION = 2
+
+/** Every version a trace line may carry and still be read. */
+export const TOOL_TRACE_READ_VERSIONS: readonly number[] = [1, 2]
 
 /** Which scheduled run a line belongs to. */
 export interface TraceBinding {
@@ -467,7 +480,7 @@ const SLOT_PREFIX = /^\{"slot":"([^"\\]+)"/
 function isTraceLine(value: unknown): value is TraceLine {
   if (value === null || typeof value !== "object") return false
   const line = value as Record<string, unknown>
-  if (typeof line.slot !== "string" || line.v !== TOOL_TRACE_VERSION || typeof line.seq !== "number" || typeof line.position !== "number") {
+  if (typeof line.slot !== "string" || !TOOL_TRACE_READ_VERSIONS.includes(line.v as number) || typeof line.seq !== "number" || typeof line.position !== "number") {
     return false
   }
   if (line.type === "request" || line.type === "outcome") {

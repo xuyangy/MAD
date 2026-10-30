@@ -22,6 +22,15 @@
  * a guard leaked by an earlier failure cannot be stacked on and then "restored"
  * in place of the real `fetch`.
  *
+ * AN INITIATION HOOK. `onInitiate`, when given, is called synchronously as the
+ * wrapper is entered, before the request is checked, delegated or blocked, with
+ * the request's method (upper-cased; from `init`, else from a `Request` input,
+ * else `GET`) and absolute URL. A request the guard then blocks is reported
+ * too. It is how a test logs, in order with other events, the moment a request
+ * was STARTED rather than the moment the server saw it. A hook that throws does
+ * not make `fetch` throw synchronously: that call returns a rejected promise
+ * and nothing is delegated.
+ *
  * WHAT IT DOES NOT COVER. It is not an OS network sandbox. Raw sockets
  * (`node:net`, `Bun.connect`), `WebSocket`, and child processes, including git
  * and anything git's configuration starts, are outside it. CAP-2 constrains the
@@ -52,6 +61,12 @@ function urlOf(input: Parameters<typeof fetch>[0]): string {
   return input.url
 }
 
+function methodOf(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): string {
+  if (init?.method !== undefined) return init.method.toUpperCase()
+  if (input instanceof Request) return input.method.toUpperCase()
+  return "GET"
+}
+
 function originOf(url: string): string {
   try {
     return new URL(url).origin
@@ -60,7 +75,10 @@ function originOf(url: string): string {
   }
 }
 
-export function installNetworkGuard(allowedOrigins: readonly string[]): NetworkGuard {
+export function installNetworkGuard(
+  allowedOrigins: readonly string[],
+  onInitiate?: (request: { method: string; url: string }) => void,
+): NetworkGuard {
   const original = globalThis.fetch
   if ((original as unknown as Record<symbol, unknown>)[GUARD_MARK]) {
     throw new Error("a network guard is already installed; an earlier test did not restore it")
@@ -76,6 +94,11 @@ export function installNetworkGuard(allowedOrigins: readonly string[]): NetworkG
 
   const guarded = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = urlOf(input)
+    try {
+      onInitiate?.({ method: methodOf(input, init), url })
+    } catch (error) {
+      return Promise.reject(error)
+    }
     if (!allowedOrigins.includes(originOf(url))) return block(url)
     delegated++
     return original(input, { ...init, redirect: "manual" }).then(async (response) => {
