@@ -15,7 +15,6 @@ import {
   clampPreset,
   PRESET_DIALS,
   PRESETS,
-  SUGGESTED_BUDGET,
   unknownUsageCount,
   usageIsComplete,
   type Preset,
@@ -36,6 +35,7 @@ import {
   type ArtifactOutcome,
 } from "./artifacts.ts"
 import { OpencodeModelBackend, type PolicyProbe } from "./model-backend.ts"
+import { DEFAULT_PLUGIN_BUDGET, pluginBudget } from "./plugin-budget.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
 import { changeReadStopGuidance } from "./change-read-guidance.ts"
 import { unsupportedTargetReason } from "./git-read-policy.ts"
@@ -395,14 +395,16 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             .min(0)
             .optional()
             .describe(
-              `OPTIONAL ceiling on this review, IN TOKENS — never in currency, because what a ` +
-                `token costs is this host's business and not MAD's. Omit for no ceiling, which is ` +
-                `the default. MAD STARTS A REVIEW IT MAY NOT BE ABLE TO FINISH and tells you ` +
-                `where it stopped; it never refuses up front. The number is split across the ` +
-                `three billing stages, so a cheap discovery hands its remainder to debate rather ` +
-                `than one stage eating the whole budget. Rough fits over a ~400-line change: ` +
-                `${SUGGESTED_BUDGET.quick} for quick, ${SUGGESTED_BUDGET.normal} for normal, ` +
-                `${SUGGESTED_BUDGET.paranoid} for paranoid.`,
+              `OPTIONAL admission budget for this review, IN TOKENS — never in currency, because ` +
+                `what a token costs is this host's business and not MAD's. Omit it for the preset's ` +
+                `default: ${DEFAULT_PLUGIN_BUDGET.quick} for quick, ${DEFAULT_PLUGIN_BUDGET.normal} for ` +
+                `normal (also when no preset is named), ${DEFAULT_PLUGIN_BUDGET.paranoid} for paranoid. ` +
+                `0 starts no model turn. MAD checks the budget when it admits work (each discovery ` +
+                `attempt, each debate round as a whole, each judge step), so it is not a hard ceiling on ` +
+                `the bill: work already admitted, a debate round's retries included, can take the total past it. ` +
+                `MAD STARTS A REVIEW IT MAY NOT BE ABLE TO FINISH and tells you where it stopped; it ` +
+                `never refuses up front. The number is split across the three billing stages, so a ` +
+                `cheap discovery hands its remainder to debate rather than one stage eating the whole budget.`,
             ),
           preset: tool.schema
             .enum(PRESETS)
@@ -801,7 +803,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               // and `clampPreset` downstream is what answers it (code review
               // 2026-09-08).
               preset: args.preset as Preset | undefined,
-              tokenCap: args.budget,
+              // CAP-6 — the plugin's default budget when the caller names none; an
+              // explicit budget, 0 included, is passed through raw for the
+              // accountant to clamp, like the preset above.
+              tokenCap: pluginBudget(args.budget, preset),
               // AD-2 amended / AD-6f (story 7A) — THE HOST HAS ALWAYS HANDED US
               // THIS. `ToolContext.abort` is an `AbortSignal`, and until this story
               // `execute` took one parameter and never read it: pressing stop in

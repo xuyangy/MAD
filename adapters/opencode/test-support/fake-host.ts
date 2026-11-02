@@ -60,6 +60,8 @@ export interface FakeHostOptions {
   judge?: Partial<Record<keyof typeof DEFAULT_JUDGE_ANSWERS, unknown>>
   /** The token figures reported on every settled message. */
   tokens?: { input: number; output: number }
+  /** CAP-6 — this prompt's answer carries no `tokens` at all, as a host that reports no usage. */
+  omitTokens?: (prompt: FakePrompt) => boolean
   /**
    * CAP-3 — what the session answer carries as `permission`, for the
    * `index`-th create (from 0). Omitted means the body's own `permission`, as
@@ -199,7 +201,9 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
         sessionID,
         role: "assistant",
         structured: answer,
-        tokens: { input: tokens.input, output: tokens.output, reasoning: 0, cache: { read: 0, write: 0 } },
+        ...(options.omitTokens?.(recorded)
+          ? {}
+          : { tokens: { input: tokens.input, output: tokens.output, reasoning: 0, cache: { read: 0, write: 0 } } }),
       },
       parts: [],
     })

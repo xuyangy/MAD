@@ -47,6 +47,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk"
 import { ISSUED_TURNS_MAY_BILL } from "../../core/run/review.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
 import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
+import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 import { OMIT, startFakeHost, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
@@ -77,7 +78,15 @@ const TIMEOUT_MS = 60_000
 interface ToolResult {
   title: string
   output: string
-  metadata?: { requested?: number; answered?: number; warnings?: string[]; cancelled?: string }
+  metadata?: {
+    requested?: number
+    answered?: number
+    warnings?: string[]
+    cancelled?: string
+    tokenCap?: number | null
+    usageComplete?: boolean
+    unknownUsageCount?: number
+  }
 }
 
 /**
@@ -538,6 +547,103 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
     },
     TIMEOUT_MS,
   )
+})
+
+describe("acceptance — the default budget admits, stops and discloses (CAP-6)", () => {
+  // Every turn reports 200,000 tokens, so the three discovery turns, admitted
+  // together at a total of 0, take the run to 600,000: past `normal`'s default
+  // of 450,000 before the judge asks to start.
+  const HEAVY_TURN = { input: 150_000, output: 50_000 }
+
+  test(
+    "budget exhaustion: with no budget argument the default refuses the judge's turn, the finding is left to the user, and the overshoot is explained",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          tokens: HEAVY_TURN,
+        })
+        expectClean(run)
+        expect(run.result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out", "unresolved-findings"])
+        // Admission stopped a turn: the probe and three discovery sessions,
+        // three prompts, and no fact-check was started.
+        expect(run.host.counts.create).toBe(4)
+        expect(run.host.counts.prompt).toBe(3)
+        expect(run.host.prompts.some((p) => p.role !== undefined)).toBe(false)
+        const report = run.result.output
+        expect(report).toContain(
+          `BUDGET EXHAUSTED IN JUDGING: 1 finding(s) were still undecided when the token cap of ${DEFAULT_PLUGIN_BUDGET.normal} was reached.`,
+        )
+        expect(report).toContain("UNRESOLVED — YOU DECIDE (1)")
+        expect(report).toContain(`the token budget (${DEFAULT_PLUGIN_BUDGET.normal}) ran out before judging could start`)
+        expect(report).toContain(`spent: 600000 of ${DEFAULT_PLUGIN_BUDGET.normal}`)
+        expect(report).toContain("the gate is asked BEFORE a turn")
+        expect(report).toContain("the turns already in flight when it last said yes still land")
+        expect(report).not.toContain("Verdicts: 1 upheld")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "an explicit budget overrides the default: the same heavy run is admitted to the judge and decided",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, tokens: HEAVY_TURN },
+          { args: { budget: 1_000_000 } },
+        )
+        expectClean(run)
+        expect(run.result.metadata?.tokenCap).toBe(1_000_000)
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out"])
+        expect(run.host.counts.prompt).toBe(4)
+        expect(run.result.output).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+        expect(run.result.output).toContain("UNRESOLVED — YOU DECIDE (0)")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "unknown usage: turns the host reports no usage for are counted as unknown, not as free, under the default budget",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          omitTokens: () => true,
+        })
+        expectClean(run)
+        expect(run.result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+        expect(run.result.metadata?.usageComplete).toBe(false)
+        expect(run.result.metadata?.unknownUsageCount).toBe(4)
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out", "usage-unquantified", "usage-unquantified"])
+        const report = run.result.output
+        expect(report).toContain("USAGE UNQUANTIFIED: 3 discovery turn(s) billed an amount MAD cannot count")
+        expect(report).toContain("USAGE UNQUANTIFIED: 1 judge turn(s) billed an amount MAD cannot count")
+        expect(report).toContain("Those turns were NOT free")
+        expect(report).toContain(`TOKENS (OBSERVED) — turns: 0 | in: 0 | out: 0 | reasoning: 0 | cache r/w: 0/0 | spent: 0 of ${DEFAULT_PLUGIN_BUDGET.normal}`)
+        expect(report).toContain("THAT TOTAL IS A FLOOR, not a full count")
+        // The review still completes: an ordinary plugin review reports the
+        // unknown and keeps working rather than stopping on it.
+        expect(report).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
 })
 
 describe("acceptance — option-shaped targets and configured filters are refused before anything runs (CAP-2)", () => {

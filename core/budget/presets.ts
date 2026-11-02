@@ -109,9 +109,11 @@ export const PRESET_DIALS: Readonly<Record<Preset, PresetDials>> = {
  *
  * PLANNING figures, and nothing reads them at run time — `ledger.ts:102-105` is
  * explicit that MAD cannot know what a turn will bill before it bills it, so a
- * promise here would be a fabricated number in front of a real one. They exist
- * to be printed in the tool's argument description, so a caller has somewhere to
- * start, and to be the budget CAP-7's acceptance test runs `normal` inside.
+ * promise here would be a fabricated number in front of a real one. They are
+ * the budget CAP-7's acceptance test runs `normal` inside. The budget a plugin
+ * review gets when the caller names none is a separate table,
+ * `DEFAULT_PLUGIN_BUDGET` in `adapters/opencode/plugin-budget.ts`, sized from
+ * recorded runs whose judge turns cost well above the per-turn figures below.
  *
  * The arithmetic is in the story's Design Notes and reproduces from three
  * per-turn figures (discovery ~10k, debate ~12k, judge ~6k) over a ~400-line

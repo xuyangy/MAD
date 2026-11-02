@@ -22,6 +22,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
+import { PRESETS } from "../../core/budget/ledger.ts"
 import { ARTIFACTS_ENV } from "./artifacts.ts"
 import type { SpawnBlame } from "./blame-exec.ts"
 import { ChangeReadStopped, changeReadQuarantineFor, clearChangeReadQuarantineForTests, opencodeRepo } from "./repo.ts"
@@ -35,6 +36,7 @@ import {
   MAX_LENS_SLOTS,
   SUBMODULE_SCOPE_NOTE,
 } from "./plugin.ts"
+import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { isolateGitHome } from "./test-support/git-home.ts"
 
 isolateGitHome()
@@ -525,12 +527,13 @@ describe("mad_review.execute — run control reaches the host boundary (story 7A
 })
 
 describe("mad_review.execute — CAP-7: the budget and the preset reach the core (story 8)", () => {
-  test("OMITTING BOTH REPRODUCES THE RUN THIS REPO SHIPPED BEFORE STORY 8", async () => {
+  test("OMITTING BOTH RUNS `normal`'s dials under `normal`'s default budget", async () => {
     // The identity property, checked at the surface a user actually touches. A
-    // preset table edit that broke it would fail here.
+    // preset table edit that broke it would fail here. The budget is the one
+    // dial the plugin boundary sets on its own (CAP-6): never uncapped.
     const result = await executeWith({})
     expect(result.metadata?.preset).toBeUndefined()
-    expect(result.metadata?.tokenCap).toBeNull()
+    expect(result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
     expect(result.metadata?.budgetSkipped).toBe(0)
     expect(result.metadata?.lensSlots).toEqual([])
     expect(result.metadata?.maxConcurrency).toBe(4)
@@ -598,6 +601,23 @@ describe("mad_review.execute — CAP-7: the budget and the preset reach the core
   test("`budget` reaches the ledger as a TOKEN CAP", async () => {
     const result = await executeWith({ budget: 50_000 })
     expect(result.metadata?.tokenCap).toBe(50_000)
+  })
+
+  test("CAP-6: EVERY PRESET HAS A FINITE DEFAULT BUDGET — none restores an uncapped run", async () => {
+    for (const preset of PRESETS) {
+      const result = await executeWith({ preset })
+      expect(result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET[preset])
+      expect(Number.isFinite(result.metadata?.tokenCap)).toBe(true)
+    }
+    // An unrecognised preset is `normal`, its budget included.
+    expect((await executeWith({ preset: "thorough" })).metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+  })
+
+  test("CAP-6: AN EXPLICIT BUDGET BEATS EVERY PRESET'S DEFAULT", async () => {
+    for (const preset of PRESETS) {
+      expect((await executeWith({ preset, budget: 123_456 })).metadata?.tokenCap).toBe(123_456)
+      expect((await executeWith({ preset, budget: 0 })).metadata?.tokenCap).toBe(0)
+    }
   })
 
   test("`budget: 0` RUNS AND ASKS NOBODY — MAD never refuses up front", async () => {
