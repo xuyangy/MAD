@@ -293,6 +293,34 @@ const FEE_FACT_CHECK = {
  */
 const OPENCODE_BILLING_NOTE = ISSUED_TURNS_NOTE.trim()
 
+/**
+ * CAP-6 — the budget note a returned review carries, written out here rather
+ * than built by the plugin's own function, so the claims are pinned word for word.
+ */
+function expectedBudgetNote(source: "default" | "explicit", cap: number, options: { preset?: string; unknownUsage?: boolean } = {}): string {
+  const origin =
+    source === "default"
+      ? `This review ran under MAD's default token budget for the ${options.preset ?? "normal"} preset, ${cap} tokens, because no budget was passed.`
+      : `This review ran under the token budget passed to it, ${cap} tokens.`
+  return (
+    `\n\n${origin} It is an admission budget, not a hard bill or quota ceiling: MAD checks it when it admits work ` +
+    "(each discovery attempt, each debate round as a whole, each judge step), so work already admitted, " +
+    "a debate round's retries included, can take the total past it. MAD does not meter all host retries and " +
+    "tool steps, so the host may bill more than the TOKENS figure." +
+    (options.unknownUsage
+      ? " Turns whose usage the host did not report are not counted against the budget, so MAD may have admitted work past it without knowing."
+      : "")
+  )
+}
+
+/** The budget note appears exactly once, after the framed report and outside every material span. */
+function expectBudgetNote(output: string, note: string): void {
+  expect(output.split(note)).toHaveLength(2)
+  const fence = fenceOf(output, "review report")
+  expect(output).toContain(`\n${fence}${note}`)
+  for (const span of materialSpans(output)) expect(span.body).not.toContain("admission budget")
+}
+
 /** CAP-5 — a pre-model stopped answer says nothing about billing at all. */
 function expectNoBillingDisclosure(output: string): void {
   expect(output).not.toMatch(/billed/i)
@@ -583,6 +611,7 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
         expect(report).toContain("the gate is asked BEFORE a turn")
         expect(report).toContain("the turns already in flight when it last said yes still land")
         expect(report).not.toContain("Verdicts: 1 upheld")
+        expectBudgetNote(report, expectedBudgetNote("default", DEFAULT_PLUGIN_BUDGET.normal))
       } finally {
         await repo.remove()
       }
@@ -606,6 +635,7 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
         expect(run.host.counts.prompt).toBe(4)
         expect(run.result.output).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
         expect(run.result.output).toContain("UNRESOLVED — YOU DECIDE (0)")
+        expectBudgetNote(run.result.output, expectedBudgetNote("explicit", 1_000_000))
       } finally {
         await repo.remove()
       }
@@ -637,6 +667,7 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
         // The review still completes: an ordinary plugin review reports the
         // unknown and keeps working rather than stopping on it.
         expect(report).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
+        expectBudgetNote(report, expectedBudgetNote("default", DEFAULT_PLUGIN_BUDGET.normal, { unknownUsage: true }))
       } finally {
         await repo.remove()
       }
@@ -644,6 +675,49 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
     TIMEOUT_MS,
   )
 
+  test(
+    "an ordinary review well under the default budget still says what the budget is and does not bound",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } })
+        expectClean(run)
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out"])
+        expect(run.result.output).not.toContain("OVER")
+        expectBudgetNote(run.result.output, expectedBudgetNote("default", DEFAULT_PLUGIN_BUDGET.normal))
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "an explicit budget equal to the default is the caller's, and an explicit 0 is reported as passed",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const equal = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
+          { args: { budget: DEFAULT_PLUGIN_BUDGET.normal } },
+        )
+        expectClean(equal)
+        expect(equal.result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+        expectBudgetNote(equal.result.output, expectedBudgetNote("explicit", DEFAULT_PLUGIN_BUDGET.normal))
+        expect(equal.result.output).not.toContain("default token budget")
+
+        const zero = await runScenario(repo, { discovery: [FEE_FINDING] }, { args: { budget: 0 } })
+        expectClean(zero)
+        expect(zero.host.counts.prompt).toBe(0)
+        expect(zero.result.metadata?.tokenCap).toBe(0)
+        expectBudgetNote(zero.result.output, expectedBudgetNote("explicit", 0))
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
 })
 
 describe("acceptance — option-shaped targets and configured filters are refused before anything runs (CAP-2)", () => {
@@ -766,8 +840,10 @@ describe("acceptance — a submodule is reviewed as its commit pointer only (CAP
         expect(spans).toHaveLength(1)
         expect(spans[0]!.body).toContain("FINDINGS (1)")
         expect(spans[0]!.body).not.toContain(SUBMODULE_SCOPE_NOTE.trim())
-        // The framed report ends at its closing fence; the notice follows it.
-        expect(output.endsWith(`\n${fenceOf(output, "review report")}${SUBMODULE_SCOPE_NOTE}`)).toBe(true)
+        // The framed report ends at its closing fence; the budget note and then
+        // the notice follow it.
+        const fence = fenceOf(output, "review report")
+        expect(output.endsWith(`\n${fence}${expectedBudgetNote("default", 450_000)}${SUBMODULE_SCOPE_NOTE}`)).toBe(true)
         expect(SUBMODULE_SCOPE_NOTE).toContain("submodules as commit pointers only")
         expect(SUBMODULE_SCOPE_NOTE).toContain("uncommitted changes inside a submodule were not read")
       } finally {

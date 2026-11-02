@@ -406,12 +406,15 @@ describe("mad_review.execute — THE REPORT LEAVES FRAMED (AD-18's eighth span, 
 
     const longestRun = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length))
     expect(openerFence.length).toBeGreaterThan(longestRun)
-    // The closing fence is followed only by the fixed submodule scope note,
-    // which also pins that story 7A's artifact note is silent when the flag is
-    // off — the default, and what a fresh install runs. (Set `MAD_ARTIFACTS` in
-    // your shell and this line is the one that tells you: the note is appended
-    // after the span, outside it.)
-    expect(result.output.endsWith(`\n${openerFence}${SUBMODULE_SCOPE_NOTE}`)).toBe(true)
+    // The closing fence is followed only by the budget note and the fixed
+    // submodule scope note, which also pins that story 7A's artifact note is
+    // silent when the flag is off — the default, and what a fresh install runs.
+    // (Set `MAD_ARTIFACTS` in your shell and this line is the one that tells
+    // you: the note is appended after the span, outside it.)
+    const tail = result.output.slice(result.output.lastIndexOf(`\n${openerFence}`))
+    expect(tail).toStartWith(`\n${openerFence}\n\nThis review ran under MAD's default token budget`)
+    expect(tail.endsWith(SUBMODULE_SCOPE_NOTE)).toBe(true)
+    expect(tail.split("\n\n")).toHaveLength(3)
   })
 })
 
@@ -608,9 +611,31 @@ describe("mad_review.execute — CAP-7: the budget and the preset reach the core
       const result = await executeWith({ preset })
       expect(result.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET[preset])
       expect(Number.isFinite(result.metadata?.tokenCap)).toBe(true)
+      expect(result.output).toContain(
+        `MAD's default token budget for the ${preset} preset, ${DEFAULT_PLUGIN_BUDGET[preset]} tokens, because no budget was passed.`,
+      )
     }
-    // An unrecognised preset is `normal`, its budget included.
-    expect((await executeWith({ preset: "thorough" })).metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+    // An unrecognised preset is `normal`, its budget and its label included;
+    // the raw value never reaches the note.
+    const unknown = await executeWith({ preset: "thorough" })
+    expect(unknown.metadata?.tokenCap).toBe(DEFAULT_PLUGIN_BUDGET.normal)
+    expect(unknown.output).toContain(`default token budget for the normal preset, ${DEFAULT_PLUGIN_BUDGET.normal} tokens`)
+    // The report's own dial-clamped warning names it; the note, after the span, does not.
+    const fence = fenceOf(unknown.output, "review report")
+    expect(unknown.output.slice(unknown.output.lastIndexOf(`\n${fence}`))).not.toContain("thorough")
+  })
+
+  test("CAP-6: AN UNUSABLE BUDGET FROM A JAVASCRIPT CALLER IS NO CEILING, AND THE NOTE SAYS SO", async () => {
+    // The schema refuses it on the shipped path; `execute` called directly does
+    // not, and the accountant's clamp reads a non-finite cap as no ceiling.
+    const result = await executeWith({ budget: Number.NaN })
+    expect(result.metadata?.tokenCap).toBeNull()
+    expect(result.output).toContain(
+      "This review ran with no token budget, because the budget passed was not a usable number, so nothing constrained admission. " +
+        "MAD does not meter all host retries and tool steps",
+    )
+    expect(result.output).not.toContain("default token budget")
+    expect(result.output).not.toContain("admission budget")
   })
 
   test("CAP-6: AN EXPLICIT BUDGET BEATS EVERY PRESET'S DEFAULT", async () => {

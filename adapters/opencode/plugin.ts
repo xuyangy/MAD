@@ -926,10 +926,11 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
               // its commit pointer only and the report itself never says so.
               // THE ORDER, all of it MAD's own text outside the span: the policy
               // stop note (before the span), then the framed report, then the
-              // submodule scope note, the probe cleanup note, the issued-turns
+              // budget note (`budgetNote`), the submodule scope note, the probe
+              // cleanup note, the issued-turns
               // billing note (`issuedTurnsNote`), the stopped-blame note and the
               // artifact note. Each is empty when it does not apply.
-              output: `${policyStopNote}${frameForHostAgent(rendered)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${issuedTurnsNote(record)}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`,
+              output: `${policyStopNote}${frameForHostAgent(rendered)}${budgetNote(record, args.budget, preset)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${issuedTurnsNote(record)}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`,
               metadata: {
                 runId: record.runId,
                 answered: record.answered,
@@ -1025,6 +1026,41 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
 /** What the read policy did not read (`./git-read-policy.ts`, SUBMODULES). */
 export const SUBMODULE_SCOPE_NOTE =
   "\n\nMAD reviewed submodules as commit pointers only: uncommitted changes inside a submodule were not read or reviewed."
+
+/**
+ * CAP-6 — what the token budget a returned review ran under is, where it came
+ * from, and what it does not bound. MAD's own sentences, outside the span.
+ *
+ * Where it came from is read from the argument, by the same nullish test
+ * `pluginBudget` uses: an explicit budget equal to the default is still the
+ * caller's. The figure is the effective cap on the record, and the preset named
+ * is the clamped one, never the raw argument. The admission and host-metering
+ * sentences hold on every returned review, overshot or not; the unknown-usage
+ * sentence is added only when the run has turns of unknown usage.
+ */
+export function budgetNote(
+  record: Pick<RunRecord, "ledger">,
+  budget: number | undefined | null,
+  preset: Preset,
+): string {
+  const cap = record.ledger.cap
+  const metering = "MAD does not meter all host retries and tool steps, so the host may bill more than the TOKENS figure."
+  if (cap === null) {
+    return `\n\nThis review ran with no token budget, because the budget passed was not a usable number, so nothing constrained admission. ${metering}`
+  }
+  const source =
+    budget === undefined || budget === null
+      ? `This review ran under MAD's default token budget for the ${preset} preset, ${cap} tokens, because no budget was passed.`
+      : `This review ran under the token budget passed to it, ${cap} tokens.`
+  const unknown = usageIsComplete(record.ledger)
+    ? ""
+    : " Turns whose usage the host did not report are not counted against the budget, so MAD may have admitted work past it without knowing."
+  return (
+    `\n\n${source} It is an admission budget, not a hard bill or quota ceiling: MAD checks it when it admits work ` +
+    `(each discovery attempt, each debate round as a whole, each judge step), so work already admitted, ` +
+    `a debate round's retries included, can take the total past it. ${metering}${unknown}`
+  )
+}
 
 /**
  * CAP-5 — what a stopped run's model turns may still cost on this host. MAD's
