@@ -50,7 +50,7 @@ import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, MadPlugin, SUBMODULE_S
 import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
-import { OMIT, startFakeHost, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
+import { OMIT, startFakeHost, THREE_PROVIDERS, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
 import {
   initiationRecorder,
   isModelAllocation,
@@ -86,6 +86,7 @@ interface ToolResult {
     tokenCap?: number | null
     usageComplete?: boolean
     unknownUsageCount?: number
+    budgetSkipped?: number
   }
 }
 
@@ -606,6 +607,8 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
           `BUDGET EXHAUSTED IN JUDGING: 1 finding(s) were still undecided when the token cap of ${DEFAULT_PLUGIN_BUDGET.normal} was reached.`,
         )
         expect(report).toContain("UNRESOLVED — YOU DECIDE (1)")
+        expect(report).toContain("None of the 1 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+        expect(report).not.toContain("No findings were raised")
         expect(report).toContain(`the token budget (${DEFAULT_PLUGIN_BUDGET.normal}) ran out before judging could start`)
         expect(report).toContain(`spent: 600000 of ${DEFAULT_PLUGIN_BUDGET.normal}`)
         expect(report).toContain("the gate is asked BEFORE a turn")
@@ -659,11 +662,14 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
         expect(run.result.metadata?.unknownUsageCount).toBe(4)
         expect(run.result.metadata?.warnings).toEqual(["provider-fan-out", "usage-unquantified", "usage-unquantified"])
         const report = run.result.output
-        expect(report).toContain("USAGE UNQUANTIFIED: 3 discovery turn(s) billed an amount MAD cannot count")
-        expect(report).toContain("USAGE UNQUANTIFIED: 1 judge turn(s) billed an amount MAD cannot count")
-        expect(report).toContain("Those turns were NOT free")
+        expect(report).toContain("USAGE UNQUANTIFIED: 3 discovery turn(s) have usage MAD cannot count")
+        expect(report).toContain("USAGE UNQUANTIFIED: 1 judge turn(s) have usage MAD cannot count")
+        expect(report).toContain("Those turns may have been billed and cannot be assumed free")
+        expect(report).not.toContain("NOT free")
+        expect(report).not.toContain("billed an amount")
         expect(report).toContain(`TOKENS (OBSERVED) — turns: 0 | in: 0 | out: 0 | reasoning: 0 | cache r/w: 0/0 | spent: 0 of ${DEFAULT_PLUGIN_BUDGET.normal}`)
         expect(report).toContain("THAT TOTAL IS A FLOOR, not a full count")
+        expect(report).toContain("4 turns in this run have UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full count.")
         // The review still completes: an ordinary plugin review reports the
         // unknown and keeps working rather than stopping on it.
         expect(report).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
@@ -711,7 +717,177 @@ describe("acceptance — the default budget admits, stops and discloses (CAP-6)"
         expectClean(zero)
         expect(zero.host.counts.prompt).toBe(0)
         expect(zero.result.metadata?.tokenCap).toBe(0)
+        // CAP-7 — the zero-answer page of a budget that admits nothing.
+        expect(zero.result.output).toContain(
+          "FINDINGS (0)\n  NOTHING WAS EXAMINED — the budget ran out before any model was asked.\n" +
+            "  3 pool slot(s) and 0 lens slot(s) were never asked, to stay inside the token budget.",
+        )
+        expect(zero.result.output).not.toContain("NO MODEL ANSWERED")
+        expect(zero.result.output).not.toContain("MODEL DROPPED OUT")
         expectBudgetNote(zero.result.output, expectedBudgetNote("explicit", 0))
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
+describe("acceptance — each result state says what happened (CAP-7, part 7a)", () => {
+  test(
+    "DEGRADED: one model fails twice and the others answer; the report names it, shrinks the denominator and still decides",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          failPrompt: (_session, prompt) => prompt.role === undefined && prompt.model === "gpt-5",
+        })
+        expectClean(run)
+        // The failing model was asked twice (the turn and its one retry).
+        expect(run.host.prompts.filter((p) => p.role === undefined && p.model === "gpt-5")).toHaveLength(2)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 2/3 models answered")
+        expect(run.result.metadata?.warnings).toEqual([
+          "provider-fan-out",
+          "model-dropped-out",
+          "denominator-reduced",
+          "usage-unquantified",
+        ])
+        const report = run.result.output
+        expect(report).toContain("WARNINGS — this run is degraded")
+        expect(report).toContain(
+          "MODEL DROPPED OUT: `openai/gpt-5` (slot discovery-2) failed twice (transport-error: UnknownError: fake prompt failure). " +
+            "The run continued without it, and it is excluded from the co-discovery denominator.",
+        )
+        expect(report).toContain(
+          "Only 2 of 3 roster model(s) answered. Every co-discovery fraction below is over 2, not over 3 requested.",
+        )
+        expect(report).toContain("slots requested: 3 | filled: 3 | answered: 2")
+        expect(report).toContain("co-discovery: 2/2   verdict: upheld")
+        expect(report).not.toContain("this run is clean")
+        expect(report).not.toMatch(/no model failed/i)
+        // The two failed attempts were issued, so their usage is unknown, not
+        // nothing: the total is OBSERVED and the budget note says so.
+        expect(run.result.metadata?.usageComplete).toBe(false)
+        expect(run.result.metadata?.unknownUsageCount).toBe(2)
+        expect(report).toContain(
+          "USAGE UNQUANTIFIED: 2 discovery turn(s) have usage MAD cannot count (the host answered the issued " +
+            "request with an error or without response data, so the provider may have received and billed it, and " +
+            "its usage was never reported). Those turns may have been billed and cannot be assumed free",
+        )
+        expect(report).toContain("TOKENS (OBSERVED) — turns: 3 | in: 300 | out: 150")
+        expect(report).toContain("2 turns in this run have UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full count.")
+        expectBudgetNote(report, expectedBudgetNote("default", DEFAULT_PLUGIN_BUDGET.normal, { unknownUsage: true }))
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "USAGE-INCOMPLETE, NOT UNKNOWN: every turn reports its usage, and the review still says the host may bill more",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const run = await runScenario(repo, { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } })
+        expectClean(run)
+        expect(run.result.metadata?.usageComplete).toBe(true)
+        expect(run.result.metadata?.unknownUsageCount).toBe(0)
+        const report = run.result.output
+        // Every final response's usage is counted, so the total carries no
+        // unknown-usage caveat...
+        expect(report).toContain("TOKENS — turns: 4 | in: 400 | out: 200")
+        expect(report).not.toContain("TOKENS (OBSERVED)")
+        expect(report).not.toContain("UNKNOWN usage")
+        expect(report).not.toContain("USAGE UNQUANTIFIED")
+        expect(report).not.toContain("A FLOOR")
+        expect(report).not.toContain("Turns whose usage the host did not report")
+        // ...and it is still not the host's whole activity: MAD does not meter
+        // the host's own retries and tool steps.
+        expect(report).toContain(
+          "MAD does not meter all host retries and tool steps, so the host may bill more than the TOKENS figure.",
+        )
+        expect(report).not.toContain("full count")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "INCOMPLETE COVERAGE, UNDERFILLED: the host offers two models for three slots; the run says so and how to fix it",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const providers = { ...THREE_PROVIDERS, providers: THREE_PROVIDERS.providers.slice(0, 2) }
+        const run = await runScenario(repo, { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, providers })
+        expectClean(run)
+        expect(run.host.prompts.filter((p) => p.role === undefined)).toHaveLength(2)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 2/3 models answered")
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out", "roster-underfilled", "roster-single-lineage"])
+        const report = run.result.output
+        expect(report).toContain("WARNINGS — this run is degraded")
+        expect(report).toContain("slots requested: 3 | filled: 2 | answered: 2 | distinct verified lineages: 2")
+        expect(report).toContain(
+          "UNDERFILLED ROSTER: 3 discovery slot(s) requested but the host offers only 2 distinct model(s)",
+        )
+        expect(report).toContain("every co-discovery fraction is over what answered, not over 3")
+        expect(report).toContain("Add a provider under the `provider` key in your opencode config")
+        expect(report).toContain("Co-discovery over a roster this narrow is a WEAK SIGNAL")
+        expect(report).toContain("This review sends the change to 2 provider(s): anthropic, openai.")
+        expect(report).toContain("co-discovery: 2/2   verdict: upheld")
+        // The unfilled slot is not reported as a model that failed.
+        expect(report).not.toContain("MODEL DROPPED OUT")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "INCOMPLETE COVERAGE, TRUNCATED: the budget refuses a lens slot; it is named as never asked, not as failed, and the empty list is bounded",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        // Discovery's share of 2,000,000 is 600,000. The first of four turns in
+        // flight lands 700,000, so the fifth slot asks after the share is spent
+        // and is refused; the four admitted turns take the run past the whole
+        // cap, so the judge is refused too and the finding is left undecided.
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, tokens: { input: 500_000, output: 200_000 } },
+          { args: { lenses: ["security", "reliability"], budget: 2_000_000 } },
+        )
+        expectClean(run)
+        expect(run.host.counts.prompt).toBe(4)
+        // The security lens was asked once and the reliability lens never.
+        expect(run.host.prompts.filter((p) => p.system.includes("The Security Sentinel"))).toHaveLength(1)
+        expect(run.host.prompts.some((p) => p.system.includes("The SRE / Reliability Expert"))).toBe(false)
+        expect(run.result.metadata?.budgetSkipped).toBe(1)
+        expect(run.result.metadata?.warnings).toEqual(["provider-fan-out", "discovery-truncated", "unresolved-findings"])
+        const report = run.result.output
+        expect(report).toContain("WARNINGS — this run is degraded")
+        expect(report).toContain(
+          "discovery-lens-reliability: openai/gpt-5 — lens `reliability`, NEVER ASKED: the budget refused this slot, so it contributed no coverage",
+        )
+        expect(report).toContain(
+          "BUDGET TRUNCATED DISCOVERY: 0 pool slot(s) and 1 lens slot(s) were never asked, because doing so would have " +
+            "taken the run past discover's share of the token cap (600000 of 2000000).",
+        )
+        expect(report).toContain("THOSE SLOTS were not skipped because a model failed — they were never asked at all.")
+        expect(report).toContain("1 discovery slot(s) were never asked, to stay inside discovery's share")
+        expect(report).not.toContain("MODEL DROPPED OUT")
+        // The finding the answering slots raised is not reported as no finding.
+        expect(report).toContain(
+          "FINDINGS (0)\n  None of the 1 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.\n" +
+            "  1 further slot(s) were never asked at all, to stay inside the token budget — so this is not a clean review of the whole roster.",
+        )
+        expect(report).not.toContain("No findings were raised")
+        expect(report).toContain("UNRESOLVED — YOU DECIDE (1)")
       } finally {
         await repo.remove()
       }
@@ -1204,6 +1380,13 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         const report = spans[0]!
         expect(report.body).toContain(ISSUED_TURNS_MAY_BILL)
         expect(report.body).toContain("MAD started no turn and retried no model after it observed the stop.")
+        // CAP-7 — the zero-answer page of a stop: nothing was examined, and the
+        // stop, not a model, is why.
+        expect(report.body).toContain(
+          "FINDINGS (0)\n  NOTHING WAS EXAMINED — you stopped this run before any model answered.\n" +
+            "  The run stopped during the discover stage; MAD started no turn and retried no model after it observed the stop.",
+        )
+        expect(report.body).not.toContain("NO MODEL ANSWERED")
         expect(report.body).not.toContain(OPENCODE_BILLING_NOTE)
         const closingFence = output.indexOf(`\n${fenceOf(output, "review report")}`, report.end)
         expect(closingFence).toBeGreaterThanOrEqual(report.end)
@@ -1743,6 +1926,34 @@ describe("acceptance — the network guard rejects what would leave the allowed 
         expect(run.result.metadata?.warnings).toContain("model-dropped-out")
         expect(run.result.title).not.toBe("MAD — nothing to review")
         expect(run.result.output).not.toContain("WARNINGS: none")
+        // CAP-7 — the zero-answer page says what happened, slot by slot: each
+        // model was asked twice and failed, nothing was examined, and the empty
+        // list is not a clean review.
+        expect(run.result.title).toBe("MAD review — 0 finding(s), 0/3 models answered")
+        expect(run.host.counts.prompt).toBe(6)
+        const report = run.result.output
+        expect(report).toContain("WARNINGS — this run is degraded")
+        for (const [slot, model] of [
+          ["discovery-1", "anthropic/claude-sonnet-4-5"],
+          ["discovery-2", "openai/gpt-5"],
+          ["discovery-3", "google/gemini-2.5-pro"],
+        ]) {
+          expect(report).toContain(`MODEL DROPPED OUT: \`${model}\` (slot ${slot}) failed twice (transport-error:`)
+        }
+        expect(report).toContain("Only 0 of 3 roster model(s) answered.")
+        expect(report).toContain("slots requested: 3 | filled: 3 | answered: 0")
+        expect(report).toContain(
+          "FINDINGS (0)\n  NO MODEL ANSWERED — this is not a clean review.\n" +
+            "  Every slot in the roster failed or dropped out; nothing was examined.",
+        )
+        expect(report).not.toContain("No findings were raised")
+        expect(report).not.toContain("this run is clean")
+        // Every failed attempt was issued: six turns of unknown usage, not a
+        // total of zero.
+        expect(run.result.metadata?.unknownUsageCount).toBe(6)
+        expect(report).toContain("USAGE UNQUANTIFIED: 6 discovery turn(s) have usage MAD cannot count")
+        expect(report).toContain("TOKENS (OBSERVED) — turns: 0 |")
+        expect(report).toContain("6 turns in this run have UNKNOWN usage")
       } finally {
         await repo.remove()
       }
@@ -1879,6 +2090,9 @@ describe("acceptance — the stop reaches MAD's own blame evidence reads (CAP-5,
         const report = run.result.output
         expect(report).toContain("Verdicts: 0 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
         expect(report).toContain("UNRESOLVED — YOU DECIDE (2)")
+        // CAP-7 — the findings were raised; a stop left them undecided.
+        expect(report).toContain("None of the 2 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+        expect(report).not.toContain("No findings were raised")
         expect(report).toContain("`git blame` STOPPED — the run was cancelled, so MAD produced no citation and decided nothing")
         expect(report).not.toContain("GIT BLAME FAILED")
         expect(report).not.toContain("ran out of budget")

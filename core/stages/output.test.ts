@@ -220,6 +220,25 @@ describe("rendering (AD-6, AD-9)", () => {
     expect(rendered).toContain("FINDINGS (0)")
   })
 
+  test("CAP-7: every finding left undecided is not 'no findings were raised', budget or stop", () => {
+    const undecided = () =>
+      finding({ severity: "high", file: "a.ts", unresolved: { diedAtStage: "judge", reason: "budget exhausted" } })
+    const budget = output(record([undecided(), undecided()], 3))
+    expect(budget).toContain("None of the 2 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+    expect(budget).not.toContain("No findings were raised")
+
+    const stopped = record([undecided()], 2)
+    stopped.cancelled = { stage: "judge" }
+    const rendered = output(stopped)
+    expect(rendered).toContain("None of the 1 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+    expect(rendered).not.toContain("No findings were raised")
+
+    // A decided finding beside an undecided one keeps the ordinary list.
+    const mixed = output(record([finding({ severity: "low", file: "b.ts" }), undecided()], 3))
+    expect(mixed).toContain("FINDINGS (1)")
+    expect(mixed).not.toContain("reached a verdict")
+  })
+
   test("AD-17e reaches the UNRESOLVED section too — a lens finding is disclosed there", () => {
     // The section is output, and clause (e) has no exception for a finding the
     // budget ran out on. A reader deciding an undecided finding by hand needs to
@@ -3278,8 +3297,9 @@ const PRESENT_NON_EMPTY = [
   "TOKENS (OBSERVED) — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
   "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
   "  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one",
-  "  it stopped waiting on, or one that settled with the host reporting none — still billed,",
-  "  and that spend is missing here. MAD does not estimate it.",
+  "  it stopped waiting on, one the host answered with an error or without data, or one that",
+  "  settled with the host reporting none — may still have billed, and any such spend is",
+  "  missing here. MAD does not estimate it.",
   "  1 turn in this run has UNKNOWN usage, so the TOKENS figure is OBSERVED spend and not a full count. MAD does not fill the gap in.",
 ].join("\n")
 
@@ -3314,8 +3334,9 @@ const PRESENT_EMPTY_CANCELLED = [
   "TOKENS — turns: 1 | in: 100 | out: 50 | reasoning: 0 | cache r/w: 0/0",
   "PEAK — at most 4 model turn(s) in flight at once (rate, not total; nothing was refused or dropped by this bound).",
   "  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one",
-  "  it stopped waiting on, or one that settled with the host reporting none — still billed,",
-  "  and that spend is missing here. MAD does not estimate it.",
+  "  it stopped waiting on, one the host answered with an error or without data, or one that",
+  "  settled with the host reporting none — may still have billed, and any such spend is",
+  "  missing here. MAD does not estimate it.",
 ].join("\n")
 
 const ABSENT = [

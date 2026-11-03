@@ -73,9 +73,11 @@ export interface FakeHostOptions {
   /** CAP-3 — a delete for this session answers 500, and the session stays open. */
   failDelete?: (sessionID: string) => boolean
   /** A prompt answers 500 instead of a scripted answer. The session is still counted. */
-  failPrompt?: (sessionID: string) => boolean
+  failPrompt?: (sessionID: string, prompt: FakePrompt) => boolean
   /** Held before the roster read is answered, so a test can keep it in flight. */
   holdProviders?: () => Promise<void> | undefined
+  /** The provider list the roster read is answered with. Omitted means `THREE_PROVIDERS`. */
+  providers?: unknown
   /** When true, the provider list request is answered with a host error. */
   failProviders?: () => boolean
   /** Held before the `index`-th create (from 0) is answered, so a test can keep it in flight. */
@@ -98,6 +100,8 @@ export interface FakePrompt {
   text: string
   /** The judge role the instructions name; `undefined` for a discovery or other turn. */
   role: JudgeRoleTag | undefined
+  /** The `modelID` the prompt asks for. */
+  model: string
 }
 
 /** Returned from `echo` to leave `permission` out of the session answer. */
@@ -189,10 +193,11 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
       system: typeof body.system === "string" ? body.system : "",
       text: body.parts.map((part) => (isObject(part) && typeof part.text === "string" ? part.text : "")).join("\n"),
       role: roleOf(body),
+      model: typeof body.model.modelID === "string" ? body.model.modelID : "",
     }
     prompts.push(recorded)
     await options.holdPrompt?.(sessionID, recorded)
-    if (options.failPrompt?.(sessionID)) return json({ name: "UnknownError", data: { message: "fake prompt failure" } }, 500)
+    if (options.failPrompt?.(sessionID, recorded)) return json({ name: "UnknownError", data: { message: "fake prompt failure" } }, 500)
     const answer = answerFor(body, recorded.role)
     if (answer instanceof Response) return answer
     return json({
@@ -219,7 +224,7 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
         counts.providers++
         await options.holdProviders?.()
         if (options.failProviders?.()) return json({ name: "UnknownError", data: { message: "fake provider failure" } }, 500)
-        return json(THREE_PROVIDERS)
+        return json(options.providers ?? THREE_PROVIDERS)
       }
       if (request.method === "POST" && path === "/session") {
         const index = counts.create++

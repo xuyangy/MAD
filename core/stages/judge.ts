@@ -2298,9 +2298,10 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // No model, no provider, and no number on the gap — `discover.ts` gives
       // the reasoning for all three.
       message:
-        `USAGE UNQUANTIFIED: ${unquantified.length} judge turn(s) billed an amount MAD cannot ` +
-        `count (${why.join("; ")}). Those turns were NOT free: the TOKENS total for this run is ` +
-        `OBSERVED spend and is short by whatever they cost, and MAD does not fill the gap in.`,
+        `USAGE UNQUANTIFIED: ${unquantified.length} judge turn(s) have usage MAD cannot count ` +
+        `(${why.join("; ")}). Those turns may have been billed and cannot be assumed free: the ` +
+        `TOKENS total for this run is OBSERVED spend and excludes any usage they were not reported ` +
+        `for, and MAD does not fill the gap in.`,
       detail: {
         turns: unquantified.length,
         executions: unquantified.map((entry) => ({

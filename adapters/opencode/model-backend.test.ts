@@ -841,6 +841,24 @@ describe("runTurn — abandonment marks usage unknown without moving a failure (
     expect(calls.delete).toHaveLength(0)
   })
 
+  test("AN ERROR ANSWER TO THE PROMPT CALL DOES carry a marker — it may have been billed", async () => {
+    // CAP-7 — the same line as the throw below: the prompt went out, and an
+    // error answer, or an answer with no data, does not say the provider never
+    // received and billed it.
+    for (const reply of [{ error: { name: "UnknownError", data: { message: "HTTP 500" } } }, {}]) {
+      const { backend, calls } = backendWith({ reply })
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+
+      expect(!result.ok && result.failure).toBe("transport-error")
+      expect(result.usageUnknown?.executionId).toBe("exec-1")
+      expect(result.usageUnknown?.why).toContain("answered the issued request with an error or without response data")
+      expect(result.usageUnknown?.why).toContain("may have")
+      expect(result.usageUnknown?.abandoned).toBeUndefined()
+      expect("tokens" in result).toBe(false)
+      expect(calls.prompt).toHaveLength(1)
+    }
+  })
+
   test("A TRANSPORT THROW FROM THE PROMPT CALL DOES carry a marker — it may have been billed", async () => {
     // CORRECTED AT THE WAVE-4 REVIEW (2026-09-11), and this test is the one that
     // holds the correction down. The path returned a bare `transport-error` on

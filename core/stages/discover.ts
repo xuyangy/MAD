@@ -932,10 +932,10 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       // NUMBER IS PUT ON THE GAP either (AC1: nothing is estimated or
       // interpolated) — the sentence says what is missing and stops.
       message:
-        `USAGE UNQUANTIFIED: ${unquantified.length} discovery turn(s) billed an amount MAD ` +
-        `cannot count (${why.join("; ")}). Those turns were NOT free: the TOKENS total for this ` +
-        `run is OBSERVED spend and is short by whatever they cost, and MAD does not fill the ` +
-        `gap in.`,
+        `USAGE UNQUANTIFIED: ${unquantified.length} discovery turn(s) have usage MAD cannot ` +
+        `count (${why.join("; ")}). Those turns may have been billed and cannot be assumed free: ` +
+        `the TOKENS total for this run is OBSERVED spend and excludes any usage they were not ` +
+        `reported for, and MAD does not fill the gap in.`,
       detail: {
         turns: unquantified.length,
         executions: unquantified.map((entry) => ({

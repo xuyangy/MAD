@@ -1673,6 +1673,14 @@ export function renderRunRecord(record: RunRecord): string {
             `not skipped because a model failed.`,
         )
       }
+    } else if (unresolved.length > 0) {
+      // CAP-7 — FINDINGS WERE RAISED, AND NONE REACHED A VERDICT. Every one was
+      // left undecided, by the budget or by a stop, so "no findings were
+      // raised" would be false: they are below, in the section that says why.
+      lines.push(
+        `  None of the ${unresolved.length} finding(s) raised reached a verdict; they are in the ` +
+          `UNRESOLVED section below.`,
+      )
     } else if (record.cancelled) {
       // Models answered and raised nothing, AND the user stopped the run. Both
       // are true and the second is the one that bounds what the first is worth:
@@ -2005,8 +2013,9 @@ export function renderRunRecord(record: RunRecord): string {
   ) {
     lines.push(
       `  THAT TOTAL IS A FLOOR, not a full count: a turn whose usage never reached MAD — one`,
-      `  it stopped waiting on, or one that settled with the host reporting none — still billed,`,
-      `  and that spend is missing here. MAD does not estimate it.`,
+      `  it stopped waiting on, one the host answered with an error or without data, or one that`,
+      `  settled with the host reporting none — may still have billed, and any such spend is`,
+      `  missing here. MAD does not estimate it.`,
     )
   }
   // ...AND HOW MANY, when the ledger knows. The caveat above fires for a stop

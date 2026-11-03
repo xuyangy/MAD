@@ -161,6 +161,10 @@ function failedInFlight(): string {
   )
 }
 
+const HOST_ANSWERED_WITH_ERROR =
+  "the host answered the issued request with an error or without response data, so the " +
+  "provider may have received and billed it, and its usage was never reported"
+
 function timedOutInFlight(ms: number): string {
   return (
     `the turn timed out at its ${ms}ms deadline while in flight, so the request was issued ` +
@@ -1182,12 +1186,17 @@ export class OpencodeModelBackend implements ModelBackend {
       }
     }
 
+    // CAP-7 — AN ERROR ANSWER IS NOT A FREE TURN either, for the thrown
+    // branch's reason above: the prompt was issued, and an error response (or
+    // an answer with no data) does not show that the provider never received
+    // and billed it. The failure and its retry are unchanged.
     if (result.error || !result.data) {
       return {
         ok: false,
         slot,
         failure: "transport-error",
         message: describeError(result.error),
+        usageUnknown: { executionId, why: HOST_ANSWERED_WITH_ERROR },
       }
     }
 
