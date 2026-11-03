@@ -1752,8 +1752,9 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
       const repo = await makeReviewRepo({ dirty: true })
       try {
         const run = await runScenario(repo, { discovery: [FEE_FINDING] })
+        expectClean(run)
         expect(run.result.metadata?.cancelled).toBeUndefined()
-        // A finished report counts billed turns, so only the stop disclosures are checked.
+        // A finished report still states its usage, so only the stop disclosures are checked.
         expect(run.result.output).not.toContain(ISSUED_TURNS_MAY_BILL)
         expect(run.result.output).not.toContain("may still have run and been billed")
         expect(run.result.output).not.toContain(OPENCODE_BILLING_NOTE)

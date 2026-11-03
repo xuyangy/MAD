@@ -327,7 +327,7 @@ export interface RequestMeterPort {
 }
 
 /** Ten minutes: long enough for a slow frontier model on a large diff. */
-const DEFAULT_TURN_TIMEOUT_MS = 600_000
+export const DEFAULT_TURN_TIMEOUT_MS = 600_000
 
 /**
  * Five seconds for a `session.delete`, and the asymmetry with the ten minutes

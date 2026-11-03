@@ -5,9 +5,10 @@
   "type": "module",
   "private": true,
   "license": "Apache-2.0",
-  "main": "adapters/opencode/plugin.ts",
+  "main": "adapters/opencode/entry.ts",
   "exports": {
-    ".": "./adapters/opencode/plugin.ts",
+    ".": "./adapters/opencode/entry.ts",
+    "./server": "./adapters/opencode/entry.ts",
     "./core": "./core/run/review.ts"
   },
   "scripts": {
