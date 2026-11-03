@@ -1359,7 +1359,7 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
       "1 adjudicated after a debate, 1 in verify-independently mode, 1 withdrawn by whoever raised it.",
     )
     expect(rendered).toContain("Verdicts: 1 upheld, 0 ruled invalid, 1 not settled, 1 withdrawn.")
-    expect(rendered).toContain("5 turn(s) requested while judging, each billed once.")
+    expect(rendered).toContain("5 turn(s) requested while judging, one attempt each.")
   })
 
   test("AD-6d — a run the budget stranded says so in the headline, and the buckets still sum", () => {
@@ -1498,7 +1498,7 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
     // 2026-08-28): "5 allocation(s) spent judging. 7 were BILLED" read as seven
     // of the five just named.
     expect(rendered).toContain(
-      "5 turn(s) requested while judging, billed as 7 calls — 2 needed the one retry AD-12 allows.",
+      "5 turn(s) requested while judging, 7 attempt(s) in all — 2 needed the one retry AD-12 allows.",
     )
   })
 

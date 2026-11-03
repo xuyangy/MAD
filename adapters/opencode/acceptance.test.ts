@@ -896,6 +896,334 @@ describe("acceptance — each result state says what happened (CAP-7, part 7a)",
   )
 })
 
+/** The reason an in-flight turn a stop abandoned carries (`model-backend.ts`). */
+const CANCELLED_IN_FLIGHT =
+  "the run was cancelled while this turn was in flight, so the request was issued and its usage was never reported"
+/** The reason an issued prompt the host answered with an error carries (`model-backend.ts`). */
+const HOST_ANSWERED_WITH_ERROR =
+  "the host answered the issued request with an error or without response data, so the provider may have " +
+  "received and billed it, and its usage was never reported"
+
+describe("acceptance — combined result states state each fact and contradict none (CAP-7, part 7b)", () => {
+  const isPoolDiscovery = (p: FakePrompt) =>
+    p.role === undefined && !p.system.includes("The Security Sentinel") && !p.system.includes("The SRE / Reliability Expert")
+
+  test(
+    "DROP-OUT PLUS A USER STOP IN JUDGING: the failure stays named, the stop is the run's, and the stranded finding is the stop's",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      let release: () => void = () => undefined
+      const held = new Promise<void>((resolve) => (release = resolve))
+      try {
+        // gpt-5 fails its discovery turn and its retry; the stop fires when the
+        // judge's fact-check arrives, and that turn is held unanswered.
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            judge: { "fact-check": FEE_FACT_CHECK },
+            failPrompt: (_session, prompt) => prompt.role === undefined && prompt.model === "gpt-5",
+            holdPrompt: (_session, prompt) => {
+              if (prompt.role !== "fact-check") return undefined
+              if (!stop.signal.aborted) recorder.fire(stop)
+              return held
+            },
+          },
+          { abort: stop.signal, recorder },
+        )
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, true)
+        // Both failed gpt-5 attempts were discovery turns, before the fact-check
+        // that fired the stop; the judge starts only after discovery settles.
+        const roles = run.host.prompts.map((p) => p.role ?? null)
+        expect(roles).toEqual([null, null, null, null, "fact-check"])
+        expect(run.host.prompts.slice(0, 4).map((p) => p.model).sort()).toEqual([
+          "claude-sonnet-4-5",
+          "gemini-2.5-pro",
+          "gpt-5",
+          "gpt-5",
+        ])
+        expect(run.result.title).toBe("MAD review — CANCELLED during judge — partial review: 1 finding(s), 2/3 models answered")
+        expect(run.result.metadata?.warnings).toEqual([
+          "provider-fan-out",
+          "model-dropped-out",
+          "denominator-reduced",
+          "usage-unquantified",
+          "unresolved-findings",
+          "usage-unquantified",
+          "run-cancelled",
+        ])
+        const report = run.result.output
+        expect(report).toContain("RUN CANCELLED — you stopped this run during the judge stage.")
+        expect(report).toContain(
+          "MODEL DROPPED OUT: `openai/gpt-5` (slot discovery-2) failed twice (transport-error: UnknownError: fake prompt failure).",
+        )
+        expect(report).toContain("Only 2 of 3 roster model(s) answered. Every co-discovery fraction below is over 2, not over 3 requested.")
+        expect(report).toContain("The warnings report the model failures MAD recorded")
+        expect(report).toContain("RUN CANCELLED DURING JUDGING: 1 finding(s) were still undecided when you stopped the run.")
+        expect(report).toContain("None of the 1 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+        expect(report).toContain("src/pay.ts:1 — died at stage judge (the run was cancelled while it was being judged)")
+        // Unknown usage from both causes, each with its own reason.
+        expect(run.result.metadata?.unknownUsageCount).toBe(3)
+        expect(report).toContain(`USAGE UNQUANTIFIED: 2 discovery turn(s) have usage MAD cannot count (${HOST_ANSWERED_WITH_ERROR})`)
+        expect(report).toContain(`USAGE UNQUANTIFIED: 1 judge turn(s) have usage MAD cannot count (${CANCELLED_IN_FLIGHT})`)
+        expect(report).toContain("3 turns in this run have UNKNOWN usage")
+        expect(report).toContain("1 turn(s) requested while judging, one attempt each.")
+        // The stop is not the budget's.
+        expect(report).not.toContain("BUDGET EXHAUSTED")
+        expect(report).not.toContain("ran out of budget")
+      } finally {
+        release()
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "DROP-OUT PLUS A USER STOP, NO ANSWERS: the stop explains the empty page, and the failure before it is still named",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      let release: () => void = () => undefined
+      const held = new Promise<void>((resolve) => (release = resolve))
+      try {
+        // Five discovery slots (three pool, two lens) and a peak of four. The
+        // first pool slot's turn and its retry fail. Its retry is held until the
+        // other three admitted slots' prompts have reached the host, and those
+        // are held unanswered. The fifth slot can start only when the first
+        // releases its place, so its prompt arriving shows the first slot has
+        // dropped out; the stop fires on it, with four prompts in flight.
+        let othersArrived: () => void = () => undefined
+        const others = new Promise<void>((resolve) => (othersArrived = resolve))
+        let otherPrompts = 0
+        let failingPrompts = 0
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            failPrompt: (_session, prompt) => isPoolDiscovery(prompt) && prompt.model === "claude-sonnet-4-5",
+            holdPrompt: (_session, prompt) => {
+              if (isPoolDiscovery(prompt) && prompt.model === "claude-sonnet-4-5") {
+                return ++failingPrompts === 2 ? others : undefined
+              }
+              if (prompt.system.includes("The SRE / Reliability Expert")) {
+                if (!stop.signal.aborted) recorder.fire(stop)
+              } else if (++otherPrompts === 3) {
+                othersArrived()
+              }
+              return held
+            },
+          },
+          { abort: stop.signal, recorder, args: { lenses: ["security", "reliability"] } },
+        )
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, true)
+        const order = run.host.prompts.map((p) => (isPoolDiscovery(p) ? p.model : p.system.includes("The SRE") ? "reliability" : "security"))
+        // The reliability lens is the last prompt: the first slot's retry was
+        // answered only after the three held prompts arrived, and all six
+        // arrived before the stop. The order of the others is the host's.
+        expect(order).toHaveLength(6)
+        expect(order.at(-1)).toBe("reliability")
+        expect(recorder.beforeStop().filter((event) => event.kind === "host" && /\/message$/.test(event.path ?? ""))).toHaveLength(6)
+        expect([...order].sort()).toEqual(["claude-sonnet-4-5", "claude-sonnet-4-5", "gemini-2.5-pro", "gpt-5", "reliability", "security"])
+        expect(run.result.title).toBe(
+          "MAD review — CANCELLED during discover — partial review: 0 finding(s), 0/3 models answered + 2 lens",
+        )
+        const report = run.result.output
+        expect(report).toContain(
+          "MODEL DROPPED OUT: `anthropic/claude-sonnet-4-5` (slot discovery-1) failed twice (transport-error: UnknownError: fake prompt failure).",
+        )
+        expect(report).toContain("Only 0 of 3 roster model(s) answered. 2 did not answer because the run was cancelled.")
+        expect(report).toContain(
+          "FINDINGS (0)\n  NOTHING WAS EXAMINED — you stopped this run before any model answered.\n" +
+            "  The run stopped during the discover stage.\n" +
+            "  Before the stop, 1 pool slot(s) failed or dropped out; see the warnings above for which models failed and why.",
+        )
+        // The stop, not the providers, emptied the page.
+        expect(report).not.toContain("NO MODEL ANSWERED")
+        expect(report).not.toContain("Every slot in the roster failed")
+        expect(report.match(/MODEL DROPPED OUT/g)).toHaveLength(1)
+        // Two failed attempts and four abandoned turns: six of unknown usage, both reasons named.
+        expect(run.result.metadata?.unknownUsageCount).toBe(6)
+        expect(report).toContain(
+          `USAGE UNQUANTIFIED: 6 discovery turn(s) have usage MAD cannot count (${HOST_ANSWERED_WITH_ERROR}; ${CANCELLED_IN_FLIGHT})`,
+        )
+        expect(report).toContain("TOKENS (OBSERVED) — turns: 0 |")
+      } finally {
+        release()
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "DEGRADED PLUS INCOMPLETE COVERAGE: requested, filled and answered are three counts, and an unfilled slot is no failed model",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const providers = { ...THREE_PROVIDERS, providers: THREE_PROVIDERS.providers.slice(0, 2) }
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          providers,
+          failPrompt: (_session, prompt) => prompt.role === undefined && prompt.model === "gpt-5",
+        })
+        expectClean(run)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 1/3 models answered")
+        expect(run.result.metadata?.warnings).toEqual([
+          "provider-fan-out",
+          "roster-underfilled",
+          "roster-single-lineage",
+          "model-dropped-out",
+          "denominator-reduced",
+          "usage-unquantified",
+        ])
+        const report = run.result.output
+        expect(report).toContain("slots requested: 3 | filled: 2 | answered: 1 | distinct verified lineages: 2")
+        expect(report).toContain("UNDERFILLED ROSTER: 3 discovery slot(s) requested but the host offers only 2 distinct model(s)")
+        expect(report).toContain(
+          "MODEL DROPPED OUT: `openai/gpt-5` (slot discovery-2) failed twice (transport-error: UnknownError: fake prompt failure).",
+        )
+        // The denominator is what answered: not the filled two, not the requested three.
+        expect(report).toContain("Only 1 of 2 roster model(s) answered. Every co-discovery fraction below is over 1, not over 3 requested.")
+        expect(report).toContain("co-discovery: 1/1   verdict: upheld")
+        expect(report.match(/MODEL DROPPED OUT/g)).toHaveLength(1)
+        expect(run.result.metadata?.unknownUsageCount).toBe(2)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "DROP-OUT, UNKNOWN USAGE AND THE BUDGET: known usage exhausts the default budget, the unknown is disclosed, and the finding is the budget's",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      let retried: () => void = () => undefined
+      const retry = new Promise<void>((resolve) => (retried = resolve))
+      let gptPrompts = 0
+      try {
+        // Two answered turns report 250,000 each, past `normal`'s 450,000. The
+        // gpt-5 turn and its retry fail, and both are issued before those two
+        // answer: their answers are held until the retry arrives, so the retry
+        // is admitted against a total of 0.
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          tokens: { input: 200_000, output: 50_000 },
+          failPrompt: (_session, prompt) => prompt.role === undefined && prompt.model === "gpt-5",
+          holdPrompt: (_session, prompt) => {
+            if (prompt.role !== undefined) return undefined
+            if (prompt.model !== "gpt-5") return retry
+            if (++gptPrompts === 2) retried()
+            return undefined
+          },
+        })
+        expectClean(run)
+        expect(run.host.counts.prompt).toBe(4)
+        expect(run.result.metadata?.warnings).toEqual([
+          "provider-fan-out",
+          "model-dropped-out",
+          "denominator-reduced",
+          "usage-unquantified",
+          "unresolved-findings",
+        ])
+        const report = run.result.output
+        expect(report).toContain(
+          "MODEL DROPPED OUT: `openai/gpt-5` (slot discovery-2) failed twice (transport-error: UnknownError: fake prompt failure).",
+        )
+        expect(report).toContain(`USAGE UNQUANTIFIED: 2 discovery turn(s) have usage MAD cannot count (${HOST_ANSWERED_WITH_ERROR})`)
+        expect(report).toContain(`TOKENS (OBSERVED) — turns: 2 | in: 400000 | out: 100000 | reasoning: 0 | cache r/w: 0/0 | spent: 500000 of ${DEFAULT_PLUGIN_BUDGET.normal}`)
+        expect(report).toContain("2 turns in this run have UNKNOWN usage")
+        // The finding is stranded by the counted spend, and says so; the
+        // unknown usage is disclosed but is not given as the reason.
+        expect(report).toContain(
+          `BUDGET EXHAUSTED IN JUDGING: 1 finding(s) were still undecided when the token cap of ${DEFAULT_PLUGIN_BUDGET.normal} was reached.`,
+        )
+        expect(report).toContain(
+          `src/pay.ts:1 — died at stage judge (the token budget (${DEFAULT_PLUGIN_BUDGET.normal}) ran out before judging could start`,
+        )
+        expect(report).toContain("None of the 1 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+        expect(report).not.toContain("cancelled")
+        expectBudgetNote(report, expectedBudgetNote("default", DEFAULT_PLUGIN_BUDGET.normal, { unknownUsage: true }))
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "UNRESOLVED FOR TWO CAUSES IN ONE RUN: debate's budget strands one finding and the user's stop strands the other, each with its own reason",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      let release: () => void = () => undefined
+      const held = new Promise<void>((resolve) => (release = resolve))
+      try {
+        // Three discovery turns of 120,000 total 360,000: past debate's share of
+        // `normal`'s default (292,500), inside the whole cap. The critical
+        // finding is debated at any threshold, so it is stranded at debate's
+        // gate; the medium one goes straight to the judge, whose fact-check is
+        // admitted and held while the stop lands.
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING, { ...NOTES_FINDING, severity: "critical" }],
+            judge: { "fact-check": FEE_FACT_CHECK },
+            tokens: { input: 100_000, output: 20_000 },
+            holdPrompt: (_session, prompt) => {
+              if (prompt.role !== "fact-check") return undefined
+              if (!stop.signal.aborted) recorder.fire(stop)
+              return held
+            },
+          },
+          { abort: stop.signal, recorder },
+        )
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, true)
+        expect(run.host.prompts.map((p) => p.role ?? null)).toEqual([null, null, null, "fact-check"])
+        expect(run.result.metadata?.warnings).toEqual([
+          "provider-fan-out",
+          "unresolved-findings",
+          "unresolved-findings",
+          "usage-unquantified",
+          "run-cancelled",
+        ])
+        const report = run.result.output
+        expect(report).toContain("BUDGET EXHAUSTED IN DEBATE: 1 contested finding(s) were still undecided")
+        expect(report).toContain("RUN CANCELLED DURING JUDGING: 1 finding(s) were still undecided when you stopped the run.")
+        // Each finding carries its own cause.
+        expect(report).toContain(
+          "notes.txt:1 — died at stage debate (debate's share of the token budget (292500 of 450000) ran out before its first round could run",
+        )
+        expect(report).toContain("src/pay.ts:1 — died at stage judge (the run was cancelled while it was being judged)")
+        // The stage summaries count them apart: the budget in debate, the stop in judging.
+        expect(report).toContain("1 finding(s) never reached an exit: the token budget ran out.")
+        expect(report).toContain("1 left undecided when you stopped the run.")
+        expect(report).toContain("1 finding(s) were left undecided because the run was cancelled")
+        expect(report).not.toContain("ran out of budget before a verdict")
+        expect(report).toContain("None of the 2 finding(s) raised reached a verdict; they are in the UNRESOLVED section below.")
+        expect(report).toContain("UNRESOLVED — YOU DECIDE (2)")
+      } finally {
+        release()
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
 describe("acceptance — option-shaped targets and configured filters are refused before anything runs (CAP-2)", () => {
   test(
     "an option-shaped target: refused, no file written, no git process, no host request, nothing changed",
@@ -1161,6 +1489,17 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         expect(run.result.output).not.toContain("No model failed")
         expect(run.result.output).not.toContain("you stopped")
         expect(run.result.metadata?.warnings).toContain("model-dropped-out")
+        // CAP-7 — the failure is named beside MAD's own stop, not erased by it.
+        expect(run.result.output).toMatch(
+          /MODEL DROPPED OUT: `[^`]+` \(slot discovery-\d\) failed twice \(transport-error: UnknownError: fake prompt failure\)\./,
+        )
+        expect(run.result.output).toContain("Only 2 of 3 roster model(s) answered.")
+        // The judge's session was created (the sixth) and never prompted: the
+        // summary counts an attempt, and claims no prompt and no bill for it.
+        expect(run.host.counts.create).toBe(6)
+        expect(run.host.prompts.some((p) => p.role !== undefined)).toBe(false)
+        expect(run.result.output).toContain("1 turn(s) requested while judging, one attempt each.")
+        expect(run.result.output).toContain("MAD never prompted the session whose rules differed")
       } finally {
         await repo.remove()
       }
@@ -2499,6 +2838,11 @@ describe("acceptance — CAP-5 integration: nothing starts after the stop is obs
         expect(run.result.metadata?.cancelled).toBe("judge")
         expect(run.result.output).toContain("RUN CANCELLED — you stopped this run during the judge stage.")
         expect(run.result.output).toContain("notes.txt:1 — died at stage judge (the run was cancelled before it could be judged)")
+        // CAP-7 — the fact-check in flight is a turn of unknown usage.
+        expect(run.result.metadata?.unknownUsageCount).toBe(1)
+        expect(run.result.output).toContain(`USAGE UNQUANTIFIED: 1 judge turn(s) have usage MAD cannot count (${CANCELLED_IN_FLIGHT})`)
+        expect(run.result.output).toContain("1 turn in this run has UNKNOWN usage, so the TOKENS figure is OBSERVED spend")
+        expect(run.result.output).toContain("1 turn(s) requested while judging, one attempt each.")
         expect(run.host.counts.abort).toBe(0)
         expectStopClaims(run.result, true)
       } finally {

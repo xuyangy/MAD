@@ -892,14 +892,18 @@ function judgeSummary(record: RunRecord): string[] {
 
   // WORDED SO THE TWO NUMBERS CANNOT BE READ AS ONE SET (code review
   // 2026-08-28). "5 allocation(s) spent judging. 7 were BILLED" reads as seven of
-  // the five just named. They are a request count and a billing count, and the
-  // retry is what separates them.
+  // the five just named. They are a count of logical turns and a count of
+  // backend attempts, and the retry is what separates them. ATTEMPTS, neither
+  // billed nor issued (CAP-7): an attempt can end before any prompt reaches the
+  // host (a failed session create, a session whose rules differ, a stop during
+  // the create), and one whose usage is unknown may or may not have been
+  // billed, which the usage-unquantified warning says.
   lines.push(
     `  ${counts.turns} turn(s) requested while judging` +
       (counts.attempts > counts.turns
-        ? `, billed as ${counts.attempts} calls — ${counts.attempts - counts.turns} needed the ` +
+        ? `, ${counts.attempts} attempt(s) in all — ${counts.attempts - counts.turns} needed the ` +
           `one retry AD-12 allows.`
-        : `, each billed once.`),
+        : `, one attempt each.`),
   )
   lines.push("")
   return lines
