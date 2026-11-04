@@ -17,7 +17,7 @@ MAD is a private TypeScript checkout. It is not published to npm.
 
 The entry module exports only the plugin because the host calls every export of a plugin module as a plugin. MAD's own code imports from `adapters/opencode/plugin.ts`.
 
-To register it with OpenCode 1.19.3, a person (not MAD) would do two things:
+To register it with OpenCode 1.19.5, a person (not MAD) would do two things:
 
 1. Install the checkout's dependencies, from the checkout's root:
 
@@ -34,7 +34,8 @@ To register it with OpenCode 1.19.3, a person (not MAD) would do two things:
 What this rests on, and what it does not:
 - **What was read.** The opencode-ai 1.19.3 bundle was read, not run. From it: the config locations above; that a server plugin is taken from a package's `exports["./server"]` or its `main`; that every export of that module is called as a plugin; and how the review-session policy below is evaluated.
 - **Where the `file://` form comes from.** It is the form this repository's own managed test host uses to load a local plugin package (`ablation/managed-host.ts`).
-- **What is untested.** Registering MAD itself this way has not been run by any test here. Other host versions are unverified.
+- **What was verified.** Registration was verified by hand on opencode-ai 1.19.5: `opencode serve`, started with `OPENCODE_CONFIG` naming a file that holds only the `file://` entry above, loaded MAD and listed `mad_review` among its tools. That check ran no review and no model.
+- **What is untested.** No test here runs that registration, and no review has been run through a live host. Other host versions are unverified.
 - **What the repository does not do.** Nothing in it installs, registers or starts MAD in your host.
 
 ## Using `mad_review`

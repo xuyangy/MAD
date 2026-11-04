@@ -31,8 +31,8 @@
     "oauth-pilot": "bun run scripts/oauth-pilot.ts"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.18",
-    "@opencode-ai/sdk": "1.18.18",
+    "@opencode-ai/plugin": "1.19.5",
+    "@opencode-ai/sdk": "1.19.5",
     "zod": "4.4.3"
   },
   "devDependencies": {
