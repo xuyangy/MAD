@@ -12,7 +12,7 @@ import type { LensSlot, Roster } from "../../core/domain/roster.ts"
 import { lineageOf, normalizeModelIdentity } from "../../core/domain/lineage.ts"
 import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../../core/instructions/coding/discovery.ts"
 import type { RequestAdmission } from "../../core/ports/admission.ts"
-import { selectRoster } from "../../core/roster/select.ts"
+import { selectRoster, type Pin } from "../../core/roster/select.ts"
 import { discover } from "../../core/stages/discover.ts"
 import { candidate, fakeAdmission, fakeClock } from "../../core/test-support/fakes.ts"
 import { createTurnRecorder } from "./artifacts.ts"
@@ -72,11 +72,17 @@ interface RunOptions {
   cap?: number
   admission?: RequestAdmission
   signal?: AbortSignal
+  pins?: Pin[]
   wrap?: (backend: OpencodeModelBackend) => import("../../core/ports/model-backend.ts").ModelBackend
 }
 
 async function run(options: RunOptions) {
-  const selected = selectRoster(options.candidates, { slots: options.slots, providerConfigKey: "provider", requireToolcall: true })
+  const selected = selectRoster(options.candidates, {
+    slots: options.slots,
+    providerConfigKey: "provider",
+    requireToolcall: true,
+    ...(options.pins === undefined ? {} : { pins: options.pins }),
+  })
   const roster: Roster = { ...selected.roster, lensSlots: options.lensSlots ?? selected.roster.lensSlots }
   const host = scriptedHost(options.script)
   const backend = new OpencodeModelBackend({
@@ -125,6 +131,7 @@ describe("discovery recovery over the real backend", () => {
       refused: [{ slot: gitlab.slot, refusal: expect.objectContaining({ kind: "payment", scope: "provider" }) }],
       replacements: [{ from: gitlab.slot, to: result.plan.candidates[0]!, dispatched: 1, answered: true }],
       notReplaced: [],
+      answeredLineages: 3,
     })
     expect(discovered.findings.map((finding) => finding.author)).toEqual(["discovery-r1"])
     expect(rowOf(gitlab.slot)!.message).toEndWith("It was replaced by slot discovery-r1.")
@@ -200,7 +207,7 @@ describe("discovery recovery over the real backend", () => {
     expect(result.discovered.recovery!.replacements[0]!.to.providerId).toBe("xai")
   })
 
-  test("no unused route: not replaced, and the drop-out row says why", async () => {
+  test("no model outside the pool: not replaced, and the drop-out row says why", async () => {
     const result = await run({
       candidates: POOL,
       slots: 3,
@@ -209,7 +216,7 @@ describe("discovery recovery over the real backend", () => {
     const gitlab = result.roster.slots.find((slot) => slot.providerId === "gitlab")!
     expect(result.discovered.recovery!.notReplaced).toEqual([{ from: gitlab.slot, reason: "no-candidate" }])
     expect(result.rowOf(gitlab.slot)!.message).toEndWith(
-      "It was not replaced: the host offers no unused model on a provider or route that was not refused.",
+      "It was not replaced: the host offers no model outside the pool on a provider or route that was not refused.",
     )
     expect(result.discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
   })
@@ -232,7 +239,14 @@ describe("discovery recovery over the real backend", () => {
       stopOnUnknownUsage: true,
       script: (route) => (route.startsWith("gitlab/") ? GITLAB_REFUSAL : NOTHING_FOUND),
     })
-    expect(result.discovered.recovery!.notReplaced).toEqual([expect.objectContaining({ reason: "budget" })])
+    // The cause is the unknown-usage stop, not the ceiling: no cap was set.
+    expect(result.discovered.recovery!.notReplaced).toEqual([expect.objectContaining({ reason: "unknown-usage" })])
+    const gitlab = result.roster.slots.find((slot) => slot.providerId === "gitlab")!
+    expect(result.rowOf(gitlab.slot)!.message).toEndWith(
+      "It was not replaced: the unknown-usage stop refused the replacement's turn before it was dispatched, " +
+        "because an earlier turn's usage was not reported.",
+    )
+    expect(result.rowOf(gitlab.slot)!.message).not.toContain("the budget refused the replacement")
     expect(result.discovered.recovery!.replacements).toEqual([])
     expect(result.prompts.some((route) => route.startsWith("xai/"))).toBe(false)
     // No trace of the reserve slot outside the original's not-replaced cause.
@@ -421,6 +435,135 @@ describe("discovery recovery — stops and limits around round 2", () => {
   })
 })
 
+describe("discovery recovery — pins, lineage and route scope", () => {
+  const FIVE = [
+    candidate("openai", "gpt-5"),
+    candidate("anthropic", "claude-sonnet-4-5"),
+    candidate("google", "gemini-2.5-pro"),
+    candidate("xai", "grok-4"),
+    candidate("mistral", "mistral-large"),
+  ]
+
+  test("a refused PINNED slot is not replaced, and says so; a refused ranked slot in the same run is", async () => {
+    const result = await run({
+      candidates: FIVE,
+      slots: 3,
+      pins: [{ providerId: "openai", modelId: "gpt-5" }],
+      script: (route) => (route === "openai/gpt-5" || route.startsWith("google/") ? PAYMENT_402 : NOTHING_FOUND),
+    })
+    const pinned = result.roster.slots[0]!
+    const ranked = result.roster.slots.find((slot) => slot.providerId === "google")!
+    expect(`${pinned.providerId}/${pinned.modelId}`).toBe("openai/gpt-5")
+    expect(result.plan.pinned).toEqual([pinned.slot])
+    expect(result.discovered.recovery!.notReplaced).toEqual([{ from: pinned.slot, reason: "pinned", detail: "openai/gpt-5" }])
+    expect(result.discovered.recovery!.replacements.map((replacement) => replacement.from)).toEqual([ranked.slot])
+    expect(result.rowOf(pinned.slot)!.message).toEndWith(
+      "It was not replaced: the slot was pinned to `openai/gpt-5`, and MAD does not put a model or provider the pin did not name in its place.",
+    )
+    expect(result.rowOf(pinned.slot)!.detail).toMatchObject({ recovery: { notReplaced: "pinned" } })
+    // One replacement turn, for the ranked slot only.
+    expect(result.prompts.filter((route) => route.startsWith("xai/") || route.startsWith("mistral/"))).toHaveLength(1)
+  })
+
+  test("a pin the host does not offer protects nothing: the slot ranking backfilled is replaced", async () => {
+    const result = await run({
+      candidates: FIVE,
+      slots: 3,
+      pins: [{ providerId: "openai", modelId: "gpt-9" }],
+      script: (route) => (route === "openai/gpt-5" ? PAYMENT_402 : NOTHING_FOUND),
+    })
+    const refused = result.roster.slots.find((slot) => slot.providerId === "openai")!
+    expect(result.plan.pinned).toEqual([])
+    expect(result.discovered.recovery!.notReplaced).toEqual([])
+    expect(result.discovered.recovery!.replacements.map((replacement) => replacement.from)).toEqual([refused.slot])
+  })
+
+  test("allocation prefers a lineage the answered pool and earlier allocations lack, over the plan's order", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("anthropic", "claude-opus-4-1"),
+        candidate("openai", "gpt-5-mini"),
+        candidate("google", "gemini-2.5-flash"),
+      ],
+      slots: 3,
+      // Route-scope refusals: the same providers' other models stay eligible.
+      script: (route) => (route === "openai/gpt-5" || route === "google/gemini-2.5-pro" ? PAYMENT_402 : NOTHING_FOUND),
+    })
+    // The plan lists the Claude model first; neither refused slot takes it.
+    expect(result.plan.candidates.map((route) => `${route.slot}=${route.modelId}`)).toEqual([
+      "discovery-r1=claude-opus-4-1",
+      "discovery-r2=gpt-5-mini",
+      "discovery-r3=gemini-2.5-flash",
+    ])
+    expect(
+      result.discovered.recovery!.replacements.map((replacement) => `${replacement.from}->${replacement.to.slot}`),
+    ).toEqual(["discovery-2->discovery-r2", "discovery-3->discovery-r3"])
+    expect(result.discovered.recovery!.answeredLineages).toBe(3)
+    expect(result.discovered.warnings.some((w) => w.code === "answered-lineages-reduced")).toBe(false)
+  })
+
+  test("a replacement that can only repeat a held lineage is dispatched, and the narrower answered pool is reported", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("anthropic", "claude-opus-4-1"),
+      ],
+      slots: 3,
+      script: (route) => (route === "openai/gpt-5" ? PAYMENT_402 : NOTHING_FOUND),
+    })
+    const { discovered } = result
+    expect(discovered.answered).toBe(3)
+    expect(discovered.recovery!.replacements).toEqual([
+      expect.objectContaining({ from: "discovery-2", to: expect.objectContaining({ modelId: "claude-opus-4-1" }), answered: true }),
+    ])
+    expect(result.roster.distinctLineages).toBe(3)
+    expect(discovered.recovery!.answeredLineages).toBe(2)
+    const reduced = discovered.warnings.find((w) => w.code === "answered-lineages-reduced")!
+    expect(reduced.stage).toBe("discover")
+    expect(reduced.message).toContain(
+      "FEWER LINEAGES ANSWERED: the initial selection held 3 distinct verified lineage(s), but the pool that " +
+        "answered discovery after recovery holds 2 (Claude (Anthropic), Gemini (Google)).",
+    )
+    expect(reduced.detail).toEqual({ initialLineages: 3, answeredLineages: 2, lineages: ["claude", "gemini"], replacements: 1 })
+  })
+
+  test("a lens slot's ROUTE-scope refusal excludes only that route: another model on its provider replaces", async () => {
+    const lens: LensSlot = {
+      slot: "discovery-lens-security",
+      lens: "security",
+      providerId: "q",
+      modelId: "codestral-latest",
+      identity: normalizeModelIdentity("codestral-latest"),
+      lineage: lineageOf("codestral-latest"),
+      toolcall: true,
+      alsoAvailableVia: [],
+    }
+    const AUTH_401 = { error: { name: "APIError", data: { statusCode: 401, isRetryable: false } }, tokens: ZERO }
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("q", "codestral-latest"),
+        candidate("q", "mistral-large"),
+      ],
+      slots: 2,
+      lensSlots: [lens],
+      script: (route) => (route === "openai/gpt-5" ? PAYMENT_402 : route === "q/codestral-latest" ? AUTH_401 : NOTHING_FOUND),
+    })
+    // The lens's refused route is the plan's first candidate.
+    expect(`${result.plan.candidates[0]!.providerId}/${result.plan.candidates[0]!.modelId}`).toBe("q/codestral-latest")
+    const replacement = result.discovered.recovery!.replacements[0]!
+    expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("q/mistral-large")
+    // The refused route was prompted once, by the lens, and never as a replacement.
+    expect(result.prompts.filter((route) => route === "q/codestral-latest")).toHaveLength(1)
+  })
+})
+
 describe("an inconsistent recovery plan", () => {
   test("is refused before any turn is dispatched", async () => {
     const selected = selectRoster([...POOL, candidate("xai", "grok-4")], { slots: 3, providerConfigKey: "provider", requireToolcall: true })
@@ -430,7 +573,7 @@ describe("an inconsistent recovery plan", () => {
       slots: [...selected.roster.slots, ...selected.recovery.candidates],
       client: host.client as never,
     })
-    const colliding = { candidates: [{ ...selected.recovery.candidates[0]!, slot: selected.roster.slots[0]!.slot }] }
+    const colliding = { candidates: [{ ...selected.recovery.candidates[0]!, slot: selected.roster.slots[0]!.slot }], pinned: [] }
     await expect(
       discover({
         roster: selected.roster,

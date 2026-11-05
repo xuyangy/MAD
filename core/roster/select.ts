@@ -25,7 +25,11 @@
  * has no `pinned` field and `Roster` has no third collection — which is how the
  * "the user asked for it" suppression AD-4's amendment forbids is prevented:
  * there is no flag for such a branch to read, so writing one would mean adding
- * the field first, in a diff a reviewer can see.
+ * the field first, in a diff a reviewer can see. The one exception is
+ * recovery: `SelectResult.recovery.pinned` lists the slot ids a pin filled, so
+ * discovery does not replace a refused pinned model with one the pin did not
+ * name. That list is outside `Roster`, is never persisted, and no roster or
+ * lineage report reads it.
  *
  * Getting the order wrong is the single most damaging thing this system can do:
  * every co-discovery number downstream inherits the error.
@@ -223,8 +227,10 @@ export interface PinResolution {
 
 /**
  * What step 0 produced. It NEVER ESCAPES `selectRoster`'s body — nothing on
- * `Roster`, `RosterSlot` or `SelectResult` carries it — which is the property
- * that keeps a pinned slot indistinguishable from a ranked one downstream.
+ * `Roster` or `RosterSlot` carries it — which is the property that keeps a
+ * pinned slot indistinguishable from a ranked one in every roster report. Only
+ * the ids of the slots the pins filled leave, in `RecoveryPlan.pinned`, for
+ * recovery alone.
  */
 export interface PinnedStep {
   /** The entries the pins claimed, in pin order. At most `slots` of them. */
@@ -447,16 +453,19 @@ function requireCapability(deduped: readonly Deduped[], candidates: readonly Can
   for (const entry of deduped) {
     const offerings = byIdentity.get(entry.identity) ?? [entry.candidate]
     // One representative per provider, in the order providers first appear:
-    // its first capable offering, else its first offering.
+    // its first capable offering, else its first offering. Providers are
+    // grouped case-insensitively, as `routeKey` and pins compare them; the
+    // representative keeps the host's own provider id for dispatch.
     const representatives = new Map<string, Candidate>()
     for (const offering of offerings) {
-      const current = representatives.get(offering.providerId)
+      const key = offering.providerId.toLowerCase()
+      const current = representatives.get(key)
       if (current === undefined || (!current.toolcall && offering.toolcall)) {
-        representatives.set(offering.providerId, offering)
+        representatives.set(key, offering)
       }
     }
-    for (const [provider, representative] of representatives) {
-      if (!representative.toolcall) ineligibleRoutes.add(routeKey(entry.identity, provider))
+    for (const representative of representatives.values()) {
+      if (!representative.toolcall) ineligibleRoutes.add(routeKey(entry.identity, representative.providerId))
     }
     if (offerings.every((offering) => offering.toolcall)) {
       eligible.push(entry)
@@ -471,7 +480,9 @@ function requireCapability(deduped: readonly Deduped[], candidates: readonly Can
     eligible.push({
       candidate: capable,
       identity: entry.identity,
-      alsoAvailableVia: variants.map((variant) => variant.providerId).filter((provider) => provider !== capable.providerId),
+      alsoAvailableVia: variants
+        .map((variant) => variant.providerId)
+        .filter((provider) => provider.toLowerCase() !== capable.providerId.toLowerCase()),
       variants,
     })
   }
@@ -569,12 +580,17 @@ export function rankByDiversity(
  * other providers in host order. Under `requireToolcall` only capable routes
  * are listed. Each route is bound to a fixed slot id `<prefix>-r<k>`, numbered
  * in that order, so a backend can be built with every id a replacement could use.
+ * Discovery reorders the eligible routes at allocation time to prefer a fresh
+ * lineage; the ids stay these.
+ *
+ * `pinned` names the pool slots a pin filled, which recovery never replaces.
  */
 function recoveryPlan(
   deduped: readonly Deduped[],
   pool: readonly Deduped[],
   requireToolcall: boolean,
   slotPrefix: string,
+  pinned: readonly string[],
 ): RecoveryPlan {
   const poolIdentities = new Set(pool.map((entry) => entry.identity))
   const poolLineages = new Set(
@@ -586,7 +602,9 @@ function recoveryPlan(
   const reserve = deduped.filter((entry) => !poolIdentities.has(entry.identity))
   const candidates: RecoveryCandidate[] = []
   for (const entry of rankByDiversity(reserve, reserve.length, poolLineages)) {
-    const others = (entry.variants ?? []).filter((variant) => variant.providerId !== entry.candidate.providerId)
+    const others = (entry.variants ?? []).filter(
+      (variant) => variant.providerId.toLowerCase() !== entry.candidate.providerId.toLowerCase(),
+    )
     for (const route of [entry.candidate, ...others]) {
       if (requireToolcall && !route.toolcall) continue
       candidates.push({
@@ -600,14 +618,15 @@ function recoveryPlan(
       })
     }
   }
-  return { candidates }
+  return { candidates, pinned }
 }
 
 /**
  * The lineage count, and the ONLY function that produces one (AD-4, AD-5).
  *
- * It takes `RosterSlot[]` and is called with `roster.slots` and nothing else.
- * `LensSlot` structurally extends `RosterSlot`, so a caller COULD hand it lens
+ * It takes `RosterSlot[]` and is called with pool slots and nothing else:
+ * `roster.slots` here, and in `core/stages/discover.ts` the pool that answered
+ * after recovery (answered originals and answered replacements). `LensSlot` structurally extends `RosterSlot`, so a caller COULD hand it lens
  * slots — which is exactly why AD-4's amendment puts them in a separate
  * collection: there is no array anywhere in the tree that holds both, so the
  * lens slots have no route into this count. That is what "by construction"
@@ -1002,5 +1021,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     })
   }
 
-  return { roster, warnings, recovery: recoveryPlan(deduped, picked, requireToolcall, slotPrefix) }
+  // The pins fill the first slots, in pin order, so the honoured pins are the
+  // first `pinning.filled.length` slot ids.
+  const pinnedSlots = rosterSlots.slice(0, pinning.filled.length).map((slot) => slot.slot)
+  return { roster, warnings, recovery: recoveryPlan(deduped, picked, requireToolcall, slotPrefix, pinnedSlots) }
 }

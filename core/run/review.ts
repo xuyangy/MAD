@@ -593,32 +593,39 @@ export type ContinueDeps = Pick<
 const continued = new WeakSet<RunRecord>()
 
 /**
- * One destination row for the whole run. When a dispatched replacement sent the
- * change to a provider the initial selection did not, the roster's
- * `provider-fan-out` disclosure is rewritten from `executionProviders`, listing
- * the replacement models beside the initial ones and naming the added
- * providers. Otherwise it is left exactly as selection wrote it.
+ * One destination row for the whole run. When discovery dispatched a
+ * replacement, the roster's `provider-fan-out` disclosure is rewritten from
+ * `executionProviders`: the models are the initial pool and lens slots, as
+ * selection lists them, then each dispatched replacement, and any provider a
+ * replacement added is named. A recovery route no replacement used is never
+ * listed. When the run has no such row, one is added. With no replacement the
+ * row is left exactly as selection wrote it.
  */
 function discloseAddedDestinations(record: RunRecord): void {
+  const replacements = replacementsOf(record)
+  if (replacements.length === 0) return
   const providers = executionProviders(record)
   const added = providers.filter((provider) => !record.roster.providers.includes(provider))
-  if (added.length === 0) return
+  const models = [
+    ...record.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`),
+    ...record.roster.lensSlots.map((slot) => `${slot.providerId}/${slot.modelId} (lens ${slot.lens})`),
+    ...replacements.map(
+      (replacement) => `${replacement.to.providerId}/${replacement.to.modelId} (replacement for ${replacement.from})`,
+    ),
+  ]
   const index = record.warnings.findIndex((warning) => warning.code === "provider-fan-out" && warning.stage === "roster")
-  if (index === -1) return
-  const initial = record.warnings[index]!
-  const initialModels = Array.isArray(initial.detail?.models) ? (initial.detail.models as string[]) : []
-  const replacementModels = replacementsOf(record).map(
-    (replacement) => `${replacement.to.providerId}/${replacement.to.modelId} (replacement for ${replacement.from})`,
-  )
-  const models = [...initialModels, ...replacementModels]
-  record.warnings[index] = {
+  const initial: Warning =
+    index === -1 ? { code: "provider-fan-out", stage: "roster", message: "" } : record.warnings[index]!
+  const row: Warning = {
     ...initial,
     message:
       `This review sends the change to ${providers.length} provider(s): ${providers.join(", ")}. ` +
-      `Models: ${models.join(", ")}. Including ${added.join(", ")}, added when discovery replaced a ` +
-      `refused model.`,
-    detail: { ...initial.detail, providers, models, added },
+      `Models: ${models.join(", ")}.` +
+      (added.length > 0 ? ` Including ${added.join(", ")}, added when discovery replaced a refused model.` : ""),
+    detail: { ...initial.detail, providers, models, ...(added.length > 0 ? { added } : {}) },
   }
+  if (index === -1) record.warnings.push(row)
+  else record.warnings[index] = row
 }
 
 export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {

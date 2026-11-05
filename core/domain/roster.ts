@@ -146,11 +146,21 @@ export type RecoveryCandidate = RosterSlot
 
 /**
  * Every route selection would replace a refused discovery slot with, in the
- * order it would try them. Held in memory by the caller that built the backend
- * with these bindings; never persisted and never rendered.
+ * order it would try them, and the pool slots recovery must leave alone. Held
+ * in memory by the caller that built the backend with these bindings; never
+ * persisted and never rendered.
  */
 export interface RecoveryPlan {
   candidates: readonly RecoveryCandidate[]
+  /**
+   * The pool slots a caller's pin filled, by slot id. A refused pinned slot is
+   * not replaced: the user named that model through that provider, and each
+   * provider is its own sign-in and spend authorization, so no route the pin
+   * did not name takes its place. A slot ranking filled, including one a missed
+   * pin fell through to, is not listed. Recovery is the only reader: lineage
+   * counting and every roster report stay blind to it.
+   */
+  pinned: readonly string[]
 }
 
 export function modelNameOf(roster: Roster, slot: string): string {

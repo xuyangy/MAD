@@ -4,7 +4,7 @@ import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts
 import { DISCLOSURE_CODES, hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { recordTurn, recordUnknownTurn, type RunRecord } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { ModelBackend } from "../ports/model-backend.ts"
+import type { ModelBackend, Refusal } from "../ports/model-backend.ts"
 import type { ToolObservation } from "../ports/tool-observation.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { selectRoster } from "../roster/select.ts"
@@ -3453,10 +3453,10 @@ describe("review — a host abort beside other causes keeps every cause (ledger 
 })
 
 /**
- * Discovery recovery's representation (2b-ii). Nothing in the pipeline produces
- * a replacement yet, so each test records one by hand on a prepared review and
- * checks that the later stages, the report and a checkpoint fork carry it,
- * while `record.roster` stays the initial selection.
+ * A replacement recorded by hand on a prepared review: the later stages, the
+ * report and a checkpoint fork carry it, while `record.roster` stays the
+ * initial selection. The describe block after this one produces the
+ * replacement through discovery itself.
  */
 describe("review — a recorded replacement reaches the later stages and the report", () => {
   function setup() {
@@ -3487,6 +3487,7 @@ describe("review — a recorded replacement reaches the later stages and the rep
       ],
       replacements: [{ from: from.slot, to: route, dispatched: 1, answered: true }],
       notReplaced: [],
+      answeredLineages: 3,
     }
     prepared.answeredSlots = prepared.answeredSlots.filter((slot) => slot !== from.slot).concat(route.slot)
     return from
@@ -3544,6 +3545,7 @@ describe("review — a recorded replacement reaches the later stages and the rep
       ],
       replacements: [{ from: replaced.slot, to: route, dispatched: 1, answered: true }],
       notReplaced: [],
+      answeredLineages: 3,
     }
     // The author and the replacement are the only eligible seats.
     prepared.answeredSlots = ["discovery-1", route.slot]
@@ -3609,5 +3611,143 @@ describe("review — a recorded replacement reaches the later stages and the rep
     expect(b!.record.recovery).toEqual(prepared.record.recovery)
     a!.record.recovery!.replacements[0]!.answered = false
     expect(b!.record.recovery!.replacements[0]!.answered).toBe(true)
+  })
+})
+
+describe("review — replacements discovery produced reach debate, the judge and the destination row", () => {
+  const refusalFor = (slot: { providerId: string; modelId: string }): Refusal => ({
+    kind: "payment",
+    basis: "structured",
+    scope: "route",
+    providerId: slot.providerId,
+    modelId: slot.modelId,
+  })
+  const refusedTurn = (slot: { providerId: string; modelId: string }): SlotStep => ({
+    kind: "fail",
+    failure: "model-error",
+    refusal: refusalFor(slot),
+  })
+  const NOTHING: SlotStep = { kind: "ok", value: { findings: [] } }
+
+  test("a refused slot's replacement is seated in debate and runs the fact-check; the refused original is never asked again", async () => {
+    const resolved = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+        candidate("mistral", "mistral-large"),
+      ],
+      { slots: 3, providerConfigKey: "provider" },
+    )
+    const [first, second, third] = resolved.roster.slots
+    const [r1, r2] = resolved.recovery.candidates
+    const backend = new FakeBackend(
+      {
+        [first!.slot]: [refusedTurn(first!)],
+        // The only author: 1/3 co-discovery sends its finding to debate.
+        [second!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+        [third!.slot]: [refusedTurn(third!)],
+        [r1!.slot]: [NOTHING, DEBATE_ABSTENTION],
+        [r2!.slot]: [NOTHING, DEBATE_ABSTENTION],
+      },
+      // The first replacement is the only tool-capable slot left eligible, so
+      // the fact-check can only go to it.
+      { [second!.slot]: false, [r2!.slot]: false },
+    )
+
+    const { record } = await review({
+      roster: resolved.roster,
+      recovery: resolved.recovery,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.recovery!.replacements.map((replacement) => [replacement.from, replacement.to.slot, replacement.answered])).toEqual([
+      [first!.slot, r1!.slot, true],
+      [third!.slot, r2!.slot, true],
+    ])
+    expect(record.answered).toBe(3)
+    expect(record.findings.some((finding) => finding.route === "debate")).toBe(true)
+    // Debate: the replacement's second turn on its own slot is a debate turn.
+    expect(backend.calls).toContainEqual({ slot: r1!.slot, attempt: 2 })
+    // Judge: the fact-check is seated on the replacement.
+    expect(backend.calls).toContainEqual({ slot: r1!.slot, attempt: 1, role: "fact-check" })
+    // The refused originals were asked once, in discovery, and never again.
+    expect(backend.calls.filter((call) => call.slot === first!.slot)).toEqual([{ slot: first!.slot, attempt: 1 }])
+    expect(backend.calls.filter((call) => call.slot === third!.slot)).toEqual([{ slot: third!.slot, attempt: 1 }])
+  })
+
+  test("a replacement on a provider already in the run is listed in the destination row, lens destinations kept, no provider claimed added", async () => {
+    const resolved = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5"), candidate("openai", "gpt-5-mini")],
+      { slots: 2, lenses: ["security"], providerConfigKey: "provider" },
+    )
+    const refused = resolved.roster.slots.find((slot) => slot.modelId === "gpt-5")!
+    const route = resolved.recovery.candidates[0]!
+    const lens = resolved.roster.lensSlots[0]!
+    expect(`${route.providerId}/${route.modelId}`).toBe("openai/gpt-5-mini")
+    const scripts: Record<string, SlotScript> = {
+      [refused.slot]: [refusedTurn(refused)],
+      [lens.slot]: [NOTHING],
+      [route.slot]: [NOTHING],
+    }
+    for (const slot of resolved.roster.slots) scripts[slot.slot] ??= [NOTHING]
+
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      recovery: resolved.recovery,
+      backend: new FakeBackend(scripts),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    const rows = record.warnings.filter((warning) => warning.code === "provider-fan-out")
+    expect(rows).toHaveLength(1)
+    const models = [
+      ...resolved.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`),
+      `${lens.providerId}/${lens.modelId} (lens security)`,
+      `openai/gpt-5-mini (replacement for ${refused.slot})`,
+    ]
+    expect(rows[0]!.message).toBe(
+      `This review sends the change to 2 provider(s): anthropic, openai. Models: ${models.join(", ")}.`,
+    )
+    expect(rows[0]!.detail).toMatchObject({ providers: ["anthropic", "openai"], models })
+    expect(rows[0]!.detail).not.toHaveProperty("added")
+    expect(rendered).not.toContain("Including")
+    // The route the replacement did not need is never named as a destination.
+    expect(resolved.recovery.candidates).toHaveLength(1)
+  })
+
+  test("with no destination row from selection, one is added for the replacement", async () => {
+    const resolved = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5"), candidate("xai", "grok-4")],
+      { slots: 2, providerConfigKey: "provider" },
+    )
+    const refused = resolved.roster.slots.find((slot) => slot.modelId === "gpt-5")!
+    const route = resolved.recovery.candidates[0]!
+    const scripts: Record<string, SlotScript> = { [refused.slot]: [refusedTurn(refused)], [route.slot]: [NOTHING] }
+    for (const slot of resolved.roster.slots) scripts[slot.slot] ??= [NOTHING]
+
+    // No `priorWarnings`: selection's disclosure never reached the run.
+    const { record } = await review({
+      roster: resolved.roster,
+      recovery: resolved.recovery,
+      backend: new FakeBackend(scripts),
+      clock: fakeClock(),
+      change: fakeChange(),
+    })
+
+    const rows = record.warnings.filter((warning) => warning.code === "provider-fan-out")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.stage).toBe("roster")
+    expect(rows[0]!.message).toBe(
+      `This review sends the change to 3 provider(s): anthropic, openai, xai. Models: anthropic/claude-sonnet-4-5, ` +
+        `openai/gpt-5, xai/grok-4 (replacement for ${refused.slot}). Including xai, added when discovery replaced a refused model.`,
+    )
+    expect(rows[0]!.detail).toMatchObject({ added: ["xai"] })
   })
 })

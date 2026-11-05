@@ -1384,5 +1384,51 @@ describe("the recovery plan", () => {
   test("a host whose models all fill the pool has an empty plan", () => {
     const { recovery } = selectRoster([candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")], { ...OPTS, slots: 2 })
     expect(recovery.candidates).toEqual([])
+    expect(recovery.pinned).toEqual([])
+  })
+
+  test("names the slots honoured pins filled, and no slot ranking filled", () => {
+    const candidates = [
+      candidate("anthropic", "claude-sonnet-4-5"),
+      candidate("openai", "gpt-5"),
+      candidate("google", "gemini-2.5-pro"),
+    ]
+    const honoured = selectRoster(candidates, {
+      ...OPTS,
+      slots: 3,
+      pins: [
+        { providerId: "google", modelId: "gemini-2.5-pro" },
+        { providerId: "openai", modelId: "gpt-5" },
+      ],
+    })
+    expect(honoured.roster.slots.slice(0, 2).map((slot) => slot.modelId)).toEqual(["gemini-2.5-pro", "gpt-5"])
+    expect(honoured.recovery.pinned).toEqual(["discovery-1", "discovery-2"])
+    // A pin the host does not offer falls through to ranking; its slot is not pinned.
+    const missed = selectRoster(candidates, { ...OPTS, slots: 3, pins: [{ providerId: "openai", modelId: "gpt-9" }] })
+    expect(missed.recovery.pinned).toEqual([])
+  })
+})
+
+describe("the tool-calling requirement groups a model's providers case-insensitively", () => {
+  test("an incapable offering under one spelling of a provider does not make the route ineligible when another spelling is capable", () => {
+    const { roster, warnings } = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("OpenAI", "gpt-5", false), candidate("openai", "gpt-5", true)],
+      { ...OPTS, slots: 2, requireToolcall: true, pins: [{ providerId: "openai", modelId: "gpt-5" }] },
+    )
+    // The pin is honoured, not `lacks-capability`, and the slot dispatches
+    // through the host's own capable provider id.
+    expect(warnings.some((w) => w.code === "roster-pin-unhonoured")).toBe(false)
+    const gpt = roster.slots.find((slot) => slot.modelId === "gpt-5")!
+    expect(gpt.providerId).toBe("openai")
+    expect(gpt.toolcall).toBe(true)
+    expect(gpt.alsoAvailableVia).toEqual([])
+  })
+
+  test("the recovery plan lists one route per provider, whatever its spelling", () => {
+    const { recovery } = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("Q", "gpt-5", false), candidate("q", "gpt-5", true)],
+      { ...OPTS, slots: 1, requireToolcall: true },
+    )
+    expect(recovery.candidates.map((route) => `${route.providerId}/${route.modelId}`)).toEqual(["q/gpt-5"])
   })
 })

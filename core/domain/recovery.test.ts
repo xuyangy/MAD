@@ -1,6 +1,7 @@
 /**
- * The recovery record's invariants and the two views derived from it, over
- * synthetic records: nothing in the pipeline produces a replacement yet.
+ * The recovery record's invariants, the recovery plan's, and the two views
+ * derived from a record, over hand-built records. Discovery producing them is
+ * covered in `adapters/opencode/recovery-discover.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -46,6 +47,7 @@ const VALID: RunRecovery = {
   refused: [{ slot: gitlabSlot!.slot, refusal: refusalOf(gitlabSlot!) }],
   replacements: [{ from: gitlabSlot!.slot, to: replacementRoute, dispatched: 1, answered: true }],
   notReplaced: [],
+  answeredLineages: 3,
 }
 
 describe("the views", () => {
@@ -147,6 +149,14 @@ describe("validateReplacements — each invariant", () => {
       { ...VALID, notReplaced: [{ from: gitlabSlot!.slot, reason: "budget" }] },
       "both replaced and not replaced",
     ],
+    [
+      "a refused slot neither replaced nor listed as not replaced",
+      { ...VALID, refused: [...VALID.refused, { slot: otherSlot.slot, refusal: refusalOf(otherSlot, "route") }] },
+      `refused slot ${otherSlot.slot} is neither replaced nor listed as not replaced`,
+    ],
+    ["an answered-lineage count above the pool it counts", { ...VALID, answeredLineages: 5 }, "answeredLineages 5"],
+    ["a negative answered-lineage count", { ...VALID, answeredLineages: -1 }, "answeredLineages -1"],
+    ["a fractional answered-lineage count", { ...VALID, answeredLineages: 1.5 }, "answeredLineages 1.5"],
   ]
   for (const [label, recovery, message] of cases) {
     test(label, () => {
@@ -165,6 +175,7 @@ describe("validateReplacements — each invariant", () => {
       // The replacement is for the OTHER slot, routed through gitlab.
       replacements: [{ from: other.slot, to: { ...replacementRoute, providerId: "gitlab" }, dispatched: 1, answered: true }],
       notReplaced: [{ from: gitlabSlot!.slot, reason: "no-candidate" }],
+      answeredLineages: 2,
     }
     expect(() => validateReplacements(recordWith(crossed))).toThrow("uses provider gitlab, which refused at provider scope")
   })
@@ -182,6 +193,7 @@ describe("validateReplacements — each invariant", () => {
             { from: only.slot, to: reserve[1]!, dispatched: 1, answered: false },
           ],
           notReplaced: [],
+          answeredLineages: 1,
         },
       }),
     ).toThrow("more replacements than original pool slots")
@@ -193,6 +205,7 @@ describe("validateReplacements — each invariant", () => {
       refused: [{ slot: gitlabSlot!.slot, refusal: refusalOf(gitlabSlot!, "route") }],
       replacements: [{ from: gitlabSlot!.slot, to: { ...replacementRoute, providerId: "gitlab" }, dispatched: 2, answered: false }],
       notReplaced: [],
+      answeredLineages: 2,
     }
     expect(() => validateReplacements(recordWith(routeScope))).not.toThrow()
   })
@@ -216,7 +229,15 @@ describe("validateRecoveryPlan", () => {
   ]
   for (const [label, candidates, message] of cases) {
     test(label, () => {
-      expect(() => validateRecoveryPlan({ candidates }, roster)).toThrow(message)
+      expect(() => validateRecoveryPlan({ candidates, pinned: [] }, roster)).toThrow(message)
     })
   }
+  test("a pinned id that is not a pool slot's, or is listed twice", () => {
+    const pool = roster.slots[0]!.slot
+    expect(() => validateRecoveryPlan({ candidates: reserve, pinned: [roster.lensSlots[0]!.slot] }, roster)).toThrow(
+      "is not a pool slot",
+    )
+    expect(() => validateRecoveryPlan({ candidates: reserve, pinned: [pool, pool] }, roster)).toThrow("listed twice")
+    expect(() => validateRecoveryPlan({ candidates: reserve, pinned: [pool] }, roster)).not.toThrow()
+  })
 })

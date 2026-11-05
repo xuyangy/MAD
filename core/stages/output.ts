@@ -1386,8 +1386,11 @@ export function renderRunRecord(record: RunRecord): string {
   }
   // Discovery recovery, only when a replacement was dispatched: each one on its
   // own row, after the initial pool, naming the slot it replaced. The lineage
-  // count on the summary line stays the initial selection's.
+  // count on the summary line stays the initial selection's; when a pool slot
+  // was refused, the verified lineages of the pool that answered follow it,
+  // labelled as that.
   const replacements = replacementsOf(record)
+  const recovered = record.recovery
   for (const replacement of replacements) {
     const to = replacement.to
     const lineage = to.lineage.verified ? to.lineage.label : "lineage unverified"
@@ -1401,7 +1404,9 @@ export function renderRunRecord(record: RunRecord): string {
     `  slots requested: ${record.roster.requested} | filled: ${record.roster.slots.length} | ` +
       (replacements.length > 0 ? `replacements dispatched: ${replacements.length} | ` : "") +
       `answered: ${record.answered} | distinct verified lineages: ${record.roster.distinctLineages}` +
-      (replacements.length > 0 ? " (initial selection)" : ""),
+      (recovered !== undefined
+        ? ` (initial selection) | verified lineages that answered after recovery: ${recovered.answeredLineages}`
+        : ""),
   )
   if (record.roster.lensSlots.length > 0) {
     const asked = record.roster.lensSlots.filter((s) => !skipped.has(s.slot))

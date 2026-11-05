@@ -883,6 +883,11 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // it is what stops a reader reading 5 turns into a 5-model roster.
             const lensLabel =
               record.roster.lensSlots.length > 0 ? ` + ${record.roster.lensSlots.length} lens` : ""
+            // A run whose answer count includes substitutes says so in the
+            // title. "Dispatched", not "restored": a dispatched replacement may
+            // itself have failed. Zero replacements leaves the title as it was.
+            const replacedCount = record.recovery?.replacements.length ?? 0
+            const replacedLabel = replacedCount > 0 ? `, ${replacedCount} replacement(s) dispatched` : ""
 
             // AD-6f — THE TITLE SAYS IT TOO. The header line inside the report
             // says it and so does a warning, but the title is the line a user sees
@@ -910,7 +915,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // user set the flag, and refuses anything that resolves inside the
             // worktree.
             return {
-              title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}`,
+              title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}${replacedLabel}`,
               // AD-18's EIGHTH SPAN (story 7). A tool's `output` is read by the
               // calling agent, which is a model, and the report quotes every
               // model-authored claim, argument and judge report the run produced.

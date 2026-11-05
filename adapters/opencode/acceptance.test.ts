@@ -682,13 +682,17 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
         expectClean(run)
         expect(run.host.prompts.filter((p) => p.model === "duo-chat-gpt-5-6-terra")).toHaveLength(1)
         expect(run.host.prompts.filter((p) => p.model === "grok-4" && p.role === undefined)).toHaveLength(1)
-        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered")
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered, 1 replacement(s) dispatched")
         expect(run.result.metadata?.warnings).toContain("model-replaced")
         const report = run.result.output
         expect(report).toContain(
           "  discovery-r1: xai/grok-4 — Grok (xAI) — REPLACEMENT for discovery-2, dispatched 1 time(s), answered discovery",
         )
         expect(report).toContain("| replacements dispatched: 1 | answered: 3 |")
+        expect(report).toContain(
+          "distinct verified lineages: 3 (initial selection) | verified lineages that answered after recovery: 3",
+        )
+        expect(run.result.metadata?.warnings).not.toContain("answered-lineages-reduced")
         expect(report).toContain("MODEL REPLACED: `gitlab/duo-chat-gpt-5-6-terra` (slot discovery-2) was refused")
         expect(report).toContain("It was replaced by slot discovery-r1.")
         // One destination row, now including the provider the replacement added.

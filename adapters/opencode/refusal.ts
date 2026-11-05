@@ -12,8 +12,13 @@
  *   authentication refusal for that provider.
  * - `APIError` with a numeric `statusCode` of 401 (auth) or 402 (payment), and
  *   `isRetryable` absent or `false`: a refusal of this provider/model route
- *   only, since a gateway can route models to different upstream accounts.
- *   `isRetryable: true`, or any non-boolean value, is not a refusal.
+ *   only. The error shows this request was refused; it does not show that
+ *   every route behind the provider shares the account, since a gateway can
+ *   route models to different upstream accounts. So another model on the same
+ *   provider may still be chosen as a replacement, and may be refused the same
+ *   way, costing that slot its one replacement and possibly an attempt of
+ *   unknown usage. `isRetryable: true`, or any non-boolean value, is not a
+ *   refusal.
  * - `UnknownError` from the `gitlab` provider whose message starts with
  *   `Failed to get direct access token: 402 Payment Required` and contains
  *   `not enough GitLab Credits`: the text this host emits when the GitLab

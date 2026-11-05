@@ -5,6 +5,7 @@
 
 import type { ZodType } from "zod"
 
+import type { Refusal } from "../domain/refusal.ts"
 import type { Candidate } from "../domain/roster.ts"
 import { CODING_AGGREGATE, CODING_EVIDENCE_EXTRACT, CODING_FACT_CHECK, CODING_LOGIC_EVAL } from "../instructions/coding/judge.ts"
 import { emptyTokenUsage, type TokenUsage } from "../domain/run-record.ts"
@@ -83,6 +84,8 @@ export type SlotStep =
       usageUnknown?: string
       /** Story 2.3 — the turn's session could not be deleted, for THIS reason. */
       cleanupUnresolved?: string
+      /** The failure envelope carries this classified refusal (`Refusal`). */
+      refusal?: Refusal
     }
 
 export type SlotScript = SlotStep[]
@@ -295,6 +298,7 @@ export class FakeBackend implements ModelBackend {
         slot,
         failure: step.failure,
         message: step.message ?? "scripted failure",
+        ...(step.refusal === undefined ? {} : { refusal: step.refusal }),
         ...this.extras(step),
       }
     }

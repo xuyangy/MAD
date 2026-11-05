@@ -106,7 +106,9 @@ import {
   recordTurn,
   recordUnknownTurn,
   unknownUsageCount,
+  usageIsComplete,
 } from "../budget/ledger.ts"
+import { countVerifiedLineages } from "../roster/select.ts"
 import type { LensInstructionRecord, TokenLedger } from "../domain/run-record.ts"
 import { hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -317,7 +319,17 @@ type SlotOutcome =
    * `admissionReason` is set when the experiment's admission refused, rather
    * than the run's ledger (story 2-5c).
    */
-  | { skippedForBudget: true; attempts: 0; admissionReason?: string }
+  | {
+      skippedForBudget: true
+      attempts: 0
+      admissionReason?: string
+      /**
+       * Set when the ledger refused under the unknown-usage stop
+       * (`stopOnUnknownUsage`) rather than at its ceiling, read at the gate so
+       * a later turn's usage cannot change the cause.
+       */
+      unknownUsageStop?: true
+    }
 
 async function runWithOneRetry(
   input: DiscoverInput,
@@ -384,7 +396,12 @@ async function runWithOneRetry(
     // be asked again — a different fact from failing twice, and `collect` words
     // it differently.
     if (!mayISpend(input.ledger, "discover")) {
-      if (attempt === 1) return { skippedForBudget: true, attempts: 0 }
+      if (attempt === 1) {
+        // `mayISpend` asks the unknown-usage stop first, so when it holds it is
+        // why the gate refused.
+        const unknownStop = input.ledger.stopOnUnknownUsage === true && !usageIsComplete(input.ledger)
+        return { skippedForBudget: true, attempts: 0, ...(unknownStop ? { unknownUsageStop: true as const } : {}) }
+      }
       return { skippedForBudget: false, envelope: last!, attempts: 1 }
     }
     // Story 2-5c — THE EXPERIMENT'S GATE, asked after the ledger's and only when
@@ -521,10 +538,20 @@ function notReplacedReason(entry: NotReplaced): string {
   switch (entry.reason) {
     case "no-plan":
       return "no recovery plan was supplied"
+    case "pinned":
+      return (
+        `the slot was pinned to \`${entry.detail ?? "this model"}\`, and MAD does not put a model or ` +
+        `provider the pin did not name in its place`
+      )
     case "no-candidate":
-      return "the host offers no unused model on a provider or route that was not refused"
+      return "the host offers no model outside the pool on a provider or route that was not refused"
     case "budget":
       return "the budget refused the replacement's turn before it was dispatched"
+    case "unknown-usage":
+      return (
+        "the unknown-usage stop refused the replacement's turn before it was dispatched, because an " +
+        "earlier turn's usage was not reported"
+      )
     case "admission":
       return `the experiment's admission refused the replacement's turn (${entry.detail ?? "no reason given"})`
     case "cancelled":
@@ -828,9 +855,15 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // member of `findings` is ever compared against, folded into, or deduplicated
   // against another here. Pool findings get exactly the ids they get with no
   // lenses configured, because the lens segment runs strictly after them.
+  // The original pool slots that answered round 1: what recovery prefers a
+  // fresh lineage against, and the originals `answeredLineages` counts.
+  const answeredOriginals: RosterSlot[] = []
   for (const outcome of poolOutcomes) {
     // AD-6a — the denominator, and the ONLY place it moves.
-    if (collect(outcome, { source: "pool" })) answered += 1
+    if (collect(outcome, { source: "pool" })) {
+      answered += 1
+      answeredOriginals.push(outcome.rosterSlot)
+    }
   }
   for (const outcome of lensOutcomes) {
     // AD-6a / AD-17d — a lens slot answering does NOT move `answered`. Its
@@ -848,10 +881,21 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // changes that set, this slot's record, or anyone else's. There is no third
   // round and no replacement of a replacement.
   //
+  // A slot a caller's pin filled (`RecoveryPlan.pinned`) is never replaced: the
+  // user named that model through that provider, and a substitute would spend
+  // where the pin did not authorize. A slot ranking filled is replaced as usual.
+  //
+  // Among the eligible routes, allocation prefers one whose VERIFIED lineage is
+  // absent from the originals that answered round 1 and from earlier
+  // allocations, then falls back to the plan's order. Restoring the refused
+  // model's lineage and adding another fresh one count the same (AD-5). The
+  // routes keep their bound slot ids; only the choice among them changes.
+  //
   // A model is consumed when it is ALLOCATED, before anything is dispatched, so
   // which slot gets which model does not depend on completion order. A
   // replacement whose first attempt is never dispatched (the budget, the
-  // admission or a stop refused it) leaves no slot of its own: the original is
+  // unknown-usage stop, the admission or a stop refused it) leaves no slot of
+  // its own: the original is
   // recorded as not replaced, with that cause. A dispatched one is collected
   // as a pool slot like any other, so it answers, drops out or is cancelled
   // under the ordinary rules, and an answer counts toward the denominator.
@@ -875,7 +919,14 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       if (refusal.scope === "provider") excludedProviders.add(refusal.providerId)
       else excludedRoutes.add(`${refusal.providerId}\u0000${refusal.modelId}`)
     }
+    const modelOf = (slot: string): string => {
+      const rosterSlot = roster.slots.find((candidate) => candidate.slot === slot)!
+      return `${rosterSlot.providerId}/${rosterSlot.modelId}`
+    }
     const allocatedIdentities = new Set(roster.slots.map((rosterSlot) => rosterSlot.identity))
+    const heldLineages = new Set(
+      answeredOriginals.filter((slot) => slot.lineage.verified).map((slot) => slot.lineage.lineage),
+    )
     const notReplaced: NotReplaced[] = []
     const allocations: { from: string; to: RosterSlot }[] = []
     for (const entry of refused) {
@@ -889,17 +940,25 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         notReplaced.push({ from: entry.slot, reason: "no-plan" })
         continue
       }
-      const to = input.recovery.candidates.find(
+      if (input.recovery.pinned.includes(entry.slot)) {
+        notReplaced.push({ from: entry.slot, reason: "pinned", detail: modelOf(entry.slot) })
+        continue
+      }
+      const eligible = input.recovery.candidates.filter(
         (candidate) =>
           !allocatedIdentities.has(candidate.identity) &&
           !excludedProviders.has(candidate.providerId) &&
           !excludedRoutes.has(`${candidate.providerId}\u0000${candidate.modelId}`),
       )
+      const to =
+        eligible.find((candidate) => candidate.lineage.verified && !heldLineages.has(candidate.lineage.lineage)) ??
+        eligible[0]
       if (to === undefined) {
         notReplaced.push({ from: entry.slot, reason: "no-candidate" })
         continue
       }
       allocatedIdentities.add(to.identity)
+      if (to.lineage.verified) heldLineages.add(to.lineage.lineage)
       allocations.push({ from: entry.slot, to })
     }
 
@@ -918,9 +977,11 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       if (outcome.skippedForBudget) {
         notReplaced.push({
           from: outcome.from,
-          ...(outcome.admissionReason === undefined
-            ? { reason: "budget" as const }
-            : { reason: "admission" as const, detail: outcome.admissionReason }),
+          ...(outcome.admissionReason !== undefined
+            ? { reason: "admission" as const, detail: outcome.admissionReason }
+            : outcome.unknownUsageStop === true
+              ? { reason: "unknown-usage" as const }
+              : { reason: "budget" as const }),
         })
         continue
       }
@@ -940,16 +1001,19 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     }
     const order = new Map(refused.map((entry, index) => [entry.slot, index]))
     notReplaced.sort((a, b) => order.get(a.from)! - order.get(b.from)!)
-    recovery = { refused, replacements, notReplaced }
+    // The pool that answered: originals that answered round 1 and replacements
+    // that answered. Never `executionRoster`, which keeps the refused originals.
+    const answeredPool = [
+      ...answeredOriginals,
+      ...replacements.filter((replacement) => replacement.answered).map((replacement) => replacement.to),
+    ]
+    const answeredLineages = countVerifiedLineages(answeredPool)
+    recovery = { refused, replacements, notReplaced, answeredLineages }
 
     // Each refused original's drop-out row says what became of its slot, and
     // each dispatched replacement gets its own row.
     const rowOf = (slot: string): Warning | undefined =>
       warnings.find((warning) => warning.code === "model-dropped-out" && warning.detail?.slot === slot)
-    const modelOf = (slot: string): string => {
-      const rosterSlot = roster.slots.find((candidate) => candidate.slot === slot)!
-      return `${rosterSlot.providerId}/${rosterSlot.modelId}`
-    }
     for (const replacement of replacements) {
       const row = rowOf(replacement.from)
       if (row !== undefined) {
@@ -984,6 +1048,35 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       if (row === undefined) continue
       row.message += ` It was not replaced: ${notReplacedReason(entry)}.`
       row.detail = { ...row.detail, recovery: { notReplaced: entry.reason } }
+    }
+
+    // AD-6c over the pool that answered, after recovery. The selection's own
+    // report (`roster-single-lineage`) describes the roster MAD chose; this
+    // says the pool whose answers the co-discovery fractions count holds fewer
+    // verified lineages than that roster did, whether or not a replacement
+    // restored the answer count.
+    if (answeredLineages < roster.distinctLineages) {
+      const lineages = [
+        ...new Set(answeredPool.filter((slot) => slot.lineage.verified).map((slot) => slot.lineage.label)),
+      ]
+      warnings.push({
+        code: "answered-lineages-reduced",
+        stage: "discover",
+        message:
+          `FEWER LINEAGES ANSWERED: the initial selection held ${roster.distinctLineages} distinct verified ` +
+          `lineage(s), but the pool that answered discovery after recovery holds ${answeredLineages}` +
+          (lineages.length > 0 ? ` (${lineages.join(", ")})` : ``) +
+          `. Co-discovery over this pool is a weaker signal than the selection's lineage count suggests: ` +
+          `models from one lineage share blind spots, whatever the answer count reads.`,
+        detail: {
+          initialLineages: roster.distinctLineages,
+          answeredLineages,
+          lineages: [
+            ...new Set(answeredPool.filter((slot) => slot.lineage.verified).map((slot) => slot.lineage.lineage)),
+          ],
+          replacements: replacements.length,
+        },
+      })
     }
   }
 

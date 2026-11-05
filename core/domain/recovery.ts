@@ -36,10 +36,18 @@ export interface Replacement {
   answered: boolean
 }
 
-/** A refused original pool slot that got no replacement, and why. */
+/**
+ * A refused original pool slot that got no replacement, and why.
+ *
+ * - `pinned`: a caller's pin filled the slot (`RecoveryPlan.pinned`), so no
+ *   other model replaces it.
+ * - `budget`: the ledger's ceiling refused the replacement's first attempt.
+ * - `unknown-usage`: the ledger refused it under the unknown-usage stop
+ *   (`stopOnUnknownUsage`), because an earlier turn's usage is unknown.
+ */
 export interface NotReplaced {
   from: string
-  reason: "no-plan" | "no-candidate" | "budget" | "admission" | "cancelled"
+  reason: "no-plan" | "pinned" | "no-candidate" | "budget" | "unknown-usage" | "admission" | "cancelled"
   detail?: string
 }
 
@@ -48,6 +56,14 @@ export interface RunRecovery {
   refused: RefusedSlot[]
   replacements: Replacement[]
   notReplaced: NotReplaced[]
+  /**
+   * Distinct VERIFIED lineages over the pool that answered discovery: the
+   * original pool slots that answered, plus each replacement whose `answered`
+   * is true. Refused, dropped, budget-skipped and cancelled originals and lens
+   * slots are not in it. A separate fact from `roster.distinctLineages`, which
+   * stays the initial selection's.
+   */
+  answeredLineages: number
 }
 
 /**
@@ -62,6 +78,13 @@ export function validateRecoveryPlan(plan: RecoveryPlan, roster: Roster): void {
     throw new Error(`recovery plan is inconsistent: ${why}`)
   }
   const taken = new Set([...roster.slots, ...roster.lensSlots].map((slot) => slot.slot))
+  const poolIds = new Set(roster.slots.map((slot) => slot.slot))
+  const pinned = new Set<string>()
+  for (const slot of plan.pinned) {
+    if (!poolIds.has(slot)) fail(`pinned slot ${slot} is not a pool slot`)
+    if (pinned.has(slot)) fail(`pinned slot ${slot} is listed twice`)
+    pinned.add(slot)
+  }
   const poolIdentities = new Set(roster.slots.map((slot) => slot.identity))
   const ids = new Set<string>()
   for (const candidate of plan.candidates) {
@@ -93,7 +116,11 @@ export function replacementsOf(record: Pick<RunRecord, "recovery">): readonly Re
  * - No replacement goes through a provider any slot refused at provider scope,
  *   or through a provider/model route any slot refused at route scope.
  * - Each not-replaced slot is listed once.
+ * - Every refused slot is accounted for: it appears exactly once, as a
+ *   replacement's `from` or as a not-replaced entry.
  * - At most one replacement per original filled pool slot; `dispatched` is 1 or 2.
+ * - `answeredLineages` is a whole number no larger than the pool slots plus
+ *   replacements it counts over.
  */
 export function validateReplacements(record: Pick<RunRecord, "roster" | "recovery">): void {
   const recovery = record.recovery
@@ -154,6 +181,13 @@ export function validateReplacements(record: Pick<RunRecord, "roster" | "recover
     notReplaced.add(entry.from)
     if (from.has(entry.from)) fail(`slot ${entry.from} is both replaced and not replaced`)
   }
+  for (const slot of refused.keys()) {
+    if (!from.has(slot) && !notReplaced.has(slot)) fail(`refused slot ${slot} is neither replaced nor listed as not replaced`)
+  }
+  const lineages = recovery.answeredLineages
+  if (!Number.isInteger(lineages) || lineages < 0 || lineages > record.roster.slots.length + recovery.replacements.length) {
+    fail(`answeredLineages ${lineages} is not a count over the answered pool`)
+  }
 }
 
 /**
@@ -162,8 +196,10 @@ export function validateReplacements(record: Pick<RunRecord, "roster" | "recover
  *
  * `requested` and `distinctLineages` are the INITIAL selection's, unchanged: the
  * lineage count describes the roster MAD selected, not the models that ran or
- * answered, and nothing may present it as either. `providers` is
- * `executionProviders`.
+ * answered, and nothing may present it as either. The lineages of the pool
+ * that answered are `RunRecovery.answeredLineages`. The refused originals stay
+ * in `slots`, so counting lineages over this view is neither number. `providers`
+ * is `executionProviders`.
  */
 export function executionRoster(record: Pick<RunRecord, "roster" | "recovery">): Roster {
   validateReplacements(record)

@@ -348,6 +348,18 @@ export const WARNING_CODES = [
    * denominator, but the distinct-lineage count describes the selection.
    */
   "model-replaced",
+  /**
+   * After discovery recovery, the pool that answered (original pool slots that
+   * answered, plus replacements that answered) holds fewer distinct verified
+   * lineages than the initial selection. Raised once per run by
+   * `core/stages/discover.ts`, only when a pool slot was refused.
+   *
+   * A DEGRADATION. `roster-single-lineage` describes the selection and cannot
+   * carry this: a replacement can restore the answer count while repeating a
+   * lineage the pool already held, and the selection's count would then read
+   * as the diversity the co-discovery fractions rest on.
+   */
+  "answered-lineages-reduced",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]

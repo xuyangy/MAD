@@ -37,8 +37,16 @@ describe("the warning vocabulary (AD-6)", () => {
     // here, in this file, before it could reach the renderer — which is exactly
     // the argument a reader needs, because the two codes are about the same
     // block of the judge and mean opposite things about the evidence.
-    expect(WARNING_CODES).toHaveLength(22)
+    expect(WARNING_CODES).toHaveLength(23)
     expect(DISCLOSURE_CODES.has("model-replaced")).toBe(false)
+  })
+
+  test("`answered-lineages-reduced` IS A DEGRADATION, not a disclosure", () => {
+    // The pool whose answers the co-discovery fractions count is narrower than
+    // the roster MAD selected, so the run is worth less than its selection's
+    // lineage count says.
+    expect(WARNING_CODES).toContain("answered-lineages-reduced")
+    expect(DISCLOSURE_CODES.has("answered-lineages-reduced")).toBe(false)
   })
 
   test("`turn-host-aborted` IS A DEGRADATION, not a disclosure (ledger #7)", () => {
