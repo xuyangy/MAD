@@ -42,7 +42,7 @@
 
 import { lineageOf, normalizeModelIdentity, UNVERIFIED_LINEAGE } from "../domain/lineage.ts"
 import { oneLine } from "../prompt/material.ts"
-import type { Candidate, LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
+import type { Candidate, LensSlot, RecoveryCandidate, RecoveryPlan, Roster, RosterSlot } from "../domain/roster.ts"
 import type { Warning } from "../domain/warning.ts"
 
 /**
@@ -80,11 +80,31 @@ export interface SelectOptions {
    * provider, and does not refuse the run.
    */
   pins?: readonly Pin[]
+  /**
+   * Only models the host affirmatively declares able to call tools may fill a
+   * discovery or lens slot. Absent or false means no capability requirement.
+   *
+   * The caller sets it, because the need is the host's: opencode returns a
+   * structured answer through a tool call, so a model that cannot call tools
+   * cannot answer a MAD turn there. A declared capability is necessary, not
+   * sufficient: the host's routing can still fail at run time.
+   *
+   * Eligibility is per provider: within one model, the first provider (in host
+   * order) that declares the capability serves the slot. A model no provider
+   * declares it for is left out, and `roster-capability-excluded` says so.
+   */
+  requireToolcall?: boolean
 }
 
 export interface SelectResult {
   roster: Roster
   warnings: Warning[]
+  /**
+   * The routes a refused discovery slot could be replaced with, for a caller
+   * that binds them into its backend (`recoveryPlan`). Not part of `roster`, so
+   * it is never persisted.
+   */
+  recovery: RecoveryPlan
 }
 
 /** Thrown when the host offers nothing at all — unusable host state, not a domain outcome. */
@@ -97,6 +117,24 @@ export class NoCandidatesError extends Error {
         `MAD holds no credentials and names no model of its own.`,
     )
     this.name = "NoCandidatesError"
+  }
+}
+
+/**
+ * Thrown when the host offers models but none meets the caller's capability
+ * requirement: unusable host state, like `NoCandidatesError`, and a different
+ * fact, so it says something different.
+ */
+export class NoEligibleCandidatesError extends Error {
+  constructor(providerConfigKey: string, offered: number) {
+    super(
+      `The host offers ${offered} provider/model offering(s), but none declares tool calling, which ` +
+        `this host needs to return MAD's structured answers, so there is nothing to review with. ` +
+        `Configure a provider whose models support tool calling in your opencode config (the ` +
+        `\`${providerConfigKey}\` key) or authenticate one with \`opencode auth login\`, then run the ` +
+        `review again. MAD holds no credentials and names no model of its own.`,
+    )
+    this.name = "NoEligibleCandidatesError"
   }
 }
 
@@ -168,6 +206,13 @@ export type PinOutcome =
   | "no-slot"
   /** Not a usable provider/model pair at all. */
   | "malformed"
+  /**
+   * The host offers it through this provider, but does not declare there the
+   * capability the caller required (`SelectOptions.requireToolcall`). Reported
+   * even when another provider declares it for the same model: the pin named
+   * this provider, and MAD does not reroute it.
+   */
+  | "lacks-capability"
 
 export interface PinResolution {
   pin: Pin
@@ -275,6 +320,14 @@ export function resolvePins(
   deduped: readonly Deduped[],
   pins: readonly Pin[],
   slots: number,
+  /**
+   * Routes (`routeKey(identity, provider)`) the host offers that lack the
+   * required capability. `deduped` holds only eligible entries, so without
+   * this a pin to such a route would read as `not-offered`, or would match an
+   * eligible entry through `alsoAvailableVia` and be served by the incapable
+   * variant. Empty when no capability is required.
+   */
+  ineligibleRoutes: ReadonlySet<string> = new Set(),
 ): PinnedStep {
   const filled: Deduped[] = []
   const resolutions: PinResolution[] = []
@@ -290,6 +343,13 @@ export function resolvePins(
 
     const identity = normalizeModelIdentity(modelId)
     const wanted = providerId.toLowerCase()
+    // Before the offered check: the host does offer it, through this provider,
+    // and saying otherwise would be false. Before `no-slot` too, for the reason
+    // `not-offered` is: it is the fact the caller can act on.
+    if (ineligibleRoutes.has(routeKey(identity, wanted))) {
+      resolutions.push({ pin, outcome: "lacks-capability" })
+      continue
+    }
     const entry = deduped.find(
       (candidate) =>
         candidate.identity === identity &&
@@ -337,6 +397,85 @@ function servedBy(entry: Deduped, provider: string): Deduped {
     alsoAvailableVia: [entry.candidate.providerId, ...entry.alsoAvailableVia.filter((via) => via.toLowerCase() !== provider)],
     variants: entry.variants,
   }
+}
+
+/** One provider's route to one model, for `ineligibleRoutes`. Provider case is ignored, as pins ignore it. */
+function routeKey(identity: string, provider: string): string {
+  return `${identity}\u0000${provider.toLowerCase()}`
+}
+
+/** What `requireCapability` kept, and what it left out. */
+interface Eligibility {
+  /** The deduped entries that may fill a slot, in dedupe order, each served by a capable provider. */
+  eligible: Deduped[]
+  /** Every route the host offers without the capability. */
+  ineligibleRoutes: Set<string>
+  /** Models (deduped identities) no provider declares the capability for. */
+  excludedModels: number
+}
+
+/**
+ * Keep, for each deduped model, the first offering in host order that declares
+ * tool calling, and drop models no offering declares it for.
+ *
+ * IT READS EVERY RAW CANDIDATE, not only `variants`: dedupe keeps one candidate
+ * per provider, so a provider listing an incapable alias of a model before a
+ * capable one (`gpt-5-preview`, then `gpt-5`) would otherwise lose the capable
+ * route. Per provider, the representative kept in `variants` is that
+ * provider's first capable candidate if it has one, so a pin naming the
+ * provider is served through it. A provider with no capable candidate for the
+ * model is an ineligible route.
+ *
+ * An entry whose every candidate declares it is returned AS IS, so a host whose
+ * models all declare it gets the same entries, in the same order, as with no
+ * requirement. Any other kept entry is served by its first capable offering;
+ * its `alsoAvailableVia` lists the other providers in host order, once each:
+ * routes the host offers, not routes that meet the requirement.
+ */
+function requireCapability(deduped: readonly Deduped[], candidates: readonly Candidate[]): Eligibility {
+  const byIdentity = new Map<string, Candidate[]>()
+  for (const candidate of candidates) {
+    const identity = normalizeModelIdentity(candidate.modelId)
+    const group = byIdentity.get(identity)
+    if (group) group.push(candidate)
+    else byIdentity.set(identity, [candidate])
+  }
+
+  const eligible: Deduped[] = []
+  const ineligibleRoutes = new Set<string>()
+  let excludedModels = 0
+  for (const entry of deduped) {
+    const offerings = byIdentity.get(entry.identity) ?? [entry.candidate]
+    // One representative per provider, in the order providers first appear:
+    // its first capable offering, else its first offering.
+    const representatives = new Map<string, Candidate>()
+    for (const offering of offerings) {
+      const current = representatives.get(offering.providerId)
+      if (current === undefined || (!current.toolcall && offering.toolcall)) {
+        representatives.set(offering.providerId, offering)
+      }
+    }
+    for (const [provider, representative] of representatives) {
+      if (!representative.toolcall) ineligibleRoutes.add(routeKey(entry.identity, provider))
+    }
+    if (offerings.every((offering) => offering.toolcall)) {
+      eligible.push(entry)
+      continue
+    }
+    const capable = offerings.find((offering) => offering.toolcall)
+    if (capable === undefined) {
+      excludedModels += 1
+      continue
+    }
+    const variants = [...representatives.values()]
+    eligible.push({
+      candidate: capable,
+      identity: entry.identity,
+      alsoAvailableVia: variants.map((variant) => variant.providerId).filter((provider) => provider !== capable.providerId),
+      variants,
+    })
+  }
+  return { eligible, ineligibleRoutes, excludedModels }
 }
 
 /**
@@ -424,6 +563,47 @@ export function rankByDiversity(
 }
 
 /**
+ * The recovery plan: every model the pool did not take, ranked by the same
+ * diversity order with the pool's lineages counted as occupied, and within
+ * each model every route that may serve a slot, served route first, then the
+ * other providers in host order. Under `requireToolcall` only capable routes
+ * are listed. Each route is bound to a fixed slot id `<prefix>-r<k>`, numbered
+ * in that order, so a backend can be built with every id a replacement could use.
+ */
+function recoveryPlan(
+  deduped: readonly Deduped[],
+  pool: readonly Deduped[],
+  requireToolcall: boolean,
+  slotPrefix: string,
+): RecoveryPlan {
+  const poolIdentities = new Set(pool.map((entry) => entry.identity))
+  const poolLineages = new Set(
+    pool
+      .map((entry) => lineageOf(entry.candidate.modelId))
+      .filter((claim) => claim.verified)
+      .map((claim) => claim.lineage),
+  )
+  const reserve = deduped.filter((entry) => !poolIdentities.has(entry.identity))
+  const candidates: RecoveryCandidate[] = []
+  for (const entry of rankByDiversity(reserve, reserve.length, poolLineages)) {
+    const others = (entry.variants ?? []).filter((variant) => variant.providerId !== entry.candidate.providerId)
+    for (const route of [entry.candidate, ...others]) {
+      if (requireToolcall && !route.toolcall) continue
+      candidates.push({
+        slot: `${slotPrefix}-r${candidates.length + 1}`,
+        providerId: route.providerId,
+        modelId: route.modelId,
+        identity: entry.identity,
+        lineage: lineageOf(route.modelId),
+        toolcall: route.toolcall,
+        alsoAvailableVia: [],
+      })
+    }
+  }
+  return { candidates }
+}
+
+/**
  * The lineage count, and the ONLY function that produces one (AD-4, AD-5).
  *
  * It takes `RosterSlot[]` and is called with `roster.slots` and nothing else.
@@ -497,7 +677,7 @@ export function fillLensSlots(
 }
 
 export function selectRoster(candidates: readonly Candidate[], options: SelectOptions): SelectResult {
-  const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [], pins = [] } = options
+  const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [], pins = [], requireToolcall = false } = options
   if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey)
   // `Number.isFinite` FIRST, because `NaN < 1` is false (ledger triage
   // 2026-09-09). A NaN `slots` passed this guard, and then `filled.length >=
@@ -509,16 +689,25 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
   if (!Number.isFinite(slots) || slots < 1)
     throw new Error("selectRoster: slots must be a finite number of at least 1")
 
-  // AD-4 — DEDUPE FIRST, over the whole raw candidate list, and this is still
-  // the only line in the module that touches `candidates`. Everything below
-  // works on what survived it.
-  const deduped = dedupeByIdentity(candidates)
+  // AD-4 — DEDUPE FIRST, over the whole raw candidate list: it establishes the
+  // model identities, one entry each. Under a capability requirement,
+  // `requireCapability` then examines every raw offering within each identity
+  // to choose the one that serves it, and drops identities with none. Pins,
+  // ranking and lenses work only on the entries that leaves. With no
+  // requirement every entry is kept as it is and nothing is excluded.
+  const allDeduped = dedupeByIdentity(candidates)
+  const eligibility: Eligibility = requireToolcall
+    ? requireCapability(allDeduped, candidates)
+    : { eligible: allDeduped, ineligibleRoutes: new Set(), excludedModels: 0 }
+  const deduped = eligibility.eligible
+  if (deduped.length === 0) throw new NoEligibleCandidatesError(providerConfigKey, candidates.length)
+  const incapableOfferings = requireToolcall ? candidates.filter((candidate) => !candidate.toolcall).length : 0
   // AD-4 step 0 (story 8A) — the pins claim from the deduped list; ranking gets
   // the remainder and the slots the pins did not take. When `pins` is empty this
   // is `resolvePins(deduped, [], slots)` returning `{filled: [], remaining:
   // deduped, resolutions: []}`, so `picked` is `rankByDiversity(deduped, slots)`
   // exactly as before — the pinless run is unchanged, not merely equivalent.
-  const pinning = resolvePins(deduped, pins, slots)
+  const pinning = resolvePins(deduped, pins, slots, eligibility.ineligibleRoutes)
   // The lineages the pins already hold, so the backfill does not spend a slot on
   // a second model from one of them while a fresh lineage goes unused. Verified
   // lineages only: an unverified claim is evidence of nothing in either
@@ -616,6 +805,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         }
         case "no-slot":
           return `there were only ${slots} slot(s) and earlier pins took them all`
+        case "lacks-capability":
+          return "the host does not declare tool calling for it through this provider, and this host needs it for structured answers"
         default:
           return "it is not a usable provider/model pair"
       }
@@ -665,6 +856,28 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     })
   }
 
+  // How the roster was formed: the offered models selection left out. Raised
+  // whenever the requirement excluded any offering, whether or not the roster
+  // still filled; the shortfall, if any, is `roster-underfilled`'s to report.
+  if (incapableOfferings > 0) {
+    warnings.push({
+      code: "roster-capability-excluded",
+      stage: "roster",
+      message:
+        `MODELS LEFT OUT: ${incapableOfferings} of the ${candidates.length} provider/model offering(s) ` +
+        `the host lists do not declare tool calling, which this host needs to return MAD's ` +
+        `structured answers, so selection did not use them. ${eligibility.excludedModels} model(s) ` +
+        `were left out entirely; other excluded offerings share a model identity with an eligible ` +
+        `offering. A declared capability does not guarantee a working endpoint.`,
+      detail: {
+        requirement: "toolcall",
+        offerings: candidates.length,
+        incapableOfferings,
+        excludedModels: eligibility.excludedModels,
+      },
+    })
+  }
+
   // AD-6c — the roster is smaller than asked for. Distinct from the lineage
   // warning below: "requested 3, filled 1" is a different fact from "filled 3,
   // all one lineage", and a run can be degraded by either. Without this, an
@@ -676,7 +889,9 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       stage: "roster",
       message:
         `UNDERFILLED ROSTER: ${slots} discovery slot(s) requested but the host offers only ` +
-        `${rosterSlots.length} distinct model(s) (${candidates.length} candidate(s) before dedupe). ` +
+        `${rosterSlots.length} distinct model(s)` +
+        (incapableOfferings > 0 ? ` that declare tool calling` : ``) +
+        ` (${candidates.length} candidate(s) before dedupe). ` +
         `The run proceeds with a smaller roster; every co-discovery fraction is over what ` +
         `answered, not over ${slots}. Add a provider under the \`${providerConfigKey}\` key in ` +
         `your opencode config to fill the remaining slot(s).`,
@@ -787,5 +1002,5 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     })
   }
 
-  return { roster, warnings }
+  return { roster, warnings, recovery: recoveryPlan(deduped, picked, requireToolcall, slotPrefix) }
 }

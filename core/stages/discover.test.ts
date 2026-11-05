@@ -1399,7 +1399,10 @@ describe("discover — the per-request admission seam (story 2-5c)", () => {
     expect(backend.calls).toHaveLength(1)
     expect(admission.settlements).toHaveLength(1)
     const dropped = discovered.warnings.find((warning) => warning.code === "model-dropped-out")
-    expect(dropped?.message).toContain("failed once, and the budget refused the retry")
+    expect(dropped?.message).toContain(
+      "failed once, and the experiment's admission refused the retry (refused by the fake admission)",
+    )
+    expect(dropped?.message).not.toContain("the budget refused the retry")
   })
 
   test("the ledger's gate is asked first: a refused ledger never reaches admission", async () => {

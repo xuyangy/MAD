@@ -24,6 +24,9 @@ import type { ZodType } from "zod"
 
 import type { TokenUsage } from "../domain/run-record.ts"
 import type { AdmittedTurn } from "./admission.ts"
+import type { Refusal } from "../domain/refusal.ts"
+
+export type { Refusal }
 
 /**
  * AD-2 — each backend declares its capabilities and the core reads the
@@ -192,6 +195,8 @@ export type Envelope<T> =
       usageUnknown?: UsageUnknown
       /** Story 2.3 — present when this turn's session could not be deleted. */
       cleanupUnresolved?: CleanupUnresolved
+      /** Present when the backend recognised the failure as a refused request (`Refusal`). */
+      refusal?: Refusal
       /**
        * The unvalidated payload, when there was one (`schema-invalid`). The
        * discover stage uses it to salvage the items that ARE valid rather than

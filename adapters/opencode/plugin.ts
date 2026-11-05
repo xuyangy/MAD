@@ -26,7 +26,7 @@ import { systemClock } from "../../core/ports/clock.ts"
 import type { ToolObservation } from "../../core/ports/tool-observation.ts"
 import { oneLine } from "../../core/prompt/material.ts"
 import { frameForHostAgent, review } from "../../core/run/review.ts"
-import { NoCandidatesError, type Pin } from "../../core/roster/select.ts"
+import { NoCandidatesError, NoEligibleCandidatesError, type Pin } from "../../core/roster/select.ts"
 import {
   artifactRootFrom,
   createTurnRecorder,
@@ -504,6 +504,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 // Matrix row "No providers": fail with guidance, not a stack trace.
                 return { title: "MAD — no providers configured", output: error.message }
               }
+              if (error instanceof NoEligibleCandidatesError) {
+                return { title: "MAD — no model declares the required capability", output: error.message }
+              }
               // Anything else — a transport failure reading the host's config, say
               // — is still the user's problem to act on, not a stack trace to read.
               return {
@@ -691,7 +694,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               // listens on (`./host-session.ts`).
               client: hostSessionFromPluginClient(client),
               directory,
-              slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
+              // Every recovery route is bound too, under its fixed slot id, so a
+              // replacement can only use a slot this backend already knows.
+              // Binding makes no request.
+              slots: [...resolved.roster.slots, ...resolved.roster.lensSlots, ...resolved.recovery.candidates],
               lateUsage,
               // CAP-3 — read-only review sessions (`./session-policy.ts`).
               sessionPermission: REVIEW_SESSION_PERMISSION,
@@ -768,6 +774,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
 
             const { record, rendered } = await review({
               roster: resolved.roster,
+              recovery: resolved.recovery,
               backend: recorder ? recorder.wrap(backend) : backend,
               clock: systemClock(),
               change,

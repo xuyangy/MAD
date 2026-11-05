@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { NoCandidatesError } from "../../core/roster/select.ts"
+import { NoCandidatesError, NoEligibleCandidatesError } from "../../core/roster/select.ts"
 import { enumerateCandidates, ProviderEnumerationError, resolveRoster } from "./roster.ts"
 
 function model(id: string, toolcall: boolean, extra: Record<string, unknown> = {}) {
@@ -126,10 +126,60 @@ describe("enumerateCandidates (AD-3)", () => {
 })
 
 describe("resolveRoster (AD-3, AD-4)", () => {
-  test("hands the host's models to core selection and gets a diverse roster back", async () => {
-    const { roster } = await resolveRoster(fakeClient(TWO_PROVIDERS), 2)
-    expect(roster.slots.map((s) => s.lineage.lineage)).toEqual(["claude", "gpt"])
-    expect(roster.distinctLineages).toBe(2)
+  test("hands the host's models to core selection, requiring tool calling: gpt-5 (declared false) is left out", async () => {
+    const { roster, warnings } = await resolveRoster(fakeClient(TWO_PROVIDERS), 2)
+    expect(roster.slots.map((s) => `${s.providerId}/${s.modelId}`)).toEqual([
+      "anthropic/claude-sonnet-4-5-20250929",
+      "anthropic/claude-haiku-4-5",
+    ])
+    expect(roster.distinctLineages).toBe(1)
+    expect(warnings.find((w) => w.code === "roster-capability-excluded")?.detail).toEqual({
+      requirement: "toolcall",
+      offerings: 3,
+      incapableOfferings: 1,
+      excludedModels: 1,
+    })
+  })
+
+  test("a model whose capabilities are missing is not declared able to call tools, so it is left out", async () => {
+    const body = {
+      providers: [
+        { id: "anthropic", models: { a: model("claude-sonnet-4-5", true) } },
+        { id: "local", models: { b: { id: "gpt-5", name: "gpt-5" } } },
+      ],
+      default: {},
+    }
+    const { roster, warnings } = await resolveRoster(fakeClient(body), 2)
+    expect(roster.slots.map((s) => s.modelId)).toEqual(["claude-sonnet-4-5"])
+    expect(warnings.some((w) => w.code === "roster-capability-excluded")).toBe(true)
+  })
+
+  test("the image-preview model the host lists first through openrouter, without tool calling, is served by google, which declares it", async () => {
+    // The shape a live run met on opencode-ai 1.19.5: openrouter listed before
+    // google, and its route to the model declared `toolcall: false`.
+    const body = {
+      providers: [
+        { id: "gitlab", models: { a: model("duo-chat-gpt-5-6-terra", true) } },
+        {
+          id: "openrouter",
+          models: { b: model("google/gemini-3-pro-image-preview", false), c: model("amazon/nova-pro-v1", true) },
+        },
+        { id: "google", models: { d: model("gemini-3-pro-image-preview", true) } },
+      ],
+      default: {},
+    }
+    const { roster } = await resolveRoster(fakeClient(body), 3)
+    const gemini = roster.slots.find((s) => s.identity === "gemini-3-pro-image")!
+    expect(`${gemini.providerId}/${gemini.modelId}`).toBe("google/gemini-3-pro-image-preview")
+    expect(gemini.toolcall).toBe(true)
+    expect(gemini.alsoAvailableVia).toEqual(["openrouter"])
+    expect(roster.slots.every((s) => s.toolcall)).toBe(true)
+  })
+
+  test("a host whose models all lack tool calling is refused with its own guidance, naming the config key", async () => {
+    const client = fakeClient({ providers: [{ id: "openrouter", models: { a: model("google/gemini-3-pro-image-preview", false) } }], default: {} })
+    await expect(resolveRoster(client, 1)).rejects.toThrow(NoEligibleCandidatesError)
+    await expect(resolveRoster(client, 1)).rejects.toThrow("`provider`")
   })
 
   test("PINS REACH CORE SELECTION and change which model takes discovery-1 (story 8A)", async () => {

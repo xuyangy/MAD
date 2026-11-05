@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { CODING_DISCOVERY_GENERALIST } from "../instructions/coding/discovery.ts"
-import { DISCLOSURE_CODES, type Warning } from "../domain/warning.ts"
+import { DISCLOSURE_CODES, hostAbortedWarning, type Warning } from "../domain/warning.ts"
 import { recordTurn, recordUnknownTurn, type RunRecord } from "../domain/run-record.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
@@ -3449,5 +3449,165 @@ describe("review — a host abort beside other causes keeps every cause (ledger 
     expect(rendered).toContain("NO POOL MODEL ANSWERED — this is not a clean review.")
     expect(rendered).toContain("1 lens slot(s) answered and raised 1 finding(s), none of them decided")
     expect(rendered).not.toContain("raised nothing")
+  })
+})
+
+/**
+ * Discovery recovery's representation (2b-ii). Nothing in the pipeline produces
+ * a replacement yet, so each test records one by hand on a prepared review and
+ * checks that the later stages, the report and a checkpoint fork carry it,
+ * while `record.roster` stays the initial selection.
+ */
+describe("review — a recorded replacement reaches the later stages and the report", () => {
+  function setup() {
+    const resolved = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+      ],
+      { slots: 3, providerConfigKey: "provider" },
+    )
+    const route = resolved.recovery.candidates[0]!
+    const slots = [...resolved.roster.slots.map((slot) => slot.slot), route.slot]
+    const backend = new FakeBackend(abstainingInDebate(Object.fromEntries(slots.map((slot) => [slot, [{ kind: "ok" as const, value: ENVELOPE }]]))))
+    const deps = { roster: resolved.roster, recovery: resolved.recovery, backend, clock: fakeClock(), change: fakeChange(), priorWarnings: resolved.warnings }
+    return { resolved, route, backend, deps }
+  }
+
+  function recordReplacement(prepared: Awaited<ReturnType<typeof prepareReview>>, route: ReturnType<typeof setup>["route"]) {
+    const from = prepared.record.roster.slots[0]!
+    prepared.record.recovery = {
+      refused: [
+        {
+          slot: from.slot,
+          refusal: { kind: "payment", basis: "structured", scope: "route", providerId: from.providerId, modelId: from.modelId },
+        },
+      ],
+      replacements: [{ from: from.slot, to: route, dispatched: 1, answered: true }],
+      notReplaced: [],
+    }
+    prepared.answeredSlots = prepared.answeredSlots.filter((slot) => slot !== from.slot).concat(route.slot)
+    return from
+  }
+
+  test("a run with no refusal records no recovery at all", async () => {
+    const { deps } = setup()
+    const prepared = await prepareReview(deps)
+    expect("recovery" in prepared.record).toBe(false)
+    const { rendered } = await continueReview(prepared, deps, "debate-off")
+    expect(rendered).not.toContain("replacements dispatched")
+    expect(rendered).not.toContain("REPLACEMENT for")
+  })
+
+  test("the judge seats the replacement slot, the report lists it, and record.roster is unchanged", async () => {
+    const { deps, route, backend } = setup()
+    const prepared = await prepareReview(deps)
+    const from = recordReplacement(prepared, route)
+    // Only the replacement is left eligible, so a judge reading the initial
+    // roster would find no slot to seat at all.
+    prepared.answeredSlots = [route.slot]
+    const initialSlots = prepared.record.roster.slots.map((slot) => slot.slot)
+    const before = backend.calls.length
+
+    const { record, rendered } = await continueReview(prepared, deps, "debate-off")
+
+    expect(backend.calls.slice(before)).toContainEqual({ slot: route.slot, attempt: 1, role: "fact-check" })
+    expect(record.roster.slots.map((slot) => slot.slot)).toEqual(initialSlots)
+    expect(rendered).toContain(
+      `  ${route.slot}: ${route.providerId}/${route.modelId} — Grok (xAI) — REPLACEMENT for ${from.slot}, dispatched 1 time(s), answered discovery`,
+    )
+    expect(rendered).toContain("| replacements dispatched: 1 |")
+    expect(rendered).toContain("(initial selection)")
+  })
+
+  test("a replacement is seated in debate", async () => {
+    const { resolved, route } = setup()
+    // Only discovery-1 raises the finding, so 1/3 co-discovery sends it to debate.
+    const scripts: Record<string, SlotScript> = {
+      "discovery-1": [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+      "discovery-2": [{ kind: "ok", value: { findings: [] } }, DEBATE_ABSTENTION],
+      "discovery-3": [{ kind: "ok", value: { findings: [] } }, DEBATE_ABSTENTION],
+      [route.slot]: [DEBATE_ABSTENTION],
+    }
+    const backend = new FakeBackend(scripts)
+    const deps = { roster: resolved.roster, recovery: resolved.recovery, backend, clock: fakeClock(), change: fakeChange(), priorWarnings: resolved.warnings }
+    const prepared = await prepareReview(deps)
+    const replaced = prepared.record.roster.slots[1]!
+    prepared.record.recovery = {
+      refused: [
+        {
+          slot: replaced.slot,
+          refusal: { kind: "auth", basis: "structured", scope: "route", providerId: replaced.providerId, modelId: replaced.modelId },
+        },
+      ],
+      replacements: [{ from: replaced.slot, to: route, dispatched: 1, answered: true }],
+      notReplaced: [],
+    }
+    // The author and the replacement are the only eligible seats.
+    prepared.answeredSlots = ["discovery-1", route.slot]
+    const before = backend.calls.length
+
+    const { record } = await continueReview(prepared, deps)
+
+    expect(record.findings.some((finding) => finding.route === "debate")).toBe(true)
+    expect(backend.calls.slice(before).some((call) => call.slot === route.slot && call.role === undefined)).toBe(true)
+  })
+
+  test("a discovery host abort on a replacement slot is reported as a pool slot that did not answer", async () => {
+    const { resolved, route } = setup()
+    // Nothing is raised, so the report reaches the clause that names the slots
+    // that did not answer discovery.
+    const empty = Object.fromEntries(
+      resolved.roster.slots.map((slot) => [slot.slot, [{ kind: "ok" as const, value: { findings: [] } }]]),
+    )
+    const deps = {
+      roster: resolved.roster,
+      recovery: resolved.recovery,
+      backend: new FakeBackend(empty),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    }
+    const prepared = await prepareReview(deps)
+    recordReplacement(prepared, route)
+    prepared.record.recovery!.replacements[0]!.answered = false
+    prepared.record.warnings.push(
+      hostAbortedWarning({
+        stage: "discover",
+        slot: route.slot,
+        model: `${route.providerId}/${route.modelId}`,
+        attempts: 1,
+        error: "MessageAbortedError",
+        turn: "discovery",
+        consequence: "it is excluded from the co-discovery denominator.",
+      }),
+    )
+    const { rendered } = await continueReview(prepared, deps, "debate-off")
+    expect(rendered).toContain("1 pool slot(s) did not answer discovery: the host reported their turn(s) aborted.")
+  })
+
+  test("a forked branch carrying a replacement continues with it", async () => {
+    const { deps, route, backend } = setup()
+    const prepared = await prepareReview(deps)
+    recordReplacement(prepared, route)
+    prepared.answeredSlots = [route.slot]
+    const [branch] = forkPreparedReview(prepared, deps.clock, 2)
+    const before = backend.calls.length
+    const { record } = await continueReview(branch!, deps, "debate-off")
+    expect(backend.calls.slice(before)).toContainEqual({ slot: route.slot, attempt: 1, role: "fact-check" })
+    expect(record.recovery?.replacements.map((replacement) => replacement.to.slot)).toEqual([route.slot])
+  })
+
+  test("a checkpoint fork carries the recovery into each branch, independently", async () => {
+    const { deps, route } = setup()
+    const prepared = await prepareReview(deps)
+    recordReplacement(prepared, route)
+    const [a, b] = forkPreparedReview(prepared, deps.clock, 2)
+    expect(a!.record.recovery).toEqual(prepared.record.recovery)
+    expect(b!.record.recovery).toEqual(prepared.record.recovery)
+    a!.record.recovery!.replacements[0]!.answered = false
+    expect(b!.record.recovery!.replacements[0]!.answered).toBe(true)
   })
 })

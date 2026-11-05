@@ -17,6 +17,7 @@ import { DEFAULT_MAX_CONCURRENCY } from "../budget/limiter.ts"
 import { CUMULATIVE_SHARE, type Preset, type SpendShares } from "../budget/presets.ts"
 import type { InstructionOrigin } from "../instructions/types.ts"
 import type { Finding, Stage } from "./finding.ts"
+import type { RunRecovery } from "./recovery.ts"
 import type { Roster } from "./roster.ts"
 import type { Warning } from "./warning.ts"
 
@@ -350,6 +351,12 @@ export interface RunRecord {
   startedAt: string
   finishedAt?: string
   roster: Roster
+  /**
+   * Discovery recovery: refused original pool slots and the replacement slots
+   * dispatched for them (`./recovery.ts`). Absent when no slot was refused;
+   * every reader treats absence as empty. `roster` stays the initial selection.
+   */
+  recovery?: RunRecovery
   /**
    * AD-6a — how many roster models actually answered. Every co-discovery
    * fraction downstream divides by this, never by `roster.requested`.

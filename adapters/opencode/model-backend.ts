@@ -26,6 +26,7 @@ import type { RosterSlot } from "../../core/domain/roster.ts"
 import type { TokenUsage } from "../../core/domain/run-record.ts"
 import type { AdmittedTurn } from "../../core/ports/admission.ts"
 import type { LateUsageReporter } from "../../core/ports/late-usage.ts"
+import { classifyRefusal } from "./refusal.ts"
 import { permissionEchoProblem, type PermissionRule } from "./session-policy.ts"
 import {
   abandonedTurn,
@@ -34,6 +35,7 @@ import {
   type CleanupUnresolved,
   type Envelope,
   type ModelBackend,
+  type Refusal,
   type TurnFailure,
   type UsageUnknown,
 } from "../../core/ports/model-backend.ts"
@@ -497,6 +499,17 @@ function isMessageAbortedError(error: unknown): boolean {
     error !== null &&
     (error as { name?: unknown }).name === "MessageAbortedError"
   )
+}
+
+/** The `refusal` field for a failed turn: only a `model-error` can carry one (`./refusal.ts`). */
+function refusalOf(
+  failure: TurnFailure,
+  error: unknown,
+  slot: { providerId: string; modelId: string },
+): { refusal: Refusal } | Record<string, never> {
+  if (failure !== "model-error") return {}
+  const refusal = classifyRefusal(error, slot)
+  return refusal === undefined ? {} : { refusal }
 }
 
 function describeError(error: unknown): string {
@@ -1308,6 +1321,7 @@ export class OpencodeModelBackend implements ModelBackend {
       message: outcome.message,
       ...failed,
       ...("raw" in outcome ? { raw: outcome.raw } : {}),
+      ...refusalOf(outcome.failure, info?.error, rosterSlot),
     }
   }
 

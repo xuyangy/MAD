@@ -37,7 +37,8 @@ describe("the warning vocabulary (AD-6)", () => {
     // here, in this file, before it could reach the renderer — which is exactly
     // the argument a reader needs, because the two codes are about the same
     // block of the judge and mean opposite things about the evidence.
-    expect(WARNING_CODES).toHaveLength(20)
+    expect(WARNING_CODES).toHaveLength(22)
+    expect(DISCLOSURE_CODES.has("model-replaced")).toBe(false)
   })
 
   test("`turn-host-aborted` IS A DEGRADATION, not a disclosure (ledger #7)", () => {
@@ -134,7 +135,11 @@ describe("the warning vocabulary (AD-6)", () => {
     // unresolved` is the second disclosure ever added, and a test that only
     // counted the set would have accepted it in the degradation bucket while
     // still passing — which is the failure this whole file exists to catch.
-    expect([...DISCLOSURE_CODES]).toEqual(["provider-fan-out", "session-cleanup-unresolved"])
+    expect([...DISCLOSURE_CODES]).toEqual([
+      "provider-fan-out",
+      "session-cleanup-unresolved",
+      "roster-capability-excluded",
+    ])
     const degradations = WARNING_CODES.filter((code) => !DISCLOSURE_CODES.has(code))
     expect(degradations).toHaveLength(WARNING_CODES.length - DISCLOSURE_CODES.size)
     expect(degradations).not.toContain("provider-fan-out")

@@ -136,6 +136,23 @@ export const MODEL_UNRESOLVED = "unresolved — not on the roster"
  */
 export const MODEL_AMBIGUOUS = "ambiguous — slot id claimed by more than one roster entry"
 
+/**
+ * One route a refused discovery slot may be replaced with: a host model the
+ * initial pool did not use, bound to a fixed slot id `<prefix>-r<k>` before the
+ * backend is built. A `RosterSlot`, so a stage reads it like any slot; its
+ * `providerId` and `modelId` are that route's own, as the host listed it.
+ */
+export type RecoveryCandidate = RosterSlot
+
+/**
+ * Every route selection would replace a refused discovery slot with, in the
+ * order it would try them. Held in memory by the caller that built the backend
+ * with these bindings; never persisted and never rendered.
+ */
+export interface RecoveryPlan {
+  candidates: readonly RecoveryCandidate[]
+}
+
 export function modelNameOf(roster: Roster, slot: string): string {
   const matches = [...roster.slots, ...roster.lensSlots].filter((s) => s.slot === slot)
   if (matches.length === 0) return MODEL_UNRESOLVED

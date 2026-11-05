@@ -1058,7 +1058,9 @@ describe("mad_review.execute — one late-usage sink, reaching the backend and r
 
     expect(source).toContain("const lateUsage = createLateUsageSink()")
     // Onto the backend, so there is somewhere to report.
-    expect(source).toContain("slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],\n              lateUsage,")
+    expect(source).toContain(
+      "slots: [...resolved.roster.slots, ...resolved.roster.lensSlots, ...resolved.recovery.candidates],\n              lateUsage,",
+    )
     // And onto the run, so there is something to drain. A bare `lateUsage,` in
     // the `review({...})` literal is the same identifier, which is the whole
     // point — two `createLateUsageSink()` calls would satisfy a weaker assertion

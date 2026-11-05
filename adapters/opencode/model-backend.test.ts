@@ -1854,3 +1854,145 @@ describe("runTurn through the host client adapter", () => {
     expect(lateUsage.reports).toEqual([{ executionId: result.usageUnknown!.executionId, tokens: HOST_TOKENS_MAPPED }])
   })
 })
+
+/**
+ * A refused request, through the real backend driving `discover`: the backend
+ * classifies the host's error (`./refusal.ts`), and the stage does not retry a
+ * refused attempt. Each provider below answers by attempt, so one run shows a
+ * first-attempt refusal, a refusal on the retry, and an ordinary two-failure
+ * drop-out side by side.
+ */
+describe("discover over the real backend — a refused request is not retried", () => {
+  const GITLAB_CREDITS =
+    'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
+  const ORDINARY = { name: "UnknownError", data: { message: "upstream hiccup" } }
+
+  /** A host client whose prompt answers come from `script(provider, attempt)`, each with all-zero tokens. */
+  function scriptedClient(script: (provider: string, attempt: number) => unknown) {
+    const attempts = new Map<string, number>()
+    const prompts: string[] = []
+    let sessions = 0
+    const client = {
+      session: {
+        create: async () => ({ data: { id: `ses_${++sessions}` } }),
+        prompt: async (args: { model: { providerID: string } }) => {
+          const provider = args.model.providerID
+          const attempt = (attempts.get(provider) ?? 0) + 1
+          attempts.set(provider, attempt)
+          prompts.push(provider)
+          return { data: { info: { error: script(provider, attempt), tokens: ZERO_HOST_TOKENS } } }
+        },
+        delete: async () => ({ data: true }),
+      },
+    }
+    return { client, prompts }
+  }
+
+  async function run(candidates: ReturnType<typeof candidate>[], lenses: string[], script: (provider: string, attempt: number) => unknown) {
+    const roster = selectRoster(candidates, { slots: candidates.length, lenses, providerConfigKey: "provider" }).roster
+    const host = scriptedClient(script)
+    const backend = new OpencodeModelBackend({
+      directory: "/repo",
+      slots: [...roster.slots, ...roster.lensSlots],
+      client: host.client as never,
+      cleanupTimeoutMs: 10,
+    })
+    const ledger = emptyLedger()
+    const discovered = await discover({ roster, backend, instructions: DISCOVERY_INSTRUCTIONS, input: "diff", clock: fakeClock(), ledger })
+    const dropped = discovered.warnings.filter((w) => w.code === "model-dropped-out")
+    return { roster, discovered, ledger, prompts: host.prompts, dropped }
+  }
+
+  test("refused on the first attempt, refused on the retry, and an ordinary drop-out, each reported for what it was", async () => {
+    const { prompts, dropped, ledger, discovered } = await run(
+      [
+        candidate("gitlab", "duo-chat-gpt-5-6-terra"),
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openrouter", "amazon/nova-pro-v1"),
+      ],
+      [],
+      (provider, attempt) => {
+        if (provider === "gitlab") return { name: "UnknownError", data: { message: GITLAB_CREDITS } }
+        if (provider === "anthropic") return attempt === 1 ? ORDINARY : { name: "APIError", data: { statusCode: 402, isRetryable: false } }
+        return ORDINARY
+      },
+    )
+
+    expect(prompts.filter((p) => p === "gitlab")).toHaveLength(1)
+    expect(prompts.filter((p) => p === "anthropic")).toHaveLength(2)
+    expect(prompts.filter((p) => p === "openrouter")).toHaveLength(2)
+    expect(discovered.answered).toBe(0)
+
+    const byModel = (model: string) => dropped.find((w) => (w.detail as { model: string }).model.includes(model))!
+    const gitlab = byModel("duo-chat")
+    expect(gitlab.message).toContain(
+      "was refused on its only attempt (a payment refusal for provider `gitlab`, recognised from a known host error " +
+        "text, not from a checked account balance), so it was not retried",
+    )
+    expect(gitlab.detail).toMatchObject({
+      attempts: 1,
+      refusal: { kind: "payment", basis: "host-signature", scope: "provider" },
+      retry: "skipped",
+    })
+
+    const anthropic = byModel("claude-sonnet")
+    expect(anthropic.message).toContain(
+      "failed once, then its retry was refused (a payment refusal for the route `anthropic/claude-sonnet-4-5`, from the host's structured error)",
+    )
+    expect(anthropic.detail).toMatchObject({ attempts: 2, refusal: { kind: "payment", basis: "structured", scope: "route" }, retry: "refused" })
+
+    const ordinary = byModel("nova")
+    expect(ordinary.message).toContain("failed twice")
+    expect(ordinary.detail).not.toHaveProperty("refusal")
+    expect(ordinary.detail).not.toHaveProperty("retry")
+
+    // Every attempt issued is recorded, each under its own execution.
+    expect(ledger.unknownUsage).toHaveLength(5)
+    expect(new Set(ledger.unknownUsage.map((entry) => entry.executionId)).size).toBe(5)
+    expect(ledger.unknownUsage.filter((entry) => entry.slot === gitlab.detail!.slot).map((entry) => entry.attempt)).toEqual([1])
+    expect(ledger.unknownUsage.filter((entry) => entry.slot === anthropic.detail!.slot).map((entry) => entry.attempt)).toEqual([1, 2])
+  })
+
+  test("a lens slot's refused request is not retried either", async () => {
+    const { prompts, dropped } = await run([candidate("gitlab", "duo-chat-gpt-5-6-terra")], ["security"], () => ({
+      name: "UnknownError",
+      data: { message: GITLAB_CREDITS },
+    }))
+    // One pool slot and one lens slot, one attempt each.
+    expect(prompts).toEqual(["gitlab", "gitlab"])
+    expect(dropped).toHaveLength(2)
+    for (const warning of dropped) expect(warning.detail).toMatchObject({ attempts: 1, retry: "skipped" })
+  })
+})
+
+/**
+ * The recovery routes the plugin binds at construction: each `discovery-r<k>`
+ * id resolves like any slot, and binding makes no host request.
+ */
+describe("recovery routes bound at construction", () => {
+  test("every reserve id is known to the backend, and building it touches nothing", () => {
+    const resolved = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("openrouter", "x-ai/grok-4"),
+        candidate("xai", "grok-4"),
+      ],
+      { slots: 2, providerConfigKey: "provider", requireToolcall: true },
+    )
+    expect(resolved.recovery.candidates.map((route) => `${route.slot} ${route.providerId}/${route.modelId}`)).toEqual([
+      "discovery-r1 openrouter/x-ai/grok-4",
+      "discovery-r2 xai/grok-4",
+    ])
+    const fake = fakeV2()
+    const backend = new OpencodeModelBackend({
+      directory: "/repo",
+      slots: [...resolved.roster.slots, ...resolved.roster.lensSlots, ...resolved.recovery.candidates],
+      client: fake.client as never,
+    })
+    for (const route of resolved.recovery.candidates) expect(backend.capabilities(route.slot)).toEqual({ tools: true })
+    expect(fake.calls.create).toEqual([])
+    expect(fake.calls.prompt).toEqual([])
+    expect(fake.calls.delete).toEqual([])
+  })
+})

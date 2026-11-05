@@ -564,6 +564,146 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
   )
 
   test(
+    "NO MODEL DECLARES THE REQUIRED CAPABILITY: a host whose models all lack declared tool calling is refused before any session",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const incapable = {
+          ...THREE_PROVIDERS,
+          providers: THREE_PROVIDERS.providers.map((provider) => ({
+            ...provider,
+            models: Object.fromEntries(
+              Object.entries(provider.models).map(([key, model]) => [key, { ...model, capabilities: { toolcall: false } }]),
+            ),
+          })),
+        }
+        const run = await runScenario(repo, { discovery: [FEE_FINDING], providers: incapable })
+        expectClean(run)
+        expect(run.result.title).toBe("MAD — no model declares the required capability")
+        expect(run.result.output).toContain("The host offers 3 provider/model offering(s), but none declares tool calling")
+        expect(run.host.counts.providers).toBe(1)
+        expect(run.host.counts.create).toBe(0)
+        expect(run.host.counts.prompt).toBe(0)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A REFUSED REQUEST IS NOT RETRIED: the GitLab no-credits error drops its slot after one attempt, and says so",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const gitlab = {
+          id: "gitlab",
+          name: "GitLab",
+          source: "env",
+          env: [],
+          options: {},
+          models: { g: { ...THREE_PROVIDERS.providers[1]!.models.b, id: "duo-chat-gpt-5-6-terra", name: "duo-chat-gpt-5-6-terra" } },
+        }
+        const providers = { ...THREE_PROVIDERS, providers: [THREE_PROVIDERS.providers[0]!, gitlab, THREE_PROVIDERS.providers[2]!] }
+        const credits =
+          'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          providers,
+          promptError: (_session, prompt) =>
+            prompt.model === "duo-chat-gpt-5-6-terra" ? { name: "UnknownError", data: { message: credits } } : undefined,
+        })
+        expectClean(run)
+        expect(run.host.prompts.filter((p) => p.model === "duo-chat-gpt-5-6-terra")).toHaveLength(1)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 2/3 models answered")
+        expect(run.result.output).toContain(
+          "MODEL DROPPED OUT: `gitlab/duo-chat-gpt-5-6-terra` (slot discovery-2) was refused on its only attempt " +
+            "(a payment refusal for provider `gitlab`, recognised from a known host error text, not from a checked " +
+            "account balance), so it was not retried",
+        )
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A HOST WITH A SPARE MODEL: its recovery route is bound but never used, and the run's requests are unchanged",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const xai = {
+          id: "xai",
+          name: "xAI",
+          source: "env",
+          env: [],
+          options: {},
+          models: { x: { ...THREE_PROVIDERS.providers[1]!.models.b, id: "grok-4", name: "grok-4" } },
+        }
+        const providers = { ...THREE_PROVIDERS, providers: [...THREE_PROVIDERS.providers, xai] }
+        const run = await runScenario(repo, { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, providers })
+        expectClean(run)
+        // The same requests as the ordinary three-provider run: the bound route
+        // made none, and nothing names it.
+        expect(run.host.counts.create).toBe(5)
+        expect(run.host.counts.prompt).toBe(4)
+        expect(run.host.prompts.some((p) => p.model === "grok-4")).toBe(false)
+        expect(run.result.output).not.toContain("grok-4")
+        expect(run.result.output).not.toContain("replacements dispatched")
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A REFUSED SLOT IS REPLACED: GitLab's no-credits refusal is replaced by the spare model, which reaches the judge",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const modelOf = (id: string) => ({ ...THREE_PROVIDERS.providers[1]!.models.b, id, name: id })
+        const provider = (id: string, model: string) => ({ id, name: id, source: "env", env: [], options: {}, models: { m: modelOf(model) } })
+        const providers = {
+          ...THREE_PROVIDERS,
+          providers: [THREE_PROVIDERS.providers[0]!, provider("gitlab", "duo-chat-gpt-5-6-terra"), THREE_PROVIDERS.providers[2]!, provider("xai", "grok-4")],
+        }
+        const credits =
+          'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          providers,
+          promptError: (_session, prompt) =>
+            prompt.model === "duo-chat-gpt-5-6-terra" ? { name: "UnknownError", data: { message: credits } } : undefined,
+        })
+        expectClean(run)
+        expect(run.host.prompts.filter((p) => p.model === "duo-chat-gpt-5-6-terra")).toHaveLength(1)
+        expect(run.host.prompts.filter((p) => p.model === "grok-4" && p.role === undefined)).toHaveLength(1)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered")
+        expect(run.result.metadata?.warnings).toContain("model-replaced")
+        const report = run.result.output
+        expect(report).toContain(
+          "  discovery-r1: xai/grok-4 — Grok (xAI) — REPLACEMENT for discovery-2, dispatched 1 time(s), answered discovery",
+        )
+        expect(report).toContain("| replacements dispatched: 1 | answered: 3 |")
+        expect(report).toContain("MODEL REPLACED: `gitlab/duo-chat-gpt-5-6-terra` (slot discovery-2) was refused")
+        expect(report).toContain("It was replaced by slot discovery-r1.")
+        // One destination row, now including the provider the replacement added.
+        expect(report).toContain("This review sends the change to 4 provider(s): anthropic, gitlab, google, xai.")
+        expect(report).toContain("xai/grok-4 (replacement for discovery-2)")
+        // The replacement's authorship survives clustering and judging.
+        expect(report).toMatch(/co-discovery: 3\/3[\s\S]*discovery-r1/)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
     "no change: a clean tree is reported as nothing to review, and no model session is opened",
     async () => {
       const repo = await makeReviewRepo({ dirty: false })

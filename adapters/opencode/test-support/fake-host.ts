@@ -74,6 +74,12 @@ export interface FakeHostOptions {
   failDelete?: (sessionID: string) => boolean
   /** A prompt answers 500 instead of a scripted answer. The session is still counted. */
   failPrompt?: (sessionID: string, prompt: FakePrompt) => boolean
+  /**
+   * When it returns a value, the prompt settles as an assistant message carrying
+   * that value as its host error, with all-zero tokens: how a real host reports
+   * a provider's error, as opposed to `failPrompt`'s HTTP failure.
+   */
+  promptError?: (sessionID: string, prompt: FakePrompt) => unknown
   /** Held before the roster read is answered, so a test can keep it in flight. */
   holdProviders?: () => Promise<void> | undefined
   /** The provider list the roster read is answered with. Omitted means `THREE_PROVIDERS`. */
@@ -198,6 +204,19 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
     prompts.push(recorded)
     await options.holdPrompt?.(sessionID, recorded)
     if (options.failPrompt?.(sessionID, recorded)) return json({ name: "UnknownError", data: { message: "fake prompt failure" } }, 500)
+    const hostError = options.promptError?.(sessionID, recorded)
+    if (hostError !== undefined) {
+      return json({
+        info: {
+          id: `msg_${sessionID}_${counts.prompt}`,
+          sessionID,
+          role: "assistant",
+          error: hostError,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [],
+      })
+    }
     const answer = answerFor(body, recorded.role)
     if (answer instanceof Response) return answer
     return json({

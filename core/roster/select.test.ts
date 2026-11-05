@@ -7,6 +7,7 @@ import {
   dedupeByIdentity,
   fillLensSlots,
   NoCandidatesError,
+  NoEligibleCandidatesError,
   resolvePins,
   selectRoster,
 } from "./select.ts"
@@ -1121,5 +1122,267 @@ describe("a pinned slot is served by the provider the pin names (AD-4, amended 2
     const deduped = dedupeByIdentity(TWO_WAY)
     const luna = deduped.find((entry) => entry.candidate.modelId === "gpt-6-luna")!
     expect(luna.variants?.map((variant) => variant.providerId)).toEqual(["openai", "github-copilot"])
+  })
+})
+
+
+/**
+ * `requireToolcall` — only models the host declares able to call tools fill a
+ * slot, chosen per provider; without the option nothing changes.
+ */
+describe("the tool-calling requirement", () => {
+  const REQUIRE = { ...OPTS, requireToolcall: true }
+
+  test("a model whose first provider lacks it is served by the first provider that has it", () => {
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("openrouter", "google/gemini-3-pro-image-preview", false),
+        candidate("google", "gemini-3-pro-image-preview", true),
+        candidate("vertex", "gemini-3-pro-image-preview", true),
+      ],
+      { ...REQUIRE, slots: 1 },
+    )
+    expect(roster.slots).toHaveLength(1)
+    expect(roster.slots[0]!.providerId).toBe("google")
+    expect(roster.slots[0]!.modelId).toBe("gemini-3-pro-image-preview")
+    expect(roster.slots[0]!.toolcall).toBe(true)
+    expect(roster.slots[0]!.alsoAvailableVia).toEqual(["openrouter", "vertex"])
+    const excluded = warnings.find((w) => w.code === "roster-capability-excluded")!
+    expect(excluded.detail).toEqual({ requirement: "toolcall", offerings: 3, incapableOfferings: 1, excludedModels: 0 })
+  })
+
+  test("a model no provider declares it for is left out, and the disclosure counts offerings and models apart", () => {
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5", true),
+        candidate("openrouter", "google/gemini-3-pro-image-preview", false),
+        candidate("google", "gemini-3-pro-image-preview", false),
+        candidate("openai", "gpt-5", true),
+      ],
+      { ...REQUIRE, slots: 3 },
+    )
+    expect(roster.slots.map((s) => `${s.providerId}/${s.modelId}`)).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5"])
+    const excluded = warnings.find((w) => w.code === "roster-capability-excluded")!
+    expect(excluded.detail).toEqual({ requirement: "toolcall", offerings: 4, incapableOfferings: 2, excludedModels: 1 })
+    expect(excluded.message).toContain("MODELS LEFT OUT: 2 of the 4 provider/model offering(s)")
+    expect(excluded.message).toContain("1 model(s) were left out entirely")
+    expect(excluded.message).toContain("A declared capability does not guarantee a working endpoint.")
+    // The shortfall is reported by the underfill warning, in its own words.
+    const underfilled = warnings.find((w) => w.code === "roster-underfilled")!
+    expect(underfilled.message).toContain("the host offers only 2 distinct model(s) that declare tool calling (4 candidate(s) before dedupe)")
+  })
+
+  test("one provider listing an incapable alias before a capable one keeps the capable route", () => {
+    const { roster, warnings } = selectRoster(
+      [candidate("p", "gpt-5-preview", false), candidate("p", "gpt-5", true)],
+      { ...REQUIRE, slots: 1 },
+    )
+    expect(roster.slots.map((s) => `${s.providerId}/${s.modelId}`)).toEqual(["p/gpt-5"])
+    expect(roster.slots[0]!.toolcall).toBe(true)
+    expect(roster.slots[0]!.alsoAvailableVia).toEqual([])
+    expect(warnings.find((w) => w.code === "roster-capability-excluded")!.message).toContain(
+      "0 model(s) were left out entirely; other excluded offerings share a model identity with an eligible offering.",
+    )
+    expect(warnings.find((w) => w.code === "roster-capability-excluded")!.detail).toEqual({
+      requirement: "toolcall",
+      offerings: 2,
+      incapableOfferings: 1,
+      excludedModels: 0,
+    })
+  })
+
+  test("a pin to a provider is served through that provider's capable alias, never its incapable one", () => {
+    const candidates = [
+      candidate("a", "gpt-5-preview", false),
+      candidate("b", "gpt-5", false),
+      candidate("c", "gpt-5-preview", false),
+      candidate("c", "gpt-5", true),
+      candidate("a", "gpt-5", true),
+      candidate("anthropic", "claude-sonnet-4-5", true),
+    ]
+    // Unpinned: the first capable offering in host order serves the model, and
+    // every other provider is listed once.
+    const ranked = selectRoster(candidates, { ...REQUIRE, slots: 2 })
+    const gpt = ranked.roster.slots.find((s) => s.identity === "gpt-5")!
+    expect(`${gpt.providerId}/${gpt.modelId}`).toBe("c/gpt-5")
+    expect(gpt.alsoAvailableVia).toEqual(["a", "b"])
+
+    // Pinned through `a`, named by its incapable alias: served by a/gpt-5.
+    const pinned = selectRoster(candidates, { ...REQUIRE, slots: 2, pins: [{ providerId: "a", modelId: "gpt-5-preview" }] })
+    expect(`${pinned.roster.slots[0]!.providerId}/${pinned.roster.slots[0]!.modelId}`).toBe("a/gpt-5")
+    expect(pinned.roster.slots[0]!.toolcall).toBe(true)
+    expect(pinned.warnings.some((w) => w.code === "roster-pin-unhonoured")).toBe(false)
+
+    // Pinned through `b`, which has no capable alias: not honoured.
+    const refused = selectRoster(candidates, { ...REQUIRE, slots: 2, pins: [{ providerId: "b", modelId: "gpt-5" }] })
+    expect(refused.roster.slots.every((s) => s.toolcall)).toBe(true)
+    expect(
+      (refused.warnings.find((w) => w.code === "roster-pin-unhonoured")!.detail!.pins as { reason: string }[])[0]!.reason,
+    ).toBe("lacks-capability")
+  })
+
+  test("a pin to the incapable provider is not honoured, even with a capable sibling, and does not consume the model", () => {
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("openrouter", "google/gemini-3-pro-image-preview", false),
+        candidate("google", "gemini-3-pro-image-preview", true),
+        candidate("anthropic", "claude-sonnet-4-5", true),
+      ],
+      { ...REQUIRE, slots: 2, pins: [{ providerId: "openrouter", modelId: "google/gemini-3-pro-image-preview" }] },
+    )
+    // Not rerouted to google by the pin; ranking still fills both slots, and the
+    // model the pin named stays available to it, through its capable provider.
+    expect(roster.slots.map((s) => `${s.providerId}/${s.modelId}`).sort()).toEqual([
+      "anthropic/claude-sonnet-4-5",
+      "google/gemini-3-pro-image-preview",
+    ])
+    expect(roster.slots.every((s) => s.toolcall)).toBe(true)
+    const pinWarning = warnings.find((w) => w.code === "roster-pin-unhonoured")!
+    expect(pinWarning.detail?.pins).toEqual([
+      { providerId: "openrouter", modelId: "google/gemini-3-pro-image-preview", reason: "lacks-capability" },
+    ])
+    expect(pinWarning.message).toContain("the host does not declare tool calling for it through this provider")
+  })
+
+  test("a pin to the capable provider of the same model is honoured through that provider", () => {
+    const { roster, warnings } = selectRoster(
+      [
+        candidate("openrouter", "google/gemini-3-pro-image-preview", false),
+        candidate("google", "gemini-3-pro-image-preview", true),
+        candidate("anthropic", "claude-sonnet-4-5", true),
+      ],
+      { ...REQUIRE, slots: 2, pins: [{ providerId: "google", modelId: "gemini-3-pro-image-preview" }] },
+    )
+    expect(roster.slots[0]!.providerId).toBe("google")
+    expect(roster.slots[0]!.toolcall).toBe(true)
+    expect(warnings.some((w) => w.code === "roster-pin-unhonoured")).toBe(false)
+  })
+
+  test("pin outcomes: malformed first, then lacks-capability, then not-offered, dedupe-collapsed and no-slot", () => {
+    // The requirement is applied inside selectRoster, so the per-pin reasons
+    // are read from its warning.
+    const { warnings } = selectRoster(
+      [
+        candidate("openrouter", "gemini-3-pro-image-preview", false),
+        candidate("google", "gemini-3-pro-image-preview", true),
+        candidate("anthropic", "claude-sonnet-4-5", true),
+      ],
+      {
+        ...REQUIRE,
+        slots: 1,
+        pins: [
+          { providerId: "", modelId: "gemini-3-pro-image-preview" },
+          { providerId: "anthropic", modelId: "claude-sonnet-4-5" },
+          { providerId: "OpenRouter", modelId: "gemini-3-pro-image-preview" },
+          { providerId: "mistral", modelId: "mistral-large" },
+          { providerId: "anthropic", modelId: "claude-sonnet-4-5" },
+          { providerId: "google", modelId: "gemini-3-pro-image-preview" },
+        ],
+      },
+    )
+    const reasons = (warnings.find((w) => w.code === "roster-pin-unhonoured")!.detail!.pins as { reason: string }[]).map(
+      (p) => p.reason,
+    )
+    // A surplus pin to an incapable route is reported as lacking the capability,
+    // not as finding no slot: that is the fact the caller can act on.
+    expect(reasons).toEqual(["malformed", "lacks-capability", "not-offered", "dedupe-collapsed", "no-slot"])
+  })
+
+  test("lens slots never land on a model without the capability", () => {
+    const { roster } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5", true),
+        candidate("openrouter", "google/gemini-3-pro-image-preview", false),
+        candidate("openai", "gpt-5", true),
+        candidate("xai", "grok-4", false),
+      ],
+      { ...REQUIRE, slots: 2, lenses: ["security", "performance", "tests", "privacy-a11y"] },
+    )
+    expect(roster.lensSlots).toHaveLength(4)
+    expect(roster.lensSlots.every((s) => s.toolcall)).toBe(true)
+    expect(new Set(roster.lensSlots.map((s) => s.modelId))).toEqual(new Set(["claude-sonnet-4-5", "gpt-5"]))
+  })
+
+  test("a host whose models all declare it gets the same roster and warnings as with no requirement", () => {
+    const all = [
+      candidate("anthropic", "claude-sonnet-4-5", true),
+      candidate("bedrock", "us.anthropic.claude-sonnet-4-5-v1:0", true),
+      candidate("openai", "gpt-5", true),
+      candidate("google", "gemini-2.5-pro", true),
+      candidate("anthropic", "claude-haiku-4-5", true),
+    ]
+    const options = { ...OPTS, slots: 3, lenses: ["security"], pins: [{ providerId: "bedrock", modelId: "claude-sonnet-4-5" }] }
+    expect(selectRoster(all, { ...options, requireToolcall: true })).toEqual(selectRoster(all, options))
+  })
+
+  test("without the requirement, a model that cannot call tools is still selected", () => {
+    const { roster, warnings } = selectRoster([candidate("openrouter", "google/gemini-3-pro-image-preview", false)], {
+      ...OPTS,
+      slots: 1,
+    })
+    expect(roster.slots[0]!.toolcall).toBe(false)
+    expect(warnings.some((w) => w.code === "roster-capability-excluded")).toBe(false)
+  })
+
+  test("a host that offers models but none with the capability is refused, with a message distinct from no providers", () => {
+    const run = () =>
+      selectRoster([candidate("openrouter", "google/gemini-3-pro-image-preview", false), candidate("xai", "grok-4", false)], REQUIRE)
+    expect(run).toThrow(NoEligibleCandidatesError)
+    expect(run).toThrow("The host offers 2 provider/model offering(s), but none declares tool calling")
+    expect(run).toThrow("`provider`")
+    expect(() => selectRoster([], REQUIRE)).toThrow(NoCandidatesError)
+  })
+})
+
+/**
+ * The recovery plan: every model the pool did not take, each route bound to a
+ * fixed `<prefix>-r<k>` id, ranked so a fresh lineage comes before one the pool
+ * already holds.
+ */
+describe("the recovery plan", () => {
+  test("lists only models the pool did not take, every route once, with real model ids and unique ids", () => {
+    const { roster, recovery } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("openrouter", "google/gemini-2.5-pro"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("anthropic", "claude-haiku-4-5"),
+      ],
+      { ...OPTS, slots: 2, lenses: ["security"] },
+    )
+    const poolIdentities = new Set(roster.slots.map((slot) => slot.identity))
+    expect(recovery.candidates.every((route) => !poolIdentities.has(route.identity))).toBe(true)
+    // Gemini is a fresh lineage, so it ranks before a second Claude, and each of
+    // its providers is a route under its own model id.
+    expect(recovery.candidates.map((route) => `${route.slot} ${route.providerId}/${route.modelId}`)).toEqual([
+      "discovery-r1 openrouter/google/gemini-2.5-pro",
+      "discovery-r2 google/gemini-2.5-pro",
+      "discovery-r3 anthropic/claude-haiku-4-5",
+    ])
+    const ids = recovery.candidates.map((route) => route.slot)
+    const taken = new Set([...roster.slots, ...roster.lensSlots].map((slot) => slot.slot))
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.some((id) => taken.has(id))).toBe(false)
+  })
+
+  test("under the tool-calling requirement only capable routes are listed, and a provider's capable alias is the one kept", () => {
+    const { recovery } = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5", true),
+        candidate("p", "gpt-5-preview", false),
+        candidate("p", "gpt-5", true),
+        candidate("q", "gpt-5", false),
+        candidate("xai", "grok-4", false),
+      ],
+      { ...OPTS, slots: 1, requireToolcall: true },
+    )
+    expect(recovery.candidates.map((route) => `${route.providerId}/${route.modelId}`)).toEqual(["p/gpt-5"])
+    expect(recovery.candidates.every((route) => route.toolcall)).toBe(true)
+  })
+
+  test("a host whose models all fill the pool has an empty plan", () => {
+    const { recovery } = selectRoster([candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")], { ...OPTS, slots: 2 })
+    expect(recovery.candidates).toEqual([])
   })
 })

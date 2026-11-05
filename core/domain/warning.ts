@@ -325,6 +325,29 @@ export const WARNING_CODES = [
    * it rides on may have succeeded completely, and usually did.
    */
   "session-cleanup-unresolved",
+  /**
+   * The caller required a model capability (`SelectOptions.requireToolcall`)
+   * and the host offers models that do not declare it, so selection left them
+   * out. Raised once per run by `core/roster/select.ts`.
+   *
+   * A DISCLOSURE. It states how the roster was formed, as `provider-fan-out`
+   * does: a model left out was never going to answer, because the host cannot
+   * return MAD's structured answer through it. When leaving models out makes
+   * the roster smaller than requested, `roster-underfilled` reports that
+   * degradation in its own words, so this code never carries it.
+   */
+  "roster-capability-excluded",
+  /**
+   * Discovery replaced a pool slot the provider refused (`Refusal`) with an
+   * unused model from the recovery plan, and dispatched its turn. One per
+   * replacement, naming both models and saying whether the replacement
+   * answered. Raised by `core/stages/discover.ts`.
+   *
+   * A DEGRADATION. The refused model's drop-out row stays, and the run's pool
+   * is not the one MAD selected: the replacement fills the slot's place in the
+   * denominator, but the distinct-lineage count describes the selection.
+   */
+  "model-replaced",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]
@@ -361,6 +384,8 @@ export const DISCLOSURE_CODES: ReadonlySet<WarningCode> = new Set<WarningCode>([
    * this set out in full rather than counting it.
    */
   "session-cleanup-unresolved",
+  /** How the roster was formed: which offered models selection left out, and why. */
+  "roster-capability-excluded",
 ])
 
 export interface Warning {

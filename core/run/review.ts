@@ -10,7 +10,8 @@
  */
 
 import { MadStop, stopCauseOf, stoppedThisRun, type StopCause } from "../domain/stop-cause.ts"
-import type { Roster } from "../domain/roster.ts"
+import { executionProviders, executionRoster, replacementsOf } from "../domain/recovery.ts"
+import type { RecoveryPlan, Roster } from "../domain/roster.ts"
 import {
   clampConcurrency,
   clampPreset,
@@ -49,6 +50,12 @@ import { clampThreshold, route } from "../stages/route.ts"
 
 export interface ReviewDeps {
   roster: Roster
+  /**
+   * The routes a refused discovery slot may be replaced with, each already
+   * bound in `backend` under its slot id. Supplied only by a caller that built
+   * its backend with those bindings; without it no slot is replaced.
+   */
+  recovery?: RecoveryPlan
   backend: ModelBackend
   clock: Clock
   /** The change under review, already read through the `Repo` port. */
@@ -585,6 +592,35 @@ export type ContinueDeps = Pick<
  */
 const continued = new WeakSet<RunRecord>()
 
+/**
+ * One destination row for the whole run. When a dispatched replacement sent the
+ * change to a provider the initial selection did not, the roster's
+ * `provider-fan-out` disclosure is rewritten from `executionProviders`, listing
+ * the replacement models beside the initial ones and naming the added
+ * providers. Otherwise it is left exactly as selection wrote it.
+ */
+function discloseAddedDestinations(record: RunRecord): void {
+  const providers = executionProviders(record)
+  const added = providers.filter((provider) => !record.roster.providers.includes(provider))
+  if (added.length === 0) return
+  const index = record.warnings.findIndex((warning) => warning.code === "provider-fan-out" && warning.stage === "roster")
+  if (index === -1) return
+  const initial = record.warnings[index]!
+  const initialModels = Array.isArray(initial.detail?.models) ? (initial.detail.models as string[]) : []
+  const replacementModels = replacementsOf(record).map(
+    (replacement) => `${replacement.to.providerId}/${replacement.to.modelId} (replacement for ${replacement.from})`,
+  )
+  const models = [...initialModels, ...replacementModels]
+  record.warnings[index] = {
+    ...initial,
+    message:
+      `This review sends the change to ${providers.length} provider(s): ${providers.join(", ")}. ` +
+      `Models: ${models.join(", ")}. Including ${added.join(", ")}, added when discovery replaced a ` +
+      `refused model.`,
+    detail: { ...initial.detail, providers, models, added },
+  }
+}
+
 export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   const { roster, backend, clock, change } = deps
   // AD-11 amended — the pool's set comes from the registry, addressed by task
@@ -703,9 +739,13 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
     limiter,
     signal,
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
+    ...(deps.recovery === undefined ? {} : { recovery: deps.recovery }),
   })
 
   record.answered = discovered.answered
+  // Discovery recovery, only when a pool slot was refused. `record.roster`
+  // stays the initial selection; `executionRoster(record)` adds what was dispatched.
+  if (discovered.recovery !== undefined) record.recovery = discovered.recovery
   // AD-15 (story 8) — recorded only when it happened, for `cancelled`'s reason:
   // absent is the ordinary run, and an always-present empty array would put a
   // budget field on every artifact dump of a run no budget touched.
@@ -719,6 +759,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // lens instruction from one generated at run time.
   record.lensInstructions = discovered.lensInstructions
   record.warnings.push(...discovered.warnings)
+  discloseAddedDestinations(record)
   if (discovered.cancelled) recordCancellation(record, "discover", stopCauseOf(deps.signal))
 
   // ---- stage 2: cluster ----
@@ -764,9 +805,10 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // failing, so seating it is not paying for a known silence. And the bill
   // stays governed either way: the protocol's stop rule and the admission
   // still gate every later billed turn it is offered.
-  const answeredSlots = roster.slots
+  const execution = executionRoster(record)
+  const answeredSlots = execution.slots
     .map((slot) => slot.slot)
-    .concat(roster.lensSlots.map((slot) => slot.slot))
+    .concat(execution.lensSlots.map((slot) => slot.slot))
     .filter(
       (slot) =>
         !discovered.droppedOut.includes(slot) && !discovered.skippedForBudget.includes(slot),
@@ -999,7 +1041,10 @@ export async function continueReview(
   continued.add(prepared.record)
 
   const { record, framedChange, answeredSlots } = prepared
-  const { roster } = record
+  // The execution view: the initial selection plus any dispatched replacement
+  // slot, so debate and the judge can seat and name them. `record.roster`
+  // itself stays the initial selection.
+  const roster = executionRoster(record)
   const { backend, clock } = deps
   const limiter = createLimiter(record.ledger.maxConcurrency)
   // The reason travels with a stop already recorded, so the stages below say

@@ -239,14 +239,16 @@ export function createTurnRecorder(): TurnRecorder {
     wrap(inner: ModelBackend): ModelBackend {
       return {
         capabilities: (slot) => inner.capabilities(slot),
-        async runTurn(slot, instructions, input, schema, signal) {
+        async runTurn(slot, instructions, input, schema, signal, admitted) {
           // Taken BEFORE the await, so it is ISSUE order rather than completion
           // order — which is the order a person reading the dump is
           // reconstructing, and the one thing `ledger.entries` deliberately does
           // not preserve (`deferred-work.md`, story 2).
           issued += 1
           const seq = issued
-          const envelope = await inner.runTurn(slot, instructions, input, schema, signal)
+          // `admitted` is passed through untouched: the admission that issued it
+          // owns its settlement, and the inner backend gates on it.
+          const envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
           turns.push({ seq, slot, input, instructions, envelope })
           return envelope
         },

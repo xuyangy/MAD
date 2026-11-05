@@ -111,6 +111,7 @@ import {
 import { BLAME_KIND } from "../judge/blame.ts"
 import { effectiveSeverity, severityRank, type Entry, type Finding } from "../domain/finding.ts"
 
+import { executionRoster, replacementsOf } from "../domain/recovery.ts"
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
 import { DISCLOSURE_CODES, type WarningCode } from "../domain/warning.ts"
 import { LINE_BREAK_CLASS, listCell, oneLine } from "../prompt/material.ts"
@@ -1383,9 +1384,24 @@ export function renderRunRecord(record: RunRecord): string {
         `additive coverage; does NOT count toward distinct lineages${generated}`,
     )
   }
+  // Discovery recovery, only when a replacement was dispatched: each one on its
+  // own row, after the initial pool, naming the slot it replaced. The lineage
+  // count on the summary line stays the initial selection's.
+  const replacements = replacementsOf(record)
+  for (const replacement of replacements) {
+    const to = replacement.to
+    const lineage = to.lineage.verified ? to.lineage.label : "lineage unverified"
+    lines.push(
+      `  ${to.slot}: ${to.providerId}/${to.modelId} — ${lineage} — REPLACEMENT for ${replacement.from}, ` +
+        `dispatched ${replacement.dispatched} time(s), ` +
+        (replacement.answered ? "answered discovery" : "did not answer discovery"),
+    )
+  }
   lines.push(
     `  slots requested: ${record.roster.requested} | filled: ${record.roster.slots.length} | ` +
-      `answered: ${record.answered} | distinct verified lineages: ${record.roster.distinctLineages}`,
+      (replacements.length > 0 ? `replacements dispatched: ${replacements.length} | ` : "") +
+      `answered: ${record.answered} | distinct verified lineages: ${record.roster.distinctLineages}` +
+      (replacements.length > 0 ? " (initial selection)" : ""),
   )
   if (record.roster.lensSlots.length > 0) {
     const asked = record.roster.lensSlots.filter((s) => !skipped.has(s.slot))
@@ -1468,7 +1484,10 @@ export function renderRunRecord(record: RunRecord): string {
   // slot. Kept apart from drop-outs and budget skips because it claims neither a
   // model failure nor a budget refusal, and from a user stop because nobody is
   // known to have asked for it.
-  const poolSlotIds = new Set(record.roster.slots.map((rosterSlot) => rosterSlot.slot))
+  // The execution pool: the initial pool and any dispatched replacement slot,
+  // which answers discovery, or fails to, like any pool slot.
+  const executionPool = executionRoster(record).slots
+  const poolSlotIds = new Set(executionPool.map((rosterSlot) => rosterSlot.slot))
   const discoverySlotsWith = (code: WarningCode): number =>
     new Set(
       record.warnings
@@ -1611,9 +1630,9 @@ export function renderRunRecord(record: RunRecord): string {
       // admit a lens. "Before any model was asked" is said only when every
       // roster slot, pool and lens, is listed.
       const skippedSlots = new Set(record.skippedForBudget ?? [])
-      const poolSkipped = record.roster.slots.filter((rosterSlot) => skippedSlots.has(rosterSlot.slot)).length
+      const poolSkipped = executionPool.filter((rosterSlot) => skippedSlots.has(rosterSlot.slot)).length
       const lensSkipped = record.roster.lensSlots.filter((lensSlot) => skippedSlots.has(lensSlot.slot)).length
-      const poolNotSkipped = record.roster.slots.length - poolSkipped
+      const poolNotSkipped = executionPool.length - poolSkipped
       const lensNotSkipped = record.roster.lensSlots.filter((lensSlot) => !skippedSlots.has(lensSlot.slot))
       const cause = skipCauseOf(record, record.skippedForBudget ?? [])
       const skippedLine =

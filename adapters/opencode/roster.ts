@@ -112,10 +112,14 @@ export async function resolveRoster(
   const candidates = await enumerateCandidates(client)
   // Throws NoCandidatesError when the host has nothing configured — unusable
   // host state, surfaced to the user with guidance by the plugin entry.
+  // opencode returns a structured answer through a tool call, so a model the
+  // host does not declare able to call tools cannot answer a MAD turn here.
+  // Throws NoEligibleCandidatesError when no offered model declares it.
   return selectRoster(candidates, {
     slots,
     lenses,
     pins,
     providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
+    requireToolcall: true,
   })
 }

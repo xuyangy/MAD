@@ -415,11 +415,12 @@ export function deliveryProbe(payload: string | null) {
     wrap(inner: ModelBackend): ModelBackend {
       return {
         capabilities: (slot) => inner.capabilities(slot),
-        async runTurn(slot, instructions, input, schema, signal) {
+        async runTurn(slot, instructions, input, schema, signal, admitted) {
           const holds = payload !== null && (input.includes(payload) || instructions.includes(payload))
           let envelope: Awaited<ReturnType<ModelBackend["runTurn"]>>
           try {
-            envelope = await inner.runTurn(slot, instructions, input, schema, signal)
+            // `admitted` passes through untouched: its admission owns the settlement.
+            envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
           } catch (error) {
             uncertain += 1
             if (holds) uncertainCarrying += 1

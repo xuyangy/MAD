@@ -7,7 +7,9 @@
  *
  * A model that errors, times out, or returns an envelope that fails validation
  * gets EXACTLY ONE retry, then the run proceeds with a warning naming it
- * (AD-6b, AD-12), and it is excluded from the denominator.
+ * (AD-6b, AD-12), and it is excluded from the denominator. The one exception is
+ * an attempt the backend recognised as a refused request (`Refusal`): it is not
+ * retried, and the warning says it was refused and on which attempt.
  *
  * Writes only the fields discovery owns (AD-8): claim, reasoning, locus,
  * severity, author, source, lens.
@@ -90,7 +92,14 @@ import {
   type FindingSource,
   type Locus,
 } from "../domain/finding.ts"
-import type { RosterSlot, Roster } from "../domain/roster.ts"
+import {
+  validateRecoveryPlan,
+  type NotReplaced,
+  type RefusedSlot,
+  type Replacement,
+  type RunRecovery,
+} from "../domain/recovery.ts"
+import type { RecoveryPlan, RosterSlot, Roster } from "../domain/roster.ts"
 import {
   ceilingNamed,
   mayISpend,
@@ -105,7 +114,8 @@ import type { InstructionSet } from "../instructions/types.ts"
 import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
-import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import { oneLine } from "../prompt/material.ts"
+import { cancelledTurn, type Envelope, type ModelBackend, type Refusal } from "../ports/model-backend.ts"
 import { settlementOf, stageGatedTurn } from "./settlement.ts"
 
 /**
@@ -163,6 +173,12 @@ export function salvageFindings(raw: unknown): Salvage | undefined {
 
 export interface DiscoverInput {
   roster: Roster
+  /**
+   * The routes a refused pool slot may be replaced with, each bound in
+   * `backend` under its slot id. Absent means no slot is replaced: a refused
+   * slot is recorded as not replaced, with no plan.
+   */
+  recovery?: RecoveryPlan
   backend: ModelBackend
   /** AD-11 — the POOL's instruction set. Every pool slot gets exactly this. */
   instructions: InstructionSet
@@ -199,6 +215,8 @@ export interface DiscoverInput {
 }
 
 export interface DiscoverResult {
+  /** Present when a pool slot was refused: what was refused, and what replaced it or why nothing did. */
+  recovery?: RunRecovery
   /**
    * The pool: every answering model's findings unioned, in roster-slot order.
    * Not merged, not deduplicated — one defect appears once per model that raised
@@ -256,7 +274,8 @@ function toLocus(raw: { file: string; startLine?: number; endLine?: number }): L
 }
 
 /**
- * One turn plus, on failure, exactly one retry (AD-6b, AD-12).
+ * One turn plus, on failure, exactly one retry (AD-6b, AD-12), except after a
+ * refused request, which is not retried.
  *
  * ## Cancellation short-circuits the retry, and that is the whole rule
  *
@@ -484,13 +503,53 @@ async function runWithOneRetry(
     if (envelope.failure === "host-aborted") {
       return { skippedForBudget: false, envelope, attempts: attempt }
     }
+    // A REFUSED REQUEST IS NOT RETRIED. When the backend classifies this
+    // attempt as an authentication or payment refusal (`Refusal`), discovery
+    // skips its automatic retry. The classification does not establish the
+    // account's state, and this attempt's usage may be unknown; it is recorded
+    // above either way. On the retry, this ends the slot as the loop would.
+    if (envelope.refusal !== undefined) {
+      return { skippedForBudget: false, envelope, attempts: attempt }
+    }
     last = envelope
   }
   return { skippedForBudget: false, envelope: last!, attempts: 2 }
 }
 
+/** Why a refused slot got no replacement, as the clause its drop-out row ends with. */
+function notReplacedReason(entry: NotReplaced): string {
+  switch (entry.reason) {
+    case "no-plan":
+      return "no recovery plan was supplied"
+    case "no-candidate":
+      return "the host offers no unused model on a provider or route that was not refused"
+    case "budget":
+      return "the budget refused the replacement's turn before it was dispatched"
+    case "admission":
+      return `the experiment's admission refused the replacement's turn (${entry.detail ?? "no reason given"})`
+    case "cancelled":
+      return "the run was stopped before a replacement was dispatched"
+  }
+}
+
+/** One refusal, in words: what was refused, at what scope, and on what evidence. */
+function describeRefusal(refusal: Refusal): string {
+  const what = refusal.kind === "payment" ? "a payment refusal" : "an authentication refusal"
+  const where =
+    refusal.scope === "provider"
+      ? `for provider \`${refusal.providerId}\``
+      : `for the route \`${refusal.providerId}/${refusal.modelId}\``
+  const evidence =
+    refusal.basis === "structured"
+      ? "from the host's structured error"
+      : "recognised from a known host error text, not from a checked account balance"
+  return `${what} ${where}, ${evidence}`
+}
+
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   const { roster, clock } = input
+  // Before any turn is dispatched, so an inconsistent plan spends nothing.
+  if (input.recovery !== undefined) validateRecoveryPlan(input.recovery, roster)
   const resolveLens =
     input.resolveLens ?? ((lens: string) => resolveInstructions({ taskType: "coding", role: "discovery", lens }))
 
@@ -670,10 +729,21 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       // was not asked again; saying "twice" would bill it for a turn nobody ran
       // and overstate its unreliability in the one report a reader uses to judge
       // it. The retry that did not happen is named by its actual cause.
+      //
+      // A REFUSED request says so, with the attempt it happened on: refused on
+      // its first attempt, the retry was skipped; refused on its retry, the
+      // first attempt had failed in an ordinary way.
+      const refusal = envelope.ok ? undefined : envelope.refusal
       const howOften =
-        outcome.attempts < 2
-          ? `failed once, and the budget refused the retry`
-          : `failed twice`
+        refusal !== undefined
+          ? outcome.attempts < 2
+            ? `was refused on its only attempt (${describeRefusal(refusal)}), so it was not retried`
+            : `failed once, then its retry was refused (${describeRefusal(refusal)})`
+          : outcome.attempts < 2
+            ? outcome.admissionReason === undefined
+              ? `failed once, and the budget refused the retry`
+              : `failed once, and the experiment's admission refused the retry (${oneLine(outcome.admissionReason)})`
+            : `failed twice`
       warnings.push({
         code: "model-dropped-out",
         stage: "discover",
@@ -690,6 +760,12 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
           failure: envelope.ok ? "none" : envelope.failure,
           error: envelope.ok ? "" : envelope.message,
           ...(outcome.admissionReason === undefined ? {} : { admission: outcome.admissionReason }),
+          ...(refusal === undefined
+            ? {}
+            : {
+                refusal: { kind: refusal.kind, basis: refusal.basis, scope: refusal.scope },
+                retry: outcome.attempts < 2 ? "skipped" : "refused",
+              }),
         },
       })
       return false
@@ -763,6 +839,154 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     collect(outcome, { source: "lens", lens: outcome.lens })
   }
 
+  // ---- round 2: discovery recovery ----
+  //
+  // A POOL slot whose turn ended in a classified refusal (`Refusal`) gets at
+  // most one replacement, from `input.recovery`, in roster slot order. Only
+  // round 1's evidence decides: the providers and routes refused in round 1,
+  // pool and lens, are excluded, and nothing a replacement's own turn reports
+  // changes that set, this slot's record, or anyone else's. There is no third
+  // round and no replacement of a replacement.
+  //
+  // A model is consumed when it is ALLOCATED, before anything is dispatched, so
+  // which slot gets which model does not depend on completion order. A
+  // replacement whose first attempt is never dispatched (the budget, the
+  // admission or a stop refused it) leaves no slot of its own: the original is
+  // recorded as not replaced, with that cause. A dispatched one is collected
+  // as a pool slot like any other, so it answers, drops out or is cancelled
+  // under the ordinary rules, and an answer counts toward the denominator.
+  const refusedOutcomes = poolOutcomes.filter(
+    (outcome) => !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.refusal !== undefined,
+  )
+  let recovery: RunRecovery | undefined
+  const replacementOutcomes: ({ rosterSlot: RosterSlot; from: string } & SlotOutcome)[] = []
+  if (refusedOutcomes.length > 0) {
+    const refusalOfOutcome = (outcome: SlotOutcome): Refusal | undefined =>
+      outcome.skippedForBudget || outcome.envelope.ok ? undefined : outcome.envelope.refusal
+    const refused: RefusedSlot[] = refusedOutcomes.map((outcome) => ({
+      slot: outcome.rosterSlot.slot,
+      refusal: refusalOfOutcome(outcome)!,
+    }))
+    const excludedProviders = new Set<string>()
+    const excludedRoutes = new Set<string>()
+    for (const outcome of [...poolOutcomes, ...lensOutcomes]) {
+      const refusal = refusalOfOutcome(outcome)
+      if (refusal === undefined) continue
+      if (refusal.scope === "provider") excludedProviders.add(refusal.providerId)
+      else excludedRoutes.add(`${refusal.providerId}\u0000${refusal.modelId}`)
+    }
+    const allocatedIdentities = new Set(roster.slots.map((rosterSlot) => rosterSlot.identity))
+    const notReplaced: NotReplaced[] = []
+    const allocations: { from: string; to: RosterSlot }[] = []
+    for (const entry of refused) {
+      // A stop that landed during round 1 is why nothing is allocated, whatever
+      // the plan holds.
+      if (input.signal?.aborted) {
+        notReplaced.push({ from: entry.slot, reason: "cancelled" })
+        continue
+      }
+      if (input.recovery === undefined) {
+        notReplaced.push({ from: entry.slot, reason: "no-plan" })
+        continue
+      }
+      const to = input.recovery.candidates.find(
+        (candidate) =>
+          !allocatedIdentities.has(candidate.identity) &&
+          !excludedProviders.has(candidate.providerId) &&
+          !excludedRoutes.has(`${candidate.providerId}\u0000${candidate.modelId}`),
+      )
+      if (to === undefined) {
+        notReplaced.push({ from: entry.slot, reason: "no-candidate" })
+        continue
+      }
+      allocatedIdentities.add(to.identity)
+      allocations.push({ from: entry.slot, to })
+    }
+
+    replacementOutcomes.push(
+      ...(await Promise.all(
+        allocations.map(async ({ from, to }) => ({
+          rosterSlot: to,
+          from,
+          ...(await withSlot(() => runWithOneRetry(input, to.slot, input.instructions.text, cleanups))),
+        })),
+      )),
+    )
+
+    const replacements: Replacement[] = []
+    for (const outcome of replacementOutcomes) {
+      if (outcome.skippedForBudget) {
+        notReplaced.push({
+          from: outcome.from,
+          ...(outcome.admissionReason === undefined
+            ? { reason: "budget" as const }
+            : { reason: "admission" as const, detail: outcome.admissionReason }),
+        })
+        continue
+      }
+      if (outcome.attempts === 0) {
+        // Cancelled before its first attempt was dispatched.
+        notReplaced.push({ from: outcome.from, reason: "cancelled" })
+        continue
+      }
+      const answeredDiscovery = collect(outcome, { source: "pool" })
+      if (answeredDiscovery) answered += 1
+      replacements.push({
+        from: outcome.from,
+        to: outcome.rosterSlot,
+        dispatched: outcome.attempts === 1 ? 1 : 2,
+        answered: answeredDiscovery,
+      })
+    }
+    const order = new Map(refused.map((entry, index) => [entry.slot, index]))
+    notReplaced.sort((a, b) => order.get(a.from)! - order.get(b.from)!)
+    recovery = { refused, replacements, notReplaced }
+
+    // Each refused original's drop-out row says what became of its slot, and
+    // each dispatched replacement gets its own row.
+    const rowOf = (slot: string): Warning | undefined =>
+      warnings.find((warning) => warning.code === "model-dropped-out" && warning.detail?.slot === slot)
+    const modelOf = (slot: string): string => {
+      const rosterSlot = roster.slots.find((candidate) => candidate.slot === slot)!
+      return `${rosterSlot.providerId}/${rosterSlot.modelId}`
+    }
+    for (const replacement of replacements) {
+      const row = rowOf(replacement.from)
+      if (row !== undefined) {
+        row.message += ` It was replaced by slot ${replacement.to.slot}.`
+        row.detail = { ...row.detail, recovery: { replacedBy: replacement.to.slot } }
+      }
+      const refusal = refused.find((entry) => entry.slot === replacement.from)!.refusal
+      const to = `${replacement.to.providerId}/${replacement.to.modelId}`
+      warnings.push({
+        code: "model-replaced",
+        stage: "discover",
+        message:
+          `MODEL REPLACED: \`${modelOf(replacement.from)}\` (slot ${replacement.from}) was refused ` +
+          `(${describeRefusal(refusal)}); MAD dispatched \`${to}\` (slot ${replacement.to.slot}) in its ` +
+          `place, ${replacement.dispatched} time(s), and it ` +
+          (replacement.answered
+            ? `answered discovery. Co-discovery fractions count the replacement as one pool model; `
+            : `did not answer discovery, so it is not in the co-discovery denominator; `) +
+          `the distinct-lineage count is the initial selection's.`,
+        detail: {
+          from: replacement.from,
+          to: replacement.to.slot,
+          model: to,
+          refusal: { kind: refusal.kind, basis: refusal.basis, scope: refusal.scope },
+          dispatched: replacement.dispatched,
+          answered: replacement.answered,
+        },
+      })
+    }
+    for (const entry of notReplaced) {
+      const row = rowOf(entry.from)
+      if (row === undefined) continue
+      row.message += ` It was not replaced: ${notReplacedReason(entry)}.`
+      row.detail = { ...row.detail, recovery: { notReplaced: entry.reason } }
+    }
+  }
+
   // AD-6a — make the shrunken denominator itself visible, not just implied by
   // the fraction. Compared against the POOL only: `roster.slots.length` never
   // includes a lens slot, so a dropped-out lens can never make this fire and a
@@ -772,7 +996,13 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // this stage must not claim to be where the run stopped when it finished its
   // work; the next stage to actually skip a turn is the honest answer, and
   // `review()` takes the FIRST stage that reports one.
-  const cancelled = [...poolOutcomes, ...lensOutcomes].some(
+  // The pool the summaries below count over: the initial slots and every
+  // dispatched replacement. `roster.slots.length` stays the filled count.
+  const executionPoolIds = (): string[] => [
+    ...roster.slots.map((rosterSlot) => rosterSlot.slot),
+    ...(recovery?.replacements ?? []).map((replacement) => replacement.to.slot),
+  ]
+  const cancelled = [...poolOutcomes, ...lensOutcomes, ...replacementOutcomes].some(
     (outcome) =>
       !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
   )
@@ -791,7 +1021,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // co-discovery denominator every later fraction divides by, while an unasked
   // LENS slot costs only that lens's vantage (AD-17d).
   if (skippedForBudget.length > 0) {
-    const poolSlots = new Set(roster.slots.map((rosterSlot) => rosterSlot.slot))
+    const poolSlots = new Set(executionPoolIds())
     const poolSkipped = skippedForBudget.filter((slot) => poolSlots.has(slot)).length
     const lensSkipped = skippedForBudget.length - poolSkipped
     // The ceiling is NAMED BY THE ACCOUNTANT, not computed here. A stage that
@@ -848,7 +1078,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // a run can lose slots to a drop-out AND to the budget at once — and both
     // clauses can be true in one run, which is why this is a second clause
     // rather than a branch.
-    const poolIds = new Set(roster.slots.map((rosterSlot) => rosterSlot.slot))
+    const poolIds = new Set(executionPoolIds())
     const poolSkippedCount = skippedForBudget.filter((slot) => poolIds.has(slot)).length
     const poolAdmissionRefused = skippedForBudget.filter((slot) => poolIds.has(slot) && admissionRefusals.has(slot)).length
     const becauseBudget =
@@ -970,5 +1200,14 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     })
   }
 
-  return { findings, answered, droppedOut, skippedForBudget, lensInstructions, warnings, cancelled }
+  return {
+    findings,
+    answered,
+    droppedOut,
+    skippedForBudget,
+    lensInstructions,
+    warnings,
+    cancelled,
+    ...(recovery === undefined ? {} : { recovery }),
+  }
 }
