@@ -18,6 +18,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { createOpencodeClient } from "@opencode-ai/sdk"
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -55,8 +56,14 @@ const THREE_PROVIDERS = {
   default: {},
 }
 
+/**
+ * The host client: its provider list is canned, and its `session` is a real v1
+ * client's, pointed at the probe-only host below, the way the host's own client
+ * reaches its server.
+ */
 function fakeClient(body: unknown = THREE_PROVIDERS) {
-  return { config: { providers: async () => ({ data: body }) } } as never
+  const sessions = createOpencodeClient({ baseUrl: `http://127.0.0.1:${probeOnlyHost!.port}` }).session
+  return { config: { providers: async () => ({ data: body }) }, session: sessions } as never
 }
 
 /**
@@ -178,8 +185,9 @@ async function executeWith(
     client: fakeClient(),
     directory: ".",
     worktree,
-    // Answers the probe only: every turn becomes a transport-error drop-out.
-    serverUrl: `http://127.0.0.1:${probeOnlyHost!.port}`,
+    // Nothing listens here; the sessions go through the host client, which
+    // reaches the probe-only host, so every turn is a transport-error drop-out.
+    serverUrl: new URL("http://127.0.0.1:9"),
     $: fakeShell(),
   } as never)
   const tool = (plugin as {

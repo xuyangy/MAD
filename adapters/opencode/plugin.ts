@@ -34,6 +34,7 @@ import {
   refusalFor,
   type ArtifactOutcome,
 } from "./artifacts.ts"
+import { hostSessionFromPluginClient } from "./host-session.ts"
 import { OpencodeModelBackend, type PolicyProbe } from "./model-backend.ts"
 import { DEFAULT_PLUGIN_BUDGET, pluginBudget } from "./plugin-budget.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
@@ -338,7 +339,7 @@ function stoppedAfterRead(disclosure = ""): { title: string; output: string } {
   }
 }
 
-export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl, $ }) => {
+export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
   // CAP-3 — ONE GUARD PER PLUGIN INSTANCE, shared by every review it runs and
   // by the hook below, so a session is covered from its creation until the host
   // confirms its deletion, whichever review created it.
@@ -685,7 +686,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, serverUrl
             let policyStop: { problem: string } | undefined
 
             const backend = new OpencodeModelBackend({
-              serverUrl,
+              // The host's own client, not one built from `serverUrl`: outside
+              // `opencode serve` the host passes a placeholder URL nothing
+              // listens on (`./host-session.ts`).
+              client: hostSessionFromPluginClient(client),
               directory,
               slots: [...resolved.roster.slots, ...resolved.roster.lensSlots],
               lateUsage,

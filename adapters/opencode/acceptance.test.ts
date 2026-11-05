@@ -4,9 +4,9 @@
  * Each scenario drives `mad_review` through the SHIPPED plugin entry: it calls
  * `MadPlugin(...)` and then `tool.mad_review.execute`. Real `@opencode-ai/sdk`
  * clients talk real HTTP to a loopback fake host (`test-support/fake-host.ts`).
- * The v1 client serves as the plugin's host `client`, and the backend builds its
- * own v2 client from `serverUrl`. The fake host answers with schema-valid fake
- * provider replies.
+ * A v1 client serves as the plugin's host `client`, and every request MAD makes,
+ * the review sessions included, goes through it; `serverUrl` is never
+ * contacted. The fake host answers with schema-valid fake provider replies.
  *
  * Five checks follow every scenario (`expectClean`):
  *
@@ -130,7 +130,10 @@ interface Run {
 interface ScenarioOptions {
   /** The `mad_review` arguments. Default none. */
   args?: Record<string, unknown>
-  /** Defaults to the fake host; the guard test points it elsewhere. */
+  /**
+   * The plugin's `serverUrl`. Defaults to the fake host. The placeholder test
+   * points it at a URL nothing listens on, to show MAD never contacts it.
+   */
   serverUrl?: string
   /** Wraps `execute` only, so the snapshots run outside it. */
   aroundExecute?: <T>(body: () => Promise<T>) => Promise<T>
@@ -2218,31 +2221,54 @@ describe("acceptance — a filter preflight that cannot answer (CAP-2)", () => {
 
 describe("acceptance — the network guard rejects what would leave the allowed origin", () => {
   test(
-    "a backend pointed away from the fake host has every request rejected before it leaves the process",
+    "a request to any other origin is rejected before it leaves the process",
     async () => {
-      const repo = await makeReviewRepo({ dirty: true })
       // A loopback origin nothing listens on, never a real provider endpoint.
       // The guard must reject before the real `fetch` is reached, so whether
       // anything listens there does not change the outcome.
-      const elsewhere = "http://127.0.0.1:9"
+      const guard = installNetworkGuard(["http://127.0.0.1:1"])
       try {
-        const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { serverUrl: elsewhere })
-        expect(run.changed).toEqual([])
-        expect(run.host.problems).toEqual([])
-        expect([...run.host.openSessions]).toEqual([])
-        expect(run.shellProblems).toEqual([])
-        expect(run.guard.blocked.length).toBeGreaterThan(0)
-        expect(run.guard.blocked.every((url) => new URL(url).origin === elsewhere)).toBe(true)
-        // Only the roster read went to the fake host; no session was created there.
-        expect(run.guard.delegated()).toBe(run.host.counts.providers)
-        expect(run.host.counts.create).toBe(0)
-        // The first blocked request is the session-policy probe (CAP-3), so the
-        // user is told MAD could not check the policy, and no model was asked.
-        // It does not read as a clean review or as nothing to review.
-        expect(run.result.title).toBe("MAD — could not check the session policy")
-        expect(run.result.output).toContain("no model was asked anything")
-        expect(run.result.output).not.toContain("permission rules different from")
-        expect(run.host.counts.prompt).toBe(0)
+        await expect(fetch("http://127.0.0.1:9/session", { method: "POST" })).rejects.toThrow("network blocked")
+        expect(guard.blocked).toEqual(["http://127.0.0.1:9/session"])
+        expect(guard.delegated()).toBe(0)
+      } finally {
+        guard.restore()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A PLACEHOLDER `serverUrl` IS NEVER CONTACTED: the review runs through the host client",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      // What the host passes outside `opencode serve`: a URL nothing listens on.
+      // Any attempt to reach it would show up in the guard's blocked list.
+      const placeholder = "http://127.0.0.1:9"
+      try {
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
+          { serverUrl: placeholder },
+        )
+        expectClean(run)
+        expect(run.guard.blocked).toEqual([])
+        // Every request the guard saw went to the fake host, which the host
+        // client is pointed at.
+        expect(run.guard.delegated()).toBe(
+          run.host.counts.providers + run.host.counts.create + run.host.counts.prompt + run.host.counts.delete,
+        )
+        // The policy probe passed on the host's echo, then three discovery
+        // turns and one fact-check ran, as in the ordinary scenario.
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered")
+        expect(run.host.counts.create).toBe(5)
+        expect(run.host.counts.prompt).toBe(4)
+        expect(run.host.counts.delete).toBe(5)
+        expect(run.host.creates.map((body) => (body as { permission?: unknown }).permission)).toEqual(
+          Array(5).fill(REVIEW_SESSION_PERMISSION),
+        )
+        expect(run.result.output).toContain("FINDINGS (1)")
+        expect(run.result.output).toContain("Verdicts: 1 upheld, 0 ruled invalid, 0 not settled, 0 withdrawn.")
       } finally {
         await repo.remove()
       }

@@ -1,11 +1,13 @@
 /**
  * A `fetch` guard for the offline acceptance suite (CAP-1).
  *
- * WHAT IT COVERS. Both SDK clients the plugin uses reach the host over
- * `fetch`, and each captures `globalThis.fetch` when it is CREATED
- * (`@opencode-ai/sdk/dist/v2/gen/client/client.gen.js`). So the guard has to be
- * installed before `MadPlugin` runs and before any client is built, and it stays
- * installed until all started work has settled.
+ * WHAT IT COVERS. Every request the plugin makes, the review sessions
+ * included, goes through the host client it is given, and that client reaches
+ * the host over `fetch`. A client may capture `globalThis.fetch` when it is
+ * CREATED (`@opencode-ai/sdk/dist/v2/gen/client/client.gen.js`). So the guard
+ * has to be installed before `MadPlugin` runs and before any client is built,
+ * and it stays installed until all started work has settled. A client built
+ * with its own `fetch` bypasses the guard: what that `fetch` does is outside it.
  *
  * A request to an allowed origin, the fake host's, goes through. Any other
  * request is recorded and rejected BEFORE the underlying `fetch` is called, so

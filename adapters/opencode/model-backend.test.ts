@@ -22,6 +22,9 @@ import { CODING_DISCOVERY_GENERALIST as DISCOVERY_INSTRUCTIONS } from "../../cor
 import { selectRoster } from "../../core/roster/select.ts"
 import { discover } from "../../core/stages/discover.ts"
 import { candidate, fakeClock } from "../../core/test-support/fakes.ts"
+import { createOpencodeClient } from "@opencode-ai/sdk"
+
+import { hostSessionFromPluginClient } from "./host-session.ts"
 import { OpencodeModelBackend, type MeteredUsage, type RequestMeterPort } from "./model-backend.ts"
 
 const SCHEMA = z.object({ findings: z.array(z.object({ claim: z.string() })) })
@@ -1739,5 +1742,115 @@ describe("discover over the real backend — a host-reported abort (ledger #7)",
     const codes = discovered.warnings.map((warning) => warning.code)
     expect(codes).toContain("turn-host-aborted")
     expect(codes).not.toContain("model-dropped-out")
+  })
+})
+
+
+/**
+ * Where the backend's session client comes from: the one it is given, else one
+ * built from `serverUrl`, else nothing, which is a programming error.
+ */
+describe("the session client", () => {
+  test("a backend with neither a client nor a server URL is refused at construction", () => {
+    expect(() => new OpencodeModelBackend({ directory: "/repo", slots: SLOTS })).toThrow(
+      "OpencodeModelBackend needs a session client or a server URL",
+    )
+  })
+
+  test("a given client wins over a server URL, which is never contacted", async () => {
+    const realFetch = globalThis.fetch
+    const contacted: string[] = []
+    globalThis.fetch = Object.assign(
+      async (input: Request | string | URL) => {
+        contacted.push(String(input instanceof Request ? input.url : input))
+        throw new Error("this test makes no network request")
+      },
+      { preconnect: realFetch.preconnect },
+    ) as typeof globalThis.fetch
+    try {
+      const fake = fakeV2()
+      const backend = new OpencodeModelBackend({
+        serverUrl: "http://127.0.0.1:9",
+        directory: "/repo",
+        slots: SLOTS,
+        client: fake.client as never,
+      })
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(result.ok).toBe(true)
+      expect(fake.calls.create).toHaveLength(1)
+      expect(contacted).toEqual([])
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  test("without the session policy, a create answering a non-string id is a transport-error, and nothing is prompted or deleted", async () => {
+    const { backend, calls } = backendWith({ create: { data: { id: 42 } } })
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(calls.prompt).toHaveLength(0)
+    expect(calls.delete).toHaveLength(0)
+  })
+})
+
+/**
+ * The backend through `hostSessionFromPluginClient` over a real v1 client, the
+ * plugin's path. The adapter adds no cancellation, so a stop still returns at
+ * once, the session is still disposed, and the held answer still reaches the
+ * late-usage sink when it arrives.
+ */
+describe("runTurn through the host client adapter", () => {
+  test("a stop returns before the held prompt settles; cleanup runs, and the usage arrives late", async () => {
+    const requests: { method: string; path: string; signal: AbortSignal }[] = []
+    let release!: (response: Response) => void
+    const held = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    let promptSeen!: () => void
+    const promptStarted = new Promise<void>((resolve) => {
+      promptSeen = resolve
+    })
+    const fetch = async (input: Request | string | URL, init?: RequestInit): Promise<Response> => {
+      const request = input instanceof Request ? new Request(input, init) : new Request(String(input), init)
+      const path = new URL(request.url).pathname
+      requests.push({ method: request.method, path, signal: request.signal })
+      if (request.method === "POST" && path === "/session") return Response.json({ id: "ses_v1" })
+      if (request.method === "POST" && path === "/session/ses_v1/message") {
+        promptSeen()
+        return held
+      }
+      if (request.method === "DELETE" && path === "/session/ses_v1") return Response.json(true)
+      return Response.json({ name: "NotFound", data: {} }, { status: 404 })
+    }
+    const v1 = createOpencodeClient({ baseUrl: "http://localhost:4096", directory: "/repo", fetch: fetch as typeof globalThis.fetch })
+    const lateUsage = collectingReporter()
+    const backend = new OpencodeModelBackend({
+      directory: "/repo",
+      slots: SLOTS,
+      client: hostSessionFromPluginClient(v1),
+      timeoutMs: 10_000,
+      cleanupTimeoutMs: 1_000,
+      lateUsage,
+    })
+
+    const controller = new AbortController()
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    await promptStarted
+    controller.abort()
+    const result = await pending
+
+    expect(!result.ok && result.failure).toBe("cancelled")
+    expect(lateUsage.reports).toEqual([])
+    expect(requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "POST /session",
+      "POST /session/ses_v1/message",
+      "DELETE /session/ses_v1",
+    ])
+    // The stop is not forwarded to the transport: the prompt request is still open.
+    expect(requests[1]!.signal.aborted).toBe(false)
+
+    release(Response.json({ info: { structured: PAYLOAD, tokens: HOST_TOKENS }, parts: [] }))
+    await flush()
+    expect(lateUsage.reports).toEqual([{ executionId: result.usageUnknown!.executionId, tokens: HOST_TOKENS_MAPPED }])
   })
 })

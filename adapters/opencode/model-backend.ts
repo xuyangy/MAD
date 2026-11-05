@@ -1,13 +1,18 @@
 /**
  * AD-2 / AD-12 — `ModelBackend` over opencode.
  *
- * THE V1/V2 TRAP (story 1 design notes): `PluginInput.client` is the v1 SDK
- * client and silently lacks a `format` parameter. Structured output — which
- * AD-12 requires, since hand-parsing JSON out of prose is exactly what it
- * forbids — needs a separately constructed v2 client, whose `session.prompt`
- * accepts `format: { type: "json_schema", schema }` and returns the parsed
+ * STRUCTURED OUTPUT. AD-12 requires it, since hand-parsing JSON out of prose is
+ * exactly what it forbids. Every prompt carries
+ * `format: { type: "json_schema", schema }`, and the host returns the parsed
  * result on `AssistantMessage.structured` (`structured`, NOT
  * `structured_output`; the docs are wrong).
+ *
+ * WHICH CLIENT. The backend calls `HostSessionApi`, in the v2 SDK's argument
+ * shapes. The plugin passes the host's own client (`PluginInput.client`, the v1
+ * SDK) through `hostSessionFromPluginClient` (`./host-session.ts`), which sends
+ * `format` and the session `permission` that the v1 request types do not
+ * declare. Callers that start `opencode serve` themselves pass `serverUrl`
+ * instead, and the backend builds a v2 client against it.
  *
  * Provider and model errors are RETURNED on `AssistantMessage.error`, not
  * thrown, and transport errors are returned too. Both become domain outcomes on
@@ -33,7 +38,42 @@ import {
   type UsageUnknown,
 } from "../../core/ports/model-backend.ts"
 
-type V2Client = ReturnType<typeof createOpencodeClient>
+/**
+ * What a session create resolves to, as much of it as this adapter reads. The
+ * id and the permission echo are checked at run time (`usableSessionID`,
+ * `permissionEchoProblem`), so both stay `unknown` here.
+ */
+interface SessionCreatedLike {
+  data?: { id?: unknown; permission?: unknown }
+  error?: unknown
+}
+
+/** One prompt request, in the v2 SDK's flat argument shape. */
+export interface HostPromptArgs {
+  sessionID: string
+  directory: string
+  model: { providerID: string; modelID: string }
+  system: string
+  format: { type: "json_schema"; schema: Record<string, unknown> }
+  tools?: Record<string, boolean>
+  parts: Array<{ type: "text"; text: string }>
+}
+
+/**
+ * THE SESSION SURFACE THIS BACKEND CALLS, and nothing more: create and prompt,
+ * which every turn needs, and delete, which a client may lack. The arguments are
+ * the v2 SDK's flat shapes, so a v2 client (`createOpencodeClient` from
+ * `@opencode-ai/sdk/v2`) satisfies it as it is. The plugin passes the host's own
+ * client through `hostSessionFromPluginClient` (`./host-session.ts`). The
+ * results are the SDK's envelopes, read through the narrow shapes below.
+ */
+export interface HostSessionApi {
+  session: {
+    create(args: { directory: string; title: string; permission?: PermissionRule[] }): Promise<SessionCreatedLike>
+    prompt(args: HostPromptArgs): Promise<PromptResultLike>
+    delete?(args: { sessionID: string; directory: string }): Promise<unknown>
+  }
+}
 
 /**
  * The parts of `AssistantMessage` this adapter reads. `structured` is where the
@@ -61,7 +101,7 @@ interface AssistantMessageLike {
  * inline annotations for one payload is one field edit away from a continuation
  * that reads a token field the prompt path does not.
  */
-interface PromptResultLike {
+export interface PromptResultLike {
   data?: { info?: AssistantMessageLike }
   error?: unknown
 }
@@ -173,8 +213,11 @@ function timedOutInFlight(ms: number): string {
 }
 
 export interface OpencodeBackendOptions {
-  /** The opencode server URL from `PluginInput.serverUrl`. */
-  serverUrl: URL | string
+  /**
+   * A running opencode server's URL, for callers that start `opencode serve`
+   * themselves. Used only when no `client` is given.
+   */
+  serverUrl?: URL | string
   /** The project directory from `PluginInput.directory`. */
   directory: string
   /** The resolved roster — maps a MAD slot id to a concrete host model. */
@@ -185,8 +228,13 @@ export interface OpencodeBackendOptions {
    * (AD-13's real mechanism — see the note on `capabilities` below.)
    */
   tools?: Record<string, boolean>
-  /** Injected in tests. Defaults to a real v2 client against `serverUrl`. */
-  client?: V2Client
+  /**
+   * The session client. The plugin passes the host's own client through
+   * `hostSessionFromPluginClient`; tests inject fakes. When given, it is used
+   * and `serverUrl` is ignored. Without it, a v2 client is built against
+   * `serverUrl`, and the constructor throws if that is missing too.
+   */
+  client?: HostSessionApi
   /**
    * How long one turn may hang before it becomes a `transport-error` drop-out.
    * `discover` documents timeout as a drop-out cause (AD-6b); without a deadline
@@ -622,7 +670,7 @@ async function withTimeout<T>(
 }
 
 export class OpencodeModelBackend implements ModelBackend {
-  private readonly client: V2Client
+  private readonly client: HostSessionApi
   private readonly directory: string
   private readonly bySlot: Map<string, RosterSlot>
   private readonly tools: Record<string, boolean> | undefined
@@ -646,12 +694,13 @@ export class OpencodeModelBackend implements ModelBackend {
   private executions = 0
 
   constructor(options: OpencodeBackendOptions) {
-    this.client =
-      options.client ??
-      createOpencodeClient({
-        baseUrl: options.serverUrl.toString(),
-        directory: options.directory,
-      })
+    if (options.client !== undefined) {
+      this.client = options.client
+    } else if (options.serverUrl !== undefined) {
+      this.client = createOpencodeClient({ baseUrl: options.serverUrl.toString(), directory: options.directory })
+    } else {
+      throw new Error("OpencodeModelBackend needs a session client or a server URL")
+    }
     this.directory = options.directory
     this.bySlot = new Map(options.slots.map((slot) => [slot.slot, slot]))
     this.tools = options.tools
@@ -677,14 +726,13 @@ export class OpencodeModelBackend implements ModelBackend {
     if (this.sessionPermission === undefined) return { ok: true }
     if (signal?.aborted) return { ok: false, kind: "cancelled", problem: "the run was stopped before the check" }
     const rules = this.sessionPermission
-    type Created = { data?: { id?: unknown; permission?: unknown }; error?: unknown }
-    let request: Promise<Created>
+    let request: Promise<SessionCreatedLike>
     try {
       request = this.client.session.create({
         directory: this.directory,
         title: "MAD session policy probe",
         permission: [...rules],
-      }) as Promise<Created>
+      })
     } catch {
       return { ok: false, kind: "unchecked", problem: UNCHECKED_PROBE }
     }
@@ -695,7 +743,7 @@ export class OpencodeModelBackend implements ModelBackend {
     // and deleted, never prompted, and a late failure is consumed here.
     let timer: ReturnType<typeof setTimeout> | undefined
     let stopListener: (() => void) | undefined
-    const outcome = await Promise.race<{ answer: Created } | { failed: true } | "timeout" | "stopped">([
+    const outcome = await Promise.race<{ answer: SessionCreatedLike } | { failed: true } | "timeout" | "stopped">([
       request.then(
         (answer) => ({ answer }),
         () => ({ failed: true as const }),
@@ -817,12 +865,11 @@ export class OpencodeModelBackend implements ModelBackend {
   private async disposeSession(sessionID: string): Promise<CleanupUnresolved | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const deletable = this.client.session as { delete?: (args: unknown) => Promise<unknown> }
-      const deletion = deletable.delete?.({ sessionID, directory: this.directory })
-      // A client with no `delete` at all is not an unresolved cleanup: there was
-      // never a request to resolve. (The v1 client's shape is why this call is
-      // optional in the first place.) Under the policy it is: the session
-      // exists and nothing can confirm it is gone, so it stays guarded.
+      const deletion = this.client.session.delete?.({ sessionID, directory: this.directory })
+      // `HostSessionApi` lets a client omit `delete`. Without the policy, a
+      // client with no `delete` is not an unresolved cleanup: there was never a
+      // request to resolve. Under the policy it is: the session exists and
+      // nothing can confirm it is gone, so it stays guarded.
       if (deletion === undefined) {
         return this.sessionPermission === undefined
           ? undefined
@@ -950,7 +997,8 @@ export class OpencodeModelBackend implements ModelBackend {
         this.onPolicyMismatch?.({ slot, problem: "the host answered a session create without a usable session id" })
         return cancelledTurn<T>(slot)
       }
-      if (created.error || !created.data?.id) {
+      const createdID = created.error ? undefined : usableSessionID(created)
+      if (createdID === undefined) {
         return {
           ok: false,
           slot,
@@ -958,11 +1006,11 @@ export class OpencodeModelBackend implements ModelBackend {
           message: `could not create a session: ${describeError(created.error)}`,
         }
       }
-      sessionID = created.data.id
+      sessionID = createdID
       // CAP-3 — TRACKED BEFORE ANYTHING ELSE CAN HAPPEN TO IT, so the guard
       // covers the session from its first moment until its deletion is confirmed.
       this.sessionGuard?.track(sessionID)
-      echoed = created.data.permission
+      echoed = created.data?.permission
     } catch (error) {
       return { ok: false, slot, failure: "transport-error", message: describeError(error) }
     }
@@ -1104,7 +1152,7 @@ export class OpencodeModelBackend implements ModelBackend {
           directory: this.directory,
           model: { providerID: rosterSlot.providerId, modelID: rosterSlot.modelId },
           system: this.promptNotice === undefined ? instructions : `${instructions}\n\n${this.promptNotice}`,
-          // AD-12 — structured output; this is the whole reason for the v2 client.
+          // AD-12 — structured output.
           format: { type: "json_schema", schema: jsonSchema },
           ...(this.tools ? { tools: this.tools } : {}),
           parts: [{ type: "text", text: input }],
