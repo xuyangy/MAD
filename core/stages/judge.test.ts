@@ -16,7 +16,7 @@ import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { CODING_LENSES } from "../instructions/coding/lenses.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
 import type { Clock } from "../ports/clock.ts"
-import type { ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type ModelBackend } from "../ports/model-backend.ts"
 import type {
   ToolObservation,
   ToolObservationFailure,
@@ -3100,5 +3100,59 @@ describe("judge — no evidence call after the stop is observed (CAP-5)", () => 
     expect(first.history.map((entry) => entry.kind)).toContain("judge-blame-stopped")
     expect(first.unresolved?.reason).toBe("the run was cancelled while it was being judged")
     expect(result.unresolvedByCancellation).toBe(1)
+  })
+})
+
+describe("judge — a turn the backend ended before its prompt", () => {
+  test("is not counted as an attempt", async () => {
+    const controller = new AbortController()
+    const inner = new FakeBackend({})
+    let calls = 0
+    const backend: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, ...rest) {
+        calls += 1
+        if (calls === 1) {
+          // The stop lands while the first judge turn's session is set up.
+          controller.abort()
+          return cancelledTurn(slot)
+        }
+        return inner.runTurn(slot, ...rest)
+      },
+    }
+    const result = await run([argued()], { backend, signal: controller.signal })
+    expect(calls).toBe(1)
+    expect(result.attempts).toBe(0)
+    // Its allocation is returned: no turn asked a model.
+    expect(result.turns).toBe(0)
+    expect(result.cancelled).toBe(true)
+  })
+
+  test("in the parallel pair, the fact-check ended before its prompt returns only its own allocation; the logic evaluation's issued turn stays counted", async () => {
+    const controller = new AbortController()
+    const inner = new FakeBackend({})
+    const roles: (JudgeRoleTag | undefined)[] = []
+    const backend: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, instructions, ...rest) {
+        const role = judgeRoleOf(instructions)
+        roles.push(role)
+        if (role === "fact-check") {
+          // Yield first, so the logic evaluation beside it is issued before the stop.
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          controller.abort()
+          return cancelledTurn(slot)
+        }
+        return inner.runTurn(slot, instructions, ...rest)
+      },
+    }
+    const result = await run([argued()], { backend, signal: controller.signal })
+    expect(roles).toContain("logic-eval")
+    // The extractor and the logic evaluation asked a model once each; the
+    // fact-check asked none, and no aggregator was allocated after the stop.
+    const issued = roles.filter((role) => role !== "fact-check").length
+    expect(result.attempts).toBe(issued)
+    expect(result.turns).toBe(issued)
+    expect(result.cancelled).toBe(true)
   })
 })

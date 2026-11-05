@@ -15,9 +15,11 @@
  */
 
 import type { AdmissionSettlement, AdmissionStage, AdmittedTurn, StepDecision } from "../ports/admission.ts"
-import type { Envelope } from "../ports/model-backend.ts"
+import { endedBeforePrompt, type Envelope } from "../ports/model-backend.ts"
 
 export function settlementOf(envelope: Envelope<unknown>, threw: boolean): AdmissionSettlement {
+  // A turn the backend ended before its prompt reached the host was never issued.
+  if (endedBeforePrompt(envelope)) return { kind: "not-issued" }
   if (envelope.usageUnknown) {
     return {
       kind: "unknown",

@@ -8,8 +8,9 @@
  * own evidence read (`Tools.blame`, run by `./tools.ts`) is not a host tool and
  * is unaffected.
  *
- * WHAT THE HOST DOES WITH THE RULES. Read from the installed host bundle,
- * opencode-ai 1.19.3, without running it; other versions are unverified.
+ * WHAT THE HOST DOES WITH THE RULES. Read from the installed host bundles,
+ * opencode-ai 1.19.3 and 1.19.5, without running them; other versions are
+ * unverified.
  * - Rules are evaluated last match wins, and a session's rules come after the
  *   agent's and the user config's.
  * - A tool whose last rule by name is a `*` deny is removed from the model's

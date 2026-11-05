@@ -61,8 +61,10 @@ export interface AdmissionRequest {
  *   present), carried neither field, or `runTurn` threw. `executionId` is present
  *   only when the backend supplied one. `abandoned` is carried from the
  *   envelope's `usageUnknown`: the attempt did not end within its bound.
- * - `not-issued` — the signal had fired by the time admission resolved, so the
- *   stage never called `runTurn`. Nothing was billed.
+ * - `not-issued` — no prompt for the attempt reached the host: the signal had
+ *   fired by the time admission resolved, so the stage never called `runTurn`,
+ *   or the backend ended the turn before its prompt (`endedBeforePrompt`).
+ *   Nothing was billed.
  */
 export type AdmissionSettlement =
   | { kind: "usage"; tokens: TokenUsage }

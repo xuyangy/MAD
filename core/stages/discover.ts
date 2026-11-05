@@ -117,7 +117,7 @@ import type { ConcurrencyLimiter } from "../budget/limiter.ts"
 import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import { oneLine } from "../prompt/material.ts"
-import { cancelledTurn, type Envelope, type ModelBackend, type Refusal } from "../ports/model-backend.ts"
+import { cancelledTurn, endedBeforePrompt, type Envelope, type ModelBackend, type Refusal } from "../ports/model-backend.ts"
 import { settlementOf, stageGatedTurn } from "./settlement.ts"
 
 /**
@@ -511,9 +511,11 @@ async function runWithOneRetry(
     if (envelope.ok) return { skippedForBudget: false, envelope, attempts: attempt }
     // A backend that DID honour the signal reports `cancelled`. Same rule as the
     // pre-check above: no second attempt, and the attempt that was billed is
-    // counted honestly.
+    // counted honestly. One the backend ended before its prompt was sent
+    // (`endedBeforePrompt`) is not counted, so a first attempt ended that way leaves
+    // the slot never asked.
     if (envelope.failure === "cancelled") {
-      return { skippedForBudget: false, envelope, attempts: attempt }
+      return { skippedForBudget: false, envelope, attempts: endedBeforePrompt(envelope) ? attempt - 1 : attempt }
     }
     // Ledger #7 — the host reported the turn aborted. The attempt was issued and
     // is recorded above; a second one is not taken, whatever its usage was.
@@ -903,6 +905,9 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     (outcome) => !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.refusal !== undefined,
   )
   let recovery: RunRecovery | undefined
+  // Set when the stop is why round 2 allocated no replacement for a refused
+  // slot that had an eligible route.
+  let stoppedBeforeReplacement = false
   const replacementOutcomes: ({ rosterSlot: RosterSlot; from: string } & SlotOutcome)[] = []
   if (refusedOutcomes.length > 0) {
     const refusalOfOutcome = (outcome: SlotOutcome): Refusal | undefined =>
@@ -930,12 +935,6 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     const notReplaced: NotReplaced[] = []
     const allocations: { from: string; to: RosterSlot }[] = []
     for (const entry of refused) {
-      // A stop that landed during round 1 is why nothing is allocated, whatever
-      // the plan holds.
-      if (input.signal?.aborted) {
-        notReplaced.push({ from: entry.slot, reason: "cancelled" })
-        continue
-      }
       if (input.recovery === undefined) {
         notReplaced.push({ from: entry.slot, reason: "no-plan" })
         continue
@@ -955,6 +954,15 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         eligible[0]
       if (to === undefined) {
         notReplaced.push({ from: entry.slot, reason: "no-candidate" })
+        continue
+      }
+      // A stop observed here is why a replacement that had a route is not
+      // allocated, and that skipped allocation is this stage's: it is what makes
+      // discovery the stage the run was stopped in. Every reason above holds
+      // whether or not the run was stopped, so it is reported instead.
+      if (input.signal?.aborted) {
+        notReplaced.push({ from: entry.slot, reason: "cancelled" })
+        stoppedBeforeReplacement = true
         continue
       }
       allocatedIdentities.add(to.identity)
@@ -1084,21 +1092,25 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // the fraction. Compared against the POOL only: `roster.slots.length` never
   // includes a lens slot, so a dropped-out lens can never make this fire and a
   // filled lens roster can never make it stop firing.
-  // AD-6f — read off the OUTCOMES, not off `input.signal.aborted`. A stop that
-  // arrives after the last turn has already returned cancelled nothing here, and
-  // this stage must not claim to be where the run stopped when it finished its
-  // work; the next stage to actually skip a turn is the honest answer, and
-  // `review()` takes the FIRST stage that reports one.
+  // AD-6f — read off the OUTCOMES and off a replacement the stop kept round 2
+  // from allocating, never off `input.signal.aborted` alone. A stop that arrives
+  // after the last turn has already returned, with no replacement left to
+  // allocate, cancelled nothing here, and this stage must not claim to be where
+  // the run stopped when it finished its work; the next stage to actually skip
+  // a turn is the honest answer, and `review()` takes the FIRST stage that
+  // reports one.
   // The pool the summaries below count over: the initial slots and every
   // dispatched replacement. `roster.slots.length` stays the filled count.
   const executionPoolIds = (): string[] => [
     ...roster.slots.map((rosterSlot) => rosterSlot.slot),
     ...(recovery?.replacements ?? []).map((replacement) => replacement.to.slot),
   ]
-  const cancelled = [...poolOutcomes, ...lensOutcomes, ...replacementOutcomes].some(
-    (outcome) =>
-      !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
-  )
+  const cancelled =
+    stoppedBeforeReplacement ||
+    [...poolOutcomes, ...lensOutcomes, ...replacementOutcomes].some(
+      (outcome) =>
+        !outcome.skippedForBudget && !outcome.envelope.ok && outcome.envelope.failure === "cancelled",
+    )
 
   // AD-15 / AD-6 (story 8) — the budget truncated the roster, said ONCE, with no
   // provider in it.

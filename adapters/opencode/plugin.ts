@@ -373,8 +373,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             .describe(
               `How many discovery models to fan out to, each reviewing the change independently ` +
                 `and in parallel. Defaults to ${DEFAULT_DISCOVERY_SLOTS}, maximum ` +
-                `${MAX_DISCOVERY_SLOTS}. Each slot is a separate billed model call. Pass 1 for a ` +
-                `single-model review.`,
+                `${MAX_DISCOVERY_SLOTS}. Each slot plans one discovery turn: a model attempt and at ` +
+                `most one retry. The budget or a stop may prevent an attempt, and a slot the provider ` +
+                `refuses may be replaced by another model. Any attempt the host received may be ` +
+                `billed. Pass 1 for a single-model review.`,
             ),
           lenses: tool.schema
             .array(tool.schema.string())
@@ -383,9 +385,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             .describe(
               `OPTIONAL discovery lenses — personas that narrow what one extra slot looks for. ` +
                 `Omit for no lenses, which is the default: a fresh install runs zero lens turns and ` +
-                `costs exactly what it would without this argument. EACH LENS IS ANOTHER BILLED ` +
-                `DISCOVERY TURN at the widest point of the run — 3 slots with 5 lenses is 8 model ` +
-                `calls, not 3. Maximum ${MAX_LENS_SLOTS}. Shipped ids: ${CODING_LENSES.map((l) => l.id).join(", ")}. ` +
+                `costs exactly what it would without this argument. EACH LENS IS ANOTHER DISCOVERY ` +
+                `TURN at the widest point of the run — 3 slots with 5 lenses is 8 discovery turns, ` +
+                `not 3, before any retry. Maximum ${MAX_LENS_SLOTS}. Shipped ids: ${CODING_LENSES.map((l) => l.id).join(", ")}. ` +
                 `An unrecognized id is accepted and its instruction is generated at run time, and ` +
                 `the output says so. Lens findings are additive coverage: they carry no ` +
                 `co-discovery fraction and never count toward roster diversity.`,
@@ -413,9 +415,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             .describe(
               `OPTIONAL depth. \`normal\` (the default, and identical to passing nothing) routes ` +
                 `at a 0.8 co-discovery threshold with no lenses. \`quick\` drops the threshold to ` +
-                `0.5, so fewer findings are contested and fewer debate turns are billed. ` +
+                `0.5, so fewer findings are contested and fewer debate turns run. ` +
                 `\`paranoid\` raises it to 1.0 AND adds three lens slots (security, reliability, ` +
-                `outsider) — with the default 3 slots that is SIX billed discovery turns rather ` +
+                `outsider) — with the default 3 slots that is SIX discovery turns rather ` +
                 `than three, and it is the only setting here that costs more. A preset moves ` +
                 `numbers, never policy, and an argument you pass explicitly always beats it.`,
             ),
@@ -1094,9 +1096,9 @@ export const ISSUED_TURNS_NOTE =
  * one turn of unknown usage. A turn MAD stopped waiting for is recorded as
  * unknown usage, so a turn that may still be in flight is always counted here.
  *
- * LIMITATION: a turn the host already answered with an HTTP error leaves no
- * ledger entry, so a run whose only issued turns ended that way gets no note.
- * Such a turn has finished, so it is not in flight and needs none. A stop
+ * A turn the host answered with an error is recorded as unknown usage too, so
+ * it brings the note although it has finished. A turn the backend ended before
+ * its prompt leaves no ledger entry and brings none: nothing was issued. A stop
  * before `review()` never reaches this function.
  */
 export function issuedTurnsNote(record: Pick<RunRecord, "cancelled" | "ledger">): string {

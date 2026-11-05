@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
+import { cancelledTurn } from "../ports/model-backend.ts"
 import { settlementOf } from "./settlement.ts"
 
 describe("settlementOf — story 2-8c3a's `abandoned`", () => {
@@ -29,5 +30,23 @@ describe("settlementOf — a thrown runTurn is abandoned (story 2-8c3a)", () => 
     expect("abandoned" in settlement).toBe(false)
     const marked = settlementOf({ ...thrown, usageUnknown: { executionId: "e", why: "the transport failed" } }, false)
     expect("abandoned" in marked).toBe(false)
+  })
+})
+
+describe("settlementOf — a turn the backend ended before its prompt", () => {
+  test("`cancelledTurn` settles as not issued", () => {
+    expect(settlementOf(cancelledTurn("s"), false)).toEqual({ kind: "not-issued" })
+  })
+
+  test("a cancelled envelope without the marker stays an issued request with no usage", () => {
+    expect(settlementOf({ ok: false, slot: "s", failure: "cancelled", message: "m" }, false)).toEqual({
+      kind: "unknown",
+      why: "the backend reported no usage for an issued request",
+    })
+  })
+
+  test("usage on the envelope wins over the marker, so a reported bill is never dropped", () => {
+    const usageUnknown = { executionId: "e", why: "w" }
+    expect(settlementOf({ ...cancelledTurn("s"), usageUnknown }, false)).toEqual({ kind: "unknown", why: "w", executionId: "e" })
   })
 })

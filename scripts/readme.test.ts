@@ -34,6 +34,7 @@ import { DEFAULT_CHANGE_READ_BUDGET_MS, DEFAULT_CHANGE_READ_CLEANUP_MS } from ".
 import { DEFAULT_BLAME_CLEANUP_TIMEOUT_MS, DEFAULT_BLAME_TIMEOUT_MS } from "../adapters/opencode/tools.ts"
 import { describeReviewPermission, READ_ONLY_SESSION_NOTICE } from "../adapters/opencode/session-policy.ts"
 import { readOnlyGitEnv, unsupportedTargetReason } from "../adapters/opencode/git-read-policy.ts"
+import { parseNulNames } from "../adapters/opencode/change-input.ts"
 import { ARTIFACTS_ENV, artifactRootFrom, defaultArtifactRoot, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { DEFAULT_PRESET, PRESET_DIALS, PRESETS } from "../core/budget/ledger.ts"
 import { CODING_LENSES } from "../core/instructions/coding/lenses.ts"
@@ -109,6 +110,21 @@ async function registeredTool() {
   }
   return { hooks, args: hooks.tool.mad_review.args }
 }
+
+describe("README — status", () => {
+  test("the status line names both the offline suite and the hand runs the live-review section reports", () => {
+    expect(README).toContain("**Status: checked offline; tried by hand on a live host.**")
+    expect(README).toContain("No test here runs against a real OpenCode host.")
+    expect(README).toContain("Two reviews were run by hand on opencode-ai 1.19.5")
+    expect(README).toContain("- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5")
+    expect(README).not.toContain("not field-tested")
+  })
+
+  test("the host-version evidence says which bundle each fact was read from", () => {
+    expect(README).toContain("The opencode-ai 1.19.5 bundle was read the same way for the review-session policy only")
+    expect(README).toContain("Its plugin loader was not re-read.")
+  })
+})
 
 describe("README — registration (CAP-8)", () => {
   test("the package entry is the one the README names, and it exports the plugin and nothing else", () => {
@@ -282,6 +298,17 @@ describe("README — tool and evidence policy (CAP-8)", () => {
   })
 })
 
+describe("README — change input limits", () => {
+  test("a name holding U+FFFD is refused, as the README says", () => {
+    expect(parseNulNames("ok.ts\0bad\uFFFD.ts\0")).toEqual({ problem: "unrepresentable" })
+    expect(README).toContain("A name containing the character U+FFFD is always refused")
+  })
+
+  test("a globally configured filter refuses every repository, as the README says", () => {
+    expect(README).toContain("such as the one `git lfs install` writes there, which makes MAD refuse every repository on that machine")
+  })
+})
+
 describe("README — cost meaning (CAP-8)", () => {
   // The note a returned review carries, built by the plugin's own function.
   const note = budgetNote({ ledger: { cap: DEFAULT_PLUGIN_BUDGET.normal, unknownUsage: [] } as never }, undefined, "normal")
@@ -311,6 +338,17 @@ describe("README — cost meaning (CAP-8)", () => {
     expect(PROSE).toContain("says they may have been billed")
     expect(PROSE).toContain("MAD makes no promise about your bill, a quota, latency, or whether the review will be useful.")
     expect(README).not.toMatch(/billed model call|were NOT free|each billed once/)
+  })
+
+  test("the tool's argument descriptions speak of attempts and turns, never of a billed call per slot or lens", async () => {
+    const { args } = await registeredTool()
+    const descriptions = Object.values(args)
+      .map((schema) => (schema as { description?: string }).description ?? "")
+      .join("\n")
+    expect(descriptions).toContain("Each slot plans one discovery turn: a model attempt and at most one retry.")
+    expect(descriptions).toContain("3 slots with 5 lenses is 8 discovery turns, not 3, before any retry")
+    expect(descriptions).toContain("with the default 3 slots that is SIX discovery turns rather than three")
+    expect(descriptions).not.toMatch(/billed model call|billed discovery turn|debate turns are billed|model calls, not/i)
   })
 })
 

@@ -198,6 +198,14 @@ export type Envelope<T> =
       /** Present when the backend recognised the failure as a refused request (`Refusal`). */
       refusal?: Refusal
       /**
+       * `false` when no prompt for this turn reached the host: the turn ended
+       * before it was issued (`cancelledTurn`), whatever round trips came before
+       * it, such as creating and disposing a session. A stage does not count such
+       * an attempt as issued and settles its admission as not issued. Absent
+       * says nothing either way, and is read as issued, as before this field.
+       */
+      issued?: false
+      /**
        * The unvalidated payload, when there was one (`schema-invalid`). The
        * discover stage uses it to salvage the items that ARE valid rather than
        * discarding a model's whole contribution — and therefore shrinking the
@@ -245,7 +253,19 @@ export function cancelledTurn<T>(slot: string): Envelope<T> {
     slot,
     failure: "cancelled",
     message: "the run was cancelled before this turn was issued",
+    issued: false,
   }
+}
+
+/**
+ * Whether the backend ended this turn before its prompt reached the host: a
+ * failure marked `issued: false` that reports no usage. Usage on the envelope
+ * outranks the marker, so a turn that reported a bill is always treated as
+ * issued. Stages read this to count attempts and settlement reads it to settle
+ * admission, so both agree on every envelope.
+ */
+export function endedBeforePrompt(envelope: Envelope<unknown>): boolean {
+  return !envelope.ok && envelope.issued === false && !envelope.usageUnknown && !envelope.tokens
 }
 
 /**

@@ -3751,3 +3751,70 @@ describe("review — replacements discovery produced reach debate, the judge and
     expect(rows[0]!.detail).toMatchObject({ added: ["xai"] })
   })
 })
+
+describe("review — a stop between discovery's two rounds", () => {
+  // Three pool slots: the first is refused, the second raises the only finding
+  // (1/3 co-discovery sends it to debate), the third answers empty. The stop
+  // lands as the last round-1 turn returns, before round 2 allocates.
+  async function stopAfterRoundOne(candidates: ReturnType<typeof candidate>[]) {
+    const resolved = selectRoster(candidates, { slots: 3, providerConfigKey: "provider" })
+    const [first, second, third] = resolved.roster.slots
+    const refusal: Refusal = {
+      kind: "payment",
+      basis: "structured",
+      scope: "route",
+      providerId: first!.providerId,
+      modelId: first!.modelId,
+    }
+    const inner = new FakeBackend({
+      [first!.slot]: [{ kind: "fail", failure: "model-error", refusal }],
+      [second!.slot]: [{ kind: "ok", value: ENVELOPE }],
+      [third!.slot]: [{ kind: "ok", value: { findings: [] } }],
+    })
+    const controller = new AbortController()
+    let returned = 0
+    const backend: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(...args) {
+        const envelope = await inner.runTurn(...args)
+        if (++returned === 3) controller.abort()
+        return envelope
+      },
+    }
+    const { record, rendered } = await review({
+      roster: resolved.roster,
+      recovery: resolved.recovery,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+      signal: controller.signal,
+    })
+    return { record, rendered, first: first!, calls: inner.calls }
+  }
+
+  test("a replacement the stop kept from being allocated makes discovery the stage the run was stopped in", async () => {
+    const { record, rendered, first, calls } = await stopAfterRoundOne([
+      candidate("anthropic", "claude-sonnet-4-5"),
+      candidate("openai", "gpt-5"),
+      candidate("google", "gemini-2.5-pro"),
+      candidate("xai", "grok-4"),
+    ])
+    expect(record.cancelled).toEqual({ stage: "discover" })
+    expect(record.recovery!.notReplaced).toEqual([{ from: first.slot, reason: "cancelled" }])
+    expect(record.recovery!.replacements).toEqual([])
+    expect(calls).toHaveLength(3)
+    expect(rendered).toContain("during the discover stage")
+    expect(rendered).not.toContain("during the debate stage")
+  })
+
+  test("with no route to replace onto, the stop skipped nothing in discovery and the next stage that skips a turn is named", async () => {
+    const { record, first } = await stopAfterRoundOne([
+      candidate("anthropic", "claude-sonnet-4-5"),
+      candidate("openai", "gpt-5"),
+      candidate("google", "gemini-2.5-pro"),
+    ])
+    expect(record.recovery!.notReplaced).toEqual([{ from: first.slot, reason: "no-candidate" }])
+    expect(record.cancelled).toEqual({ stage: "debate" })
+  })
+})

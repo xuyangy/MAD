@@ -116,7 +116,7 @@ import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
-import { cancelledTurn, type Envelope, type ModelBackend, type TurnFailure } from "../ports/model-backend.ts"
+import { cancelledTurn, endedBeforePrompt, type Envelope, type ModelBackend, type TurnFailure } from "../ports/model-backend.ts"
 import {
   awaitObservationWrite,
   deadlineProblem,
@@ -455,7 +455,10 @@ async function runJudgeTurn<T>(
     if (settle !== undefined) await settle(settlementOf(envelope, threw))
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { refused: false, envelope, attempts: attempt }
-    if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
+    // A turn the backend ended before its prompt was sent is not an attempt.
+    if (envelope.failure === "cancelled") {
+      return { refused: false, envelope, attempts: endedBeforePrompt(envelope) ? attempt - 1 : attempt }
+    }
     // Ledger #7 — a host-reported abort gets no second attempt.
     if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
     last = envelope
@@ -1202,6 +1205,16 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * counted an allocation before issuing; it is returned when nothing was issued,
    * so the stranding sentence and `turns` match a gate that refused before asking.
    */
+  /**
+   * A role turn the stop cancelled before any attempt was issued returns its
+   * allocation, as a refused one does in `refuseTurn`, so `turns` counts only
+   * turns that asked a model. A refused outcome is left to the refusal branches.
+   */
+  const returnUnissued = (outcome: TurnOutcome<unknown> | RefusedTurn | undefined): void => {
+    if (outcome === undefined || outcome.refused) return
+    if (!outcome.envelope.ok && outcome.envelope.failure === "cancelled" && outcome.attempts === 0) counts.turns -= 1
+  }
+
   const refuseTurn = (finding: Finding, outcome: RefusedTurn, slot: string, role: JudgeRole): void => {
     if (outcome.attempts === 0) counts.turns -= 1
     noteRefusedFailure(outcome, slot, role)
@@ -1493,6 +1506,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
         ),
       )
       counts.attempts += outcome.attempts
+      returnUnissued(outcome)
       if (outcome.refused) {
         refuseTurn(finding, outcome, slot, "evidence-extract")
         continue
@@ -1864,6 +1878,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
 
     const [factResult, logicResult] = await Promise.all([factPromise, logicPromise])
     counts.attempts += factResult.attempts + (logicResult?.attempts ?? 0)
+    returnUnissued(factResult)
+    returnUnissued(logicResult)
 
     // Story 2-5c — a refused LOGIC evaluation is read like the gate that declines
     // to issue one: the finding is not stranded here, and the aggregator's gate
@@ -2071,6 +2087,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       ),
     )
     counts.attempts += aggregateOutcome.attempts
+    returnUnissued(aggregateOutcome)
     if (aggregateOutcome.refused) {
       refuseTurn(finding, aggregateOutcome, aggregateSlot, "aggregate")
       continue

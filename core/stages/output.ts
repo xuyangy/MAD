@@ -896,15 +896,19 @@ function judgeSummary(record: RunRecord): string[] {
   // the five just named. They are a count of logical turns and a count of
   // backend attempts, and the retry is what separates them. ATTEMPTS, neither
   // billed nor issued (CAP-7): an attempt can end before any prompt reaches the
-  // host (a failed session create, a session whose rules differ, a stop during
-  // the create), and one whose usage is unknown may or may not have been
-  // billed, which the usage-unquantified warning says.
+  // host (a failed session create), and one whose usage is unknown may or may
+  // not have been billed, which the usage-unquantified warning says. An attempt
+  // the backend ended before its prompt (a session whose rules differ, a stop
+  // during the create) is not counted, and a turn none of whose attempts was
+  // counted is not a turn here.
   lines.push(
     `  ${counts.turns} turn(s) requested while judging` +
-      (counts.attempts > counts.turns
-        ? `, ${counts.attempts} attempt(s) in all — ${counts.attempts - counts.turns} needed the ` +
-          `one retry AD-12 allows.`
-        : `, one attempt each.`),
+      (counts.turns === 0
+        ? `.`
+        : counts.attempts > counts.turns
+          ? `, ${counts.attempts} attempt(s) in all — ${counts.attempts - counts.turns} needed the ` +
+            `one retry AD-12 allows.`
+          : `, one attempt each.`),
   )
   lines.push("")
   return lines

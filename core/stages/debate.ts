@@ -99,7 +99,7 @@ import { resolveInstructions } from "../instructions/registry.ts"
 import type { InstructionSet } from "../instructions/types.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { AdmittedTurn, RequestAdmission, SettleRequest } from "../ports/admission.ts"
-import { cancelledTurn, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, endedBeforePrompt, type Envelope, type ModelBackend } from "../ports/model-backend.ts"
 import { settlementOf, stageGatedTurn } from "./settlement.ts"
 import { listCell, material, oneLine } from "../prompt/material.ts"
 
@@ -478,7 +478,10 @@ async function runDebateTurn(
     if (settle !== undefined) await settle(settlementOf(envelope, threw))
     if (envelope.cleanupUnresolved) cleanups.push({ slot, why: envelope.cleanupUnresolved.why })
     if (envelope.ok) return { refused: false, envelope, attempts: attempt }
-    if (envelope.failure === "cancelled") return { refused: false, envelope, attempts: attempt }
+    // A turn the backend ended before its prompt was sent is not an attempt.
+    if (envelope.failure === "cancelled") {
+      return { refused: false, envelope, attempts: endedBeforePrompt(envelope) ? attempt - 1 : attempt }
+    }
     // Ledger #7 — a host-reported abort gets no second attempt.
     if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
     last = envelope
@@ -1100,7 +1103,8 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         if (outcome.attempts > 0) turns += 1
         continue
       }
-      if (outcome.envelope.ok || outcome.envelope.failure !== "cancelled") turns += 1
+      // A cancelled seat is a turn when one of its attempts was issued.
+      if (outcome.envelope.ok || outcome.envelope.failure !== "cancelled" || outcome.attempts > 0) turns += 1
     }
 
     const at = clock.now()

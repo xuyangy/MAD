@@ -21,16 +21,19 @@ export interface RefusedSlot {
 }
 
 /**
- * A replacement slot whose discovery turn was DISPATCHED: admitted and handed to
- * the backend's `runTurn`. That is backend work, not proof a prompt reached the
- * provider; the ledger records what each execution billed, as for any turn.
+ * A replacement slot whose discovery turn was DISPATCHED: admitted, handed to the
+ * backend's `runTurn`, and not ended by the backend before its prompt was sent
+ * (an envelope with `issued: false`). A replacement none of whose attempts got
+ * that far is listed as not replaced. Dispatched still does not prove the
+ * provider received or billed the prompt; the ledger records what each
+ * execution billed, as for any turn.
  */
 export interface Replacement {
   /** The refused original pool slot it replaces. */
   from: string
   /** The replacement route, under its bound slot id. */
   to: RosterSlot
-  /** How many times its turn was dispatched: the first attempt, and a retry if one was taken. */
+  /** How many of its attempts were dispatched: the first, and a retry if one was taken. */
   dispatched: 1 | 2
   /** Whether its discovery turn returned findings MAD could use. Says nothing about later stages. */
   answered: boolean

@@ -8,7 +8,7 @@ import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { emptyLedger, withShares, type RunRecord } from "../domain/run-record.ts"
 import { CODING_DEBATE_GENERALIST } from "../instructions/coding/debate.ts"
 import { CODING_LENS_INSTRUCTIONS } from "../instructions/coding/lenses.ts"
-import type { ModelBackend } from "../ports/model-backend.ts"
+import { cancelledTurn, type ModelBackend } from "../ports/model-backend.ts"
 import { MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
 import { output } from "./output.ts"
 import {
@@ -2442,5 +2442,51 @@ describe("debate — a host-reported abort (ledger #7)", () => {
     const result = await run([contested()], {}, { backend, maxRounds: 3 })
     expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
     expect(result.droppedOut).toEqual(["discovery-2"])
+  })
+})
+
+describe("debate — a seat the backend ended before its prompt", () => {
+  test("is not counted as an attempt or a turn", async () => {
+    const controller = new AbortController()
+    const inner = new FakeBackend({ "discovery-1": [says({ findingId: "f-1", position: "upholds" })] })
+    const backend: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, ...rest) {
+        if (slot === "discovery-2") {
+          // The stop lands while this seat's session is set up: no prompt is sent.
+          controller.abort()
+          return cancelledTurn(slot)
+        }
+        return inner.runTurn(slot, ...rest)
+      },
+    }
+    const result = await run([contested()], {}, { backend, signal: controller.signal })
+    expect(result.cancelled).toBe(true)
+    expect(result.attempts).toBe(1)
+    expect(result.turns).toBe(1)
+  })
+
+  test("a retry ended before its prompt keeps the seat's issued first attempt as a turn", async () => {
+    const controller = new AbortController()
+    const inner = new FakeBackend({ "discovery-1": [says({ findingId: "f-1", position: "upholds" })] })
+    let seat2 = 0
+    const backend: ModelBackend = {
+      capabilities: (slot) => inner.capabilities(slot),
+      async runTurn(slot, ...rest) {
+        if (slot === "discovery-2") {
+          seat2 += 1
+          if (seat2 === 1) return { ok: false, slot, failure: "model-error", message: "upstream hiccup" }
+          controller.abort()
+          return cancelledTurn(slot)
+        }
+        return inner.runTurn(slot, ...rest)
+      },
+    }
+    const result = await run([contested()], {}, { backend, signal: controller.signal })
+    expect(seat2).toBe(2)
+    expect(result.cancelled).toBe(true)
+    // One issued attempt per seat, so two turns and no retry to call billed.
+    expect(result.attempts).toBe(2)
+    expect(result.turns).toBe(2)
   })
 })

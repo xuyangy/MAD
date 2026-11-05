@@ -700,6 +700,90 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
         expect(report).toContain("xai/grok-4 (replacement for discovery-2)")
         // The replacement's authorship survives clustering and judging.
         expect(report).toMatch(/co-discovery: 3\/3[\s\S]*discovery-r1/)
+        // The run was not stopped, and the counts behind the title agree with it.
+        expect(run.result.title).not.toContain("CANCELLED")
+        expect(run.result.metadata?.answered).toBe(3)
+        // The refused attempt reported no tokens: its usage is unknown, not free.
+        expect(report).toContain("USAGE UNQUANTIFIED: 1 discovery turn(s) have usage MAD cannot count")
+        // CAP-3 — the replacement's session was created under the same rules as every other.
+        const replacementCreate = run.host.creates.find(
+          (body) => (body as { title?: string }).title === "MAD discovery-r1",
+        ) as { permission?: unknown } | undefined
+        expect(replacementCreate?.permission).toEqual(REVIEW_SESSION_PERMISSION)
+        expect(run.host.creates.every((body) => JSON.stringify((body as { permission?: unknown }).permission) === JSON.stringify(REVIEW_SESSION_PERMISSION))).toBe(true)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "STOPPED AFTER A REFUSAL, before the replacement: discovery is the stage named, the spare model is never asked, and nothing starts after the stop",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const stop = new AbortController()
+      const recorder = initiationRecorder()
+      try {
+        const modelOf = (id: string) => ({ ...THREE_PROVIDERS.providers[1]!.models.b, id, name: id })
+        const provider = (id: string, model: string) => ({ id, name: id, source: "env", env: [], options: {}, models: { m: modelOf(model) } })
+        const providers = {
+          ...THREE_PROVIDERS,
+          providers: [THREE_PROVIDERS.providers[0]!, provider("gitlab", "duo-chat-gpt-5-6-terra"), THREE_PROVIDERS.providers[2]!, provider("xai", "grok-4")],
+        }
+        const credits =
+          'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
+        const anthropic = THREE_PROVIDERS.providers[0]!
+        const anthropicModel = Object.values(anthropic.models)[0]!.id
+        // THE BARRIER: the backend disposes a session only after it has the
+        // prompt's answer, so GitLab's session delete starting means its refusal
+        // was consumed. The Anthropic discovery prompt is held until then, and
+        // the stop is fired from that hold, before round 2 can allocate.
+        let gitlabSession: string | undefined
+        let refusalConsumed!: () => void
+        const consumed = new Promise<void>((resolve) => {
+          refusalConsumed = resolve
+        })
+        // A release path if the barrier is never reached, so the hold cannot
+        // outlive the test; the assertions below then fail on the missing refusal.
+        const release = setTimeout(() => refusalConsumed(), TIMEOUT_MS / 2)
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            judge: { "fact-check": FEE_FACT_CHECK },
+            providers,
+            promptError: (session, prompt) => {
+              if (prompt.model !== "duo-chat-gpt-5-6-terra") return undefined
+              gitlabSession = session
+              return { name: "UnknownError", data: { message: credits } }
+            },
+            failDelete: (session) => {
+              if (session === gitlabSession) refusalConsumed()
+              return false
+            },
+            holdPrompt: (_session, prompt) =>
+              prompt.model === anthropicModel && prompt.role === undefined
+                ? consumed.then(() => recorder.fire(stop))
+                : undefined,
+          },
+          { abort: stop.signal, recorder },
+        )
+        clearTimeout(release)
+        expectClean(run)
+        expectNothingStartedAfterStop(recorder)
+        expectStopClaims(run.result, true)
+        expect(run.result.title).toStartWith("MAD review — CANCELLED during discover")
+        expect(run.result.title).not.toContain("replacement(s) dispatched")
+        expect(run.host.prompts.filter((p) => p.model === "duo-chat-gpt-5-6-terra")).toHaveLength(1)
+        expect(run.host.prompts.some((p) => p.model === "grok-4")).toBe(false)
+        expect(run.host.creates.some((body) => (body as { title?: string }).title === "MAD discovery-r1")).toBe(false)
+        const report = run.result.output
+        expect(report).toContain("It was not replaced: the run was stopped before a replacement was dispatched.")
+        expect(report).not.toContain("MODEL REPLACED")
+        expect(report).not.toContain("xai")
+        // The refused attempt's bill is still disclosed as unknown.
+        expect(report).toContain("USAGE UNQUANTIFIED")
       } finally {
         await repo.remove()
       }
@@ -1642,10 +1726,10 @@ describe("acceptance — review sessions run no host tool (CAP-3)", () => {
         )
         expect(run.result.output).toContain("Only 2 of 3 roster model(s) answered.")
         // The judge's session was created (the sixth) and never prompted: the
-        // summary counts an attempt, and claims no prompt and no bill for it.
+        // summary counts no turn and no attempt for it.
         expect(run.host.counts.create).toBe(6)
         expect(run.host.prompts.some((p) => p.role !== undefined)).toBe(false)
-        expect(run.result.output).toContain("1 turn(s) requested while judging, one attempt each.")
+        expect(run.result.output).toContain("0 turn(s) requested while judging.")
         expect(run.result.output).toContain("MAD never prompted the session whose rules differed")
       } finally {
         await repo.remove()

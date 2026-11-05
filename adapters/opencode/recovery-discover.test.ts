@@ -17,6 +17,8 @@ import { discover } from "../../core/stages/discover.ts"
 import { candidate, fakeAdmission, fakeClock } from "../../core/test-support/fakes.ts"
 import { createTurnRecorder } from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
+import { cancelledTurn } from "../../core/ports/model-backend.ts"
+import { REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 
 const ZERO = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 const KNOWN = { input: 7, output: 3, reasoning: 0, cache: { read: 0, write: 0 } }
@@ -366,27 +368,49 @@ describe("discovery recovery over the real backend", () => {
 })
 
 describe("discovery recovery — stops and limits around round 2", () => {
+  const stopDuringRoundOne = (controller: AbortController) => async (route: string) => {
+    if (route.startsWith("gitlab/")) return GITLAB_REFUSAL
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    controller.abort()
+    return NOTHING_FOUND
+  }
+
+  test("a stop during round 1 is why a refused slot with an eligible route is not replaced, and discovery reports the stop", async () => {
+    const controller = new AbortController()
+    const result = await run({
+      candidates: [...POOL, candidate("xai", "grok-4")],
+      slots: 3,
+      signal: controller.signal,
+      script: stopDuringRoundOne(controller),
+    })
+    const gitlab = result.roster.slots.find((slot) => slot.providerId === "gitlab")!
+    expect(result.discovered.recovery!.notReplaced).toEqual([{ from: gitlab.slot, reason: "cancelled" }])
+    expect(result.discovered.cancelled).toBe(true)
+    expect(result.prompts.some((route) => route.startsWith("xai/"))).toBe(false)
+    expect(result.discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
+    expect(result.rowOf(gitlab.slot)!.message).toEndWith(
+      "It was not replaced: the run was stopped before a replacement was dispatched.",
+    )
+  })
+
   for (const plan of [true, false]) {
-    test(`a stop during round 1 is why a refused slot is not replaced (${plan ? "no unused route" : "no plan"})`, async () => {
+    // Whether discovery reports the stop here depends on the round-1 turn the
+    // stop cancelled in flight; "review — a stop between discovery's two rounds"
+    // in core/run/review.test.ts pins the case where round 1 had finished.
+    test(`a stop during round 1 with ${plan ? "no unused route" : "no plan"} reports that reason, not the stop`, async () => {
       const controller = new AbortController()
       const result = await run({
         candidates: POOL,
         slots: 3,
         plan,
         signal: controller.signal,
-        script: async (route) => {
-          if (route.startsWith("gitlab/")) return GITLAB_REFUSAL
-          await new Promise((resolve) => setTimeout(resolve, 20))
-          controller.abort()
-          return NOTHING_FOUND
-        },
+        script: stopDuringRoundOne(controller),
       })
       const gitlab = result.roster.slots.find((slot) => slot.providerId === "gitlab")!
-      expect(result.discovered.recovery!.notReplaced).toEqual([{ from: gitlab.slot, reason: "cancelled" }])
+      expect(result.discovered.recovery!.notReplaced).toEqual([
+        { from: gitlab.slot, reason: plan ? "no-candidate" : "no-plan" },
+      ])
       expect(result.discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
-      expect(result.rowOf(gitlab.slot)!.message).toEndWith(
-        "It was not replaced: the run was stopped before a replacement was dispatched.",
-      )
     })
   }
 
@@ -586,5 +610,127 @@ describe("an inconsistent recovery plan", () => {
       }),
     ).rejects.toThrow("recovery plan is inconsistent")
     expect(host.prompts).toEqual([])
+  })
+})
+
+describe("discovery recovery — a replacement whose session the stop ended before any prompt", () => {
+  // The real backend under the review-session policy: the stop lands while the
+  // replacement's session is being created, so the backend disposes it
+  // unprompted and returns the pre-issue cancellation.
+  async function stopDuringReplacementCreate() {
+    const selected = selectRoster(
+      [
+        candidate("gitlab", "duo-chat-gpt-5-6-terra"),
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openrouter", "amazon/nova-pro-v1"),
+        candidate("xai", "grok-4"),
+      ],
+      { slots: 3, providerConfigKey: "provider", requireToolcall: true },
+    )
+    const controller = new AbortController()
+    let creates = 0
+    const prompts: string[] = []
+    const deleted: string[] = []
+    const client = {
+      session: {
+        create: async (request: { permission?: unknown }) => {
+          creates += 1
+          // Round 1 creates three sessions; the fourth is the replacement's.
+          if (creates === 4) controller.abort()
+          return { data: { id: `ses_${creates}`, permission: request.permission } }
+        },
+        prompt: async (request: { model: { providerID: string; modelID: string } }) => {
+          prompts.push(`${request.model.providerID}/${request.model.modelID}`)
+          return { data: { info: request.model.providerID === "gitlab" ? GITLAB_REFUSAL : NOTHING_FOUND } }
+        },
+        delete: async (request: { sessionID?: string; path?: { id?: string } }) => {
+          deleted.push(String(request.sessionID ?? request.path?.id))
+          return { data: true }
+        },
+      },
+    }
+    const backend = new OpencodeModelBackend({
+      directory: "/repo",
+      slots: [...selected.roster.slots, ...selected.recovery.candidates],
+      client: client as never,
+      cleanupTimeoutMs: 10,
+      sessionPermission: REVIEW_SESSION_PERMISSION,
+    })
+    const admission = fakeAdmission()
+    const discovered = await discover({
+      roster: selected.roster,
+      recovery: selected.recovery,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(null),
+      signal: controller.signal,
+      admission: admission.admission,
+    })
+    validateReplacements({ roster: selected.roster, recovery: discovered.recovery })
+    return { selected, discovered, prompts, creates: () => creates, deleted, admission }
+  }
+
+  test("is not recorded as dispatched: the slot is not replaced, because the run was stopped", async () => {
+    const { selected, discovered, prompts, creates, deleted } = await stopDuringReplacementCreate()
+    const gitlab = selected.roster.slots.find((slot) => slot.providerId === "gitlab")!
+    expect(creates()).toBe(4)
+    expect(prompts.some((route) => route.startsWith("xai/"))).toBe(false)
+    expect(deleted).toContain("ses_4")
+    expect(discovered.recovery!.replacements).toEqual([])
+    expect(discovered.recovery!.notReplaced).toEqual([{ from: gitlab.slot, reason: "cancelled" }])
+    expect(discovered.cancelled).toBe(true)
+    expect(discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
+  })
+
+  test("its admission settles as not issued, and the refused original's attempt keeps its own settlement", async () => {
+    const { selected, admission } = await stopDuringReplacementCreate()
+    const gitlab = selected.roster.slots.find((slot) => slot.providerId === "gitlab")!
+    const replacementSettlements = admission.settlements.filter((entry) => entry.request.slot === "discovery-r1")
+    expect(replacementSettlements.map((entry) => entry.settlement)).toEqual([{ kind: "not-issued" }])
+    const refusedSettlements = admission.settlements.filter((entry) => entry.request.slot === gitlab.slot)
+    expect(refusedSettlements.map((entry) => entry.settlement.kind)).toEqual(["unknown"])
+  })
+})
+
+describe("discovery — a retry the backend ended before its prompt", () => {
+  const TURN_TOKENS = { input: 7, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  test("keeps the issued first attempt: the slot was asked once and is reported as stopped in flight, not never asked", async () => {
+    const selected = selectRoster(
+      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5"), candidate("google", "gemini-2.5-pro")],
+      { slots: 3, providerConfigKey: "provider" },
+    )
+    const [first] = selected.roster.slots
+    const controller = new AbortController()
+    const calls: { slot: string; attempt: number }[] = []
+    const backend: import("../../core/ports/model-backend.ts").ModelBackend = {
+      capabilities: () => ({ tools: false }),
+      async runTurn(slot) {
+        const attempt = calls.filter((call) => call.slot === slot).length + 1
+        calls.push({ slot, attempt })
+        if (slot === first!.slot) {
+          if (attempt === 1) return { ok: false, slot, failure: "model-error", message: "upstream hiccup", tokens: TURN_TOKENS }
+          controller.abort()
+          return cancelledTurn(slot)
+        }
+        return { ok: true, slot, value: { findings: [] } as never, tokens: TURN_TOKENS }
+      },
+    }
+    const discovered = await discover({
+      roster: selected.roster,
+      recovery: selected.recovery,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(null),
+      signal: controller.signal,
+    })
+    expect(calls.filter((call) => call.slot === first!.slot)).toHaveLength(2)
+    expect(discovered.cancelled).toBe(true)
+    const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("1 did not answer because the run was cancelled")
+    expect(reduced.message).not.toContain("never asked")
   })
 })
