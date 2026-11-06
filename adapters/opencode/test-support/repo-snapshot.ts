@@ -139,6 +139,12 @@ async function walk(root: Buffer, rel: Buffer, into: Map<string, Entry>): Promis
   const here = rel.length === 0 ? root : Buffer.concat([root, SLASH, rel])
   const names = await readdir(here, { encoding: "buffer" })
   for (const name of names) {
+    if (!Buffer.isBuffer(name)) {
+      throw new TypeError(
+        `snapshot: readdir returned a ${typeof name} name, not raw name bytes; ` +
+          "this Bun does not support the snapshot, use the Bun version the README names",
+      )
+    }
     const childRel = rel.length === 0 ? name : Buffer.concat([rel, SLASH, name])
     if (childRel.equals(INDEX_FILE)) continue
     const full = Buffer.concat([root, SLASH, childRel])

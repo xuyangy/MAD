@@ -134,6 +134,8 @@ These are stated so you can plan around them. No fix is implied.
 
 ## Development
 
+The offline tests are run with Bun 1.4.3, locally and in CI (`.github/workflows/ci.yml`). The snapshot that checks the repository under review is unchanged needs directory entries as raw name bytes, and stops with an error on a Bun that returns them as strings.
+
 ```sh
 bun run typecheck
 bun run lint
