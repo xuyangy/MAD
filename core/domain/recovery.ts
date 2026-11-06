@@ -106,6 +106,31 @@ export function replacementsOf(record: Pick<RunRecord, "recovery">): readonly Re
 }
 
 /**
+ * What refusals keep a replacement from using, compared the way selection
+ * groups providers: a provider id without regard to case, a model id exactly.
+ * A provider-scope refusal excludes every route through its provider; a
+ * route-scope refusal excludes its provider/model route only. Records keep the
+ * host's spelling; only the comparison folds case.
+ */
+export function refusalExclusions(
+  refusals: Iterable<Refusal>,
+): (route: { providerId: string; modelId: string }) => "provider" | "route" | undefined {
+  const providers = new Set<string>()
+  const routes = new Set<string>()
+  for (const refusal of refusals) {
+    const provider = refusal.providerId.toLowerCase()
+    if (refusal.scope === "provider") providers.add(provider)
+    else routes.add(`${provider}\u0000${refusal.modelId}`)
+  }
+  return (route) => {
+    const provider = route.providerId.toLowerCase()
+    if (providers.has(provider)) return "provider"
+    if (routes.has(`${provider}\u0000${route.modelId}`)) return "route"
+    return undefined
+  }
+}
+
+/**
  * The invariants a record's recovery must hold, checked from its structured
  * fields only. A violation is a programming error, so it throws.
  *
@@ -117,7 +142,8 @@ export function replacementsOf(record: Pick<RunRecord, "recovery">): readonly Re
  * - A replacement's identity is its model id's, and is new: no original pool
  *   identity, no other replacement's.
  * - No replacement goes through a provider any slot refused at provider scope,
- *   or through a provider/model route any slot refused at route scope.
+ *   or through a provider/model route any slot refused at route scope
+ *   (`refusalExclusions`: provider ids compared without regard to case).
  * - Each not-replaced slot is listed once.
  * - Every refused slot is accounted for: it appears exactly once, as a
  *   replacement's `from` or as a not-replaced entry.
@@ -144,12 +170,7 @@ export function validateReplacements(record: Pick<RunRecord, "roster" | "recover
     refused.set(entry.slot, entry.refusal)
   }
   // Exclusions hold across the whole run, not only for the slot that was refused.
-  const refusedProviders = new Set<string>()
-  const refusedRoutes = new Set<string>()
-  for (const refusal of refused.values()) {
-    if (refusal.scope === "provider") refusedProviders.add(refusal.providerId)
-    else refusedRoutes.add(`${refusal.providerId}\u0000${refusal.modelId}`)
-  }
+  const excluded = refusalExclusions(refused.values())
 
   if (recovery.replacements.length > record.roster.slots.length) {
     fail("more replacements than original pool slots")
@@ -169,10 +190,11 @@ export function validateReplacements(record: Pick<RunRecord, "roster" | "recover
     }
     if (identities.has(replacement.to.identity)) fail(`replacement ${id} reuses model ${replacement.to.identity}`)
     identities.add(replacement.to.identity)
-    if (refusedProviders.has(replacement.to.providerId)) {
+    const exclusion = excluded(replacement.to)
+    if (exclusion === "provider") {
       fail(`replacement ${id} uses provider ${replacement.to.providerId}, which refused at provider scope`)
     }
-    if (refusedRoutes.has(`${replacement.to.providerId}\u0000${replacement.to.modelId}`)) {
+    if (exclusion === "route") {
       fail(`replacement ${id} uses the route ${replacement.to.providerId}/${replacement.to.modelId}, which was refused`)
     }
     if (replacement.dispatched !== 1 && replacement.dispatched !== 2) fail(`replacement ${id} has dispatched ${replacement.dispatched}`)

@@ -13,6 +13,7 @@ import {
   executionRoster,
   heldReplacementCount,
   recoverySummary,
+  refusalExclusions,
   replacementsOf,
   validateRecoveryPlan,
   validateReplacements,
@@ -182,6 +183,16 @@ describe("validateReplacements — each invariant", () => {
     expect(() => validateReplacements(recordWith(crossed))).toThrow("uses provider gitlab, which refused at provider scope")
   })
 
+  test("a case variant of a provider refused at provider scope is the same provider", () => {
+    const crossed: RunRecovery = {
+      refused: [{ slot: gitlabSlot!.slot, refusal: refusalOf(gitlabSlot!, "provider") }],
+      replacements: [{ from: gitlabSlot!.slot, to: { ...replacementRoute, providerId: "GitLab" }, dispatched: 1, answered: true }],
+      notReplaced: [],
+      answeredLineages: 3,
+    }
+    expect(() => validateReplacements(recordWith(crossed))).toThrow("uses provider GitLab, which refused at provider scope")
+  })
+
   test("more replacements than original pool slots", () => {
     const small = { ...roster, slots: roster.slots.slice(0, 1) }
     const only = small.slots[0]!
@@ -282,5 +293,31 @@ describe("the recovery summary a host reads", () => {
       expect(heldReplacementCount(record(reason))).toBe(0)
     }
     expect(heldReplacementCount({})).toBe(0)
+  })
+})
+
+describe("refusalExclusions", () => {
+  const refusal = (scope: Refusal["scope"], providerId: string, modelId: string): Refusal => ({
+    kind: "auth",
+    basis: "structured",
+    scope,
+    providerId,
+    modelId,
+  })
+
+  test("a provider-scope refusal excludes every model through any case variant of its provider", () => {
+    const excluded = refusalExclusions([refusal("provider", "GitLab", "duo-chat-gpt-5-6-terra")])
+    expect(excluded({ providerId: "gitlab", modelId: "mistral-large" })).toBe("provider")
+    expect(excluded({ providerId: "GITLAB", modelId: "duo-chat-gpt-5-6-terra" })).toBe("provider")
+    expect(excluded({ providerId: "xai", modelId: "grok-4" })).toBeUndefined()
+  })
+
+  test("a route-scope refusal excludes its model through a case variant of its provider, and nothing else", () => {
+    const excluded = refusalExclusions([refusal("route", "openrouter", "amazon/nova-pro-v1")])
+    expect(excluded({ providerId: "OpenRouter", modelId: "amazon/nova-pro-v1" })).toBe("route")
+    // Model ids compare exactly: another model, or another spelling of one, is another route.
+    expect(excluded({ providerId: "OpenRouter", modelId: "google/gemini-2.5-pro" })).toBeUndefined()
+    expect(excluded({ providerId: "openrouter", modelId: "Amazon/Nova-Pro-V1" })).toBeUndefined()
+    expect(excluded({ providerId: "anthropic", modelId: "amazon/nova-pro-v1" })).toBeUndefined()
   })
 })

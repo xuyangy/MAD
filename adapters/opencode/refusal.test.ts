@@ -50,6 +50,24 @@ describe("recognised refusals", () => {
     })
   })
 
+  test("provider ids match without regard to case, as selection groups them, and the result keeps the slot's spelling", () => {
+    expect(classifyRefusal({ name: "ProviderAuthError", data: { providerID: "OpenRouter" } }, ROUTE)).toEqual({
+      kind: "auth",
+      basis: "structured",
+      scope: "provider",
+      ...ROUTE,
+    })
+    const upper = { ...GITLAB, providerId: "GitLab" }
+    expect(classifyRefusal({ name: "UnknownError", data: { message: GITLAB_CREDITS } }, upper)).toEqual({
+      kind: "payment",
+      basis: "host-signature",
+      scope: "provider",
+      ...upper,
+    })
+    // The message evidence is still exact under a case-variant provider.
+    expect(classifyRefusal({ name: "UnknownError", data: { message: GITLAB_CREDITS.toLowerCase() } }, upper)).toBeUndefined()
+  })
+
   test("the provider and model are the slot's, whatever the error body names", () => {
     const refusal = classifyRefusal(
       { name: "APIError", data: { statusCode: 402, isRetryable: false, providerID: "elsewhere", modelID: "other" } },

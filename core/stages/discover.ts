@@ -93,6 +93,7 @@ import {
   type Locus,
 } from "../domain/finding.ts"
 import {
+  refusalExclusions,
   validateRecoveryPlan,
   type NotReplaced,
   type RefusedSlot,
@@ -916,14 +917,9 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       slot: outcome.rosterSlot.slot,
       refusal: refusalOfOutcome(outcome)!,
     }))
-    const excludedProviders = new Set<string>()
-    const excludedRoutes = new Set<string>()
-    for (const outcome of [...poolOutcomes, ...lensOutcomes]) {
-      const refusal = refusalOfOutcome(outcome)
-      if (refusal === undefined) continue
-      if (refusal.scope === "provider") excludedProviders.add(refusal.providerId)
-      else excludedRoutes.add(`${refusal.providerId}\u0000${refusal.modelId}`)
-    }
+    const excluded = refusalExclusions(
+      [...poolOutcomes, ...lensOutcomes].flatMap((outcome) => refusalOfOutcome(outcome) ?? []),
+    )
     const modelOf = (slot: string): string => {
       const rosterSlot = roster.slots.find((candidate) => candidate.slot === slot)!
       return `${rosterSlot.providerId}/${rosterSlot.modelId}`
@@ -945,9 +941,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       }
       const eligible = input.recovery.candidates.filter(
         (candidate) =>
-          !allocatedIdentities.has(candidate.identity) &&
-          !excludedProviders.has(candidate.providerId) &&
-          !excludedRoutes.has(`${candidate.providerId}\u0000${candidate.modelId}`),
+          !allocatedIdentities.has(candidate.identity) && excluded(candidate) === undefined,
       )
       const to =
         eligible.find((candidate) => candidate.lineage.verified && !heldLineages.has(candidate.lineage.lineage)) ??

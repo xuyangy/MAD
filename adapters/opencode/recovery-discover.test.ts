@@ -181,6 +181,17 @@ describe("discovery recovery over the real backend", () => {
     expect(result.prompts.filter((route) => route === "gitlab/mistral-large")).toEqual([])
   })
 
+  test("a provider-scope refusal excludes a case variant of that provider from the replacement", async () => {
+    const result = await run({
+      candidates: [...POOL, candidate("GitLab", "mistral-large"), candidate("xai", "grok-4")],
+      slots: 3,
+      script: (route) => (route.startsWith("gitlab/") ? GITLAB_REFUSAL : NOTHING_FOUND),
+    })
+    expect(`${result.plan.candidates[0]!.providerId}/${result.plan.candidates[0]!.modelId}`).toBe("GitLab/mistral-large")
+    expect(result.discovered.recovery!.replacements[0]!.to.providerId).toBe("xai")
+    expect(result.prompts.filter((route) => route === "GitLab/mistral-large")).toEqual([])
+  })
+
   test("a lens slot's provider-scope refusal excludes that provider from the replacement too", async () => {
     const lens: LensSlot = {
       slot: "discovery-lens-security",
@@ -653,6 +664,35 @@ describe("discovery recovery — pins, lineage and route scope", () => {
     expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("q/mistral-large")
     // The refused route was prompted once, by the lens, and never as a replacement.
     expect(result.prompts.filter((route) => route === "q/codestral-latest")).toHaveLength(1)
+  })
+
+  test("a lens slot's ROUTE-scope refusal excludes that model through a case variant of its provider, not another model there", async () => {
+    const lens: LensSlot = {
+      slot: "discovery-lens-security",
+      lens: "security",
+      providerId: "q",
+      modelId: "codestral-latest",
+      identity: normalizeModelIdentity("codestral-latest"),
+      lineage: lineageOf("codestral-latest"),
+      toolcall: true,
+      alsoAvailableVia: [],
+    }
+    const AUTH_401 = { error: { name: "APIError", data: { statusCode: 401, isRetryable: false } }, tokens: ZERO }
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("Q", "codestral-latest"),
+        candidate("Q", "mistral-large"),
+      ],
+      slots: 2,
+      lensSlots: [lens],
+      script: (route) => (route === "openai/gpt-5" ? PAYMENT_402 : route === "q/codestral-latest" ? AUTH_401 : NOTHING_FOUND),
+    })
+    expect(`${result.plan.candidates[0]!.providerId}/${result.plan.candidates[0]!.modelId}`).toBe("Q/codestral-latest")
+    const replacement = result.discovered.recovery!.replacements[0]!
+    expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("Q/mistral-large")
+    expect(result.prompts.filter((route) => route === "Q/codestral-latest")).toEqual([])
   })
 })
 

@@ -8,7 +8,8 @@
  * evidence. Anything not matched exactly is not a refusal, and the turn stays an
  * ordinary failure with its ordinary retry.
  *
- * - `ProviderAuthError` whose `data.providerID` is the slot's provider: an
+ * - `ProviderAuthError` whose `data.providerID` is the slot's provider,
+ *   compared without regard to case as selection compares providers: an
  *   authentication refusal for that provider.
  * - `APIError` with a numeric `statusCode` of 401 (auth) or 402 (payment), and
  *   `isRetryable` absent or `false`: a refusal of this provider/model route
@@ -19,7 +20,7 @@
  *   way, costing that slot its one replacement and possibly an attempt of
  *   unknown usage. `isRetryable: true`, or any non-boolean value, is not a
  *   refusal.
- * - `UnknownError` from the `gitlab` provider whose message starts with
+ * - `UnknownError` from the `gitlab` provider (any case) whose message starts with
  *   `Failed to get direct access token: 402 Payment Required` and contains
  *   `not enough GitLab Credits`: the text this host emits when the GitLab
  *   account has no credits. A heuristic on a known message, labelled
@@ -43,7 +44,9 @@ export function classifyRefusal(error: unknown, slot: { providerId: string; mode
   const route = { providerId: slot.providerId, modelId: slot.modelId }
 
   if (error.name === "ProviderAuthError") {
-    if (typeof data.providerID !== "string" || data.providerID !== slot.providerId) return undefined
+    if (typeof data.providerID !== "string" || data.providerID.toLowerCase() !== slot.providerId.toLowerCase()) {
+      return undefined
+    }
     return { kind: "auth", basis: "structured", scope: "provider", ...route }
   }
 
@@ -56,7 +59,7 @@ export function classifyRefusal(error: unknown, slot: { providerId: string; mode
   }
 
   if (error.name === "UnknownError") {
-    if (slot.providerId !== "gitlab" || typeof data.message !== "string") return undefined
+    if (slot.providerId.toLowerCase() !== "gitlab" || typeof data.message !== "string") return undefined
     if (!data.message.startsWith(GITLAB_CREDITS_PREFIX) || !data.message.includes(GITLAB_CREDITS_MARKER)) return undefined
     return { kind: "payment", basis: "host-signature", scope: "provider", ...route }
   }
