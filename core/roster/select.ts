@@ -50,16 +50,41 @@ import type { Candidate, LensSlot, RecoveryCandidate, RecoveryPlan, Roster, Rost
 import type { Warning } from "../domain/warning.ts"
 
 /**
- * The host config key a user edits to add a provider. Named in the AD-6c
- * warning so the warning is actionable rather than decorative.
- *
- * This is host-shaped, so the caller supplies it (AD-1: no opencode knowledge
- * in the core). The adapter passes opencode's key.
+ * The host's own words in selection's remedies: where its provider config
+ * lives, how a provider is authenticated, and why it needs tool calling. The
+ * core names no host (AD-1), so the caller supplies them; absent, the messages
+ * use `NEUTRAL_HOST_GUIDANCE`.
  */
+export interface HostGuidance {
+  /** The config a user edits, as a noun phrase: "in <config>", "the `key` key in <config>". */
+  config: string
+  /** How a provider is authenticated, completing "or authenticate one <authenticate>". */
+  authenticate: string
+  /** Why tool calling is required, completing "tool calling, which <toolcallReason>". */
+  toolcallReason: string
+  /** The same reason for one pinned model, completing "for it through this provider, and <toolcallReasonForPin>". */
+  toolcallReasonForPin: string
+}
+
+/** Wording that names no host and assumes nothing about why tool calling is needed. */
+export const NEUTRAL_HOST_GUIDANCE: HostGuidance = {
+  config: "the host's configuration",
+  authenticate: "through the host",
+  toolcallReason: "the caller requires",
+  toolcallReasonForPin: "the caller requires it",
+}
+
 export interface SelectOptions {
   slots: number
-  /** e.g. `provider` in opencode.json — named verbatim in the AD-6c warning. */
+  /**
+   * The host config key a user edits to add a provider, named verbatim in the
+   * AD-6c warning so the warning is actionable rather than decorative. It is
+   * host-shaped, so the caller supplies it (AD-1: no host knowledge in the
+   * core). The adapter passes its host's key.
+   */
   providerConfigKey: string
+  /** The host's wording for the remedies; absent means `NEUTRAL_HOST_GUIDANCE`. */
+  hostGuidance?: HostGuidance
   /** Slot id prefix; `discovery` yields `discovery-1`, `discovery-2`, ... */
   slotPrefix?: string
   /**
@@ -88,9 +113,9 @@ export interface SelectOptions {
    * Only models the host affirmatively declares able to call tools may fill a
    * discovery or lens slot. Absent or false means no capability requirement.
    *
-   * The caller sets it, because the need is the host's: opencode returns a
-   * structured answer through a tool call, so a model that cannot call tools
-   * cannot answer a MAD turn there. A declared capability is necessary, not
+   * The caller sets it, because the need is the host's: a host that returns a
+   * structured answer through a tool call cannot get one from a model that
+   * cannot call tools. A declared capability is necessary, not
    * sufficient: the host's routing can still fail at run time.
    *
    * Eligibility is per provider: within one model, the first provider (in host
@@ -113,11 +138,11 @@ export interface SelectResult {
 
 /** Thrown when the host offers nothing at all — unusable host state, not a domain outcome. */
 export class NoCandidatesError extends Error {
-  constructor(providerConfigKey: string) {
+  constructor(providerConfigKey: string, guidance: HostGuidance = NEUTRAL_HOST_GUIDANCE) {
     super(
       `No models are available from the host, so there is nothing to review with. ` +
-        `Configure at least one provider in your opencode config (the \`${providerConfigKey}\` key) ` +
-        `or authenticate one with \`opencode auth login\`, then run the review again. ` +
+        `Configure at least one provider in ${guidance.config} (the \`${providerConfigKey}\` key) ` +
+        `or authenticate one ${guidance.authenticate}, then run the review again. ` +
         `MAD holds no credentials and names no model of its own.`,
     )
     this.name = "NoCandidatesError"
@@ -130,12 +155,12 @@ export class NoCandidatesError extends Error {
  * fact, so it says something different.
  */
 export class NoEligibleCandidatesError extends Error {
-  constructor(providerConfigKey: string, offered: number) {
+  constructor(providerConfigKey: string, offered: number, guidance: HostGuidance = NEUTRAL_HOST_GUIDANCE) {
     super(
       `The host offers ${offered} provider/model offering(s), but none declares tool calling, which ` +
-        `this host needs to return MAD's structured answers, so there is nothing to review with. ` +
-        `Configure a provider whose models support tool calling in your opencode config (the ` +
-        `\`${providerConfigKey}\` key) or authenticate one with \`opencode auth login\`, then run the ` +
+        `${guidance.toolcallReason}, so there is nothing to review with. ` +
+        `Configure a provider whose models support tool calling in ${guidance.config} (the ` +
+        `\`${providerConfigKey}\` key) or authenticate one ${guidance.authenticate}, then run the ` +
         `review again. MAD holds no credentials and names no model of its own.`,
     )
     this.name = "NoEligibleCandidatesError"
@@ -696,8 +721,16 @@ export function fillLensSlots(
 }
 
 export function selectRoster(candidates: readonly Candidate[], options: SelectOptions): SelectResult {
-  const { slots, providerConfigKey, slotPrefix = "discovery", lenses = [], pins = [], requireToolcall = false } = options
-  if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey)
+  const {
+    slots,
+    providerConfigKey,
+    hostGuidance: guidance = NEUTRAL_HOST_GUIDANCE,
+    slotPrefix = "discovery",
+    lenses = [],
+    pins = [],
+    requireToolcall = false,
+  } = options
+  if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey, guidance)
   // `Number.isFinite` FIRST, because `NaN < 1` is false (ledger triage
   // 2026-09-09). A NaN `slots` passed this guard, and then `filled.length >=
   // slots` in `resolvePins` never became true either — so every pin filled, the
@@ -719,7 +752,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     ? requireCapability(allDeduped, candidates)
     : { eligible: allDeduped, ineligibleRoutes: new Set(), excludedModels: 0 }
   const deduped = eligibility.eligible
-  if (deduped.length === 0) throw new NoEligibleCandidatesError(providerConfigKey, candidates.length)
+  if (deduped.length === 0) throw new NoEligibleCandidatesError(providerConfigKey, candidates.length, guidance)
   const incapableOfferings = requireToolcall ? candidates.filter((candidate) => !candidate.toolcall).length : 0
   // AD-4 step 0 (story 8A) — the pins claim from the deduped list; ranking gets
   // the remainder and the slots the pins did not take. When `pins` is empty this
@@ -825,7 +858,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         case "no-slot":
           return `there were only ${slots} slot(s) and earlier pins took them all`
         case "lacks-capability":
-          return "the host does not declare tool calling for it through this provider, and this host needs it for structured answers"
+          return `the host does not declare tool calling for it through this provider, and ${guidance.toolcallReasonForPin}`
         default:
           return "it is not a usable provider/model pair"
       }
@@ -854,8 +887,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         `PIN NOT HONOURED: ${unhonoured.length} of ${pins.length} pinned model(s) did not fill a ` +
         `slot — ${listed}. Those slot(s) fell through to ranking and the run PROCEEDS with the ` +
         `roster below; MAD names no model of its own and does not refuse a run over a pin. Check ` +
-        `the provider and model ids against the \`${providerConfigKey}\` key in your opencode ` +
-        `config.`,
+        `the provider and model ids against the \`${providerConfigKey}\` key in ${guidance.config}.`,
       detail: {
         pins: unhonoured.map((resolution) => ({
           ...pinParts(resolution.pin),
@@ -884,8 +916,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       stage: "roster",
       message:
         `MODELS LEFT OUT: ${incapableOfferings} of the ${candidates.length} provider/model offering(s) ` +
-        `the host lists do not declare tool calling, which this host needs to return MAD's ` +
-        `structured answers, so selection did not use them. ${eligibility.excludedModels} model(s) ` +
+        `the host lists do not declare tool calling, which ${guidance.toolcallReason}, so selection ` +
+        `did not use them. ${eligibility.excludedModels} model(s) ` +
         `were left out entirely; other excluded offerings share a model identity with an eligible ` +
         `offering. A declared capability does not guarantee a working endpoint.`,
       detail: {
@@ -913,7 +945,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         ` (${candidates.length} candidate(s) before dedupe). ` +
         `The run proceeds with a smaller roster; every co-discovery fraction is over what ` +
         `answered, not over ${slots}. Add a provider under the \`${providerConfigKey}\` key in ` +
-        `your opencode config to fill the remaining slot(s).`,
+        `${guidance.config} to fill the remaining slot(s).`,
       detail: {
         requested: slots,
         filled: rosterSlots.length,
@@ -950,8 +982,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         `DEGRADED ROSTER: ${slots} discovery slot(s) requested but only ${distinctLineages} ` +
         `distinct verified lineage(s) available (${named}). Co-discovery over a roster this narrow ` +
         `is a WEAK SIGNAL — models from one lineage share training data and therefore share blind ` +
-        `spots. Add a provider from another lineage under the \`${providerConfigKey}\` key in your ` +
-        `opencode config to fix this. Temperature variation across one model is not an accepted ` +
+        `spots. Add a provider from another lineage under the \`${providerConfigKey}\` key in ` +
+        `${guidance.config} to fix this. Temperature variation across one model is not an accepted ` +
         `substitute for a diverse roster.`,
       detail: {
         requested: slots,
@@ -1008,7 +1040,7 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
         `${oneModel ? "that model's" : "that lineage's"} blind spots, so these lenses buy ` +
         `COVERAGE and not independence. Lens variation is not an accepted substitute for a diverse ` +
         `roster, on the same grounds as temperature variation. Add a provider from another lineage ` +
-        `under the \`${providerConfigKey}\` key in your opencode config to spread them. Lens slots ` +
+        `under the \`${providerConfigKey}\` key in ${guidance.config} to spread them. Lens slots ` +
         `never count toward distinct lineages, so this is a separate fact from the roster report.`,
       detail: {
         model: `${only.providerId}/${only.modelId}`,

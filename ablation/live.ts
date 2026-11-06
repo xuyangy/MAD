@@ -58,7 +58,7 @@
 
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 
-import { enumerateCandidates } from "../adapters/opencode/roster.ts"
+import { enumerateCandidates, OPENCODE_HOST_GUIDANCE } from "../adapters/opencode/roster.ts"
 import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { opencodeRepo, type OpencodeRepoOptions } from "../adapters/opencode/repo.ts"
 import { selectRoster, type Pin } from "../core/roster/select.ts"
@@ -287,6 +287,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
           lenses: spec.lenses ?? [],
           pins: spec.pins ?? [],
           providerConfigKey,
+          hostGuidance: OPENCODE_HOST_GUIDANCE,
         })
         const backend = new OpencodeModelBackend({
           serverUrl: options.serverUrl,
@@ -305,6 +306,7 @@ export async function runLiveAblation(options: LiveOptions): Promise<AblationRep
       change,
       candidates,
       providerConfigKey,
+      hostGuidance: OPENCODE_HOST_GUIDANCE,
       ...(governor === undefined ? {} : { governor }),
       ...(options.tokenCap === undefined ? {} : { dials: { tokenCap: options.tokenCap } }),
       // EACH ARM IS PERSISTED AS IT FINISHES (review finding 4, 2026-09-10).

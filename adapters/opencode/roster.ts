@@ -11,13 +11,25 @@
 import type { PluginInput } from "@opencode-ai/plugin"
 
 import type { Candidate } from "../../core/domain/roster.ts"
-import { selectRoster, type Pin, type SelectResult } from "../../core/roster/select.ts"
+import { selectRoster, type HostGuidance, type Pin, type SelectResult } from "../../core/roster/select.ts"
 
 /**
  * The opencode config key a user edits to add a provider. Named verbatim in the
  * AD-6c warning so the warning is actionable.
  */
 export const OPENCODE_PROVIDER_CONFIG_KEY = "provider"
+
+/**
+ * opencode's wording for selection's remedies: its config, its login command,
+ * and why it needs tool calling (it returns a structured answer through a tool
+ * call). The opencode callers that surface selection guidance pass it.
+ */
+export const OPENCODE_HOST_GUIDANCE: HostGuidance = {
+  config: "your opencode config",
+  authenticate: "with `opencode auth login`",
+  toolcallReason: "this host needs to return MAD's structured answers",
+  toolcallReasonForPin: "this host needs it for structured answers",
+}
 
 type Client = PluginInput["client"]
 
@@ -120,6 +132,7 @@ export async function resolveRoster(
     lenses,
     pins,
     providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
+    hostGuidance: OPENCODE_HOST_GUIDANCE,
     requireToolcall: true,
   })
 }

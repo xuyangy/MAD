@@ -209,3 +209,36 @@ describe("resolveRoster (AD-3, AD-4)", () => {
     await expect(resolveRoster(client, 1)).rejects.toThrow("`provider`")
   })
 })
+
+describe("opencode's wording for selection's remedies (OPENCODE_HOST_GUIDANCE)", () => {
+  // Exact messages through resolveRoster, so the adapter's wiring, not a copy of
+  // the constant, is what keeps opencode's guidance.
+  test("no providers, and no provider declaring tool calling", async () => {
+    await expect(resolveRoster(fakeClient({ providers: [], default: {} }), 1)).rejects.toThrow(
+      "No models are available from the host, so there is nothing to review with. Configure at least one provider in your opencode config (the `provider` key) or authenticate one with `opencode auth login`, then run the review again. MAD holds no credentials and names no model of its own.",
+    )
+    const incapable = fakeClient({ providers: [{ id: "openrouter", models: { a: model("google/gemini-3-pro-image-preview", false) } }], default: {} })
+    await expect(resolveRoster(incapable, 1)).rejects.toThrow(
+      "The host offers 1 provider/model offering(s), but none declares tool calling, which this host needs to return MAD's structured answers, so there is nothing to review with. Configure a provider whose models support tool calling in your opencode config (the `provider` key) or authenticate one with `opencode auth login`, then run the review again. MAD holds no credentials and names no model of its own.",
+    )
+  })
+
+  test("every roster remedy names the opencode config and why opencode needs tool calling", async () => {
+    const { warnings } = await resolveRoster(fakeClient(TWO_PROVIDERS), 3, ["security", "performance"], [
+      { providerId: "openai", modelId: "gpt-5" },
+    ])
+    const messages = Object.fromEntries(warnings.filter((w) => w.code !== "provider-fan-out").map((w) => [w.code, w.message]))
+    expect(messages).toEqual({
+      "roster-pin-unhonoured":
+        "PIN NOT HONOURED: 1 of 1 pinned model(s) did not fill a slot — `openai/gpt-5` (the host does not declare tool calling for it through this provider, and this host needs it for structured answers). Those slot(s) fell through to ranking and the run PROCEEDS with the roster below; MAD names no model of its own and does not refuse a run over a pin. Check the provider and model ids against the `provider` key in your opencode config.",
+      "roster-capability-excluded":
+        "MODELS LEFT OUT: 1 of the 3 provider/model offering(s) the host lists do not declare tool calling, which this host needs to return MAD's structured answers, so selection did not use them. 1 model(s) were left out entirely; other excluded offerings share a model identity with an eligible offering. A declared capability does not guarantee a working endpoint.",
+      "roster-underfilled":
+        "UNDERFILLED ROSTER: 3 discovery slot(s) requested but the host offers only 2 distinct model(s) that declare tool calling (3 candidate(s) before dedupe). The run proceeds with a smaller roster; every co-discovery fraction is over what answered, not over 3. Add a provider under the `provider` key in your opencode config to fill the remaining slot(s).",
+      "roster-single-lineage":
+        "DEGRADED ROSTER: 3 discovery slot(s) requested but only 1 distinct verified lineage(s) available (Claude (Anthropic), Claude (Anthropic)). Co-discovery over a roster this narrow is a WEAK SIGNAL — models from one lineage share training data and therefore share blind spots. Add a provider from another lineage under the `provider` key in your opencode config to fix this. Temperature variation across one model is not an accepted substitute for a diverse roster.",
+      "roster-lens-homogeneous":
+        "LENS ROSTER HOMOGENEOUS: all 2 lens slot(s) resolved to 2 models of ONE lineage (Claude (Anthropic)): anthropic/claude-sonnet-4-5-20250929, anthropic/claude-haiku-4-5 (security, performance). Several personas over one lineage share that lineage's blind spots, so these lenses buy COVERAGE and not independence. Lens variation is not an accepted substitute for a diverse roster, on the same grounds as temperature variation. Add a provider from another lineage under the `provider` key in your opencode config to spread them. Lens slots never count toward distinct lineages, so this is a separate fact from the roster report.",
+    })
+  })
+})

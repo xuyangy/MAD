@@ -99,7 +99,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 
 import type { SpawnBlame } from "../adapters/opencode/blame-exec.ts"
 import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
-import { enumerateCandidates, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
+import { enumerateCandidates, OPENCODE_HOST_GUIDANCE, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
 import { runAdversarialSuite, type AdversarialHostLifecycle, type AdversarialHostStart, type AdversarialHostStop, type AdversarialRunContext } from "../ablation/adversarial.ts"
 import type { RunGit as MaterializeGit } from "../ablation/adversarial-materialize.ts"
 import {
@@ -367,7 +367,12 @@ export function parseAdversarialFlags(argv: readonly string[]): AdversarialFlags
 // The roster
 // ---------------------------------------------------------------------------
 
-const rosterOptions = (pin: Pin) => ({ slots: 1, pins: [pin], providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY })
+const rosterOptions = (pin: Pin) => ({
+  slots: 1,
+  pins: [pin],
+  providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
+  hostGuidance: OPENCODE_HOST_GUIDANCE,
+})
 
 /**
  * The one-slot roster the schedule seals, built from the pin before any host

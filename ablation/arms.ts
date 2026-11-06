@@ -34,7 +34,7 @@
  */
 
 import type { Pin } from "../core/roster/select.ts"
-import { selectRoster } from "../core/roster/select.ts"
+import { selectRoster, type HostGuidance } from "../core/roster/select.ts"
 import type { Clock } from "../core/ports/clock.ts"
 import type { ModelBackend } from "../core/ports/model-backend.ts"
 import type { Candidate } from "../core/domain/roster.ts"
@@ -112,6 +112,8 @@ export interface ArmDeps {
   change: ChangeSet
   candidates: readonly Candidate[]
   providerConfigKey: string
+  /** The host's wording for selection's remedies; absent means the core's neutral wording. */
+  hostGuidance?: HostGuidance
   dials?: Dials
   /**
    * Called as each arm FINISHES, before the next one starts (story 2.2, review
@@ -170,6 +172,7 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     lenses: spec.lenses ?? [],
     pins: spec.pins ?? [],
     providerConfigKey: deps.providerConfigKey,
+    ...(deps.hostGuidance === undefined ? {} : { hostGuidance: deps.hostGuidance }),
   })
   // AC2 (story 2.3) — ONE SINK PER ARM RUN, AND THE SAME OBJECT BOTH WAYS.
   //

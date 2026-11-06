@@ -7,9 +7,11 @@ import {
   dedupeByIdentity,
   fillLensSlots,
   NoCandidatesError,
+  NEUTRAL_HOST_GUIDANCE,
   NoEligibleCandidatesError,
   resolvePins,
   selectRoster,
+  type HostGuidance,
 } from "./select.ts"
 
 const OPTS = { slots: 3, providerConfigKey: "provider" }
@@ -529,16 +531,88 @@ describe("lens spread follows lineage rank, not host listing order (code review 
 })
 
 describe("no providers (matrix row: fail with guidance)", () => {
-  test("throws a message naming what to configure in opencode", () => {
+  test("throws a message naming the config key, the host's config and how to authenticate", () => {
     expect(() => selectRoster([], OPTS)).toThrow(NoCandidatesError)
+    expect(() => selectRoster([], OPTS)).toThrow(
+      "Configure at least one provider in the host's configuration (the `provider` key) or authenticate one through the host, then run the review again.",
+    )
+  })
+})
+
+describe("the host's wording for the remedies (AD-1: the core names no host)", () => {
+  const ACME: HostGuidance = {
+    config: "your acme.toml",
+    authenticate: "with `acme login`",
+    toolcallReason: "acme needs to parse a reply",
+    toolcallReasonForPin: "acme needs it to parse a reply",
+  }
+  const MIXED = [
+    candidate("anthropic", "claude-sonnet-4-5"),
+    candidate("x", "claude-opus-4", false),
+    candidate("anthropic", "claude-haiku-4"),
+  ]
+  const MIXED_OPTIONS = {
+    slots: 3,
+    providerConfigKey: "models",
+    requireToolcall: true,
+    lenses: ["security", "performance"],
+    pins: [{ providerId: "x", modelId: "claude-opus-4" }],
+  }
+  const REMEDY_CODES = [
+    "roster-pin-unhonoured",
+    "roster-capability-excluded",
+    "roster-underfilled",
+    "roster-single-lineage",
+    "roster-lens-homogeneous",
+  ]
+  const thrown = (f: () => unknown): string => {
     try {
-      selectRoster([], OPTS)
+      f()
     } catch (error) {
-      const message = (error as Error).message
-      expect(message).toContain("`provider`")
-      expect(message).toContain("opencode")
-      expect(message).toContain("auth login")
+      return (error as Error).message
     }
+    throw new Error("expected a throw")
+  }
+
+  test("a caller's guidance reaches both errors and every remedy warning", () => {
+    expect(thrown(() => selectRoster([], { ...MIXED_OPTIONS, hostGuidance: ACME }))).toContain(
+      "in your acme.toml (the `models` key) or authenticate one with `acme login`, then",
+    )
+    const noEligible = thrown(() =>
+      selectRoster([candidate("x", "claude-opus-4", false)], { ...MIXED_OPTIONS, hostGuidance: ACME }),
+    )
+    expect(noEligible).toContain("none declares tool calling, which acme needs to parse a reply, so")
+    expect(noEligible).toContain("in your acme.toml (the `models` key) or authenticate one with `acme login`, then")
+
+    const { warnings } = selectRoster(MIXED, { ...MIXED_OPTIONS, hostGuidance: ACME })
+    const byCode = new Map<string, string>(warnings.map((w) => [w.code, w.message]))
+    expect(REMEDY_CODES.filter((code) => !byCode.has(code))).toEqual([])
+    expect(byCode.get("roster-pin-unhonoured")).toContain("through this provider, and acme needs it to parse a reply)")
+    expect(byCode.get("roster-pin-unhonoured")).toEndWith("against the `models` key in your acme.toml.")
+    expect(byCode.get("roster-capability-excluded")).toContain("tool calling, which acme needs to parse a reply, so selection")
+    for (const code of ["roster-underfilled", "roster-single-lineage", "roster-lens-homogeneous"]) {
+      expect(byCode.get(code)).toContain("under the `models` key in your acme.toml to ")
+    }
+  })
+
+  test("without guidance, nothing names a host or assumes why tool calling is needed", () => {
+    const messages = [
+      thrown(() => selectRoster([], MIXED_OPTIONS)),
+      thrown(() => selectRoster([candidate("x", "claude-opus-4", false)], MIXED_OPTIONS)),
+      ...selectRoster(MIXED, MIXED_OPTIONS)
+        .warnings.filter((w) => REMEDY_CODES.includes(w.code))
+        .map((w) => w.message),
+    ]
+    expect(messages).toHaveLength(2 + REMEDY_CODES.length)
+    for (const message of messages) {
+      expect(message.toLowerCase()).not.toContain("opencode")
+      expect(message).not.toContain("structured answer")
+      expect(message).not.toContain("auth login")
+    }
+    expect(messages[1]).toContain("tool calling, which the caller requires, so")
+    expect(messages[2]).toContain("through this provider, and the caller requires it)")
+    expect(messages).toContainEqual(expect.stringContaining("in the host's configuration"))
+    expect(NEUTRAL_HOST_GUIDANCE.config).toBe("the host's configuration")
   })
 })
 

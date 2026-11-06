@@ -143,7 +143,7 @@ import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame, type SpawnedBl
 import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import { startRequestMeter, type RequestMeter, type RequestMeterOptions } from "../ablation/request-meter.ts"
 import { DEFAULT_DISCOVERY_SLOTS } from "../adapters/opencode/plugin.ts"
-import { enumerateCandidates, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
+import { enumerateCandidates, OPENCODE_HOST_GUIDANCE, OPENCODE_PROVIDER_CONFIG_KEY } from "../adapters/opencode/roster.ts"
 import {
   DEFAULT_BLAME_CLEANUP_TIMEOUT_MS,
   DEFAULT_BLAME_TIMEOUT_MS,
@@ -1865,6 +1865,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         slots: DEFAULT_DISCOVERY_SLOTS,
         pins: flags.pins,
         providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
+        hostGuidance: OPENCODE_HOST_GUIDANCE,
         // The api-key route keeps its lens-free roster; protocol v2's prefix of 10 attempts is sized for these two lenses.
         ...(oauthMode ? { lenses: OAUTH_LENSES } : {}),
       })
