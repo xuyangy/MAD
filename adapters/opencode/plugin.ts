@@ -19,6 +19,7 @@ import {
   usageIsComplete,
   type Preset,
 } from "../../core/budget/ledger.ts"
+import { heldReplacementCount, recoverySummary } from "../../core/domain/recovery.ts"
 import type { RunRecord } from "../../core/domain/run-record.ts"
 import type { Warning } from "../../core/domain/warning.ts"
 import { CODING_LENSES } from "../../core/instructions/coding/lenses.ts"
@@ -1002,7 +1003,14 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 // warning's detail for anyone who needs which.
                 preset: record.preset,
                 tokenCap: record.ledger.cap,
-                budgetSkipped: record.skippedForBudget?.length ?? 0,
+                // A replacement a gate held back is a planned pool turn never
+                // asked, so it counts here beside the skipped roster slots; which
+                // gate held it is in `recovery.notReplaced`.
+                budgetSkipped: (record.skippedForBudget?.length ?? 0) + heldReplacementCount(record),
+                // Discovery recovery, separately named from the initial
+                // selection's `distinctLineages`: dispatched replacements, not
+                // planned ones. Absent when no slot was refused.
+                ...(record.recovery === undefined ? {} : { recovery: recoverySummary(record.recovery) }),
                 // AD-16 — TWO FIELDS, NOT ONE OVERLOADED STRING (code review
                 // 2026-08-31). This used to be a single field holding either a
                 // directory path or the bare literal `"refused"`/`"failed"`, so a

@@ -228,3 +228,42 @@ export function executionProviders(record: Pick<RunRecord, "roster" | "recovery"
   }
   return providers
 }
+
+/**
+ * The recovery facts a host reads without parsing the report, separately named
+ * from the initial selection's: how many original pool slots were refused, how
+ * many replacements were DISPATCHED (not merely planned) and how many of those
+ * answered discovery, why each other refused slot got none, and the verified
+ * lineages among the pool that answered. `record.roster.distinctLineages`
+ * stays the initial selection's count.
+ */
+export interface RecoverySummary {
+  refused: number
+  replacementsDispatched: number
+  replacementsAnswered: number
+  notReplaced: Partial<Record<NotReplaced["reason"], number>>
+  answeredLineages: number
+}
+
+export function recoverySummary(recovery: RunRecovery): RecoverySummary {
+  const notReplaced: Partial<Record<NotReplaced["reason"], number>> = {}
+  for (const entry of recovery.notReplaced) notReplaced[entry.reason] = (notReplaced[entry.reason] ?? 0) + 1
+  return {
+    refused: recovery.refused.length,
+    replacementsDispatched: recovery.replacements.length,
+    replacementsAnswered: recovery.replacements.filter((replacement) => replacement.answered).length,
+    notReplaced,
+    answeredLineages: recovery.answeredLineages,
+  }
+}
+
+/**
+ * Replacements a gate held back before dispatch: the run's budget, the
+ * experiment's admission or the unknown-usage stop. Each is a planned pool turn
+ * that was never asked.
+ */
+export function heldReplacementCount(record: Pick<RunRecord, "recovery">): number {
+  return (record.recovery?.notReplaced ?? []).filter(
+    (entry) => entry.reason === "budget" || entry.reason === "admission" || entry.reason === "unknown-usage",
+  ).length
+}

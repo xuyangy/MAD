@@ -87,6 +87,8 @@ interface ToolResult {
     usageComplete?: boolean
     unknownUsageCount?: number
     budgetSkipped?: number
+    distinctLineages?: number
+    recovery?: import("../../core/domain/recovery.ts").RecoverySummary
   }
 }
 
@@ -710,7 +712,64 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
           (body) => (body as { title?: string }).title === "MAD discovery-r1",
         ) as { permission?: unknown } | undefined
         expect(replacementCreate?.permission).toEqual(REVIEW_SESSION_PERMISSION)
+        // Machine-readable recovery facts, separate from the initial selection's lineages.
+        expect(run.result.metadata?.distinctLineages).toBe(3)
+        expect(run.result.metadata?.budgetSkipped).toBe(0)
+        expect(run.result.metadata?.recovery).toEqual({
+          refused: 1,
+          replacementsDispatched: 1,
+          replacementsAnswered: 1,
+          notReplaced: {},
+          answeredLineages: 3,
+        })
         expect(run.host.creates.every((body) => JSON.stringify((body as { permission?: unknown }).permission) === JSON.stringify(REVIEW_SESSION_PERMISSION))).toBe(true)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A REPLACEMENT THE BUDGET HELD BACK: the spare model is never asked, and the budget signals and metadata count it",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const modelOf = (id: string) => ({ ...THREE_PROVIDERS.providers[1]!.models.b, id, name: id })
+        const provider = (id: string, model: string) => ({ id, name: id, source: "env", env: [], options: {}, models: { m: modelOf(model) } })
+        const providers = {
+          ...THREE_PROVIDERS,
+          providers: [THREE_PROVIDERS.providers[0]!, provider("gitlab", "duo-chat-gpt-5-6-terra"), THREE_PROVIDERS.providers[2]!, provider("xai", "grok-4")],
+        }
+        const credits =
+          'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
+        // A 1,000-token budget gives discovery 300; the two answering turns report
+        // 200 each, so round 1 spends past discovery's share before round 2.
+        const run = await runScenario(
+          repo,
+          {
+            discovery: [FEE_FINDING],
+            judge: { "fact-check": FEE_FACT_CHECK },
+            providers,
+            tokens: { input: 150, output: 50 },
+            promptError: (_session, prompt) =>
+              prompt.model === "duo-chat-gpt-5-6-terra" ? { name: "UnknownError", data: { message: credits } } : undefined,
+          },
+          { args: { budget: 1000 } },
+        )
+        expectClean(run)
+        expect(run.host.prompts.some((p) => p.model === "grok-4")).toBe(false)
+        expect(run.result.title).not.toContain("replacement(s) dispatched")
+        expect(run.result.metadata?.warnings).toContain("discovery-truncated")
+        expect(run.result.metadata?.budgetSkipped).toBe(1)
+        expect(run.result.metadata?.recovery).toEqual({
+          refused: 1,
+          replacementsDispatched: 0,
+          replacementsAnswered: 0,
+          notReplaced: { budget: 1 },
+          answeredLineages: expect.any(Number),
+        })
+        expect(run.result.output).toContain("REPLACEMENT HELD BACK: 1 replacement(s) for refused pool slot(s) were never dispatched")
       } finally {
         await repo.remove()
       }
@@ -782,6 +841,15 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
         expect(report).toContain("It was not replaced: the run was stopped before a replacement was dispatched.")
         expect(report).not.toContain("MODEL REPLACED")
         expect(report).not.toContain("xai")
+        // Planned, not dispatched: the metadata says the slot was not replaced because of the stop.
+        expect(run.result.metadata?.recovery).toEqual({
+          refused: 1,
+          replacementsDispatched: 0,
+          replacementsAnswered: 0,
+          notReplaced: { cancelled: 1 },
+          answeredLineages: expect.any(Number),
+        })
+        expect(run.result.metadata?.budgetSkipped).toBe(0)
         // The refused attempt's bill is still disclosed as unknown.
         expect(report).toContain("USAGE UNQUANTIFIED")
       } finally {

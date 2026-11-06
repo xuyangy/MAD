@@ -1125,6 +1125,51 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   // the same and mean different things: an unasked POOL slot costs the
   // co-discovery denominator every later fraction divides by, while an unasked
   // LENS slot costs only that lens's vantage (AD-17d).
+  // A REPLACEMENT A GATE HELD BACK is a planned pool turn that was never
+  // asked, for the refused slot it would have restored. It is reported beside
+  // the skipped slots, never in `skippedForBudget`, whose ids are roster slots,
+  // and each gate is named for what it is: the run's budget, the experiment's
+  // admission, or the unknown-usage stop.
+  const heldReplacements = (recovery?.notReplaced ?? []).filter(
+    (entry) => entry.reason === "budget" || entry.reason === "admission" || entry.reason === "unknown-usage",
+  )
+  const heldCause = (): string => {
+    const causes: string[] = []
+    if (heldReplacements.some((entry) => entry.reason === "budget")) {
+      causes.push(`dispatching it would have taken the run past ${ceilingNamed(input.ledger, "discover")}`)
+    }
+    const admission = [
+      ...new Set(heldReplacements.filter((entry) => entry.reason === "admission").map((entry) => entry.detail ?? "")),
+    ]
+    if (admission.length > 0) causes.push(`the experiment's admission refused it (${admission.join("; ")})`)
+    if (heldReplacements.some((entry) => entry.reason === "unknown-usage")) {
+      causes.push("the unknown-usage stop refused it, because an earlier turn's usage was not reported")
+    }
+    return causes.join(", or ")
+  }
+  const heldSentence =
+    heldReplacements.length === 0
+      ? ""
+      : `${heldReplacements.length} replacement(s) for refused pool slot(s) were never dispatched, because ` +
+        `${heldCause()}.`
+
+  if (skippedForBudget.length === 0 && heldReplacements.length > 0) {
+    warnings.push({
+      code: "discovery-truncated",
+      stage: "discover",
+      message:
+        `REPLACEMENT HELD BACK: ${heldSentence} The refused slot(s) stay out of the co-discovery denominator, ` +
+        `so this run examined the change with fewer models than recovery planned.`,
+      detail: {
+        slots: [],
+        poolSkipped: 0,
+        lensSkipped: 0,
+        replacementsHeld: heldReplacements.map((entry) => ({ from: entry.from, reason: entry.reason })),
+        cap: input.ledger.cap,
+      },
+    })
+  }
+
   if (skippedForBudget.length > 0) {
     const poolSlots = new Set(executionPoolIds())
     const poolSkipped = skippedForBudget.filter((slot) => poolSlots.has(slot)).length
@@ -1135,14 +1180,15 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     // Story 2-5c — when the experiment's admission refused every skipped slot,
     // the run's own ceiling did not, so the sentence names the admission instead.
     const admissionReasons = [...new Set(admissionRefusals.values())]
-    // CAP-5 — THE TITLE NAMES THE SAME CAUSE AS THE BODY: the budget, the
-    // admission, or both.
-    const title =
-      admissionRefusals.size === 0
-        ? "BUDGET TRUNCATED DISCOVERY"
-        : admissionRefusals.size === skippedForBudget.length
-          ? "ADMISSION TRUNCATED DISCOVERY"
-          : "BUDGET AND ADMISSION TRUNCATED DISCOVERY"
+    // CAP-5 — THE TITLE NAMES THE SAME CAUSES AS THE BODY: every gate behind a
+    // skipped roster slot, and every gate behind a held replacement.
+    const gates = new Set<"BUDGET" | "ADMISSION" | "UNKNOWN-USAGE STOP">()
+    if (admissionRefusals.size < skippedForBudget.length) gates.add("BUDGET")
+    if (admissionRefusals.size > 0) gates.add("ADMISSION")
+    for (const entry of heldReplacements) {
+      gates.add(entry.reason === "budget" ? "BUDGET" : entry.reason === "admission" ? "ADMISSION" : "UNKNOWN-USAGE STOP")
+    }
+    const title = `${(["BUDGET", "ADMISSION", "UNKNOWN-USAGE STOP"] as const).filter((gate) => gates.has(gate)).join(" AND ")} TRUNCATED DISCOVERY`
     const cause =
       admissionRefusals.size === skippedForBudget.length
         ? `the experiment's admission refused them (${admissionReasons.join("; ")})`
@@ -1154,12 +1200,15 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       message:
         `${title}: ${poolSkipped} pool slot(s) and ${lensSkipped} lens slot(s) ` +
         `were never asked, because ${cause}. THOSE SLOTS were not skipped because a ` +
-        `model failed — they were never asked at all. This run examined the change with fewer ` +
-        `models than it had available.`,
+        `model failed — they were never asked at all.${heldSentence === "" ? "" : ` ${heldSentence}`} This run ` +
+        `examined the change with fewer models than it had available.`,
       detail: {
         slots: [...skippedForBudget],
         poolSkipped,
         lensSkipped,
+        ...(heldReplacements.length === 0
+          ? {}
+          : { replacementsHeld: heldReplacements.map((entry) => ({ from: entry.from, reason: entry.reason })) }),
         cap: input.ledger.cap,
         ...(admissionRefusals.size === 0 ? {} : { admission: Object.fromEntries(admissionRefusals) }),
       },
@@ -1228,7 +1277,8 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       stage: "discover",
       message:
         `Only ${answered} of ${roster.slots.length} roster model(s) answered.${becauseStopped}` +
-        `${becauseBudget}${becauseHostAborted} Every co-discovery fraction below is over ${answered}, not over ` +
+        `${becauseBudget}${becauseHostAborted}${heldSentence === "" ? "" : ` ${heldSentence}`} Every ` +
+        `co-discovery fraction below is over ${answered}, not over ` +
         `${roster.requested} requested.`,
       detail: {
         answered,
@@ -1237,6 +1287,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
         cancelled,
         skippedForBudget: poolSkippedCount,
         ...(poolHostAbortedCount === 0 ? {} : { hostAborted: poolHostAbortedCount }),
+        ...(heldReplacements.length === 0 ? {} : { replacementsHeld: heldReplacements.length }),
       },
     })
   }

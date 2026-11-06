@@ -253,6 +253,13 @@ describe("discovery recovery over the real backend", () => {
     expect(result.prompts.some((route) => route.startsWith("xai/"))).toBe(false)
     // No trace of the reserve slot outside the original's not-replaced cause.
     expect(result.discovered.skippedForBudget).not.toContain("discovery-r1")
+    // The held replacement names the unknown-usage stop, never the ceiling.
+    const truncated = result.discovered.warnings.find((w) => w.code === "discovery-truncated")!
+    expect(truncated.message).toContain(
+      "were never dispatched, because the unknown-usage stop refused it, because an earlier turn's usage was not reported.",
+    )
+    expect(truncated.message).not.toContain("past")
+    expect(truncated.detail).toMatchObject({ replacementsHeld: [{ from: gitlab.slot, reason: "unknown-usage" }] })
   })
 
   test("the experiment's admission refusing the replacement is recorded with its reason", async () => {
@@ -267,6 +274,11 @@ describe("discovery recovery over the real backend", () => {
       expect.objectContaining({ reason: "admission", detail: "refused by the fake admission" }),
     ])
     expect(result.prompts.some((route) => route.startsWith("xai/"))).toBe(false)
+    const truncated = result.discovered.warnings.find((w) => w.code === "discovery-truncated")!
+    expect(truncated.message).toContain(
+      "were never dispatched, because the experiment's admission refused it (refused by the fake admission).",
+    )
+    expect(truncated.message).not.toContain("past")
   })
 
   test("a stop after allocation, before the replacement is dispatched: not replaced, cancelled", async () => {
@@ -429,6 +441,62 @@ describe("discovery recovery — stops and limits around round 2", () => {
     expect(result.discovered.skippedForBudget).toEqual([])
     // The refused attempt's bill is kept.
     expect(result.ledger.unknownUsage.filter((entry) => entry.slot === gitlab.slot)).toHaveLength(1)
+    // The held replacement is a budget signal, counted as a pool turn and named
+    // as the budget's, in the truncation warning and the denominator's clause.
+    const truncated = result.discovered.warnings.find((w) => w.code === "discovery-truncated")!
+    expect(truncated.message).toStartWith(
+      "REPLACEMENT HELD BACK: 1 replacement(s) for refused pool slot(s) were never dispatched, because " +
+        "dispatching it would have taken the run past",
+    )
+    expect(truncated.detail).toMatchObject({
+      poolSkipped: 0,
+      lensSkipped: 0,
+      replacementsHeld: [{ from: gitlab.slot, reason: "budget" }],
+    })
+    const reduced = result.discovered.warnings.find((w) => w.code === "denominator-reduced")!
+    expect(reduced.message).toContain("1 replacement(s) for refused pool slot(s) were never dispatched")
+    expect(reduced.detail).toMatchObject({ replacementsHeld: 1 })
+  })
+
+  test("an admission-skipped lens beside a budget-held replacement: the title and the body name both gates, each for its own slots", async () => {
+    const lens: LensSlot = {
+      slot: "discovery-lens-security",
+      lens: "security",
+      providerId: "q",
+      modelId: "codestral-latest",
+      identity: normalizeModelIdentity("codestral-latest"),
+      lineage: lineageOf("codestral-latest"),
+      toolcall: true,
+      alsoAvailableVia: [],
+    }
+    // The admission refuses only the lens; the two answering pool turns spend
+    // discovery's share of the 50-token cap, so the budget holds the replacement.
+    const admission = fakeAdmission((request) => request.slot === lens.slot)
+    const result = await run({
+      candidates: [...POOL, candidate("xai", "grok-4")],
+      slots: 3,
+      cap: 50,
+      lensSlots: [lens],
+      admission: admission.admission,
+      script: (route) => (route.startsWith("gitlab/") ? GITLAB_REFUSAL : NOTHING_FOUND),
+    })
+    const gitlab = result.roster.slots.find((slot) => slot.providerId === "gitlab")!
+    expect(result.discovered.recovery!.notReplaced).toEqual([{ from: gitlab.slot, reason: "budget" }])
+    const truncated = result.discovered.warnings.filter((w) => w.code === "discovery-truncated")
+    expect(truncated).toHaveLength(1)
+    const message = truncated[0]!.message
+    expect(message).toStartWith("BUDGET AND ADMISSION TRUNCATED DISCOVERY: 0 pool slot(s) and 1 lens slot(s) were never asked")
+    // The roster clause names the admission; the held-replacement clause names the budget.
+    expect(message).toContain("because the experiment's admission refused them (refused by the fake admission)")
+    expect(message).toContain(
+      "1 replacement(s) for refused pool slot(s) were never dispatched, because dispatching it would have taken the run past",
+    )
+    expect(truncated[0]!.detail).toMatchObject({
+      slots: [lens.slot],
+      poolSkipped: 0,
+      lensSkipped: 1,
+      replacementsHeld: [{ from: gitlab.slot, reason: "budget" }],
+    })
   })
 
   test("a replacement whose first attempt fails and whose retry the admission refuses stays a replacement", async () => {

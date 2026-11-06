@@ -11,6 +11,8 @@ import { selectRoster } from "../roster/select.ts"
 import {
   executionProviders,
   executionRoster,
+  heldReplacementCount,
+  recoverySummary,
   replacementsOf,
   validateRecoveryPlan,
   validateReplacements,
@@ -239,5 +241,46 @@ describe("validateRecoveryPlan", () => {
     )
     expect(() => validateRecoveryPlan({ candidates: reserve, pinned: [pool, pool] }, roster)).toThrow("listed twice")
     expect(() => validateRecoveryPlan({ candidates: reserve, pinned: [pool] }, roster)).not.toThrow()
+  })
+})
+
+describe("the recovery summary a host reads", () => {
+  test("counts dispatched replacements and those that answered, separately from the initial selection", () => {
+    expect(recoverySummary(VALID)).toEqual({
+      refused: 1,
+      replacementsDispatched: 1,
+      replacementsAnswered: 1,
+      notReplaced: {},
+      answeredLineages: 3,
+    })
+    expect(roster.distinctLineages).toBe(3)
+  })
+
+  test("a replacement dispatched but unanswered is counted as dispatched and not as answered", () => {
+    const summary = recoverySummary({
+      ...VALID,
+      replacements: [{ ...VALID.replacements[0]!, answered: false }],
+      answeredLineages: 2,
+    })
+    expect(summary.replacementsDispatched).toBe(1)
+    expect(summary.replacementsAnswered).toBe(0)
+  })
+
+  test("a refused slot with no replacement is counted by its reason, never as dispatched", () => {
+    const summary = recoverySummary({ ...VALID, replacements: [], notReplaced: [{ from: gitlabSlot!.slot, reason: "budget" }], answeredLineages: 2 })
+    expect(summary).toEqual({ refused: 1, replacementsDispatched: 0, replacementsAnswered: 0, notReplaced: { budget: 1 }, answeredLineages: 2 })
+  })
+
+  test("held replacements are the ones a gate refused: budget, admission or the unknown-usage stop, and nothing else", () => {
+    const record = (reason: "budget" | "admission" | "unknown-usage" | "cancelled" | "no-candidate" | "pinned" | "no-plan") => ({
+      recovery: { ...VALID, replacements: [], notReplaced: [{ from: gitlabSlot!.slot, reason }] },
+    })
+    expect(heldReplacementCount(record("budget"))).toBe(1)
+    expect(heldReplacementCount(record("admission"))).toBe(1)
+    expect(heldReplacementCount(record("unknown-usage"))).toBe(1)
+    for (const reason of ["cancelled", "no-candidate", "pinned", "no-plan"] as const) {
+      expect(heldReplacementCount(record(reason))).toBe(0)
+    }
+    expect(heldReplacementCount({})).toBe(0)
   })
 })
