@@ -163,6 +163,7 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below; neither has been run against a live host.")
     expect(PROSE).toContain("No test here runs that registration or a live review.")
     expect(PROSE).toContain("MAD sends every request through the client OpenCode hands the plugin, never to the plugin's `serverUrl`")
+    expect(PROSE).toContain("`serverUrl` is not a supported way for the plugin to reach the host; MAD's evaluation and probe scripts keep it as their transport to a server they start or are given.")
     expect(PROSE).toContain("`adapters/opencode/host-session.test.ts` pins the three session requests it sends this way: create, prompt and delete.")
     expect(PROSE).toContain("Nothing in it installs, registers or starts MAD in your host.")
     expect(README).not.toMatch(/npm (install|i) /)

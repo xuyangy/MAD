@@ -11,8 +11,12 @@
  * shapes. The plugin passes the host's own client (`PluginInput.client`, the v1
  * SDK) through `hostSessionFromPluginClient` (`./host-session.ts`), which sends
  * `format` and the session `permission` that the v1 request types do not
- * declare. Callers that start `opencode serve` themselves pass `serverUrl`
- * instead, and the backend builds a v2 client against it.
+ * declare. The plugin always passes that client and does not support
+ * `serverUrl` as a route to the host. `serverUrl` is the transport of the
+ * evaluation and probe scripts, including `ablation/live.ts`, which is given
+ * the URL of a running server, and `scripts/paired.ts` and
+ * `scripts/adversarial.ts`, which start their own `opencode serve`; the
+ * backend builds a v2 client against it.
  *
  * Provider and model errors are RETURNED on `AssistantMessage.error`, not
  * thrown, and transport errors are returned too. Both become domain outcomes on
@@ -216,8 +220,11 @@ function timedOutInFlight(ms: number): string {
 
 export interface OpencodeBackendOptions {
   /**
-   * A running opencode server's URL, for callers that start `opencode serve`
-   * themselves. Used only when no `client` is given.
+   * A running opencode server's URL, for the evaluation and probe scripts
+   * that reach a server they start or are given (including `ablation/live.ts`,
+   * `scripts/paired.ts` and `scripts/adversarial.ts`). Used only when no
+   * `client` is given. The plugin always gives `client` and does not support
+   * this as a route.
    */
   serverUrl?: URL | string
   /** The project directory from `PluginInput.directory`. */
