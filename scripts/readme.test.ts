@@ -124,6 +124,23 @@ describe("README — status", () => {
     expect(README).toContain("The opencode-ai 1.19.5 bundle was read the same way for the review-session policy only")
     expect(README).toContain("Its plugin loader was not re-read.")
   })
+
+  test("the target host names one version and two routes, each not established, and cites its evidence", () => {
+    expect(PROSE).toContain("MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. No other host version or route is targeted.")
+    expect(README).toContain("| TUI | not established |")
+    expect(README).toContain("| `opencode run` | not established |")
+    expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
+    expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
+    expect(README).toContain("| How a plugin is loaded from a package | read from the 1.19.3 bundle only; the 1.19.5 loader is unverified.")
+    expect(README).toContain("Registration was observed by hand on 1.19.5 (historical registration report E1, source commit `12af673`). |")
+    expect(README).toContain("| The plugin reaches the host through the client OpenCode hands it | observed by hand on 1.19.5 in historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0` |")
+    expect(README).toContain("| How the review-session permission rules are evaluated | read from the 1.19.5 bundle |")
+    expect(README).toContain("| A `json_schema` prompt's answer is recorded through the host's `StructuredOutput` tool | read from the 1.19.5 bundle |")
+    expect(PROSE).toContain("listed `mad_review` among its tools (historical registration report E1, source commit `12af673`).")
+    expect(PROSE).toContain("holding one uncommitted file (historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0`).")
+    expect(README).not.toMatch(/(\bTUI\b|`opencode run`)[^.\n]*\bsupport(s|ed)?\b/i)
+    expect(README).not.toMatch(/\bsupport(s|ed)?\b[^.\n]*(\bTUI\b|`opencode run`)/i)
+  })
 })
 
 describe("README — registration (CAP-8)", () => {

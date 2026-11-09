@@ -4,6 +4,26 @@ MAD reviews a code change with several models at once. Each model reviews the ch
 
 **Status: checked offline; tried by hand on a live host.** The behaviour this README describes is checked by an offline test suite with a scripted fake host and fake models (`bun test`). No test here runs against a real OpenCode host. Two reviews were run by hand on opencode-ai 1.19.5, and *What a live review showed* below says what they did and did not show. Whether MAD is useful on your changes is a separate, later question.
 
+## Target host
+
+MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. No other host version or route is targeted.
+
+| Route | Status |
+|-------|--------|
+| TUI | not established |
+| `opencode run` | not established |
+
+A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it. The two hand reviews below predate that record, and they are not validation.
+
+These are the host facts MAD relies on, and the evidence for each on 1.19.5:
+
+| Fact | Evidence on 1.19.5 |
+|------|--------------------|
+| How a plugin is loaded from a package | read from the 1.19.3 bundle only; the 1.19.5 loader is unverified. Registration was observed by hand on 1.19.5 (historical registration report E1, source commit `12af673`). |
+| The plugin reaches the host through the client OpenCode hands it | observed by hand on 1.19.5 in historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0` |
+| How the review-session permission rules are evaluated | read from the 1.19.5 bundle |
+| A `json_schema` prompt's answer is recorded through the host's `StructuredOutput` tool | read from the 1.19.5 bundle |
+
 ## Registration
 
 MAD is a private TypeScript checkout. It is not published to npm.
@@ -34,8 +54,8 @@ To register it with OpenCode 1.19.5, a person (not MAD) would do two things:
 What this rests on, and what it does not:
 - **What was read.** The opencode-ai 1.19.3 bundle was read, not run. From it: the config locations above; that a server plugin is taken from a package's `exports["./server"]` or its `main`; that every export of that module is called as a plugin; and how the review-session policy below is evaluated. The opencode-ai 1.19.5 bundle was read the same way for the review-session policy only, and evaluates it as described below. Its plugin loader was not re-read.
 - **Where the `file://` form comes from.** It is the form this repository's own managed test host uses to load a local plugin package (`ablation/managed-host.ts`).
-- **What was verified.** Registration was verified by hand on opencode-ai 1.19.5: `opencode serve`, started with `OPENCODE_CONFIG` naming a file that holds only the `file://` entry above, loaded MAD and listed `mad_review` among its tools. That check ran no review and no model.
-- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5, once through `opencode run` and once in the TUI, each with `{"preset":"quick","budget":100000}` on a scratch repository holding one uncommitted file. In both, MAD's session-policy check passed, a model returned structured findings, the judge decided them, the host reported usage for the turns that completed, and the repository was left unchanged. Each run also had four failed attempts whose usage the host did not report, so each run's token total is a floor, not its full spend. In both, two of the three models MAD chose dropped out (one provider was out of credits, and one model had no endpoint that supports structured output), so each review rested on one model. Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below; neither has been run against a live host.
+- **What was verified.** Registration was verified by hand on opencode-ai 1.19.5: `opencode serve`, started with `OPENCODE_CONFIG` naming a file that holds only the `file://` entry above, loaded MAD and listed `mad_review` among its tools (historical registration report E1, source commit `12af673`). That check ran no review and no model.
+- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5, once through `opencode run` and once in the TUI, each with `{"preset":"quick","budget":100000}` on a scratch repository holding one uncommitted file (historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0`). In both, MAD's session-policy check passed, a model returned structured findings, the judge decided them, the host reported usage for the turns that completed, and the repository was left unchanged. Each run also had four failed attempts whose usage the host did not report, so each run's token total is a floor, not its full spend. In both, two of the three models MAD chose dropped out (one provider was out of credits, and one model had no endpoint that supports structured output), so each review rested on one model. Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below; neither has been run against a live host.
 - **How MAD reaches the host.** MAD sends every request through the client OpenCode hands the plugin, never to the plugin's `serverUrl`: outside `opencode serve`, OpenCode 1.19.5 passes a placeholder URL that nothing listens on. `serverUrl` is not a supported way for the plugin to reach the host; MAD's evaluation and probe scripts keep it as their transport to a server they start or are given. That client is OpenCode's v1 SDK, whose request types do not declare two fields MAD sends: `permission`, when it creates a review session, and `format`, when it asks for structured output. MAD sends both in the request body, and `adapters/opencode/host-session.test.ts` pins the three session requests it sends this way: create, prompt and delete.
 - **What is untested.** No test here runs that registration or a live review. Other host versions are unverified.
 - **What the repository does not do.** Nothing in it installs, registers or starts MAD in your host.
