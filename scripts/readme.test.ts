@@ -175,8 +175,11 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain("so each run's token total is a floor, not its full spend.")
     expect(PROSE).toContain("It uses only models the host declares able to call tools, because OpenCode returns MAD's structured answers through a tool call")
     expect(PROSE).toContain("If no offered model declares it, MAD refuses before asking any model.")
-    expect(PROSE).toContain("Once every first-round discovery turn has finished, it replaces that slot once with a model not in the pool")
+    expect(PROSE).toContain("For a recognised refusal, once every first-round discovery turn has finished, MAD replaces the refused slot once with a model not in the pool")
     expect(PROSE).toContain("A slot you pinned with `models` is not replaced, and lens slots are never replaced.")
+    expect(PROSE).toContain(
+      "A 429 quota error, a 403, GitLab's no-credits text under a provider id other than `gitlab`, or a refusal in the prompt envelope's `result.error` is treated as an ordinary failure. It can receive the ordinary retry if the stop and budget gates permit it; that error alone does not qualify the slot for replacement.",
+    )
     expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below; neither has been run against a live host.")
     expect(PROSE).toContain("No test here runs that registration or a live review.")
     expect(PROSE).toContain("MAD sends every request through the client OpenCode hands the plugin, never to the plugin's `serverUrl`")
