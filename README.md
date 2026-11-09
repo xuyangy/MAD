@@ -13,7 +13,7 @@ MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`.
 | TUI | not established |
 | `opencode run` | not established |
 
-A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it. The two hand reviews below predate that record, and they are not validation.
+A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it. The two hand reviews below predate that record, and they are not validation. Both routes' verdict for this release is *not established*: the offline-only outcome was chosen, so no authorized live run was made. The tool-calling filter, the replacement of refused slots and the replacement session's policy check have run only in the offline tests.
 
 These are the host facts MAD relies on, and the evidence for each on 1.19.5:
 

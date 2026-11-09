@@ -131,6 +131,9 @@ describe("README — status", () => {
     expect(README).toContain("| `opencode run` | not established |")
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
+    expect(PROSE).toContain(
+      "Both routes' verdict for this release is *not established*: the offline-only outcome was chosen, so no authorized live run was made. The tool-calling filter, the replacement of refused slots and the replacement session's policy check have run only in the offline tests.",
+    )
     expect(README).toContain("| How a plugin is loaded from a package | read from the 1.19.3 bundle only; the 1.19.5 loader is unverified.")
     expect(README).toContain("Registration was observed by hand on 1.19.5 (historical registration report E1, source commit `12af673`). |")
     expect(README).toContain("| The plugin reaches the host through the client OpenCode hands it | observed by hand on 1.19.5 in historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0` |")
