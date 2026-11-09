@@ -802,6 +802,80 @@ describe("discovery recovery — a replacement whose session the stop ended befo
   })
 })
 
+describe("discovery recovery — a replacement session whose policy echo differs", () => {
+  // The real backend under the review-session policy: round 1's three sessions
+  // echo the rules, and the replacement's session (the fourth create) answers
+  // with none, so the backend must dispose it unprompted and report it.
+  async function replacementEchoDiffers() {
+    const selected = selectRoster(
+      [
+        candidate("gitlab", "duo-chat-gpt-5-6-terra"),
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openrouter", "amazon/nova-pro-v1"),
+        candidate("xai", "grok-4"),
+      ],
+      { slots: 3, providerConfigKey: "provider", requireToolcall: true },
+    )
+    let creates = 0
+    const permissions: unknown[] = []
+    const prompts: string[] = []
+    const deleted: string[] = []
+    const mismatches: { slot: string; problem: string }[] = []
+    const client = {
+      session: {
+        create: async (request: { permission?: unknown }) => {
+          creates += 1
+          permissions.push(request.permission)
+          return { data: { id: `ses_${creates}`, ...(creates === 4 ? {} : { permission: request.permission }) } }
+        },
+        prompt: async (request: { model: { providerID: string; modelID: string } }) => {
+          prompts.push(`${request.model.providerID}/${request.model.modelID}`)
+          return { data: { info: request.model.providerID === "gitlab" ? GITLAB_REFUSAL : NOTHING_FOUND } }
+        },
+        delete: async (request: { sessionID?: string; path?: { id?: string } }) => {
+          deleted.push(String(request.sessionID ?? request.path?.id))
+          return { data: true }
+        },
+      },
+    }
+    const backend = new OpencodeModelBackend({
+      directory: "/repo",
+      slots: [...selected.roster.slots, ...selected.recovery.candidates],
+      client: client as never,
+      cleanupTimeoutMs: 10,
+      sessionPermission: REVIEW_SESSION_PERMISSION,
+      onPolicyMismatch: (fact) => mismatches.push(fact),
+    })
+    const discovered = await discover({
+      roster: selected.roster,
+      recovery: selected.recovery,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger: emptyLedger(null),
+      signal: new AbortController().signal,
+      admission: fakeAdmission().admission,
+    })
+    return { discovered, permissions, prompts, deleted, mismatches, creates: () => creates }
+  }
+
+  test("the replacement's session carries the rules, is never prompted, is disposed, and the mismatch names its slot", async () => {
+    const { discovered, permissions, prompts, deleted, mismatches, creates } = await replacementEchoDiffers()
+    expect(creates()).toBe(4)
+    for (const permission of permissions) expect(permission).toEqual([...REVIEW_SESSION_PERMISSION])
+    expect(prompts.some((route) => route.startsWith("xai/"))).toBe(false)
+    expect(deleted).toContain("ses_4")
+    expect(mismatches).toEqual([{ slot: "discovery-r1", problem: "the host returned no permission rules for the session" }])
+    // The pre-issue cancellation: never dispatched, so not replaced, and the
+    // answered lineages are the two round-1 models that answered.
+    expect(discovered.recovery!.replacements).toEqual([])
+    expect(discovered.recovery!.notReplaced).toEqual([{ from: "discovery-1", reason: "cancelled" }])
+    expect(discovered.recovery!.answeredLineages).toBe(2)
+    expect(discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
+  })
+})
+
 describe("discovery — a retry the backend ended before its prompt", () => {
   const TURN_TOKENS = { input: 7, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
   test("keeps the issued first attempt: the slot was asked once and is reported as stopped in flight, not never asked", async () => {
