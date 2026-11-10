@@ -167,6 +167,23 @@ describe("live-check — the MAD record", () => {
     expect((await madRecord(repo.dir)).uncommittedSha256).not.toBe(first.uncommittedSha256)
   })
 
+  test("a staged rename is one entry holding its source, even a source named like an untracked record", async () => {
+    const repo = await makeReviewRepo({ dirty: false })
+    cleanups.push(repo.remove)
+    await writeFile(join(repo.dir, "?? src.txt"), "moved\n")
+    await setupGit(repo.dir, ["add", "--", "?? src.txt"])
+    await setupGit(repo.dir, ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--no-verify", "-m", "src"])
+    await setupGit(repo.dir, ["mv", "--", "?? src.txt", "dst.txt"])
+    // An ignored `src.txt` is in no status entry. Read as an untracked record,
+    // the source field `?? src.txt` would name it, and its bytes would move the digest.
+    await writeFile(join(repo.dir, ".git", "info", "exclude"), "src.txt\n")
+    await writeFile(join(repo.dir, "src.txt"), "ignored, first\n")
+    const first = await madRecord(repo.dir)
+    expect(first.status).toEqual(["R  dst.txt\0?? src.txt"])
+    await writeFile(join(repo.dir, "src.txt"), "ignored, second\n")
+    expect((await madRecord(repo.dir)).uncommittedSha256).toBe(first.uncommittedSha256)
+  })
+
   test("a dirty checkout lists its entries, and its digest moves with untracked content", async () => {
     const repo = await makeReviewRepo({ dirty: true })
     cleanups.push(repo.remove)
@@ -176,6 +193,78 @@ describe("live-check — the MAD record", () => {
     const second = await madRecord(repo.dir)
     expect(second.uncommittedSha256).not.toBe(first.uncommittedSha256)
     expect(second.revision).toBe(first.revision)
+  })
+})
+
+describe("live-check — the MAD checkout between before and after", () => {
+  const commit = (dir: string) =>
+    setupGit(dir, ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--no-verify", "--allow-empty", "-m", "next"])
+
+  test("a new commit alone, its content unchanged, is named and exits 1 with the repository unchanged", async () => {
+    const f = await fixture(true)
+    const before = join(f.outDir, "before.json")
+    expect(await f.run("before", "--repo", f.repo, "--out", before)).toBe(0)
+    const was = (JSON.parse(await readFile(before, "utf8")) as CheckRecord).mad
+    await commit(f.mad)
+    const after = join(f.outDir, "after.json")
+    expect(await f.run("after", "--repo", f.repo, "--before", before, "--out", after)).toBe(1)
+    const record = JSON.parse(await readFile(after, "utf8")) as CheckRecord
+    expect(record.differences).toEqual([])
+    expect(record.mad.uncommittedSha256).toBe(was.uncommittedSha256)
+    expect(record.madDifferences).toEqual([`MAD revision ${was.revision} -> ${record.mad.revision}`])
+    expect(f.lines).toContain("after: the MAD checkout CHANGED since before (1)")
+    expect(f.lines.some((line) => line.startsWith("after: the repository is unchanged"))).toBe(true)
+  })
+
+  test("a change to the checkout's uncommitted content alone, revision and repository unchanged, exits 1", async () => {
+    const f = await fixture(true)
+    const before = join(f.outDir, "before.json")
+    expect(await f.run("before", "--repo", f.repo, "--out", before)).toBe(0)
+    await writeFile(join(f.mad, "scratch.txt"), "edited between the snapshots\n")
+    const after = join(f.outDir, "after.json")
+    expect(await f.run("after", "--repo", f.repo, "--before", before, "--out", after)).toBe(1)
+    const record = JSON.parse(await readFile(after, "utf8")) as CheckRecord
+    expect(record.differences).toEqual([])
+    expect(record.madDifferences).toEqual(["MAD uncommitted content changed"])
+  })
+
+  test("a change to the checkout's uncommitted content or flags is named, beside the repository's own changes", async () => {
+    const f = await fixture(true)
+    const before = join(f.outDir, "before.json")
+    expect(await f.run("before", "--repo", f.repo, "--out", before)).toBe(0)
+    await writeFile(join(f.mad, "scratch.txt"), "edited between the snapshots\n")
+    await setupGit(f.mad, ["update-index", "--assume-unchanged", "src/pay.ts"])
+    await writeFile(join(f.repo, "notes.txt"), "untracked scratch, edited\n")
+    const after = join(f.outDir, "after.json")
+    expect(await f.run("after", "--repo", f.repo, "--before", before, "--out", after)).toBe(1)
+    const record = JSON.parse(await readFile(after, "utf8")) as CheckRecord
+    expect(record.differences).toEqual(['changed "notes.txt"'])
+    expect(record.madDifferences).toEqual(["MAD uncommitted content changed", "MAD flagged paths changed"])
+  })
+
+  test("an unchanged checkout records no MAD differences", async () => {
+    const { record } = await check(true, async () => {})
+    expect(record.madDifferences).toEqual([])
+  })
+
+  test("a before record whose MAD fields are missing or malformed is refused with exit 2", async () => {
+    const f = await fixture(true)
+    const before = join(f.outDir, "before.json")
+    expect(await f.run("before", "--repo", f.repo, "--out", before)).toBe(0)
+    const good = JSON.parse(await readFile(before, "utf8")) as Record<string, unknown>
+    const bad = [
+      { ...good, mad: undefined },
+      { ...good, mad: { ...(good.mad as object), revision: 7 } },
+      { ...good, mad: { ...(good.mad as object), flagged: "src/pay.ts" } },
+      { ...good, mad: { ...(good.mad as object), uncommittedSha256: undefined } },
+    ]
+    for (const [n, record] of bad.entries()) {
+      const file = join(f.outDir, `bad-${n}.json`)
+      await writeFile(file, JSON.stringify(record))
+      expect(await f.run("after", "--repo", f.repo, "--before", file, "--out", join(f.outDir, `a-${n}.json`))).toBe(2)
+      expect(f.errors[n]).toContain("--before is not a before record")
+      expect(await stat(join(f.outDir, `a-${n}.json`)).catch(() => "absent")).toBe("absent")
+    }
   })
 })
 

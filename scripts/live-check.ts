@@ -10,9 +10,11 @@
  * record of this MAD checkout: its full commit id, its `git status` entries,
  * the tracked paths flagged assume-unchanged or skip-worktree, and a digest of
  * its staged content and of every tracked and untracked file as it is on disk. `after` writes
- * the same, compares the repository with the `before` file, prints every
- * difference, naming each staged path that changed, and exits 1 when there is
- * any. A usage error or a refused repository exits 2, and nothing is written.
+ * the same, compares the repository and the MAD record with the `before` file,
+ * prints every difference, naming each staged path that changed and marking a
+ * change to the MAD checkout as its own, and exits 1 when there is any. A
+ * usage error, a refused repository or a malformed `before` record exits 2,
+ * and nothing is written.
  *
  * Every git read here, of the reviewed repository and of the MAD checkout,
  * runs under the review's read-only git policy
@@ -50,7 +52,11 @@ import {
 export interface MadRecord {
   /** The full commit id of HEAD. */
   readonly revision: string
-  /** `git status --porcelain=v1 -z --untracked-files=all` entries; empty when clean. */
+  /**
+   * `git status --porcelain=v1 -z --untracked-files=all` entries, one per
+   * change; empty when clean. A rename or copy entry holds its source path
+   * after a NUL, as git writes it.
+   */
   readonly status: string[]
   /**
    * Tracked paths git is told not to look at (assume-unchanged or
@@ -74,8 +80,10 @@ export interface CheckRecord {
   readonly repo: string
   readonly mad: MadRecord
   readonly snapshot: SnapshotJson
-  /** On `after` only: every difference from the `before` record. */
+  /** On `after` only: every difference in the reviewed repository from the `before` record. */
   readonly differences?: string[]
+  /** On `after` only: every difference in the MAD checkout from the `before` record (`madDifferences`). */
+  readonly madDifferences?: string[]
 }
 
 export interface CheckIo {
@@ -133,11 +141,33 @@ function nulRecords(raw: Buffer): Buffer[] {
   return out
 }
 
+/**
+ * `git status --porcelain=v1 -z` entries, one per change. A rename or copy
+ * (`R` or `C` in either status column) is followed by its source path in a
+ * field of its own; that field belongs to the same entry and is kept in it
+ * after a NUL, exactly as git wrote it, so it is never read as an entry.
+ */
+function statusEntries(raw: Buffer): Buffer[] {
+  const fields = nulRecords(raw)
+  const out: Buffer[] = []
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!
+    const xy = field.subarray(0, 2).toString("latin1")
+    const source = /[RC]/.test(xy) ? fields[i + 1] : undefined
+    if (source === undefined) out.push(field)
+    else {
+      out.push(Buffer.concat([field, Buffer.from([0]), source]))
+      i++
+    }
+  }
+  return out
+}
+
 export async function madRecord(root: string, git: GitReader = policyGit): Promise<MadRecord> {
   await filterPreflight(root, "the MAD checkout", git)
   const revision = (await git(root, ["rev-parse", "--verify", "HEAD"])).toString("utf8").trim()
   // Entries are split as bytes, so an untracked name is read exactly as git listed it.
-  const entries = nulRecords(await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
+  const entries = statusEntries(await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
   const hash = createHash("sha256")
   const frame = (label: string, bytes: Buffer | string) => {
     const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
@@ -222,6 +252,27 @@ async function checkedOut(path: string, repo: string): Promise<string> {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((entry) => typeof entry === "string")
+
+function isMadRecord(value: unknown): value is MadRecord {
+  if (!isRecord(value)) return false
+  const { revision, status, flagged, uncommittedSha256 } = value
+  return typeof revision === "string" && typeof uncommittedSha256 === "string" && isStrings(status) && isStrings(flagged)
+}
+
+/**
+ * How the MAD checkout differs between the `before` and `after` records: its
+ * commit, its uncommitted content, or the paths git is told not to look at.
+ * Any of these means the run may not have used the revision `before` recorded.
+ */
+export function madDifferences(before: MadRecord, after: MadRecord): string[] {
+  const out: string[] = []
+  if (before.revision !== after.revision) out.push(`MAD revision ${before.revision} -> ${after.revision}`)
+  if (before.uncommittedSha256 !== after.uncommittedSha256) out.push("MAD uncommitted content changed")
+  if (JSON.stringify(before.flagged) !== JSON.stringify(after.flagged)) out.push("MAD flagged paths changed")
+  return out
+}
+
 function isSnapshotJson(value: unknown): value is SnapshotJson {
   if (!isRecord(value)) return false
   const { paths, index, indexEntries, head, refs } = value
@@ -240,7 +291,13 @@ async function readBefore(path: string, repo: string): Promise<CheckRecord> {
   } catch {
     throw new UsageError(`--before is not JSON: ${path}`)
   }
-  if (!isRecord(parsed) || parsed.kind !== "before" || typeof parsed.repo !== "string" || !isSnapshotJson(parsed.snapshot)) {
+  if (
+    !isRecord(parsed) ||
+    parsed.kind !== "before" ||
+    typeof parsed.repo !== "string" ||
+    !isMadRecord(parsed.mad) ||
+    !isSnapshotJson(parsed.snapshot)
+  ) {
     throw new UsageError(`--before is not a before record: ${path}`)
   }
   if (parsed.repo !== repo) throw new UsageError(`--before records ${JSON.stringify(parsed.repo)}, not ${JSON.stringify(repo)}`)
@@ -263,9 +320,11 @@ export async function runLiveCheck(argv: readonly string[], io: CheckIo): Promis
 
     const taken = await snapshot(repo, policyGit)
     let found: string[] | undefined
+    let madFound: string[] | undefined
     if (before !== undefined) {
       const earlier = snapshotFromJson(before.snapshot)
       found = [...differences(earlier, taken), ...indexDifferences(earlier, taken)]
+      madFound = madDifferences(before.mad, mad)
     }
     const record: CheckRecord = {
       kind: command,
@@ -274,6 +333,7 @@ export async function runLiveCheck(argv: readonly string[], io: CheckIo): Promis
       mad,
       snapshot: snapshotToJson(taken),
       ...(found === undefined ? {} : { differences: found }),
+      ...(madFound === undefined ? {} : { madDifferences: madFound }),
     }
     await writeFile(out, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" })
 
@@ -285,17 +345,21 @@ export async function runLiveCheck(argv: readonly string[], io: CheckIo): Promis
             ...(mad.flagged.length === 0 ? [] : [`${mad.flagged.length} paths git is told not to look at`]),
           ].join(", ")
     io.out(`MAD ${mad.revision} (${state})`)
-    if (found === undefined) {
+    if (found === undefined || madFound === undefined) {
       io.out(`before: ${taken.paths.size} paths recorded in ${out}`)
       return 0
     }
-    if (found.length === 0) {
-      io.out(`after: the repository is unchanged; recorded in ${out}`)
-      return 0
-    }
-    io.out(`after: the repository CHANGED (${found.length}); recorded in ${out}`)
+    io.out(
+      found.length === 0
+        ? `after: the repository is unchanged; recorded in ${out}`
+        : `after: the repository CHANGED (${found.length}); recorded in ${out}`,
+    )
     for (const line of found) io.out(`  ${line}`)
-    return 1
+    if (madFound.length > 0) {
+      io.out(`after: the MAD checkout CHANGED since before (${madFound.length})`)
+      for (const line of madFound) io.out(`  ${line}`)
+    }
+    return found.length === 0 && madFound.length === 0 ? 0 : 1
   } catch (error) {
     if (error instanceof UsageError) {
       io.err(`live-check: ${error.message}`)
