@@ -2487,7 +2487,10 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         },
       })
       const stdout = wrap(child.stdout as unknown as ReadableStream<Uint8Array>, () => stop.abort(), false)
-      const stderr = wrap(child.stderr as unknown as ReadableStream<Uint8Array>, () => undefined, stderrUnreadable)
+      // `stderrUnreadable` hands MAD NO stderr pipe: the one unread stderr that
+      // still returns (`stderr-unread`). A real pipe whose end MAD never saw is
+      // `observation-failed` and latches, which `repo-stop.test.ts` covers.
+      const stderr = stderrUnreadable ? null : wrap(child.stderr as unknown as ReadableStream<Uint8Array>, () => undefined, false)
       return overriding(child, { stdout, stderr })
     })
   }

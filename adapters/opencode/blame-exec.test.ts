@@ -239,21 +239,65 @@ describe("the deadline terminates, and says which of the two facts it got", () =
 })
 
 describe("what the launcher will not pass off as something else", () => {
-  test("a stderr pipe that could not be read is TAGGED, never presented as git's text", async () => {
+  test("NO STDERR PIPE AT ALL is TAGGED, never presented as git's text, and the call still returns", async () => {
+    const { spawn, kills } = spawnOf({ stdout: closedStream("porcelain"), stderr: null, exitCode: 0 })
+    const outcome = await runBoundedBlame({ ...RUN, spawn })
+
+    expect(outcome.kind).toBe("returned")
+    if (outcome.kind === "returned") {
+      // The field holds what the command printed, and there was no pipe to print
+      // to. MAD's account of why travels in its own field, where no reader
+      // downstream can mistake it for a diagnostic git emitted. No pipe existed,
+      // so nothing can be holding it, and the output stands.
+      expect(outcome.stdout).toBe("porcelain")
+      expect(outcome.stderr).toBe("")
+      expect(outcome.stderrFailure).toContain("no stderr pipe was available")
+    }
+    expect(kills()).toBe(0)
+  })
+
+  test("A REAL STDERR PIPE THAT ERRORED BEFORE ITS END fails the call: cleanup unresolved, pid and exit kept, nothing killed", async () => {
+    // Ledger #157. Something that inherited the write end may still be running,
+    // which is the same signal an unread stdout carries, so the complete stdout
+    // is not published.
+    const { spawn, kills } = spawnOf({
+      pid: 5353,
+      stdout: closedStream("porcelain"),
+      stderr: tornStream("warning: ", "the stderr pipe broke"),
+      exitCode: 0,
+    })
+    const outcome = await runBoundedBlame({ ...RUN, spawn })
+
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.pid).toBe(5353)
+      expect(outcome.why).toContain("exited with status 0, but the stderr pipe could not be read to its end")
+      expect(outcome.why).toContain("the stderr pipe broke")
+      expect(outcome.cleanup.kind).toBe("unresolved")
+      if (outcome.cleanup.kind === "unresolved") {
+        expect(outcome.cleanup.why).toContain("stderr")
+        expect(outcome.cleanup.why).toContain("never observed")
+        // The child's own exit was observed, and an unresolved pipe does not unmake it.
+        expect(outcome.cleanup.observed).toEqual({ exitCode: 0, signal: null })
+      }
+    }
+    // Everything had settled: no kill was sent to a child that had exited.
+    expect(kills()).toBe(0)
+  })
+
+  test("a real stderr pipe something else had locked takes the same branch", async () => {
     const held = closedStream()
     const reader = held.getReader()
     try {
-      const { spawn } = spawnOf({ stdout: closedStream("porcelain"), stderr: held, exitCode: 0 })
+      const { spawn, kills } = spawnOf({ stdout: closedStream("porcelain"), stderr: held, exitCode: 0 })
       const outcome = await runBoundedBlame({ ...RUN, spawn })
 
-      expect(outcome.kind).toBe("returned")
-      if (outcome.kind === "returned") {
-        // The field holds what the command printed, and it printed nothing MAD
-        // could read. MAD's account of why travels in its own field, where no
-        // reader downstream can mistake it for a diagnostic git emitted.
-        expect(outcome.stderr).toBe("")
-        expect(outcome.stderrFailure).toContain("could not be opened for reading")
+      expect(outcome.kind).toBe("observation-failed")
+      if (outcome.kind === "observation-failed") {
+        expect(outcome.why).toContain("the stderr pipe could not be opened for reading")
+        expect(outcome.cleanup.kind).toBe("unresolved")
       }
+      expect(kills()).toBe(0)
     } finally {
       reader.releaseLock()
     }

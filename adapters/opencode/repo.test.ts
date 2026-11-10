@@ -407,34 +407,25 @@ describe("opencodeRepo.change — a read that does not return cleanly is a stop"
     expect(changeReadQuarantineFor(worktree)).toBeUndefined()
   })
 
-  test("an accepted status with an unread stderr is `stderr-unread`, with no quarantine", async () => {
+  // NO STDERR PIPE AT ALL: the one unread stderr that still returns. A real
+  // pipe whose end MAD never saw fails the read and latches instead (ledger
+  // #157, `repo-stop.test.ts`).
+  test("an accepted status with no stderr pipe is `stderr-unread`, with no quarantine", async () => {
     const worktree = keyed(freshWorktree())
-    const held = closedStream()
-    const reader = held.getReader()
-    try {
-      const { spawn } = fakeSpawn(() => ({ stdout: DIFF, stderr: held, status: 0 }))
-      const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
+    const { spawn } = fakeSpawn(() => ({ stdout: DIFF, stderr: null, status: 0 }))
+    const error = await stoppedBy(opencodeRepo({ worktree, spawn, inputFs: FILES }).change())
 
-      expect(error.stop).toBe("stderr-unread")
-      expect(error.status).toBe(0)
-      expect(error.message).toContain("could not read its stderr")
-      expect(changeReadQuarantineFor(worktree)).toBeUndefined()
-    } finally {
-      reader.releaseLock()
-    }
+    expect(error.stop).toBe("stderr-unread")
+    expect(error.status).toBe(0)
+    expect(error.message).toContain("could not read its stderr")
+    expect(changeReadQuarantineFor(worktree)).toBeUndefined()
   })
 
-  test("a refused status with an unread stderr stays a GitError, with MAD's reason apart from git's", async () => {
-    const held = closedStream()
-    const reader = held.getReader()
-    try {
-      const { spawn } = fakeSpawn(() => ({ stderr: held, status: 128 }))
-      const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change("nope...HEAD")
-      await expect(change).rejects.toThrow(GitError)
-      await expect(change).rejects.toThrow("MAD could not read the command's stderr")
-    } finally {
-      reader.releaseLock()
-    }
+  test("a refused status with no stderr pipe stays a GitError, with MAD's reason apart from git's", async () => {
+    const { spawn } = fakeSpawn(() => ({ stderr: null, status: 128 }))
+    const change = opencodeRepo({ worktree: keyed(freshWorktree()), spawn, inputFs: FILES }).change("nope...HEAD")
+    await expect(change).rejects.toThrow(GitError)
+    await expect(change).rejects.toThrow("MAD could not read the command's stderr")
   })
 
   test("an unread stdout whose cleanup is unresolved stops AND latches the quarantine", async () => {

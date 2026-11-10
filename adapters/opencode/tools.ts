@@ -711,9 +711,10 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
     // citation over lines git never finished blaming. The exit code is preserved
     // in the evidence because it was really observed; what it does not do is
     // prove the program completed, so the launch reading stays `unproved`.
-    // THE TRACE'S `stderr` IS WHAT THE COMMAND PRINTED, AND ONLY THAT. Where the
-    // pipe could not be read, the launcher hands back an empty `stderr` and its
-    // reason in `stderrFailure`, and the two stay apart here: the field keeps
+    // THE TRACE'S `stderr` IS WHAT THE COMMAND PRINTED, AND ONLY THAT. Where no
+    // stderr pipe existed, the launcher hands back an empty `stderr` and its
+    // reason in `stderrFailure` (a real pipe whose end was not seen fails the
+    // call as `observation-failed` instead), and the two stay apart here: the field keeps
     // only git's own text, and MAD's account of why it has none travels in the
     // error message, which is MAD's voice by construction. Folding the reason
     // into the field would put a sentence git never wrote where every reader

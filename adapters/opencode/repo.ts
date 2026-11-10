@@ -469,7 +469,10 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
               cleanup: outcome.cleanup.kind,
               why,
               ...pidOf(outcome.pid),
-              ...(outcome.cleanup.kind === "confirmed" ? observedOf(outcome.cleanup.observed) : {}),
+              // AN OBSERVED EXIT IS KEPT EVEN WHEN THE CLEANUP IS UNRESOLVED: the
+              // process was seen to end, and an unresolved pipe does not unmake
+              // that, nor does it say its descendants ended.
+              ...(outcome.cleanup.observed === undefined ? {} : observedOf(outcome.cleanup.observed)),
             })
           }
           case "terminated":
@@ -539,9 +542,10 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         const accepted = outcome.exitCode === 0 || (acceptOne && outcome.exitCode === 1)
         if (!accepted) throw new GitError(operation, `${outcome.stderr}${unreadStderr}`)
 
-        // 3. A CHANGE WHOSE DIAGNOSTICS MAD COULD NOT SEE IS NOT PUBLISHED. An
-        //    unread stderr on a returned child is not evidence of a survivor, so
-        //    nothing is latched.
+        // 3. A CHANGE WHOSE DIAGNOSTICS MAD COULD NOT SEE IS NOT PUBLISHED. A
+        //    returned child carries `stderrFailure` only when no stderr pipe
+        //    existed, which is not evidence of a survivor, so nothing is latched.
+        //    A real pipe whose end was not seen arrives as `observation-failed`.
         if (outcome.stderrFailure !== null) {
           throw stopped(operation, {
             stop: "stderr-unread",

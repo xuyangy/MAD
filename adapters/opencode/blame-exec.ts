@@ -157,8 +157,9 @@ export type BlameExecOutcome =
    * The process ran and returned. `exitCode` is git's own, zero or not.
    *
    * `stderrFailure` IS THE STRUCTURAL TAG. Where it is set, `stderr` is empty
-   * and the string in it is MAD's account of why the pipe could not be read —
-   * never something git said. A caller that merges the two loses the only
+   * and the string in it is MAD's account of why there was no stderr to read —
+   * never something git said. It is set only when no stderr pipe existed; a
+   * real pipe whose end was not seen is `observation-failed` instead. A caller that merges the two loses the only
    * distinction between a diagnostic the program emitted and one it did not.
    */
   | {
@@ -613,16 +614,36 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     }
   }
 
+  if (!stderr.ok && stderr.unreadEnd) {
+    // A REAL STDERR PIPE WHOSE END WAS NEVER SEEN is the same descendant signal
+    // as an unread stdout: something that inherited its write end may still be
+    // running. So the cleanup is asked for, exactly as in the stdout branch
+    // above, and the call fails rather than publishing its output. Everything
+    // has already settled, so this spends none of the budget and sends no kill.
+    const cleanup = await accountFor(child, { exit, out: out.read, err: err.read }, options.cleanupMs)
+    releaseReads()
+    return {
+      kind: "observation-failed",
+      pid,
+      cleanup,
+      why:
+        `\`${options.argv.join(" ")}\` exited with status ${exitRead.code}, but ${stderr.why}. A pipe whose ` +
+        `end MAD never saw may still be held by something the command started, so its output is not used`,
+    }
+  }
+
   releaseReads()
   return {
     kind: "returned",
     exitCode: exitRead.code,
     signal: child.signalCode,
     stdout: stdout.text,
-    // STDERR IS DIAGNOSTIC, NOT REQUIRED, so a failed read of it degrades the
-    // message rather than the call. It degrades it in a FIELD OF ITS OWN: the
-    // text below is git's or it is absent, and MAD's reason for not having it
-    // travels beside it where no reader can mistake one for the other.
+    // STDERR IS DIAGNOSTIC, NOT REQUIRED, so an ABSENT stderr pipe degrades the
+    // message rather than the call: no pipe existed, so nothing can be holding
+    // it. A real pipe whose end was not seen fails the call above instead. The
+    // degradation is in a FIELD OF ITS OWN: the text below is git's or it is
+    // absent, and MAD's reason for not having it travels beside it where no
+    // reader can mistake one for the other.
     stderr: stderr.ok ? stderr.text : "",
     stderrFailure: stderr.ok ? null : stderr.why,
   }

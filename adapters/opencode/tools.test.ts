@@ -55,6 +55,8 @@ interface ProcessReply {
   stdoutFailsAfter?: string
   /** POST-SPAWN: there is no stdout pipe at all. */
   noStdout?: boolean
+  /** POST-SPAWN: the stderr pipe errors part-way through, with this reason. */
+  stderrFailsAfter?: string
 }
 
 /** One recorded launch: the argv array as handed over, boundaries intact. */
@@ -103,7 +105,10 @@ function fakeSpawn(replies: { match: string; reply: ProcessReply }[]) {
         : reply.stdoutFailsAfter !== undefined
           ? failingStreamOf(reply.stdout ?? "", reply.stdoutFailsAfter)
           : streamOf(reply.stdout ?? ""),
-      stderr: streamOf(reply.stderr ?? ""),
+      stderr:
+        reply.stderrFailsAfter !== undefined
+          ? failingStreamOf(reply.stderr ?? "", reply.stderrFailsAfter)
+          : streamOf(reply.stderr ?? ""),
       exited,
       // WITH A REJECTING EXIT PROMISE, `exitCode` models the INDEPENDENT source:
       // a status whatever reaped the process recorded on the handle. Omitted, the
@@ -318,6 +323,27 @@ describe("bounded termination and the quarantine it can leave behind (story 2-7c
     expect(killed).toEqual([])
   })
 
+  test("A BLAME WHOSE STDERR PIPE BROKE BEFORE ITS END quarantines the adapter: no citation, the latch notified, no later launch", async () => {
+    // Ledger #157, through the launcher: complete porcelain on stdout, an exit
+    // observed, and a real stderr pipe whose end was never seen.
+    const { spawn, launches } = fakeSpawn([
+      { match: "blame", reply: { stdout: PORCELAIN, stderr: "warn", stderrFailsAfter: "the stderr pipe broke" } },
+    ])
+    const facts: { operation: string; why: string; pid: number }[] = []
+    const tools = opencodeTools({ worktree: "/repo", spawn, onCleanupUnresolved: (fact) => void facts.push(fact) })
+
+    const first = await rejection(tools.blame("src/pay.ts", 1, 1))
+    expect(first.message).toContain("the stderr pipe could not be read to its end")
+    expect(first.message).toContain("the stderr pipe broke")
+    expect(facts).toHaveLength(1)
+    expect(facts[0]!.operation).toContain("blame")
+    expect(facts[0]!.pid).toBe(4242)
+    expect(facts[0]!.why).toContain("stderr")
+
+    const second = await rejection(tools.blame("src/other.ts", 1, 1))
+    expect(second.message).toContain("refusing to launch")
+    expect(launches.filter((launch) => launch.cmd.includes("blame"))).toHaveLength(1)
+  })
   test("AN UNCONFIRMED CLEANUP LATCHES FIRST AND NOTIFIES SECOND, and refuses every later launch", async () => {
     const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { hang: true, unkillable: true } }])
     const seen: { operation: string; pid: number; refusedInside?: boolean }[] = []

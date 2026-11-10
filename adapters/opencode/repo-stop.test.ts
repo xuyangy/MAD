@@ -313,3 +313,39 @@ describe("the change read stops when the review does (CAP-5)", () => {
     TIMEOUT_MS,
   )
 })
+
+describe("ledger #157 — a change read whose stderr pipe broke before its end", () => {
+  test(
+    "the read fails as observation-failed with an unresolved cleanup, latches the worktree, and a fresh change() launches nothing",
+    async () => {
+      const dir = await repo()
+      const { spawn: real } = realSpawn()
+      // The real `git diff` runs; only the stderr MAD reads is replaced by one
+      // that errors before its end, as a pipe a descendant still holds can.
+      const spawn: SpawnBlame = (request) => {
+        const child = real(request)
+        if (!request.cmd.includes("diff") || request.cmd.includes("--no-index")) return child
+        const broken = new ReadableStream<Uint8Array>({ start: (c) => c.error(new Error("the stderr pipe broke")) })
+        return new Proxy(child, { get: (target, key) => (key === "stderr" ? broken : Reflect.get(target, key)) }) as never
+      }
+      const error = await stoppedBy(opencodeRepo({ worktree: dir, spawn }).change())
+      expect(error.stop).toBe("observation-failed")
+      expect(error.cleanup).toBe("unresolved")
+      expect(error.message).toContain("the stderr pipe could not be read to its end")
+      // git was seen to exit 0; its cleanup stays unconfirmed, and the error says both.
+      expect(error.status).toBe(0)
+      expect(error.message).toContain(
+        "UNRESOLVED — the process was seen to end, but MAD could not confirm its cleanup, so something it started may still be running",
+      )
+      expect(error.message).not.toContain("UNRESOLVED — the process may still be running")
+      expect(typeof error.pid).toBe("number")
+      expect(changeReadQuarantineFor(dir)?.pid).toBe(error.pid)
+
+      const { spawn: counted, launched } = realSpawn()
+      const refused = await stoppedBy(opencodeRepo({ worktree: dir, spawn: counted }).change())
+      expect(refused.stop).toBe("quarantined")
+      expect(launched).toEqual([])
+    },
+    TIMEOUT_MS,
+  )
+})
