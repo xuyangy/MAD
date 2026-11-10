@@ -800,20 +800,46 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
   const pluginSource = () => Bun.file(new URL("./plugin.ts", import.meta.url)).text()
 
   /**
-   * The `opencodeTools({...})` call's own argument literal.
+   * A call's own argument literal: from `opener` to the call's closing `})`,
+   * the first one after it on a line indented as the opener's line is.
    *
    * SLICED RATHER THAN MATCHED AS ONE STRING. The construction site is
    * multi-line, and an assertion pinned to one exact spelling fails for a
    * reformat while passing for a deleted field — the opposite of what it is for.
    * Each field is checked on its own line inside this literal.
+   *
+   * A missing boundary THROWS, naming it. Without the end, the slice would run
+   * on to a later call, whose field could satisfy a check meant for this one.
    */
-  const toolsLiteral = (source: string): string => {
-    const at = source.indexOf("opencodeTools({")
-    if (at < 0) return ""
-    const rest = source.slice(at)
-    const end = rest.indexOf("\n          })")
-    return end < 0 ? rest : rest.slice(0, end)
+  const callLiteral = (source: string, opener: string): string => {
+    const at = source.indexOf(opener)
+    if (at < 0) throw new Error(`no \`${opener}\` in the source`)
+    const lineStart = source.lastIndexOf("\n", at) + 1
+    const indent = /^[ \t]*/.exec(source.slice(lineStart, at))![0]
+    const close = `\n${indent}})`
+    const end = source.indexOf(close, at)
+    if (end < 0) throw new Error(`no call end ${JSON.stringify(close)} after \`${opener}\``)
+    return source.slice(at, end)
   }
+  const toolsLiteral = (source: string): string => callLiteral(source, "opencodeTools({")
+  const reviewLiteral = (source: string): string => callLiteral(source, "await review({")
+
+  test("the literal extraction refuses a missing start or end, and stops at the call's own end", () => {
+    expect(() => toolsLiteral("const x = 1\n")).toThrow("no `opencodeTools({` in the source")
+    expect(() => reviewLiteral("  await review({\n    tools,\n})\n")).toThrow('no call end "\\n  })" after `await review({`')
+    const bounded = reviewLiteral(
+      "  })\n  const r = await review({\n    nested: f({\n      a,\n    }),\n    tools,\n  })\n  await other({\n    toolObservation,\n  })\n",
+    )
+    expect(bounded).toBe("await review({\n    nested: f({\n      a,\n    }),\n    tools,")
+    expect(bounded).not.toMatch(/^\s*toolObservation,\s*$/m)
+  })
+
+  test("both literals in plugin.ts end at their own call: neither reaches the next call's fields", async () => {
+    const source = await pluginSource()
+    expect(toolsLiteral(source)).not.toContain("await review({")
+    expect(reviewLiteral(source)).toMatch(/^\s*signal: runControl\.signal,$/m)
+    expect(reviewLiteral(source).length).toBeLessThan(source.length / 4)
+  })
 
   test("THE PORT IS BUILT, and over the same worktree `Repo` reads", async () => {
     const source = await pluginSource()
@@ -838,10 +864,7 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
   })
 
   test("AND IT REACHES `review()` — the line whose deletion nothing else notices", async () => {
-    const source = await pluginSource()
-    const call = source.slice(source.indexOf("await review({"))
-    expect(call.length).toBeGreaterThan(0)
-    const literal = call.slice(0, call.indexOf("\n          })"))
+    const literal = reviewLiteral(await pluginSource())
 
     // The property, on its own line, inside the `review({...})` literal itself —
     // not merely somewhere in the file, which a comment mentioning `tools` would
@@ -853,9 +876,7 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     // The non-vacuous sibling. Without this, a rewrite of the check that always
     // passed would look identical from the outside.
     const withoutIt = (await pluginSource()).replace(/\n\s*tools,\n/, "\n")
-    const call = withoutIt.slice(withoutIt.indexOf("await review({"))
-    const literal = call.slice(0, call.indexOf("\n          })"))
-    expect(literal).not.toMatch(/^\s*tools,\s*$/m)
+    expect(reviewLiteral(withoutIt)).not.toMatch(/^\s*tools,\s*$/m)
   })
 
   /**
@@ -876,10 +897,7 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
    * `adapters/opencode/tools-observation.test.ts`, over real git.
    */
   test("THE OBSERVER REACHES `review()` TOO — the second line nothing else notices", async () => {
-    const source = await pluginSource()
-    const call = source.slice(source.indexOf("await review({"))
-    const literal = call.slice(0, call.indexOf("\n          })"))
-    expect(literal).toMatch(/^\s*toolObservation,\s*$/m)
+    expect(reviewLiteral(await pluginSource())).toMatch(/^\s*toolObservation,\s*$/m)
   })
 
   test("and that assertion can FAIL too — the negative control for the observer", async () => {
@@ -888,9 +906,7 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     // the factory's copy and then assert something about `review()`'s, which is
     // still there.
     const withoutIt = (await pluginSource()).replaceAll(/\n\s*toolObservation,\n/g, "\n")
-    const call = withoutIt.slice(withoutIt.indexOf("await review({"))
-    const literal = call.slice(0, call.indexOf("\n          })"))
-    expect(literal).not.toMatch(/^\s*toolObservation,\s*$/m)
+    expect(reviewLiteral(withoutIt)).not.toMatch(/^\s*toolObservation,\s*$/m)
   })
 
   /**
@@ -914,20 +930,22 @@ describe("mad_review.execute — the `Tools` port is WIRED IN (story 10, CAP-8)"
     // Both readers, by the bare name. A second `const toolObservation` anywhere
     // in the file would make the two sites able to refer to different objects.
     expect(toolsLiteral(source)).toMatch(/^\s*toolObservation,\s*$/m)
-    const call = source.slice(source.indexOf("await review({"))
-    expect(call.slice(0, call.indexOf("\n          })"))).toMatch(/^\s*toolObservation,\s*$/m)
+    expect(reviewLiteral(source)).toMatch(/^\s*toolObservation,\s*$/m)
   })
 
   test("and THAT can fail — a second binding is what the count is for", async () => {
     // The negative control the substring count never had: a file with two
     // declarations still contains every string the assertions above look for,
     // and is exactly the shape that silently splits the trace in half.
+    // The inserted lines take the call site's own indentation, so the call still
+    // reads as one literal.
     const split = (await pluginSource()).replace(
-      "const tools = opencodeTools({",
-      "const toolObservation2: ToolObservation | undefined = undefined\n" +
-        "          const toolObservation = toolObservation2\n" +
-        "          const tools = opencodeTools({",
+      /^([ \t]*)const tools = opencodeTools\(\{/m,
+      "$1const toolObservation2: ToolObservation | undefined = undefined\n" +
+        "$1const toolObservation = toolObservation2\n" +
+        "$1const tools = opencodeTools({",
     )
+    expect(split.split("const toolObservation = toolObservation2").length - 1).toBe(1)
 
     // Every field assertion above still holds on this file, which is the point:
     // only the DECLARATION COUNT catches a trace quietly split in half.
