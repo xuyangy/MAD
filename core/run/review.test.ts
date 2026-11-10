@@ -2811,11 +2811,59 @@ describe("forkPreparedReview — one checkpoint, independent branches (story 2.5
       error = caught
     }
     expect(error).toBeInstanceOf(CheckpointForkError)
+    expect((error as Error).message).toContain("holds a value that cannot be copied")
     expect((error as Error).message).toContain("session-cleanup-unresolved")
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(DOMException)
+    expect(((error as { cause: DOMException }).cause).name).toBe("DataCloneError")
     expect(prepared.record.warnings.find((w) => w.message === "caller evidence")?.detail?.["probe"]).toBe(probe)
 
     const { record } = await continueReview(prepared, deps)
     expect(record.finishedAt).toBeDefined()
+  })
+
+  test("A COPY THAT THROWS for another reason is not called uncopyable, keeps its cause, and the source still forks once repaired", async () => {
+    const { deps } = criticalRun()
+    const prepared = await prepareReview({
+      ...deps,
+      priorWarnings: [
+        ...deps.priorWarnings,
+        { code: "session-cleanup-unresolved", stage: "discover", message: "caller evidence", detail: {} },
+      ],
+    })
+    const detail = prepared.record.warnings.find((w) => w.message === "caller evidence")!.detail!
+    let broken = true
+    let reads = 0
+    Object.defineProperty(detail, "probe", {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        reads += 1
+        if (broken) throw new Error("getter down")
+        return "caller evidence"
+      },
+    })
+
+    let error: unknown
+    try {
+      forkPreparedReview(prepared, deps.clock, 2)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(CheckpointForkError)
+    expect((error as Error).message).toContain("copying the prepared review threw: getter down")
+    expect((error as Error).message).toContain("Nothing was forked and the prepared review is still unused")
+    expect((error as Error).message).not.toContain("cannot be copied")
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(Error)
+    expect(((error as { cause: Error }).cause).message).toBe("getter down")
+    // The failed copy is not re-read to guess a location: one read, by the copy itself.
+    expect(reads).toBe(1)
+
+    broken = false
+    const [branch] = forkPreparedReview(prepared, deps.clock, 2)
+    expect(branch!.record.forkedFrom).toBe(prepared.record.runId)
+    expect(branch!.record.warnings.find((w) => w.message === "caller evidence")?.detail?.["probe"]).toBe(
+      "caller evidence",
+    )
   })
 
   test("A CLOCK THAT THROWS OR REPEATS AN ID fails the fork and leaves the source usable", async () => {

@@ -881,14 +881,17 @@ export const MAX_FORK_BRANCHES = 64
  * first recorded each one.
  *
  * ATOMIC. The count, the source's state, every clone and every id are checked
- * before the source is marked consumed. A failure throws a `CheckpointForkError`,
- * or whatever `clock.id` threw, and leaves the source usable. Once forked, the
- * source cannot be forked or continued again, for the reason `PreparedReview`
- * gives for single use.
+ * before the source is marked consumed. Every failure throws a
+ * `CheckpointForkError`, with the underlying error as its `cause` where there is
+ * one, and leaves the source unconsumed, so it can still be forked or continued.
+ * Run ids the clock already issued for earlier branches are spent, not rolled
+ * back: a retried fork mints new ones. Once forked, the source cannot be forked
+ * or continued again, for the reason `PreparedReview` gives for single use.
  *
  * A value `structuredClone` cannot copy, such as a function in a caller's
  * `warning.detail`, is refused rather than stripped: dropping it would change the
- * evidence the branch carries.
+ * evidence the branch carries. Any other throw while copying, such as a getter
+ * that throws, is refused as a copy that threw, with that error as its `cause`.
  *
  * Issues no request and bills nothing.
  */
@@ -974,10 +977,21 @@ function cloneCheckpoint(
   try {
     return structuredClone({ record, instructions, answeredSlots })
   } catch (error) {
+    // Only a `DataCloneError` means a value cannot be copied. Anything else was
+    // thrown by the state itself while it was read, such as a caller's getter,
+    // and is not re-read to guess where an uncopyable value sits.
+    if (error instanceof DOMException && error.name === "DataCloneError") {
+      throw new CheckpointForkError(
+        `the prepared review holds a value that cannot be copied${uncloneableWarning(record)}: ` +
+          `${error.message}. MAD does not strip evidence to make a copy succeed, so nothing was forked and ` +
+          `the prepared review is still unused.`,
+        { cause: error },
+      )
+    }
     throw new CheckpointForkError(
-      `the prepared review holds a value that cannot be copied${uncloneableWarning(record)}: ` +
-        `${error instanceof Error ? error.message : String(error)}. MAD does not strip evidence to make a ` +
-        `copy succeed, so nothing was forked and the prepared review is still unused.`,
+      `copying the prepared review threw: ${error instanceof Error ? error.message : String(error)}. ` +
+        `Nothing was forked and the prepared review is still unused.`,
+      { cause: error },
     )
   }
 }
