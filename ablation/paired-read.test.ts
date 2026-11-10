@@ -57,6 +57,46 @@ import {
   type PairedSchedule,
 } from "./schedule.ts"
 
+/**
+ * The rendered text from `start` up to the first `end` after it. Throws, naming
+ * the marker, when `start` is absent, or when `end` is absent or occurs only
+ * before `start`. Unchecked, a missing marker turns `slice` into the last
+ * character or an empty string, and a `not.toContain` on that passes without
+ * checking the block it names.
+ */
+function between(text: string, start: string, end: string): string {
+  const at = text.indexOf(start)
+  if (at < 0) throw new Error(`between: no ${JSON.stringify(start)} in the text`)
+  const stop = text.indexOf(end, at + start.length)
+  if (stop < 0) {
+    throw new Error(
+      text.includes(end)
+        ? `between: ${JSON.stringify(end)} occurs only before ${JSON.stringify(start)}`
+        : `between: no ${JSON.stringify(end)} in the text`,
+    )
+  }
+  return text.slice(at, stop)
+}
+
+describe("between — the checked block extraction these tests read the rendering through", () => {
+  const report = "HEADER\nBLOCK 1\none\nBLOCK 2\ntwo A DEGRADED ARM\nBLOCK 3\nthree\n"
+
+  test("returns the start block only, never the later block", () => {
+    expect(between(report, "BLOCK 1", "BLOCK 2")).toBe("BLOCK 1\none\n")
+    expect(between(report, "BLOCK 1", "BLOCK 2")).not.toContain("A DEGRADED ARM")
+  })
+
+  test("a missing BLOCK 1 fails the extraction rather than satisfying a negative assertion", () => {
+    const noBlock1 = report.replace("BLOCK 1\none\n", "")
+    expect(() => between(noBlock1, "BLOCK 1", "BLOCK 2")).toThrow('between: no "BLOCK 1" in the text')
+  })
+
+  test("a missing end, and an end that occurs only before the start, are refused by name", () => {
+    expect(() => between(report.replace("BLOCK 3", "B3"), "BLOCK 2", "BLOCK 3")).toThrow('between: no "BLOCK 3" in the text')
+    expect(() => between(report, "BLOCK 2", "BLOCK 1")).toThrow('between: "BLOCK 1" occurs only before "BLOCK 2"')
+  })
+})
+
 const scratch: string[] = []
 
 async function tempDir(): Promise<string> {
@@ -465,12 +505,12 @@ describe("a partial or crashed arm supplies no half of a pair, and a degraded on
 
     // The degradation is named where the confounds sit, beside the numbers it qualifies.
     const text = renderPairedBundle(result)
-    const body = text.slice(text.indexOf("BLOCK 2"), text.indexOf("BLOCK 3"))
+    const body = between(text, "BLOCK 2", "BLOCK 3")
     expect(body).toContain("A DEGRADED ARM IS IN THIS RESULT, NAMED RATHER THAN DISCARDED.")
     expect(body).toContain("on `run-on-1`: completion `degraded`; 1 warning(s): model-dropped-out")
     expect(body.indexOf("A DEGRADED ARM IS IN THIS RESULT")).toBeGreaterThan(body.indexOf("CONFOUNDS, BESIDE THIS RESULT"))
     // Untouched blocks say nothing about degradation.
-    expect(text.slice(text.indexOf("BLOCK 1"), text.indexOf("BLOCK 2"))).not.toContain("A DEGRADED ARM")
+    expect(between(text, "BLOCK 1", "BLOCK 2")).not.toContain("A DEGRADED ARM")
   })
 
   test("A DEGRADED ARM WITH NO WARNING says so rather than implying a cause", async () => {
@@ -914,7 +954,7 @@ describe("what the reader refuses to say", () => {
     const named = text.split("\n").filter((line) => /^ {4}`d\d`: on upheld → off judge-ruled-invalid$/.test(line))
     expect(named).toHaveLength(5)
     expect(text).toContain("…and 4 more, in this block's two `manifest.json` files.")
-    const body = text.slice(text.indexOf("BLOCK 1"), text.indexOf("BLOCK 2"))
+    const body = between(text, "BLOCK 1", "BLOCK 2")
     expect(body).toContain("CONFOUNDS, BESIDE THIS RESULT — block 1")
     expect(body.indexOf("…and 4 more")).toBeLessThan(body.indexOf("IDENTIFICATION."))
   })
