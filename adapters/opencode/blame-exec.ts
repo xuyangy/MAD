@@ -248,7 +248,28 @@ export interface BlameExecOptions {
    * set it; every other caller decodes as before.
    */
   keepLeadingBom?: boolean
+  /**
+   * Ledger #158 — the most bytes of each pipe's output kept for one command.
+   * Omitted fields take `DEFAULT_STDOUT_LIMIT_BYTES` and
+   * `DEFAULT_STDERR_LIMIT_BYTES`. A command whose output passes its limit is
+   * killed and fails as `observation-failed`: its output is refused, never
+   * returned truncated. Each limit must be a positive safe integer, or nothing
+   * is launched. It bounds the output MAD keeps, not the child's memory or the
+   * size of one chunk the runtime hands over.
+   */
+  outputLimits?: OutputLimits
 }
+
+/** Per-command output limits, in bytes (`BlameExecOptions.outputLimits`). */
+export interface OutputLimits {
+  stdoutBytes?: number
+  stderrBytes?: number
+}
+
+/** The default stdout limit: a practical policy default, overridable per command, not a claim about any diff's size. */
+export const DEFAULT_STDOUT_LIMIT_BYTES = 64 * 1024 * 1024
+/** The default stderr limit. Past it, stderr is no longer kept and the command's output is refused. */
+export const DEFAULT_STDERR_LIMIT_BYTES = 1024 * 1024
 
 /** SIGKILL. The number rather than the name, so the seam takes one shape only. */
 const SIGKILL = 9
@@ -262,7 +283,7 @@ const SIGKILL = 9
  * there at all is a different fact: there is no inherited write end to reason
  * about, so its absence is not evidence of a survivor.
  */
-type PipeRead = { ok: true; text: string } | { ok: false; why: string; unreadEnd: boolean }
+type PipeRead = { ok: true; text: string } | { ok: false; why: string; unreadEnd: boolean; overLimit?: true }
 
 /** What the exit gave back. A rejection is TAGGED, never read as an exit. */
 type ExitRead = { ok: true; code: number } | { ok: false; why: string }
@@ -309,7 +330,9 @@ function track<T>(promise: Promise<T>): Tracked<T> {
 function readPipe(
   stream: SpawnedBlame["stdout"],
   name: string,
-  keepLeadingBom = false,
+  keepLeadingBom: boolean,
+  limitBytes: number,
+  onLimit: () => void,
 ): { read: Tracked<PipeRead>; release: () => void; setupFailure: string | null } {
   const unusable = (why: string, unreadEnd: boolean) => ({
     read: track(Promise.resolve<PipeRead>({ ok: false, why, unreadEnd })),
@@ -345,18 +368,36 @@ function readPipe(
     (async (): Promise<PipeRead> => {
       const chunks: Uint8Array[] = []
       let size = 0
+      // LEDGER #158 — PAST THE LIMIT, NOTHING MORE IS KEPT, BUT THE PIPE IS STILL
+      // READ. Bytes are counted before they are kept, and exactly the limit is
+      // allowed. On the first byte past it the kept chunks are dropped and the
+      // launcher is told, and every later chunk is read and discarded: only a
+      // naturally observed end may confirm the cleanup, and a cancel would
+      // manufacture one.
+      let overLimit = false
+      const limitWhy = `the ${name} output passed its ${limitBytes}-byte limit, so none of it is used`
       try {
         for (;;) {
           const { done, value } = await reader.read()
           if (done) break
-          if (value !== undefined) {
-            chunks.push(value)
-            size += value.length
+          // An empty chunk is not kept: retained chunks must carry payload.
+          if (value === undefined || value.length === 0 || overLimit) continue
+          if (size + value.length > limitBytes) {
+            overLimit = true
+            chunks.length = 0
+            onLimit()
+            continue
           }
+          chunks.push(value)
+          size += value.length
         }
       } catch (error) {
-        return { ok: false, why: `the ${name} pipe could not be read to its end: ${messageOf(error)}`, unreadEnd: true }
+        const torn = `the ${name} pipe could not be read to its end: ${messageOf(error)}`
+        return overLimit
+          ? { ok: false, why: `${limitWhy}, and then ${torn}`, unreadEnd: true, overLimit: true }
+          : { ok: false, why: torn, unreadEnd: true }
       }
+      if (overLimit) return { ok: false, why: limitWhy, unreadEnd: false, overLimit: true }
       const joined = new Uint8Array(size)
       let at = 0
       for (const chunk of chunks) {
@@ -436,6 +477,16 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     const problem = deadlineProblem(name, ms)
     if (problem !== null) return { kind: "refused", why: `nothing was launched: ${problem}` }
   }
+  const stdoutLimit = options.outputLimits?.stdoutBytes ?? DEFAULT_STDOUT_LIMIT_BYTES
+  const stderrLimit = options.outputLimits?.stderrBytes ?? DEFAULT_STDERR_LIMIT_BYTES
+  for (const [name, bytes] of [
+    ["the stdout limit", stdoutLimit],
+    ["the stderr limit", stderrLimit],
+  ] as const) {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+      return { kind: "refused", why: `nothing was launched: ${name} must be a positive whole number of bytes, and ${bytes} is not` }
+    }
+  }
 
   // CAP-5 — A STOP THAT HAS ALREADY FIRED STARTS NOTHING.
   if (options.signal?.aborted) return { kind: "stopped", launched: false }
@@ -461,8 +512,18 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
   // reach a halt reason as `undefined`. `-1` is never a real pid, and the
   // reasons below say "process -1" rather than pretending to identify one.
   const pid = Number.isInteger(child.pid) && child.pid > 0 ? child.pid : -1
-  const out = readPipe(child.stdout, "stdout", options.keepLeadingBom === true)
-  const err = readPipe(child.stderr, "stderr")
+  // LEDGER #158 — THE FIRST PIPE PAST ITS LIMIT ENDS THE WAIT AT ONCE.
+  let limitHit: (name: "stdout" | "stderr") => void = () => undefined
+  const overLimit = new Promise<{ limit: "stdout" | "stderr" }>((resolve) => {
+    let fired = false
+    limitHit = (name) => {
+      if (fired) return
+      fired = true
+      resolve({ limit: name })
+    }
+  })
+  const out = readPipe(child.stdout, "stdout", options.keepLeadingBom === true, stdoutLimit, () => limitHit("stdout"))
+  const err = readPipe(child.stderr, "stderr", false, stderrLimit, () => limitHit("stderr"))
   // TAGGED, SO A REJECTED EXIT IS NEVER READ AS AN EXIT.
   const exit = track(
     child.exited.then(
@@ -506,10 +567,11 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
 
   let timer: ReturnType<typeof setTimeout> | undefined
   let onStop: (() => void) | undefined
-  let raced: Awaited<typeof finished> | "deadline" | "stopped"
+  let raced: Awaited<typeof finished> | "deadline" | "stopped" | { limit: "stdout" | "stderr" }
   try {
-    raced = await Promise.race<Awaited<typeof finished> | "deadline" | "stopped">([
+    raced = await Promise.race<Awaited<typeof finished> | "deadline" | "stopped" | { limit: "stdout" | "stderr" }>([
       finished,
+      overLimit,
       new Promise<"deadline">((resolve) => {
         timer = setTimeout(() => resolve("deadline"), options.deadlineMs)
       }),
@@ -572,7 +634,46 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     }
   }
 
+  if (!Array.isArray(raced)) {
+    // LEDGER #158 — A PIPE PASSED ITS LIMIT. Killed now unless the child's own
+    // end was already observed, and accounted for under the cleanup budget; the
+    // drain goes on meanwhile, so a pipe that then closes naturally can still
+    // confirm.
+    const end = await observedEnd(child, exit)
+    const killError = end === null ? forceKill(child) : null
+    const cleanup = await accountFor(child, { exit, out: out.read, err: err.read }, options.cleanupMs)
+    releaseReads()
+    // The reason is built from what is known, not by awaiting the pipe's read,
+    // which a held pipe may never settle.
+    const limitBytes = raced.limit === "stdout" ? stdoutLimit : stderrLimit
+    return overLimitOutcome(
+      options,
+      pid,
+      `the ${raced.limit} output passed its ${limitBytes}-byte limit, so none of it is used`,
+      cleanup,
+      end ?? (killError === null ? "it was sent SIGKILL" : `SIGKILL could not be sent (${killError})`),
+    )
+  }
+
   const [exitRead, stdout, stderr] = raced
+
+  // LEDGER #158 — EVERYTHING SETTLED, BUT A PIPE HAD PASSED ITS LIMIT. A kill is
+  // still attempted unless the child's own end was observed: a settled exit
+  // promise that REJECTED is not one.
+  const breached = [stdout, stderr].find((read) => !read.ok && read.overLimit === true)
+  if (breached !== undefined) {
+    const end = await observedEnd(child, exit)
+    const killError = end === null ? forceKill(child) : null
+    const cleanup = await accountFor(child, { exit, out: out.read, err: err.read }, options.cleanupMs)
+    releaseReads()
+    return overLimitOutcome(
+      options,
+      pid,
+      breached.ok ? "a pipe passed its output limit" : breached.why,
+      cleanup,
+      end ?? (killError === null ? "it was sent SIGKILL" : `SIGKILL could not be sent (${killError})`),
+    )
+  }
 
   if (!exitRead.ok) {
     // POST-LAUNCH, AND LIVENESS IS UNCONFIRMED. A failed exit read says nothing
@@ -646,6 +747,42 @@ export async function runBoundedBlame(options: BlameExecOptions): Promise<BlameE
     // reader can mistake one for the other.
     stderr: stderr.ok ? stderr.text : "",
     stderrFailure: stderr.ok ? null : stderr.why,
+  }
+}
+
+/**
+ * Ledger #158 — how the child's own end was observed, or `null` when it was
+ * not: a read exit status, or an exit code or terminating signal recorded on the
+ * handle. A settled exit promise that REJECTED is not an observed end.
+ */
+async function observedEnd(child: SpawnedBlame, exit: Tracked<ExitRead>): Promise<string | null> {
+  if (exit.settled()) {
+    const read = await exit.promise
+    if (read.ok) return `it had already exited with status ${read.code}`
+  }
+  const observed = observedOf(child)
+  if (observed.exitCode !== null || observed.signal !== null) return "its end was already recorded on the handle"
+  return null
+}
+
+/** Ledger #158 — the `observation-failed` a pipe past its limit ends as. Its output is refused, never returned. */
+function overLimitOutcome(
+  options: BlameExecOptions,
+  pid: number,
+  why: string,
+  cleanup: CleanupState,
+  termination: string,
+): BlameExecOutcome {
+  return {
+    kind: "observation-failed",
+    pid,
+    cleanup,
+    why:
+      cleanup.kind === "unresolved"
+        ? `\`${options.argv.join(" ")}\` ran as process ${pid}, ${why}; ${termination}, but ${options.cleanupMs}ms ` +
+          `later ${cleanup.why}: ${unresolvedState(pid, cleanup.observed)}`
+        : `\`${options.argv.join(" ")}\` ran as process ${pid}, ${why}; ${termination}, and process ${pid} and its ` +
+          `output were accounted for${describeObserved(pid, cleanup.observed)}`,
   }
 }
 

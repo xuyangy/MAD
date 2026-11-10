@@ -349,3 +349,51 @@ describe("ledger #157 — a change read whose stderr pipe broke before its end",
     TIMEOUT_MS,
   )
 })
+
+describe("ledger #158 — a change read past its output limit", () => {
+  const LIMITS = { stdoutBytes: 32 }
+
+  test(
+    "a real git diff past the limit is killed and refused; its pipes end naturally, so nothing is latched",
+    async () => {
+      const dir = await repo()
+      const error = await stoppedBy(opencodeRepo({ worktree: dir, outputLimits: LIMITS }).change())
+      expect(error.stop).toBe("observation-failed")
+      expect(error.message).toContain("the stdout output passed its 32-byte limit, so none of it is used")
+      expect(error.cleanup).toBe("confirmed")
+      expect(changeReadQuarantineFor(dir)).toBeUndefined()
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "a diff past the limit whose child ignores the kill and holds its pipes latches the worktree; a fresh change() launches nothing",
+    async () => {
+      const dir = await repo()
+      const { spawn: real } = realSpawn()
+      const spawn: SpawnBlame = (request) => {
+        if (!request.cmd.includes("--unified=8")) return real(request)
+        const big = new TextEncoder().encode("x".repeat(100))
+        return {
+          pid: 7777,
+          stdout: new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(big) }),
+          stderr: new ReadableStream<Uint8Array>({ start: () => undefined }),
+          exited: new Promise<number>(() => undefined),
+          exitCode: null,
+          signalCode: null,
+          kill() {},
+        }
+      }
+      const error = await stoppedBy(opencodeRepo({ worktree: dir, spawn, outputLimits: LIMITS, cleanupMs: 30 }).change())
+      expect(error.stop).toBe("observation-failed")
+      expect(error.cleanup).toBe("unresolved")
+      expect(error.message).toContain("the stdout output passed its 32-byte limit")
+      expect(changeReadQuarantineFor(dir)?.pid).toBe(7777)
+
+      const { spawn: counted, launched } = realSpawn()
+      expect((await stoppedBy(opencodeRepo({ worktree: dir, spawn: counted }).change())).stop).toBe("quarantined")
+      expect(launched).toEqual([])
+    },
+    TIMEOUT_MS,
+  )
+})

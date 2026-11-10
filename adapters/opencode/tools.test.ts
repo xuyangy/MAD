@@ -344,6 +344,28 @@ describe("bounded termination and the quarantine it can leave behind (story 2-7c
     expect(second.message).toContain("refusing to launch")
     expect(launches.filter((launch) => launch.cmd.includes("blame"))).toHaveLength(1)
   })
+
+  test("A BLAME PAST ITS OUTPUT LIMIT whose child does not end quarantines the adapter, and the limit is named (ledger #158)", async () => {
+    const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { stdout: PORCELAIN, hang: true, unkillable: true } }])
+    const facts: { why: string; pid: number }[] = []
+    const tools = opencodeTools({
+      worktree: "/repo",
+      spawn,
+      outputLimits: { stdoutBytes: 8 },
+      blameCleanupTimeoutMs: 20,
+      onCleanupUnresolved: (fact) => void facts.push(fact),
+    })
+
+    const first = await rejection(tools.blame("src/pay.ts", 1, 1))
+    expect(first.message).toContain("the stdout output passed its 8-byte limit, so none of it is used")
+    expect(facts).toHaveLength(1)
+    expect(facts[0]!.pid).toBe(4242)
+
+    const second = await rejection(tools.blame("src/other.ts", 1, 1))
+    expect(second.message).toContain("refusing to launch")
+    expect(launches.filter((launch) => launch.cmd.includes("blame"))).toHaveLength(1)
+  })
+
   test("AN UNCONFIRMED CLEANUP LATCHES FIRST AND NOTIFIES SECOND, and refuses every later launch", async () => {
     const { spawn, launches } = fakeSpawn([{ match: "blame", reply: { hang: true, unkillable: true } }])
     const seen: { operation: string; pid: number; refusedInside?: boolean }[] = []
@@ -1037,6 +1059,18 @@ describe("the filter preflight before blame (CAP-2)", () => {
     expect(launches).toHaveLength(1)
     expect(toolFailureEvidence(error)).toEqual({ stage: "pre-shell", launch: "not-attempted" })
     expect(error.message).toContain("the filter preflight did not complete, so blame was not run")
+  })
+
+  test("A PREFLIGHT PAST ITS OUTPUT LIMIT is no answer either: the limit reaches the preflight, and blame is never launched (ledger #158)", async () => {
+    const { seesPreflight, launches } = fakeSpawn([
+      { match: PREFLIGHT, reply: { stdout: "filter.x.clean cat\nfilter.y.clean cat\n", exitCode: 0 } },
+    ])
+    const tools = opencodeTools({ worktree: "/repo", spawn: seesPreflight, outputLimits: { stdoutBytes: 8 } })
+    const error = await rejection(tools.blame("src/pay.ts", 1, 1))
+
+    expect(launches).toHaveLength(1)
+    expect(error.message).toContain("the filter preflight did not complete, so blame was not run")
+    expect(error.message).toContain("the stdout output passed its 8-byte limit")
   })
 
   test("A SIGNALLED PREFLIGHT is no answer, whatever status came with it", async () => {

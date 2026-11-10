@@ -333,3 +333,278 @@ describe("what the launcher will not pass off as something else", () => {
     }
   })
 })
+
+/** A stream the test feeds and ends by hand, to hold a pipe open. */
+function heldStream() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const stream = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c) })
+  return {
+    stream,
+    push: (text: string) => controller.enqueue(new TextEncoder().encode(text)),
+    close: () => controller.close(),
+  }
+}
+
+/** A stream that yields each text as its own chunk, then closes. */
+function chunkedStream(...texts: string[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const text of texts) controller.enqueue(new TextEncoder().encode(text))
+      controller.close()
+    },
+  })
+}
+
+describe("ledger #158 — a pipe past its output limit is refused, never truncated", () => {
+  const LIMITS = { stdoutBytes: 4, stderrBytes: 4 }
+
+  test("exactly the limit is kept and returned; one byte more fails, across chunks", async () => {
+    const exact = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn: spawnOf({ stdout: chunkedStream("ab", "cd") }).spawn })
+    expect(exact.kind).toBe("returned")
+    if (exact.kind === "returned") expect(exact.stdout).toBe("abcd")
+
+    const over = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn: spawnOf({ stdout: chunkedStream("ab", "cde") }).spawn })
+    expect(over.kind).toBe("observation-failed")
+    if (over.kind === "observation-failed") {
+      expect(over.why).toContain("the stdout output passed its 4-byte limit, so none of it is used")
+      expect(over.why).not.toContain("abcd")
+    }
+  })
+
+  test("bytes, not characters: a two-byte character that crosses the limit fails, one that fits returns", async () => {
+    const fits = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn: spawnOf({ stdout: closedStream("abé") }).spawn })
+    expect(fits.kind).toBe("returned")
+    if (fits.kind === "returned") expect(fits.stdout).toBe("abé")
+    const crosses = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn: spawnOf({ stdout: closedStream("abcé") }).spawn })
+    expect(crosses.kind).toBe("observation-failed")
+  })
+
+  test("one oversized chunk on stderr fails the call too, and no output is returned", async () => {
+    const outcome = await runBoundedBlame({
+      ...RUN,
+      outputLimits: LIMITS,
+      spawn: spawnOf({ stdout: closedStream("ok"), stderr: closedStream("warning: far too long") }).spawn,
+    })
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.why).toContain("the stderr output passed its 4-byte limit")
+      expect(outcome.why).not.toContain("warning")
+    }
+  })
+
+  test("a limit that is not a positive whole number is refused before anything is spawned", async () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      for (const outputLimits of [{ stdoutBytes: bad }, { stderrBytes: bad }]) {
+        let spawned = 0
+        const spawn: SpawnBlame = (request) => (spawned++, spawnOf({}).spawn(request))
+        const outcome = await runBoundedBlame({ ...RUN, outputLimits, spawn })
+        expect(outcome.kind).toBe("refused")
+        if (outcome.kind === "refused") expect(outcome.why).toContain("must be a positive whole number of bytes")
+        expect(spawned).toBe(0)
+      }
+    }
+  })
+
+  test("the breach ends the wait at once: the kill comes while the exit and stderr are still held, and the drained pipes confirm", async () => {
+    const stdout = heldStream()
+    const stderr = heldStream()
+    let exit!: (code: number) => void
+    let heldWhenKilled: boolean | undefined
+    let released = false
+    const { spawn, kills } = spawnOf({
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      exited: new Promise<number>((resolve) => (exit = resolve)),
+      exitCode: null,
+      onKill: () => {
+        heldWhenKilled = !released
+        // The killed child ends: its exit and both pipes close naturally.
+        released = true
+        stdout.push("still writing")
+        stdout.close()
+        stderr.close()
+        exit(137)
+      },
+    })
+    const running = runBoundedBlame({ ...RUN, deadlineMs: 60_000, cleanupMs: 2_000, outputLimits: LIMITS, spawn })
+    stdout.push("abcdefgh")
+    const outcome = await running
+
+    expect(kills()).toBe(1)
+    expect(heldWhenKilled).toBe(true)
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.cleanup.kind).toBe("confirmed")
+      expect(outcome.why).toContain("it was sent SIGKILL")
+      expect(outcome.why).toContain("were accounted for")
+    }
+  })
+
+  test("a breach whose child ignores the kill and holds its pipes stays unresolved", async () => {
+    const stdout = heldStream()
+    const stderr = heldStream()
+    const { spawn, kills } = spawnOf({
+      pid: 6464,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      exited: new Promise<number>(() => undefined),
+      exitCode: null,
+    })
+    const running = runBoundedBlame({ ...RUN, deadlineMs: 60_000, cleanupMs: 50, outputLimits: LIMITS, spawn })
+    stdout.push("abcdefgh")
+    const outcome = await running
+
+    expect(kills()).toBe(1)
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.pid).toBe(6464)
+      expect(outcome.cleanup.kind).toBe("unresolved")
+      expect(outcome.why).toContain("the stdout output passed its 4-byte limit")
+      expect(outcome.why).toContain("50ms later")
+    }
+  })
+
+  test("a breach whose child exits on the kill while something still holds its stdout stays unresolved: the end was never seen", async () => {
+    // The drain goes on after the breach, and only a naturally observed end
+    // confirms. Stopping the read at the breach would claim an end nobody saw.
+    const stdout = heldStream()
+    const stderr = heldStream()
+    let exit!: (code: number) => void
+    const { spawn, kills } = spawnOf({
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      exited: new Promise<number>((resolve) => (exit = resolve)),
+      exitCode: null,
+      onKill: () => {
+        // One more write lands after the breach; the holder keeps the pipe open.
+        stdout.push("more")
+        stderr.close()
+        exit(137)
+      },
+    })
+    const running = runBoundedBlame({ ...RUN, deadlineMs: 60_000, cleanupMs: 50, outputLimits: LIMITS, spawn })
+    stdout.push("abcdefgh")
+    const outcome = await running
+
+    expect(kills()).toBe(1)
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.cleanup.kind).toBe("unresolved")
+      if (outcome.cleanup.kind === "unresolved") expect(outcome.cleanup.why).toContain("stdout")
+    }
+  })
+
+  test("a kill that cannot be sent is said so, and the held child stays unresolved", async () => {
+    const stdout = heldStream()
+    const { spawn } = spawnOf({
+      stdout: stdout.stream,
+      stderr: heldStream().stream,
+      exited: new Promise<number>(() => undefined),
+      exitCode: null,
+      onKill: () => {
+        throw new Error("EPERM")
+      },
+    })
+    const running = runBoundedBlame({ ...RUN, deadlineMs: 60_000, cleanupMs: 50, outputLimits: LIMITS, spawn })
+    stdout.push("abcdefgh")
+    const outcome = await running
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.why).toContain("SIGKILL could not be sent (EPERM)")
+      expect(outcome.cleanup.kind).toBe("unresolved")
+    }
+  })
+
+  test("a breach with a REJECTED exit read: the kill is still attempted, no exit is invented, and nothing confirms", async () => {
+    const exited = Promise.reject(new Error("wait failed"))
+    exited.catch(() => undefined)
+    const { spawn, kills } = spawnOf({ stdout: closedStream("abcdefgh"), exited, exitCode: null })
+    const outcome = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn })
+
+    expect(kills()).toBe(1)
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.cleanup.kind).toBe("unresolved")
+      if (outcome.cleanup.kind === "unresolved") expect(outcome.cleanup.observed).toBeUndefined()
+      expect(outcome.why).not.toContain("exited with status")
+    }
+  })
+
+  test("a child that had already exited when its buffered output passed the limit is not killed, and its end is kept", async () => {
+    const { spawn, kills } = spawnOf({ stdout: closedStream("abcdefgh"), exited: Promise.resolve(0), exitCode: 0 })
+    const outcome = await runBoundedBlame({ ...RUN, outputLimits: LIMITS, spawn })
+
+    expect(kills()).toBe(0)
+    expect(outcome.kind).toBe("observation-failed")
+    if (outcome.kind === "observation-failed") {
+      expect(outcome.cleanup.kind).toBe("confirmed")
+      if (outcome.cleanup.kind === "confirmed") expect(outcome.cleanup.observed).toEqual({ exitCode: 0, signal: null })
+      expect(outcome.why).toMatch(/it had already exited with status 0|its end was already recorded on the handle/)
+      expect(outcome.why).not.toContain("SIGKILL")
+    }
+  })
+
+  test("empty chunks are skipped: interleaved with payload, exactly the limit still returns", async () => {
+    const outcome = await runBoundedBlame({
+      ...RUN,
+      outputLimits: LIMITS,
+      spawn: spawnOf({ stdout: chunkedStream("", "ab", "", "", "cd", "") }).spawn,
+    })
+    expect(outcome.kind).toBe("returned")
+    if (outcome.kind === "returned") expect(outcome.stdout).toBe("abcd")
+  })
+
+  /** A stream that yields the same chunk `times` times, then closes: large output without a large allocation. */
+  function repeated(chunk: Uint8Array, times: number): ReadableStream<Uint8Array> {
+    let sent = 0
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent === times) return controller.close()
+        sent += 1
+        controller.enqueue(chunk)
+      },
+    })
+  }
+
+  test("with no limits given, the defaults apply: 64 MiB of stdout and 1 MiB of stderr, each one byte past refused", async () => {
+    const { DEFAULT_STDOUT_LIMIT_BYTES, DEFAULT_STDERR_LIMIT_BYTES } = await import("./blame-exec.ts")
+    expect(DEFAULT_STDOUT_LIMIT_BYTES).toBe(64 * 1024 * 1024)
+    expect(DEFAULT_STDERR_LIMIT_BYTES).toBe(1024 * 1024)
+    const mib = new Uint8Array(1024 * 1024).fill(120)
+    const byte = new Uint8Array(1).fill(120)
+    const past = (chunks: number) =>
+      new ReadableStream<Uint8Array>({
+        start: () => undefined,
+        async pull(controller) {
+          const reader = repeated(mib, chunks).getReader()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            controller.enqueue(value)
+          }
+          controller.enqueue(byte)
+          controller.close()
+        },
+      })
+
+    const stdout = await runBoundedBlame({ ...RUN, deadlineMs: 30_000, spawn: spawnOf({ stdout: past(64) }).spawn })
+    expect(stdout.kind).toBe("observation-failed")
+    if (stdout.kind === "observation-failed") expect(stdout.why).toContain(`the stdout output passed its ${64 * 1024 * 1024}-byte limit`)
+
+    const stderr = await runBoundedBlame({
+      ...RUN,
+      deadlineMs: 30_000,
+      spawn: spawnOf({ stdout: closedStream("ok"), stderr: past(1) }).spawn,
+    })
+    expect(stderr.kind).toBe("observation-failed")
+    if (stderr.kind === "observation-failed") expect(stderr.why).toContain(`the stderr output passed its ${1024 * 1024}-byte limit`)
+
+    // Exactly the default is kept and returned.
+    const exact = await runBoundedBlame({
+      ...RUN,
+      deadlineMs: 30_000,
+      spawn: spawnOf({ stdout: closedStream("ok"), stderr: repeated(mib, 1) }).spawn,
+    })
+    expect(exact.kind).toBe("returned")
+  }, 60_000)
+})

@@ -120,7 +120,7 @@ import {
   TOOL_FAILURE_EVIDENCE,
 } from "../../core/ports/tool-observation.ts"
 import type { CommandResult, GrepHit, Tools } from "../../core/ports/tools.ts"
-import type { SpawnBlame } from "./blame-exec.ts"
+import type { OutputLimits, SpawnBlame } from "./blame-exec.ts"
 import { runBoundedBlame } from "./blame-exec.ts"
 import {
   configuredFilters,
@@ -296,6 +296,12 @@ export interface OpencodeToolsOptions {
   quarantinedBy?: BlameCleanupUnresolved
   /** Test seam for the launcher. Defaults to the real one. */
   spawn?: SpawnBlame
+  /**
+   * Ledger #158 — the per-command output limits for every launch here, the
+   * filter preflight included (`BlameExecOptions.outputLimits`). Omitted, the
+   * launcher's defaults apply.
+   */
+  outputLimits?: OutputLimits
   /**
    * CAP-5 — the run's stop, read only from construction; the `Tools` port
    * takes no signal. Checked before every launch, after the range and
@@ -491,6 +497,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       deadlineMs: blameTimeoutMs,
       cleanupMs: cleanupTimeoutMs,
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+      ...(options.outputLimits === undefined ? {} : { outputLimits: options.outputLimits }),
       ...(signal === undefined ? {} : { signal }),
     })
     if (outcome.kind === "cleanup-unresolved") {
@@ -637,6 +644,7 @@ export function opencodeTools(options: OpencodeToolsOptions): Tools {
       deadlineMs: atLaunch.deadlineMs,
       cleanupMs: cleanupTimeoutMs,
       ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+      ...(options.outputLimits === undefined ? {} : { outputLimits: options.outputLimits }),
       ...(signal === undefined ? {} : { signal }),
     })
 

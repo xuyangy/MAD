@@ -50,7 +50,7 @@
 import type { ChangeSet, Repo } from "../../core/ports/repo.ts"
 import { deadlineProblem } from "../../core/ports/observation-wait.ts"
 
-import { runBoundedBlame, type BlameExecOutcome, type SpawnBlame } from "./blame-exec.ts"
+import { runBoundedBlame, type BlameExecOutcome, type OutputLimits, type SpawnBlame } from "./blame-exec.ts"
 import {
   inputReason,
   lineSafeName,
@@ -91,6 +91,13 @@ export interface OpencodeRepoOptions {
    * that; it is bounded by the read budget like any other read that hangs.
    */
   spawn?: SpawnBlame
+  /**
+   * Ledger #158 — the per-command output limits for every read here
+   * (`BlameExecOptions.outputLimits`). Omitted, the launcher's defaults apply.
+   * A read past its limit stops as `observation-failed`; it is never returned
+   * truncated.
+   */
+  outputLimits?: OutputLimits
   /** The total execution budget of one `change()`. Default `DEFAULT_CHANGE_READ_BUDGET_MS`. */
   readBudgetMs?: number
   /** The cleanup budget after a read that stops. Default `DEFAULT_CHANGE_READ_CLEANUP_MS`. */
@@ -423,6 +430,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
           ...(keepLeadingBom ? { keepLeadingBom } : {}),
           ...(signal === undefined ? {} : { signal }),
           ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+          ...(options.outputLimits === undefined ? {} : { outputLimits: options.outputLimits }),
         })
         // A LAUNCHED `git diff` MAY HAVE PASSED CHANGE TEXT TO MAD before it
         // stopped or failed, so from here "No change was read" is not claimed.
