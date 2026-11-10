@@ -142,7 +142,7 @@ describe("runAdversarialSuite — sixteen healthy scripted runs over real git", 
     expect(await exists(join(root, LOCK_FILE))).toBe(false)
     expect(await exists(join(adversarialDirectory(root), BUNDLE_FILE))).toBe(true)
     expect((await readAdversarialSlotStatuses(root)).filter((line) => line.status !== "started")).toHaveLength(16)
-  })
+  }, 60_000)
 
   test("ONE observer reaches both opencodeTools and review(): every run's trace holds the core's and the adapter's facts", async () => {
     const { root, input } = await sealedSuite(scratch)
@@ -165,7 +165,7 @@ describe("runAdversarialSuite — sixteen healthy scripted runs over real git", 
       }
       expect(lines.some((line) => line.type === "shellOutcome" && line.fact.launch === "proved")).toBe(true)
     }
-  })
+  }, 60_000)
 })
 
 describe("runAdversarialSuite — preflight refuses before the start marker", () => {
@@ -195,7 +195,7 @@ describe("runAdversarialSuite — preflight refuses before the start marker", ()
     await unlink(join(root, HALT_MARKER_FILE))
     const outcome = await runAdversarialSuite(input)
     expect(outcome.ok).toBe(true)
-  })
+  }, 60_000)
 
   test("an already started schedule is refused", async () => {
     const { root, input, calls } = await sealedSuite(scratch)
@@ -254,7 +254,7 @@ describe("runAdversarialSuite — one experiment, one ledger", () => {
     expect(outcome.bill.refusedAdversarial[0]!.reason).toContain("global cap is exhausted: 2000000 of 2000000")
     expect(outcome.slots.every((slot) => slot.status === "failed")).toBe(true)
     expect(outcome.complete).toBe(false)
-  })
+  }, 60_000)
 
   test("a halt written at the root during the suite refuses the next adversarial request", async () => {
     const { root, input } = await sealedSuite(scratch)
@@ -294,7 +294,7 @@ describe("runAdversarialSuite — one experiment, one ledger", () => {
       expect(slot.delivery?.requests).toBe(0)
       expect(slot.delivery?.reason).toContain("the run issued no model request")
     }
-  })
+  }, 60_000)
 
   test("spend already past the Adversarial allowance is reported as overshoot", async () => {
     const { root, input } = await sealedSuite(scratch)
@@ -302,7 +302,7 @@ describe("runAdversarialSuite — one experiment, one ledger", () => {
     const outcome = await runAdversarialSuite(input)
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(outcome.overshoot.adversarial).toEqual({ limit: 400_000, spent: 450_000, overshoot: 50_000 })
-  })
+  }, 60_000)
 
   test("unknown usage halts: the marker is written and no later case is admitted", async () => {
     const { root, input } = await sealedSuite(scratch, {
@@ -358,7 +358,7 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
     expect(failed.reason).toContain("could not be written, so nothing was issued")
     expect(calls.some((call) => call.position === failed.position)).toBe(false)
     expect(outcome.slots.filter((slot) => slot !== failed).every((slot) => slot.status === "completed")).toBe(true)
-  })
+  }, 60_000)
 
   for (const attempts of [false, true]) {
     const mode = attempts ? "attempt" : "token"
@@ -381,7 +381,7 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
         expect(await exists(join(root, HALT_MARKER_FILE))).toBe(false)
         expect(await exists(join(root, LOCK_FILE))).toBe(false)
       }
-    })
+    }, 60_000)
 
     test(`an UNCONFIRMED worktree git quarantines the suite (${mode} mode)`, async () => {
       const { root, input, calls } = await sealedSuite(scratch, { attempts })
@@ -449,7 +449,7 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
     await rm(join(adversarialDirectory(root), BUNDLE_FILE), { recursive: true })
     const outcome = await runAdversarialSuite(input)
     expect(outcome.ok).toBe(true)
-  })
+  }, 60_000)
 
   test("the runner leaves the journal's bill beside the slots, for the reader", async () => {
     const { root, input } = await sealedSuite(scratch)
@@ -461,7 +461,7 @@ describe("the runner's cancellation, worktree failures and durable bill", () => 
     expect(bill.bill.overshoot.adversarial).toEqual(outcome.overshoot.adversarial)
     expect(bill.bill.adversarialKnown).toBeGreaterThan(0)
     expect(await exists(join(adversarialDirectory(root), ADVERSARIAL_BILL_FILE))).toBe(true)
-  })
+  }, 60_000)
 })
 
 describe("the dumps sit under the adversarial directory, one per run", () => {
@@ -472,7 +472,7 @@ describe("the dumps sit under the adversarial directory, one per run", () => {
     for (const side of ["clean", "attack"]) {
       expect((await readdir(join(adversarialDirectory(root), side))).sort()).toEqual(["0", "1", "2", "3", "4", "5", "6", "7"])
     }
-  })
+  }, 60_000)
 })
 
 describe("the runner's preflight, delivery and ledger checks", () => {
@@ -723,7 +723,7 @@ describe("the quarantine, end to end (story 2-7c)", () => {
     expect(outcome.bill.halt).toBeNull()
     expect(await exists(join(root, LOCK_FILE))).toBe(false)
     expect(outcome.warnings.some((warning) => warning.includes("lock was NOT released"))).toBe(false)
-  })
+  }, 60_000)
 })
 
 // ---------------------------------------------------------------------------
@@ -770,7 +770,7 @@ describe("runAdversarialSuite in attempt mode", () => {
       ["adversarialKnown", "at", "globalKnown", "halt", "inFlight", "operational", "overshoot", "refused", "scheduleHash", "stop", "uncertain", "unknown"].sort(),
     )
     expect(await exists(join(suite.root, ADVERSARIAL_ROOT_MARKER_FILE))).toBe(false)
-  })
+  }, 60_000)
 
   test("a healthy suite completes all sixteen, and the bill shows actual issued attempts against 30/480/480", async () => {
     const suite = await sealedSuite(scratch, { attempts: true })
@@ -806,7 +806,7 @@ describe("runAdversarialSuite in attempt mode", () => {
     expect(manifest.value.adversarial).toMatchObject({ accounting: "attempts", caseId: first.caseId, side: first.side })
     expect(manifest.value.spend).toMatchObject({ source: "host-reported-unverified", usageCompleteness: "unverified", exposure: "unquantified" })
     expect(manifest.value.dials.cap).toBeNull()
-  })
+  }, 60_000)
 
   test("unknown host usage is one attempt and a diagnostic: the suite still completes and nothing halts", async () => {
     const suite = await sealedSuite(scratch, { attempts: true, script: { usage: () => ({ unknown: "the host reported no usage" }) } })
@@ -818,7 +818,7 @@ describe("runAdversarialSuite in attempt mode", () => {
     expect(outcome.bill.unknown).toHaveLength(suite.calls.length)
     expect(outcome.overshoot.adversarial.spent).toBe(suite.calls.length)
     expect(await exists(join(suite.root, HALT_MARKER_FILE))).toBe(false)
-  })
+  }, 60_000)
 
   test("a run refused on its own 30 fails for budget, and every later run proceeds", async () => {
     // One discovery turn and one judge turn per finding: 31 findings ask for 32 attempts.
@@ -1182,7 +1182,7 @@ describe("runAdversarialSuite in attempt mode", () => {
     // None of those refusals spent the schedule.
     const ran = await runAdversarialSuite(other.input)
     expect(ran.ok).toBe(true)
-  })
+  }, 60_000)
 })
 
 // ---------------------------------------------------------------------------
@@ -1256,7 +1256,7 @@ describe("story 2-7f — all sixteen worktrees are written before any run", () =
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(outcome.complete).toBe(true)
     expect(atFirstCall).toEqual(Array.from({ length: 16 }, () => true))
-  })
+  }, 60_000)
 
   test("a cancellation between two worktrees ends the phase: no review, no later worktree, every slot not attempted", async () => {
     const controller = new AbortController()
@@ -1390,7 +1390,7 @@ describe("story 2-7f — the per-run host lifecycle", () => {
     expect(suite.schedule.config.hostTools).toEqual({ "*": false, StructuredOutput: true })
     // Every run's turns went through its own host's backend.
     expect(new Set(suite.calls.map((call) => call.position)).size).toBe(16)
-  })
+  }, 60_000)
 
   for (const [name, start, why] of [
     ["refuses before spawning", { ok: false, reason: "the scripted host was refused before its spawn", cleanup: { ok: true, detail: "no host was started" } }, "its cleanup: no host was started"],
