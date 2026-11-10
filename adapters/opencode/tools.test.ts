@@ -751,6 +751,33 @@ describe("the deadlines are validated before anything launches (story 2-7c)", ()
   })
 })
 
+/**
+ * `source` from the first `marker` to its end. Throws when `marker` is absent:
+ * unchecked, `slice(indexOf(...))` would be the source's last character, and a
+ * `not.toContain` on it would pass without reading anything.
+ */
+function suffixFrom(source: string, marker: string): string {
+  const at = source.indexOf(marker)
+  if (at < 0) throw new Error(`suffixFrom: no ${JSON.stringify(marker)} in the source`)
+  return source.slice(at)
+}
+
+describe("suffixFrom — the checked slice the latch's structural test reads through", () => {
+  test("a missing marker throws rather than yielding the last character", () => {
+    expect(() => suffixFrom("const other = new Map()\nwriteFile", "UNRESOLVED_BLAME_CLEANUP")).toThrow(
+      'suffixFrom: no "UNRESOLVED_BLAME_CLEANUP" in the source',
+    )
+  })
+
+  test("a present marker yields the suffix from it, and the negative check is sensitive to writeFile there", () => {
+    const clean = "import x\nconst UNRESOLVED_BLAME_CLEANUP = new Map()\nexport {}\n"
+    expect(suffixFrom(clean, "UNRESOLVED_BLAME_CLEANUP")).toBe("UNRESOLVED_BLAME_CLEANUP = new Map()\nexport {}\n")
+    expect(suffixFrom(clean, "UNRESOLVED_BLAME_CLEANUP")).not.toContain("writeFile")
+    const writing = `${clean}await writeFile(path, facts)\n`
+    expect(suffixFrom(writing, "UNRESOLVED_BLAME_CLEANUP")).toContain("writeFile")
+  })
+})
+
 describe("THE PER-WORKTREE LATCH AN ORDINARY RUN NEEDS (story 2-7c)", () => {
   test("a pre-set quarantine refuses without launching, and rides `blame-unavailable`", async () => {
     // What `adapters/opencode/plugin.ts` carries between invocations. An ordinary
@@ -857,7 +884,7 @@ describe("THE PER-WORKTREE LATCH AN ORDINARY RUN NEEDS (story 2-7c)", () => {
       // An ordinary review has no experiment to quarantine: no file, no lock, no
       // halt marker. That one is structural because its claim is an ABSENCE.
       const source = await Bun.file(new URL("./plugin.ts", import.meta.url)).text()
-      const latch = source.slice(source.indexOf("UNRESOLVED_BLAME_CLEANUP"))
+      const latch = suffixFrom(source, "UNRESOLVED_BLAME_CLEANUP")
       expect(latch).not.toContain("writeFile")
     } finally {
       clearBlameQuarantineForTests(worktree)
