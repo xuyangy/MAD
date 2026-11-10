@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
+import { ChangeReadStopped } from "../adapters/opencode/repo.ts"
 import { main as ablationMain, stringFlag } from "../scripts/ablation.ts"
 import { main as evalReadMain } from "../scripts/eval-read.ts"
 import { BUNDLE_FILE, BUNDLE_SCHEMA_VERSION, EvaluationBundleError } from "./bundle.ts"
@@ -337,6 +338,60 @@ describe("a deliberate bundle stop is a refusal, not a crash", () => {
         }),
       ),
     ).rejects.toThrow("the provider hung up")
+  })
+
+  const stopped = (facts: Partial<ConstructorParameters<typeof ChangeReadStopped>[0]> = {}) =>
+    new ChangeReadStopped({
+      operation: "untracked-file diff",
+      stop: "terminated",
+      why: "the read budget passed",
+      readsCompleted: 2,
+      cleanup: "confirmed",
+      ...facts,
+    })
+
+  test("a stopped change read prints its own message, says no arm ran, and RETURNS 1", async () => {
+    const error = stopped()
+    const { code, text } = await captured(() =>
+      ablationMain(liveArgv("/scratch/mad-eval"), {
+        runLive: () => {
+          throw error
+        },
+      }),
+    )
+    expect(code).toBe(1)
+    expect(text).toContain("the change read STOPPED before any arm ran, so NO REPORT IS PRINTED")
+    expect(text).toContain(error.message)
+    expect(text).toContain("no arm was run, and nothing was billed")
+    expect(text).not.toContain("Before running again")
+    expect(text).not.toMatch(/^\s+at /m)
+  })
+
+  test("an unresolved stop with a pid names the pid and its helpers, not a restart", async () => {
+    const { code, text } = await captured(() =>
+      ablationMain(liveArgv("/scratch/mad-eval"), {
+        runLive: () => {
+          throw stopped({ cleanup: "unresolved", pid: 7777 })
+        },
+      }),
+    )
+    expect(code).toBe(1)
+    expect(text).toContain("check that process 7777 has ended AND look for any git process or helper")
+    expect(text).toContain("process 7777 having ended does not mean its helpers have")
+    expect(text).not.toContain("restart")
+  })
+
+  test("an unresolved stop without a pid says MAD has none", async () => {
+    const { code, text } = await captured(() =>
+      ablationMain(liveArgv("/scratch/mad-eval"), {
+        runLive: () => {
+          throw stopped({ cleanup: "unresolved" })
+        },
+      }),
+    )
+    expect(code).toBe(1)
+    expect(text).toContain("MAD has no process id for this read. Before running again, look for any git process")
+    expect(text).not.toContain("check that process")
   })
 
   test("a live run that succeeds still prints its report", async () => {

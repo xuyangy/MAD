@@ -19,12 +19,15 @@
  * regression two different voices. A zero verdict difference is a RESULT here,
  * not an error, so exiting non-zero on it would be actively wrong.
  *
- * ONE EXCEPTION: the `--labelled-change` containment refusal returns 1. A
- * `--directory` that is this repository, sits inside it, contains it, is
- * relative, or links into or above it would let a live model read the answer
- * key, so that refusal stands in for an invalidated measurement, and a script
- * or CI wrapper that checks only the exit status (`materialize … && ablation …`)
- * must see it fail. Every other refusal and every completed report returns 0.
+ * TWO EXCEPTIONS return 1, because a script or CI wrapper that checks only the
+ * exit status (`materialize … && ablation …`) must see them fail:
+ * - the `--labelled-change` containment refusal. A `--directory` that is this
+ *   repository, sits inside it, contains it, is relative, or links into or above
+ *   it would let a live model read the answer key, so that refusal stands in for
+ *   an invalidated measurement.
+ * - a `--live` change read that stopped (`ChangeReadStopped`). It stops before
+ *   the calibration and before any arm, so no evaluation ran at all.
+ * Every other refusal and every completed report returns 0.
  */
 
 import { resolve } from "node:path"
@@ -40,6 +43,7 @@ import { scriptedAblation } from "../ablation/seeded-defects.ts"
 // which side of the split a module is on.
 import { SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
+import type { ChangeReadStopped } from "../adapters/opencode/repo.ts"
 import type { Pin } from "../core/roster/select.ts"
 
 /**
@@ -199,12 +203,42 @@ export function stringFlag(argv: readonly string[], name: string): StringFlag {
 }
 
 /**
+ * The page for a `--live` run whose change read stopped. The error's own
+ * message says which read stopped, how, and the cleanup state; this adds that
+ * no arm ran and, for an unresolved cleanup, what to check before running
+ * again. The quarantine MAD latches for an unresolved cleanup lives in this
+ * process and ends when it exits, so it does not block the next run; a git
+ * process or helper that outlived the read can still be running in the worktree.
+ */
+function changeReadStoppedPage(error: ChangeReadStopped): string {
+  const lines = [
+    `CAP-9 ablation — the change read STOPPED before any arm ran, so NO REPORT IS PRINTED.`,
+    ``,
+    `  ${error.message}`,
+    ``,
+    `This is a refusal, not a crash. Nothing was calibrated, no arm was run, and nothing was billed.`,
+  ]
+  if (error.cleanup === "unresolved") {
+    lines.push(
+      ``,
+      (error.pid === undefined
+        ? `MAD has no process id for this read. Before running again, look for any git process or helper `
+        : `Before running again, check that process ${error.pid} has ended AND look for any git process or helper ` +
+          `it started that is `) +
+        `still running in this worktree (for example with \`ps -A -o pid,ppid,command | grep git\`)` +
+        (error.pid === undefined ? `.` : `: process ${error.pid} having ended does not mean its helpers have.`),
+    )
+  }
+  return lines.join("\n")
+}
+
+/**
  * Print why the invocation was refused, and return `status`.
  *
  * Refusing is not gating: this is the same shape the missing-`--pin` path uses,
  * for the same reason recorded in the file header, so `status` defaults to 0.
- * The `--labelled-change` containment refusal alone passes 1, the exception the
- * file header records. What `refuse` buys is that the refusal happens before
+ * Of the refusals, the `--labelled-change` containment refusal alone passes 1,
+ * an exception the file header records. What `refuse` buys is that the refusal happens before
  * `scriptedAblation` or `runLiveAblation` is called at all, so "nothing was
  * billed" is a structural fact rather than a promise.
  */
@@ -465,6 +499,7 @@ export async function main(
     const { runLiveAblation } = await import("../ablation/live.ts")
     const { codeRevisionFrom, EvaluationBundleError } = await import("../ablation/bundle.ts")
     const { known, unknownValue } = await import("../ablation/manifest.ts")
+    const { ChangeReadStopped } = await import("../adapters/opencode/repo.ts")
 
     const bundle =
       out.value === undefined
@@ -516,14 +551,13 @@ export async function main(
             },
           }
 
-    // THE BUNDLE'S DELIBERATE STOP IS CAUGHT HERE (recheck finding, 2026-09-10).
-    // A mandatory dump that could not be written stops the evaluation on purpose —
-    // FR1: a published number is traceable to the run that produced it, or it is
-    // not published — and that refusal reaching the operator as an unhandled stack
-    // trace, with the process exiting 1, reads as a crash in MAD rather than as
-    // the refusal it is. It also broke this file's own "main always returns 0"
-    // contract. Only `EvaluationBundleError` is caught; anything else still
-    // propagates exactly as it did before this story.
+    // TWO DELIBERATE STOPS ARE CAUGHT HERE, and anything else propagates.
+    // - `EvaluationBundleError`: a mandatory dump could not be written, so the
+    //   evaluation stops on purpose (FR1: a published number is traceable to the
+    //   run that produced it, or it is not published). No report is printed,
+    //   completed arms keep their dumps, and the run returns 0.
+    // - `ChangeReadStopped`: the change read stopped before the calibration and
+    //   before any arm, so no evaluation ran, and the run returns 1.
     let report: Awaited<ReturnType<typeof runLiveAblation>>
     try {
       report = await (overrides.runLive ?? runLiveAblation)({
@@ -560,6 +594,10 @@ export async function main(
             }),
       })
     } catch (error) {
+      if (error instanceof ChangeReadStopped) {
+        console.log(changeReadStoppedPage(error))
+        return 1
+      }
       if (!(error instanceof EvaluationBundleError)) throw error
       console.log(
         `CAP-9 ablation — the evaluation STOPPED and NO REPORT IS PRINTED.\n` +
