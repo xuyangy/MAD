@@ -46,7 +46,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk"
 
 import { ISSUED_TURNS_MAY_BILL } from "../../core/run/review.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
-import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
+import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, latchBlameQuarantine, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
 import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
@@ -148,10 +148,12 @@ interface ScenarioOptions {
    * reads are exempt.
    */
   recorder?: InitiationRecorder
+  /** The plugin's `worktree`. Default the review repository's directory. */
+  worktree?: string
 }
 
 async function runScenario(repo: ReviewRepo, hostOptions: FakeHostOptions, options: ScenarioOptions = {}): Promise<Run> {
-  const { args = {}, serverUrl, aroundExecute = (body) => body(), abort = new AbortController().signal, recorder } = options
+  const { args = {}, serverUrl, aroundExecute = (body) => body(), abort = new AbortController().signal, recorder, worktree } = options
   const host = startFakeHost(hostOptions)
   let guard: NetworkGuard | undefined
   try {
@@ -165,7 +167,7 @@ async function runScenario(repo: ReviewRepo, hostOptions: FakeHostOptions, optio
     const plugin = await MadPlugin({
       client,
       directory: repo.dir,
-      worktree: repo.dir,
+      worktree: worktree ?? repo.dir,
       serverUrl: new URL(serverUrl ?? host.url),
       $: refusingShell(shellProblems),
     } as never)
@@ -1579,6 +1581,80 @@ describe("acceptance — option-shaped targets and configured filters are refuse
           expect(await readFile(log, "utf8")).toBe("")
           // The filter preflight is the one git process started.
           expect(await counted.launches()).toBe(1)
+        } finally {
+          await counted.dispose()
+        }
+      } finally {
+        await repo.remove()
+        await rm(scratch, { recursive: true, force: true })
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
+describe("acceptance — a worktree MAD cannot identify (ledger #150)", () => {
+  test(
+    "a blame quarantine latched under the canonical path holds for a run given a symlinked worktree: no blame launch, disclosed",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const scratch = await mkdtemp(join(tmpdir(), "mad-acceptance-alias-"))
+      const alias = join(scratch, "alias")
+      const fact = { operation: "git blame", why: "an earlier run's deadline", pid: 8181 }
+      const launched: string[][] = []
+      try {
+        await symlink(repo.dir, alias)
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } },
+          {
+            worktree: alias,
+            // After the scenario's own clears: the latch an earlier run left, under the canonical path.
+            aroundExecute: (body) => {
+              latchBlameQuarantine(repo.dir, fact)
+              return spawnHook((cmd) => void launched.push(cmd))(body)
+            },
+          },
+        )
+        expectClean(run)
+        expect(launched.some((cmd) => cmd.includes("diff"))).toBe(true)
+        expect(launched.some((cmd) => cmd.includes("blame"))).toBe(false)
+        expect(run.host.prompts.some((p) => p.text.includes("What `git blame` says"))).toBe(false)
+        expect(run.result.metadata?.warnings).toContain("blame-unavailable")
+        expect(run.result.output).toContain("an earlier git blame could not be confirmed terminated")
+        expect(run.result.output).toContain("an earlier run's deadline")
+      } finally {
+        clearBlameQuarantineForTests(repo.dir)
+        await repo.remove()
+        await rm(scratch, { recursive: true, force: true })
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "a worktree whose path cannot be resolved: stopped before the tools are built, no git read, no model session",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const scratch = await mkdtemp(join(tmpdir(), "mad-acceptance-identity-"))
+      // A symlink to itself: realpath fails with ELOOP, which is not a missing
+      // path, so MAD refuses rather than fall back to the spelling as given.
+      const loop = join(scratch, "loop")
+      try {
+        await symlink(loop, loop)
+        const counted = await gitCounter()
+        try {
+          const run = await runScenario(repo, { discovery: [FEE_FINDING] }, { aroundExecute: counted.around, worktree: loop })
+          expectClean(run)
+          expect(run.result.title).toBe("MAD — could not read the change")
+          expect(run.result.output).toContain("the worktree identity check stopped (identity-unresolved) after 0 completed read(s)")
+          expect(run.result.output).toContain("ELOOP")
+          expect(run.result.output).toContain("MAD could not identify the worktree, so it did not launch this read")
+          expect(run.result.output).toContain("No change was read.")
+          expect(run.result.output).not.toContain("QUARANTINED")
+          expect(run.host.counts.create).toBe(0)
+          expect(run.host.counts.prompt).toBe(0)
+          expect(await counted.launches()).toBe(0)
         } finally {
           await counted.dispose()
         }

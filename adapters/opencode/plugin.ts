@@ -43,6 +43,7 @@ import { changeReadStopGuidance } from "./change-read-guidance.ts"
 import { unsupportedTargetReason } from "./git-read-policy.ts"
 import { ChangeReadRefused, ChangeReadStopped, FilterPreflightFailed, opencodeRepo } from "./repo.ts"
 import { opencodeTools, type BlameCleanupUnresolved } from "./tools.ts"
+import { worktreeIdentity, worktreeKeyOrThrow, type RealpathOf } from "./worktree-identity.ts"
 import { MadStop } from "../../core/domain/stop-cause.ts"
 import {
   describeReviewPermission,
@@ -272,7 +273,10 @@ export function truncatedListWarnings(args: {
  * NARROW ON PURPOSE, and each limit is deliberate:
  *
  * - **Per worktree, never global.** One unaccounted-for process in one
- *   repository is no reason to refuse MAD in an unrelated one.
+ *   repository is no reason to refuse MAD in an unrelated one. The worktree is
+ *   keyed by its identity (`./worktree-identity.ts`), so another spelling of the
+ *   same directory — a symlink, a trailing separator, a relative path — is the
+ *   same worktree.
  * - **Per host process, and NOT durable.** It lives in this module's memory and
  *   is gone when the host restarts. That is an accepted limit rather than an
  *   oversight: a durable registry of process state is a file MAD would have to
@@ -300,17 +304,39 @@ const UNRESOLVED_BLAME_CLEANUP = new Map<string, BlameCleanupUnresolved>()
  * overwrite the first: the earliest process is the one an operator has the least
  * chance of finding by other means, and a reason replaced is a pid lost.
  */
-export function blameQuarantineFor(worktree: string): BlameCleanupUnresolved | undefined {
-  return UNRESOLVED_BLAME_CLEANUP.get(worktree)
+export function blameQuarantineFor(worktree: string, realpath?: RealpathOf): BlameCleanupUnresolved | undefined {
+  return UNRESOLVED_BLAME_CLEANUP.get(worktreeKeyOrThrow(worktree, realpath))
 }
 
-export function latchBlameQuarantine(worktree: string, fact: BlameCleanupUnresolved): void {
-  if (!UNRESOLVED_BLAME_CLEANUP.has(worktree)) UNRESOLVED_BLAME_CLEANUP.set(worktree, fact)
+export function latchBlameQuarantine(worktree: string, fact: BlameCleanupUnresolved, realpath?: RealpathOf): void {
+  latchBlameKey(worktreeKeyOrThrow(worktree, realpath), fact)
 }
 
-/** Test-only. Nothing in a run clears a latch; recovery is a restart. */
-export function clearBlameQuarantineForTests(worktree: string): void {
-  UNRESOLVED_BLAME_CLEANUP.delete(worktree)
+/**
+ * The two halves by an identity already resolved. `MadPlugin` resolves the
+ * worktree's identity ONCE, before it builds the tools, and checks and latches
+ * under that key, so the check and the latch cannot disagree and a cleanup
+ * never has to resolve the path again.
+ */
+function blameQuarantineForKey(key: string): BlameCleanupUnresolved | undefined {
+  return UNRESOLVED_BLAME_CLEANUP.get(key)
+}
+
+function latchBlameKey(key: string, fact: BlameCleanupUnresolved): void {
+  if (!UNRESOLVED_BLAME_CLEANUP.has(key)) UNRESOLVED_BLAME_CLEANUP.set(key, fact)
+}
+
+/** Test-only. Nothing in a run clears a latch; recovery is a restart. Throws on an unresolved identity. */
+export function clearBlameQuarantineForTests(worktree: string, realpath?: RealpathOf): void {
+  UNRESOLVED_BLAME_CLEANUP.delete(worktreeKeyOrThrow(worktree, realpath))
+}
+
+/** A change read that did not return cleanly, or the worktree identity check before it: no model was asked. */
+function changeReadStoppedAnswer(error: ChangeReadStopped): { title: string; output: string } {
+  return {
+    title: "MAD — could not read the change",
+    output: `MAD could not read the change to review.\n\n${error.message}\n\n${changeReadStopGuidance(error)}`,
+  }
 }
 
 /**
@@ -557,7 +583,24 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // for is remembered here, whether or not an earlier fact already
             // holds the worktree's latch, so the answer can say so outside the
             // span.
-            const alreadyUnresolved = blameQuarantineFor(worktree)
+            //
+            // KEYED BY THE WORKTREE'S IDENTITY, resolved once here. A worktree
+            // MAD cannot identify gets no tools at all: the run stops before
+            // they are built, with zero reads, as a stopped change read.
+            const blameIdentity = worktreeIdentity(worktree)
+            if ("unresolved" in blameIdentity) {
+              return changeReadStoppedAnswer(
+                new ChangeReadStopped({
+                  operation: "the worktree identity check",
+                  stop: "identity-unresolved",
+                  readsCompleted: 0,
+                  cleanup: "not-applicable",
+                  why: `${blameIdentity.unresolved}, so MAD did not launch any read: without the worktree's identity it cannot tell whether the worktree is quarantined`,
+                }),
+              )
+            }
+            const blameKey = blameIdentity.key
+            const alreadyUnresolved = blameQuarantineForKey(blameKey)
             let stopLatchedBlame: BlameCleanupUnresolved | undefined
             const tools = opencodeTools({
               $,
@@ -566,7 +609,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               signal: runControl.signal,
               ...(alreadyUnresolved === undefined ? {} : { quarantinedBy: alreadyUnresolved }),
               onCleanupUnresolved: (fact) => {
-                latchBlameQuarantine(worktree, fact)
+                latchBlameKey(blameKey, fact)
                 stopLatchedBlame = stopCausedBlameFact(stopLatchedBlame, fact)
               },
             })
@@ -633,15 +676,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               }
               // A READ THAT DID NOT RETURN CLEANLY is not a bad ref, and the
               // bad-ref hint would send the user after the wrong fix.
-              if (error instanceof ChangeReadStopped) {
-                return {
-                  title: "MAD — could not read the change",
-                  output:
-                    `MAD could not read the change to review.\n\n` +
-                    `${error.message}\n\n` +
-                    changeReadStopGuidance(error),
-                }
-              }
+              if (error instanceof ChangeReadStopped) return changeReadStoppedAnswer(error)
               // A bad ref, or a directory that is not a git repo. Say which.
               return {
                 title: "MAD — could not read the change",

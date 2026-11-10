@@ -41,6 +41,9 @@
  * every later spawn for it — from this `change()`, another one in flight, or a
  * fresh `opencodeRepo` — is refused until the host restarts. The latch is
  * checked immediately before every spawn, not only when `change()` starts. It is
+ * keyed by the worktree's identity (`./worktree-identity.ts`), so a symlinked,
+ * trailing-separator or relative spelling of the same directory is the same
+ * worktree; a worktree that cannot be identified launches nothing. It is
  * separate from `git blame`'s latch in `plugin.ts`, and neither reads the other.
  */
 
@@ -66,6 +69,7 @@ import {
   usesReadOnlyPolicy,
   type GitReadPolicy,
 } from "./git-read-policy.ts"
+import { worktreeIdentity, worktreeKeyOrThrow, type RealpathOf } from "./worktree-identity.ts"
 
 /** The total execution budget of one `change()`. An operational limit, not a measured latency. */
 export const DEFAULT_CHANGE_READ_BUDGET_MS = 60_000
@@ -93,6 +97,8 @@ export interface OpencodeRepoOptions {
   cleanupMs?: number
   /** A monotonic clock in milliseconds. Default `performance.now`. */
   now?: () => number
+  /** How the worktree's identity is resolved (`./worktree-identity.ts`). Test seam; the default is `node:fs`. */
+  realpath?: RealpathOf
 }
 
 /**
@@ -162,6 +168,11 @@ export type ChangeReadStopKind =
   | "stderr-unread"
   /** The worktree is quarantined, so the read was not launched. */
   | "quarantined"
+  /**
+   * The worktree's identity, which the quarantine is keyed by, could not be
+   * resolved (`./worktree-identity.ts`), so this read was not launched.
+   */
+  | "identity-unresolved"
   /**
    * CAP-5 — the caller's stop. Nothing was started after it was seen; a read
    * it caught running was killed under the bounded cleanup, whose outcome
@@ -271,22 +282,29 @@ function cleanupWords(cleanup: ChangeReadCleanup, exitObserved: boolean): string
 
 /**
  * Worktrees where a change read left a process nobody could account for.
- * Keyed by the `worktree` string as given, as blame's latch is. Process-local
- * and not durable: nothing clears it but a host restart.
+ * Keyed by the worktree's identity (`./worktree-identity.ts`), as blame's latch
+ * is, so another spelling of the same directory finds the same entry.
+ * Process-local and not durable: nothing clears it but a host restart.
  */
 const UNRESOLVED_CHANGE_READ = new Map<string, ChangeReadQuarantine>()
 
-export function changeReadQuarantineFor(worktree: string): ChangeReadQuarantine | undefined {
-  return UNRESOLVED_CHANGE_READ.get(worktree)
+/**
+ * The latch for this worktree, or `undefined` when it has none. Throws
+ * `WorktreeIdentityUnresolved` when the worktree cannot be identified: an
+ * unknown identity is never reported as "not quarantined".
+ */
+export function changeReadQuarantineFor(worktree: string, realpath?: RealpathOf): ChangeReadQuarantine | undefined {
+  return UNRESOLVED_CHANGE_READ.get(worktreeKeyOrThrow(worktree, realpath))
 }
 
-/** Test-only. Nothing in a run clears a latch; recovery is a restart. */
-export function clearChangeReadQuarantineForTests(worktree: string): void {
-  UNRESOLVED_CHANGE_READ.delete(worktree)
+/** Test-only. Nothing in a run clears a latch; recovery is a restart. Throws on an unresolved identity. */
+export function clearChangeReadQuarantineForTests(worktree: string, realpath?: RealpathOf): void {
+  UNRESOLVED_CHANGE_READ.delete(worktreeKeyOrThrow(worktree, realpath))
 }
 
-function latch(worktree: string, fact: ChangeReadQuarantine): void {
-  if (!UNRESOLVED_CHANGE_READ.has(worktree)) UNRESOLVED_CHANGE_READ.set(worktree, fact)
+/** `key` is the identity resolved immediately before the read that is latching; it is never re-resolved here. */
+function latch(key: string, fact: ChangeReadQuarantine): void {
+  if (!UNRESOLVED_CHANGE_READ.has(key)) UNRESOLVED_CHANGE_READ.set(key, fact)
 }
 
 export function opencodeRepo(options: OpencodeRepoOptions): Repo {
@@ -363,8 +381,19 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         }
 
         // IMMEDIATELY BEFORE EVERY SPAWN: another invocation may have latched
-        // this worktree while this one was between reads.
-        const latched = UNRESOLVED_CHANGE_READ.get(worktree)
+        // this worktree while this one was between reads, under any spelling of
+        // it. The key resolved here is the one this read latches under, so the
+        // check and the latch cannot disagree.
+        const identity = worktreeIdentity(worktree, options.realpath)
+        if ("unresolved" in identity) {
+          throw stopped(operation, {
+            stop: "identity-unresolved",
+            cleanup: "not-applicable",
+            why: `${identity.unresolved}, so MAD did not launch this read: without the worktree's identity it cannot tell whether the worktree is quarantined`,
+          })
+        }
+        const key = identity.key
+        const latched = UNRESOLVED_CHANGE_READ.get(key)
         if (latched !== undefined) {
           throw stopped(operation, {
             stop: "quarantined",
@@ -400,7 +429,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         const launched =
           outcome.kind !== "refused" && outcome.kind !== "launch-failed" && !(outcome.kind === "stopped" && !outcome.launched)
         if (operation === "git diff" && launched) contentRead ??= "possibly"
-        const accepted = accept(operation, outcome, acceptOne)
+        const accepted = accept(operation, outcome, acceptOne, key)
 
         // THE FINAL-READ BOUNDARY. A read that came back after the budget had
         // passed is not used, the last one included. The launcher already
@@ -425,6 +454,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
         operation: string,
         outcome: BlameExecOutcome,
         acceptOne: boolean,
+        key: string,
       ): { stdout: string; exitCode: number } {
         switch (outcome.kind) {
           case "refused":
@@ -433,7 +463,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
           case "observation-failed": {
             const why =
               outcome.cleanup.kind === "unresolved" ? `${outcome.why}. ${outcome.cleanup.why}` : outcome.why
-            if (outcome.cleanup.kind === "unresolved") latch(worktree, { operation, why, ...pidOf(outcome.pid) })
+            if (outcome.cleanup.kind === "unresolved") latch(key, { operation, why, ...pidOf(outcome.pid) })
             throw stopped(operation, {
               stop: "observation-failed",
               cleanup: outcome.cleanup.kind,
@@ -451,7 +481,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
               ...observedOf(outcome.observed),
             })
           case "cleanup-unresolved":
-            latch(worktree, { operation, why: outcome.why, ...pidOf(outcome.pid) })
+            latch(key, { operation, why: outcome.why, ...pidOf(outcome.pid) })
             throw stopped(operation, {
               stop: "cleanup-unresolved",
               cleanup: "unresolved",
@@ -468,7 +498,7 @@ export function opencodeRepo(options: OpencodeRepoOptions): Repo {
               })
             }
             if (outcome.cleanup.kind === "unresolved") {
-              latch(worktree, { operation, why: outcome.why, ...pidOf(outcome.pid) })
+              latch(key, { operation, why: outcome.why, ...pidOf(outcome.pid) })
               throw stopped(operation, {
                 stop: "cancelled",
                 cleanup: "unresolved",

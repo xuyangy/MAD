@@ -38,6 +38,13 @@ export function changeReadStopGuidance(error: ChangeReadStopped): string {
         `This worktree is QUARANTINED: MAD reads nothing in it until opencode restarts. ` +
         restart(error.quarantine?.pid)
       )
+    case "identity-unresolved":
+      // Earlier reads may have completed; the error's own message keeps their count.
+      return (
+        `MAD could not identify the worktree, so it did not launch this read: it keys its quarantine by the ` +
+        `worktree's resolved path, and without it MAD cannot tell whether an earlier read here is still ` +
+        `running. Check that the worktree's path and its parent directories can be read, then try again.`
+      )
     case "launch-failed":
       return `git could not be started. Check that git is installed and on the PATH opencode runs with.`
     case "refused":
