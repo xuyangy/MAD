@@ -121,8 +121,11 @@ describe("README — status", () => {
   })
 
   test("the host-version evidence says which bundle each fact was read from", () => {
-    expect(README).toContain("The opencode-ai 1.19.5 bundle was read the same way for the review-session policy only")
-    expect(README).toContain("Its plugin loader was not re-read.")
+    expect(PROSE).toContain(
+      "The opencode-ai 1.19.5 bundle was read the same way for the review-session policy, which it evaluates as described below, and, for the live-run authorization, for how `opencode run` chooses the outer agent's model and handles permission requests, and how a plugin's tools are wrapped.",
+    )
+    expect(PROSE).toContain("Its plugin loader was not re-read in full.")
+    expect(README).not.toContain("for the review-session policy only")
   })
 
   test("the target host names one version and two routes, each not established, and cites its evidence", () => {
@@ -132,9 +135,10 @@ describe("README — status", () => {
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
     expect(PROSE).toContain(
-      "Both routes' verdict for this release is *not established*: the offline-only outcome was chosen, so no authorized live run was made. The tool-calling filter, the replacement of refused slots and the replacement session's policy check have run only in the offline tests.",
+      "Both routes' verdict for this release, rendered on 2026-11-11, is *not established*: no authorized live review has completed on either route. The one authorized attempt, through `opencode run`, ended when the outer agent's own model request was refused, before any MAD review was observed. The authorization then ended, so the TUI was not attempted. The attempt and the verdict are recorded as N1 and the 2026-11-11 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files. The tool-calling filter, the replacement of refused slots and the replacement session's policy check have run only in the offline tests.",
     )
-    expect(README).toContain("| How a plugin is loaded from a package | read from the 1.19.3 bundle only; the 1.19.5 loader is unverified.")
+    expect(README).not.toContain("the offline-only outcome was chosen")
+    expect(README).toContain("| How a plugin is loaded from a package | read from the 1.19.3 bundle; in 1.19.5 only the wrapper around a plugin's tools was read, and the loader itself is unverified.")
     expect(README).toContain("Registration was observed by hand on 1.19.5 (historical registration report E1, source commit `12af673`). |")
     expect(README).toContain("| The plugin reaches the host through the client OpenCode hands it | observed by hand on 1.19.5 in historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0` |")
     expect(README).toContain("| How the review-session permission rules are evaluated | read from the 1.19.5 bundle |")
