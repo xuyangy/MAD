@@ -969,7 +969,8 @@ export interface JudgeCounts {
   verifiedIndependently: number
   /**
    * AD-6/AD-12 — fact-check turns that never completed: the slot failed both
-   * attempts (code review 2026-08-28).
+   * attempts, or its only attempt was refused and not retried (code review
+   * 2026-08-28).
    *
    * Distinct from `factChecksUnverified`, which counts checks that DID answer
    * while opening nothing. Without this, a verify-independently finding whose one

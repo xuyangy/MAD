@@ -82,6 +82,7 @@
  * stage could ship the exact failure story 7A exists to prevent.
  */
 
+import { describeRefusal } from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -561,32 +562,6 @@ function notReplacedReason(entry: NotReplaced): string {
     case "cancelled":
       return "the run was stopped before a replacement was dispatched"
   }
-}
-
-/**
- * One refusal, in words: what was refused, at what scope, and on what evidence.
- * A capability refusal is named by the feature it rejected; the forced tool
- * choice is the only capability signature recognised today, so the wording
- * names it.
- */
-function describeRefusal(refusal: Refusal): string {
-  const what =
-    refusal.kind === "payment"
-      ? "a payment refusal"
-      : refusal.kind === "capability"
-        ? "a capability refusal (the route does not accept MAD's forced tool choice)"
-        : "an authentication refusal"
-  const where =
-    refusal.scope === "provider"
-      ? `for provider \`${refusal.providerId}\``
-      : `for the route \`${refusal.providerId}/${refusal.modelId}\``
-  const evidence =
-    refusal.basis === "structured"
-      ? "from the host's structured error"
-      : refusal.kind === "capability"
-        ? "recognised from a known host error text"
-        : "recognised from a known host error text, not from a checked account balance"
-  return `${what} ${where}, ${evidence}`
 }
 
 export async function discover(input: DiscoverInput): Promise<DiscoverResult> {

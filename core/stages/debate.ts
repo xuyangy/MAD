@@ -72,6 +72,7 @@
  * it. The stage returns the array it was given.
  */
 
+import { describeRefusal } from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -262,8 +263,8 @@ export interface DebateStageResult extends DebateCounts {
   /** The clamped value this run actually debated under. */
   maxRounds: number
   /**
-   * AD-6b — slots that failed both attempts during THIS stage (code review
-   * 2026-08-28).
+   * AD-6b — slots that dropped out during THIS stage, after failing both
+   * attempts or a refused only attempt (code review 2026-08-28).
    *
    * Discovery has always returned its own; debate kept the set local, so
    * `review()` derived "who is still alive to be asked" from discovery alone and
@@ -484,6 +485,12 @@ async function runDebateTurn(
     }
     // Ledger #7 — a host-reported abort gets no second attempt.
     if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
+    // A REFUSED REQUEST IS NOT RETRIED, as in `discover.ts`'s `runWithOneRetry`:
+    // an attempt the backend classified as a refusal (`Refusal`) ends the slot's
+    // attempts, on the first attempt or the retry. Its usage is recorded above.
+    // `refused` stays false: that field means an admission or budget refusal,
+    // not a request the provider refused.
+    if (envelope.refusal !== undefined) return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
   return { refused: false, envelope: last!, attempts: 2 }
@@ -948,8 +955,9 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   })
 
   /**
-   * Slots that failed twice in a round. They are DROPPED FOR THE REST OF THE
-   * STAGE, not merely warned about once (code review 2026-08-24).
+   * Slots that failed twice in a round, or were refused on their only attempt.
+   * They are DROPPED FOR THE REST OF THE STAGE, not merely warned about once
+   * (code review 2026-08-24).
    *
    * The previous shape suppressed the duplicate warning and left the slot in
    * every subsequent round's fan-out, so a dead model silently cost two attempts
@@ -1193,14 +1201,22 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         // is NOT salvaged item-by-item the way discovery salvages findings —
         // discovery salvages to protect the AD-6a denominator, and there is no
         // equivalent here: a half-parsed position is a position nobody stated.
+        //
+        // A REFUSED request (`Refusal`) was not retried when its first attempt
+        // was refused, and the warning says so rather than counting two attempts.
         if (!droppedOutThisStage.has(outcome.slot)) {
           droppedOutThisStage.add(outcome.slot)
+          const { refusal } = outcome.envelope
+          const howOften =
+            refusal !== undefined && outcome.attempts < 2
+              ? `was refused on its only attempt in round ${round} (${describeRefusal(refusal)}), so it was ` +
+                `not retried`
+              : `failed twice in round ${round}`
           warnings.push({
             code: "model-dropped-out",
             stage: "debate",
             message:
-              `MODEL DROPPED OUT OF DEBATE: \`${modelOf(outcome.slot)}\` (slot ${outcome.slot}) failed ` +
-              `twice in round ${round} ` +
+              `MODEL DROPPED OUT OF DEBATE: \`${modelOf(outcome.slot)}\` (slot ${outcome.slot}) ${howOften} ` +
               `(${outcome.envelope.failure}: ${outcome.envelope.message}). The round completed without ` +
               `it, and it is NOT asked again in any later round of this debate. Its silence is an ` +
               `abstention: it neither denied nor conceded any finding, and no debate waited on it.`,
@@ -1212,6 +1228,12 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
               error: outcome.envelope.message,
               findings: outcome.rooms.map((room) => room.finding.id),
               raw: outcome.envelope.raw,
+              ...(refusal === undefined
+                ? {}
+                : {
+                    attempts: outcome.attempts,
+                    refusal: { kind: refusal.kind, basis: refusal.basis, scope: refusal.scope },
+                  }),
             },
           })
         }

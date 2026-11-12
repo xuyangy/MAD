@@ -80,6 +80,7 @@
  * story 8's; it is filed in `deferred-work.md` rather than guessed at here.
  */
 
+import { describeRefusal, type Refusal } from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -461,6 +462,12 @@ async function runJudgeTurn<T>(
     }
     // Ledger #7 — a host-reported abort gets no second attempt.
     if (envelope.failure === "host-aborted") return { refused: false, envelope, attempts: attempt }
+    // A REFUSED REQUEST IS NOT RETRIED, as in `discover.ts`'s `runWithOneRetry`:
+    // an attempt the backend classified as a refusal (`Refusal`) ends the slot's
+    // attempts, on the first attempt or the retry. Its usage is recorded above.
+    // `refused` stays false: that field means an admission or budget refusal,
+    // not a request the provider refused.
+    if (envelope.refusal !== undefined) return { refused: false, envelope, attempts: attempt }
     last = envelope
   }
   return { refused: false, envelope: last!, attempts: 2 }
@@ -1100,8 +1107,9 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   }
 
   /**
-   * AD-6b — a turn that failed twice is reported once per slot, by name, AND THE
-   * SLOT IS DROPPED FOR THE REST OF THE STAGE.
+   * AD-6b — a turn that failed twice, or was refused on its only attempt, is
+   * reported once per slot, by name, AND THE SLOT IS DROPPED FOR THE REST OF
+   * THE STAGE.
    *
    * Warning-only was the shape until code review 2026-08-27, and it repeated
    * exactly the defect story 5's review found in debate: a dead model stayed in
@@ -1116,11 +1124,25 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    * retried on a later finding — is the trade AD-6b already makes inside one
    * turn, applied at the stage's granularity rather than contradicted at it.
    */
-  const noteDropOut = (slot: string, role: JudgeRole, failure: { message: string; raw?: unknown }, retryRefused = false): void => {
+  const noteDropOut = (
+    slot: string,
+    role: JudgeRole,
+    failure: { message: string; raw?: unknown; refusal?: Refusal },
+    { retryRefused = false, attempts }: { retryRefused?: boolean; attempts?: number } = {},
+  ): void => {
     if (droppedOut.includes(slot)) return
     droppedOut.push(slot)
-    const { message } = failure
+    const { message, refusal } = failure
     const shape = failure.raw === undefined ? undefined : payloadShape(failure.raw)
+    // A REFUSED request (`Refusal`) on the first attempt was not retried, and
+    // the warning says so rather than counting two attempts.
+    const refusedOnly = !retryRefused && refusal !== undefined && attempts !== undefined && attempts < 2
+    const lost = retryRefused
+      ? `failed once, and its retry was refused, on the ${role} step and`
+      : refusedOnly
+        ? `was refused on its only attempt on the ${role} step (${describeRefusal(refusal)}), so it was not ` +
+          `retried, and`
+        : `failed twice on the ${role} step and`
     warnings.push({
       code: "model-dropped-out",
       stage: "judge",
@@ -1133,18 +1155,22 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // roster block, `raised by:`, the transcript — identifies a participant
       // by it. `discover.ts` set this shape first.
       message:
-        `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) ${retryRefused ? "failed once, and its retry was refused," : "failed twice"} on the ${role} step and ` +
+        `JUDGE TURN LOST: \`${modelOf(slot)}\` (slot ${slot}) ${lost} ` +
         `the run continued without it. Any finding it was asked about is decided on what the other ` +
         `steps produced, which is less than it should have been. (${message})` +
         (shape === undefined ? "" : ` The payload it returned: ${shape}.`),
-      // `attempts` only when a retry was refused, which only an admission can do:
-      // an ordinary run's warning keeps its shape.
+      // `attempts` only when a retry was refused, which only an admission can do,
+      // or when the turn carried a refusal: an ordinary failure's warning keeps
+      // its shape.
       detail: {
         slot,
         model: modelOf(slot),
         role,
         message,
-        ...(retryRefused ? { attempts: 1 } : {}),
+        ...(retryRefused ? { attempts: 1 } : refusal !== undefined && attempts !== undefined ? { attempts } : {}),
+        ...(refusal === undefined
+          ? {}
+          : { refusal: { kind: refusal.kind, basis: refusal.basis, scope: refusal.scope } }),
         ...(shape === undefined ? {} : { payloadShape: shape }),
       },
     })
@@ -1235,7 +1261,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   const noteLost = (
     slot: string,
     role: JudgeRole,
-    envelope: { failure: TurnFailure; message: string; raw?: unknown },
+    envelope: { failure: TurnFailure; message: string; raw?: unknown; refusal?: Refusal },
     attempts: number,
     finding: Finding,
   ): void => {
@@ -1258,7 +1284,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       )
       return
     }
-    noteDropOut(slot, role, envelope)
+    noteDropOut(slot, role, envelope, { attempts })
   }
 
   /**
@@ -1267,7 +1293,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
    */
   const noteRefusedFailure = (outcome: RefusedTurn, slot: string, role: JudgeRole): void => {
     if (outcome.failure !== undefined && !outcome.failure.ok) {
-      noteDropOut(slot, role, outcome.failure, true)
+      noteDropOut(slot, role, outcome.failure, { retryRefused: true })
     }
   }
 
@@ -2012,8 +2038,9 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // counts checks that ANSWERED while opening nothing. This one never
       // answered.
       // A host-aborted check never answered either, but the line this count
-      // renders says the model failed both attempts, which is not what happened.
-      // The renderer reports it from the judge-stage `turn-host-aborted` warning.
+      // renders points to the JUDGE TURN LOST warnings, which a host abort does
+      // not produce. The renderer reports it from the judge-stage
+      // `turn-host-aborted` warning.
       if (factOutcome.envelope.failure !== "host-aborted") counts.factChecksDroppedOut += 1
       if (!argued) {
         counts.verifiedIndependently += 1

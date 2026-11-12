@@ -4,6 +4,7 @@ import { z } from "zod"
 
 import { mayISpend, spent, type BudgetLedger } from "../budget/ledger.ts"
 import type { CoDiscovery, Entry, Finding, Severity } from "../domain/finding.ts"
+import type { Refusal } from "../domain/refusal.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { emptyLedger, withShares, type RunRecord } from "../domain/run-record.ts"
 import { CODING_DEBATE_GENERALIST } from "../instructions/coding/debate.ts"
@@ -144,6 +145,19 @@ function run(
     ledger: emptyLedger() as BudgetLedger,
     ...overrides,
   })
+}
+
+/**
+ * A route refusal of the kind the 2026-11-12 live runs produced. Its model id
+ * differs from the slot id, so a warning naming the route is told apart from one
+ * naming the slot.
+ */
+const CAPABILITY_REFUSAL: Refusal = {
+  kind: "capability",
+  basis: "host-signature",
+  scope: "route",
+  providerId: "provider",
+  modelId: "refused-model",
 }
 
 const roundEntries = (finding: Finding): Entry[] =>
@@ -507,6 +521,70 @@ describe("debate — the proceeding barrier (AD-6b, AD-12)", () => {
     // The author's position was still recorded, and the finding still exited.
     expect(roundEntries(finding).map((entry) => entry.actor)).toEqual(["discovery-1"])
     expect(finding.exit).toBeDefined()
+  })
+
+  test("MATRIX: a seat whose turn is REFUSED is asked once, not retried, and the warning says so", async () => {
+    const finding = contested()
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [
+        {
+          kind: "fail",
+          failure: "model-error",
+          message: 'tool_choice: type "tool" and "any" are not supported for this model.',
+          refusal: CAPABILITY_REFUSAL,
+        },
+      ],
+    })
+    const result = await run([finding], {}, { backend, maxRounds: 2 })
+
+    // One attempt in round 1, and none in round 2: the seat dropped out.
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(1)
+    const dropped = result.warnings.filter((warning) => warning.code === "model-dropped-out")
+    expect(dropped).toHaveLength(1)
+    expect(dropped[0]!.message).toContain(
+      "was refused on its only attempt in round 1 (a capability refusal (the route does not accept MAD's " +
+        "forced tool choice) for the route `provider/refused-model`, recognised from a known host error text), " +
+        "so it was not retried",
+    )
+    // The route is the refusal's, not one built from the slot id.
+    expect(dropped[0]!.message).toContain("for the route `provider/refused-model`")
+    expect(dropped[0]!.message).not.toContain("twice")
+    expect(dropped[0]!.detail?.attempts).toBe(1)
+    expect(dropped[0]!.detail?.refusal).toEqual({ kind: "capability", basis: "host-signature", scope: "route" })
+    expect(roundEntries(finding).map((entry) => entry.actor)).toEqual(["discovery-1"])
+  })
+
+  test("MATRIX: a refusal on the RETRY keeps the two-attempt wording and records the refusal", async () => {
+    const finding = contested()
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [
+        { kind: "fail", failure: "transport-error", message: "socket closed" },
+        { kind: "fail", failure: "model-error", message: "refused", refusal: CAPABILITY_REFUSAL },
+      ],
+    })
+    const result = await run([finding], {}, { backend, maxRounds: 1 })
+
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
+    const dropped = result.warnings.find((warning) => warning.code === "model-dropped-out")!
+    expect(dropped.message).toContain("failed twice in round 1")
+    expect(dropped.detail?.attempts).toBe(2)
+    expect(dropped.detail?.refusal).toEqual({ kind: "capability", basis: "host-signature", scope: "route" })
+  })
+
+  test("MATRIX: an ordinary model-error is still retried once", async () => {
+    const finding = contested()
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" })],
+      "discovery-2": [{ kind: "fail", failure: "model-error", message: "overloaded" }],
+    })
+    const result = await run([finding], {}, { backend, maxRounds: 1 })
+
+    expect(backend.calls.filter((call) => call.slot === "discovery-2")).toHaveLength(2)
+    const dropped = result.warnings.find((warning) => warning.code === "model-dropped-out")!
+    expect(dropped.message).toContain("failed twice in round 1")
+    expect(dropped.detail?.refusal).toBeUndefined()
   })
 
   test("MATRIX: a schema-invalid envelope is a drop-out FOR THAT SLOT, and the raw payload is kept", async () => {

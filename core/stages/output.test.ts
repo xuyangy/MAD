@@ -1462,6 +1462,9 @@ describe("the judge's verdict is rendered (CAP-5)", () => {
     )
 
     expect(rendered).toContain("2 check(s) against the code NEVER COMPLETED")
+    // A refused check made one attempt, so the line claims no attempt count.
+    expect(rendered).toContain("asked gave no answer (the judge's JUDGE TURN LOST warnings say why)")
+    expect(rendered).not.toContain("both attempts")
     // And it did NOT claim they opened nothing — that is the other line.
     expect(rendered).not.toContain("OPENED NOTHING AND RAN")
   })
@@ -3625,7 +3628,7 @@ describe("the JUDGE summary reports a host-aborted check (ledger #7)", () => {
     expect(rendered).toContain("1 check(s) against the code NEVER COMPLETED — the host reported the turn")
     expect(rendered).toContain("1 finding(s) were not settled because the host reported a judge turn aborted")
     expect(rendered).not.toContain('"Not settled" is a real answer')
-    expect(rendered).not.toContain("asked failed both attempts")
+    expect(rendered).not.toContain("asked gave no answer")
   })
 
   test("mixed: the 'real answer' sentence is scoped to the findings the evidence did not decide", () => {

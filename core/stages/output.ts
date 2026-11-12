@@ -808,8 +808,8 @@ function judgeSummary(record: RunRecord): string[] {
     // this one never answered at all.
     lines.push(
       `  ! ${counts.factChecksDroppedOut} check(s) against the code NEVER COMPLETED — the model`,
-      `  asked failed both attempts. Any finding relying on one was decided without it, or not`,
-      `  decided at all.`,
+      `  asked gave no answer (the judge's JUDGE TURN LOST warnings say why). Any finding relying`,
+      `  on one was decided without it, or not decided at all.`,
     )
   }
 

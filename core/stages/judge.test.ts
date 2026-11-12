@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import type { BudgetLedger } from "../budget/ledger.ts"
 import { emptyLedger, emptyTokenUsage, recordTurn } from "../domain/run-record.ts"
 import type { Entry, Finding, Severity } from "../domain/finding.ts"
+import type { Refusal } from "../domain/refusal.ts"
 import type { LensSlot, Roster, RosterSlot } from "../domain/roster.ts"
 import { CODING_LENSES } from "../instructions/coding/lenses.ts"
 import { resolveInstructions } from "../instructions/registry.ts"
@@ -185,6 +186,31 @@ function recordingBackend(seen: { slot: string; role?: JudgeRoleTag; input: stri
 function failingRoles(...roles: JudgeRoleTag[]): FakeBackend {
   const script: Partial<Record<JudgeRoleTag, SlotScript>> = {}
   for (const role of roles) script[role] = [{ kind: "fail", failure: "model-error", message: "boom" }]
+  return new FakeBackend({}, {}, script)
+}
+
+/** A route refusal as the 2026-11-12 live runs produced it; the slot it names is illustrative. */
+const CAPABILITY_REFUSAL: Refusal = {
+  kind: "capability",
+  basis: "host-signature",
+  scope: "route",
+  providerId: "p",
+  modelId: "refused",
+}
+
+/** A backend whose named roles are refused (`CAPABILITY_REFUSAL`), and whose others answer normally. */
+function refusingRoles(...roles: JudgeRoleTag[]): FakeBackend {
+  const script: Partial<Record<JudgeRoleTag, SlotScript>> = {}
+  for (const role of roles) {
+    script[role] = [
+      {
+        kind: "fail",
+        failure: "model-error",
+        message: 'tool_choice: type "tool" and "any" are not supported for this model.',
+        refusal: CAPABILITY_REFUSAL,
+      },
+    ]
+  }
   return new FakeBackend({}, {}, script)
 }
 
@@ -434,6 +460,65 @@ describe("a turn that fails twice", () => {
     // different fact and has its own warning.
     expect(result.factChecksUnverified).toBe(0)
     expect(result.warnings.map((w) => w.code)).toContain("model-dropped-out")
+  })
+
+  test("MATRIX: a REFUSED fact-check is asked once, not retried, and no line claims two attempts", async () => {
+    const backend = refusingRoles("fact-check")
+    const f = finding({ route: "judge", history: [] })
+    const result = await run([f], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "fact-check")).toHaveLength(1)
+    expect(result.attempts).toBe(1)
+    expect(f.verdict).toBe("not-adjudicated")
+    expect(result.factChecksDroppedOut).toBe(1)
+    const lost = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(lost.message).toContain(
+      "was refused on its only attempt on the fact-check step (a capability refusal (the route does not " +
+        "accept MAD's forced tool choice) for the route `p/refused`, recognised from a known host error " +
+        "text), so it was not retried, and the run continued without it",
+    )
+    expect(lost.message).not.toContain("twice")
+    expect(lost.detail?.attempts).toBe(1)
+    expect(lost.detail?.refusal).toEqual({ kind: "capability", basis: "host-signature", scope: "route" })
+  })
+
+  test("MATRIX: a refusal on the judge's RETRY keeps the two-attempt wording and records the refusal", async () => {
+    const backend = new FakeBackend({}, {}, {
+      "fact-check": [
+        { kind: "fail", failure: "transport-error", message: "socket closed" },
+        { kind: "fail", failure: "model-error", message: "refused", refusal: CAPABILITY_REFUSAL },
+      ],
+    })
+    const result = await run([finding({ route: "judge", history: [] })], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "fact-check")).toHaveLength(2)
+    const lost = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(lost.message).toContain("failed twice on the fact-check step")
+    expect(lost.detail?.attempts).toBe(2)
+    expect(lost.detail?.refusal).toEqual({ kind: "capability", basis: "host-signature", scope: "route" })
+  })
+
+  test("MATRIX: an ordinary judge failure without a refusal is still retried once", async () => {
+    const backend = failingRoles("fact-check")
+    const result = await run([finding({ route: "judge", history: [] })], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "fact-check")).toHaveLength(2)
+    const lost = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(lost.message).toContain("failed twice on the fact-check step")
+    expect(lost.detail?.refusal).toBeUndefined()
+  })
+
+  test("a REFUSED logic evaluator is asked once, and the verdict still lands", async () => {
+    const backend = refusingRoles("logic-eval")
+    const f = argued()
+    const result = await run([f], { backend })
+
+    expect(backend.calls.filter((call) => call.role === "logic-eval")).toHaveLength(1)
+    expect(f.verdict).toBe("upheld")
+    const lost = result.warnings.find((w) => w.code === "model-dropped-out")!
+    expect(lost.message).toContain("was refused on its only attempt on the logic-eval step")
+    expect(lost.detail?.attempts).toBe(1)
+    expect(lost.detail?.refusal).toEqual({ kind: "capability", basis: "host-signature", scope: "route" })
   })
 
   test("the logic evaluator drops out — advisory, so the verdict still lands", async () => {

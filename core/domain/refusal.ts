@@ -1,6 +1,8 @@
 /**
- * The data vocabulary for a refused request, shared by the backend port, which
- * produces it, and the run record, which keeps it for discovery recovery.
+ * The data vocabulary for a refused request. The type is shared by the backend
+ * port, which produces it, and the run record, which keeps it for discovery
+ * recovery. The module also holds the one description of a refusal that every
+ * stage's warnings use.
  */
 
 /**
@@ -14,10 +16,11 @@
  * in `basis`. Everything it cannot classify stays an ordinary failure. The
  * provider and model are the roster slot's, never read from the error.
  *
- * Discovery, pool and lens slots alike, skips its automatic retry after an
- * attempt carrying a refusal. That is a policy on the classification; it does
- * not establish the account's state, and the refused attempt's usage may still
- * be unknown. Debate and judge retry as they do for any failure.
+ * Every stage skips its automatic retry after an attempt carrying a refusal:
+ * discovery's pool and lens slots, debate's seats and judge's roles. That is a
+ * policy on the classification; it does not establish the account's state, and
+ * the refused attempt's usage may still be unknown. Only discovery replaces a
+ * refused slot.
  */
 export interface Refusal {
   /**
@@ -36,4 +39,41 @@ export interface Refusal {
   scope: "provider" | "route"
   providerId: string
   modelId: string
+}
+
+/**
+ * One refusal, in words: what was refused, at what scope, and on what evidence.
+ * A capability refusal is named by the feature it rejected; the forced tool
+ * choice is the only capability signature recognised today, so the wording
+ * names it.
+ */
+export function describeRefusal(refusal: Refusal): string {
+  const what = refusalKindWords(refusal.kind)
+  const where =
+    refusal.scope === "provider"
+      ? `for provider \`${refusal.providerId}\``
+      : `for the route \`${refusal.providerId}/${refusal.modelId}\``
+  const evidence =
+    refusal.basis === "structured"
+      ? "from the host's structured error"
+      : refusal.kind === "capability"
+        ? "recognised from a known host error text"
+        : "recognised from a known host error text, not from a checked account balance"
+  return `${what} ${where}, ${evidence}`
+}
+
+/** A refusal's kind, in words; a new kind fails to compile until it is worded here. */
+function refusalKindWords(kind: Refusal["kind"]): string {
+  switch (kind) {
+    case "auth":
+      return "an authentication refusal"
+    case "payment":
+      return "a payment refusal"
+    case "capability":
+      return "a capability refusal (the route does not accept MAD's forced tool choice)"
+    default: {
+      const unworded: never = kind
+      return unworded
+    }
+  }
 }

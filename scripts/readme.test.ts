@@ -191,7 +191,8 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain("If no offered model declares it, MAD refuses before asking any model.")
     expect(PROSE).toContain("For a recognised refusal, once every first-round discovery turn has finished, MAD replaces the refused slot once with a model not in the pool")
     expect(PROSE).toContain("A slot you pinned with `models` is not replaced, and lens slots are never replaced.")
-    expect(PROSE).toContain("When a provider refuses a discovery model's request in a way MAD recognises, MAD does not retry it.")
+    expect(PROSE).toContain("When a provider refuses a request in a way MAD recognises, MAD does not retry it, whether the request was a discovery, debate or judge turn; a refused debate or judge model drops out of that stage and is not replaced.")
+    expect(PROSE).not.toContain("refuses a discovery model's request")
     expect(PROSE).toContain(
       "A recognised refusal is an authentication or payment refusal, such as GitLab's no-credits error, or a capability refusal: an `APIError` whose message is exactly `tool_choice: type \"tool\" and \"any\" are not supported for this model.`, with `isRetryable` absent or false, whatever its status code (a 401, 402 or 5xx carrying this text is a capability refusal, not an authentication or payment one), which means the route rejects the forced tool choice MAD's structured answers need.",
     )
