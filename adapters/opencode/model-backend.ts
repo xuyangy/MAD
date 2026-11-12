@@ -283,7 +283,8 @@ export interface OpencodeBackendOptions {
    * `retry` with its next try after the turn's deadline settles at that read
    * instead of at the deadline. The host's `next` is on the host's clock and
    * the deadline on MAD's; the two are assumed to agree, and no slack is
-   * added. A positive finite number; default 5000. Has no effect on a client
+   * added. A positive number of at most 2147483647 (the longest timer delay;
+   * a longer one fires at once); default 5000. Has no effect on a client
    * without `session.status`.
    */
   statusPollMs?: number
@@ -439,6 +440,9 @@ const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000
 
 /** Five seconds between status reads while a prompt is pending. */
 export const DEFAULT_STATUS_POLL_MS = 5_000
+
+/** The longest delay a timer honours; a longer one is clamped to 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647
 
 function mapTokens(tokens: {
   input?: number
@@ -752,9 +756,11 @@ interface RetryWatch {
  * THE HOST'S RETRY. With a `watch`, the host's session status is read while
  * the prompt is pending: first after `intervalMs` or half the deadline,
  * whichever is shorter, so even a long interval reads once, and then every
- * `intervalMs`. Each tick issues a new read. A read still pending at the next
- * tick is abandoned and its later answer ignored, so a read that never settles
- * does not stop the ones after it. When an answer reports the session in
+ * `intervalMs`. Each tick issues a new read, whether or not earlier reads have
+ * answered, so a read that never settles does not stop the ones after it. An
+ * answer counts unless an answer from a later read has already been applied, so
+ * reads slower than the interval still count and an older answer never
+ * overrides a newer one. When an answer reports the session in
  * `retry` with `next` later than this turn's deadline, the race rejects with
  * `HostRetryPastDeadlineError`: the host would not try again before MAD
  * stopped waiting anyway. `next` is the host's clock and the deadline MAD's;
@@ -786,11 +792,13 @@ async function withTimeout<T>(
     if (watch) {
       races.push(
         new Promise<never>((_, reject) => {
-          // Only the newest read's answer counts; each tick abandons the last.
-          let current = 0
+          // Reads are numbered as issued; an answer counts unless a later
+          // read's answer has already been applied.
+          let issued = 0
+          let applied = 0
           const tick = () => {
             if (over) return
-            const mine = ++current
+            const mine = ++issued
             let read: Promise<unknown>
             try {
               read = watch.read()
@@ -799,7 +807,8 @@ async function withTimeout<T>(
             }
             Promise.resolve(read).then(
               (answer) => {
-                if (over || mine !== current) return
+                if (over || mine <= applied) return
+                applied = mine
                 const retry = hostRetryOf(answer, watch.sessionID)
                 if (retry !== undefined && retry.next > deadline) reject(new HostRetryPastDeadlineError(ms, retry))
               },
@@ -900,8 +909,15 @@ export class OpencodeModelBackend implements ModelBackend {
     this.tools = options.tools
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS
     const statusPollMs = options.statusPollMs ?? DEFAULT_STATUS_POLL_MS
-    if (typeof statusPollMs !== "number" || !Number.isFinite(statusPollMs) || statusPollMs <= 0) {
-      throw new Error(`OpencodeModelBackend: statusPollMs must be a positive finite number, got ${String(statusPollMs)}`)
+    if (
+      typeof statusPollMs !== "number" ||
+      !Number.isFinite(statusPollMs) ||
+      statusPollMs <= 0 ||
+      statusPollMs > MAX_TIMER_MS
+    ) {
+      throw new Error(
+        `OpencodeModelBackend: statusPollMs must be a positive number of at most ${MAX_TIMER_MS}, got ${String(statusPollMs)}`,
+      )
     }
     this.statusPollMs = statusPollMs
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS

@@ -2177,11 +2177,18 @@ describe("runTurn — a session the host is retrying past the turn's deadline", 
     expect((backend as unknown as { statusPollMs: number }).statusPollMs).toBe(5_000)
   })
 
-  for (const statusPollMs of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, "10" as unknown as number]) {
+  for (const statusPollMs of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, "10" as unknown as number, 2_147_483_648]) {
     test(`a poll interval of ${String(statusPollMs)} is refused at construction`, () => {
-      expect(() => backendWith({}, { statusPollMs })).toThrow("statusPollMs must be a positive finite number")
+      expect(() => backendWith({}, { statusPollMs })).toThrow(
+        "statusPollMs must be a positive number of at most 2147483647",
+      )
     })
   }
+
+  test("the longest timer delay is accepted as a poll interval", () => {
+    const { backend } = backendWith({}, { statusPollMs: 2_147_483_647 })
+    expect((backend as unknown as { statusPollMs: number }).statusPollMs).toBe(2_147_483_647)
+  })
 
   test("no status read is issued after the turn settles early", async () => {
     const { backend, calls } = backendWith(
@@ -2305,7 +2312,7 @@ describe("runTurn — a session the host is retrying past the turn's deadline", 
     await flush()
   })
 
-  test("an abandoned read's later answer is ignored", async () => {
+  test("a slow read's answer still counts when no later read has answered", async () => {
     let late: ((value: unknown) => void) | undefined
     const { backend, calls } = backendWith(
       {
@@ -2317,14 +2324,56 @@ describe("runTurn — a session the host is retrying past the turn's deadline", 
               })
             : new Promise(() => {}),
       },
-      { timeoutMs: 150, statusPollMs: 10, cleanupTimeoutMs: 10 },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
     )
+    const started = Date.now()
     const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
     await pause(40)
     expect(calls.status.length).toBeGreaterThan(1)
     late!(retrying(Date.now() + 3_600_000, 9))
     const result = await pending
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(!result.ok && result.message).toContain("attempt 9")
+  })
+
+  test("an older read's answer after a later read's answer is ignored", async () => {
+    let late: ((value: unknown) => void) | undefined
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) =>
+          index === 0
+            ? new Promise((resolve) => {
+                late = resolve
+              })
+            : index === 1
+              ? { data: {} }
+              : new Promise(() => {}),
+      },
+      { timeoutMs: 150, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    await pause(40)
+    expect(calls.status.length).toBeGreaterThan(2)
+    late!(retrying(Date.now() + 3_600_000, 9))
+    const result = await pending
     expect(!result.ok && result.message).toBe("turn timed out after 150ms")
+  })
+
+  test("every read slower than the interval: the turn still settles early", async () => {
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: () => new Promise((resolve) => setTimeout(() => resolve(retrying(Date.now() + 3_600_000, 2)), 35)),
+      },
+      { timeoutMs: 2_000, statusPollMs: 20, cleanupTimeoutMs: 10 },
+    )
+    const started = Date.now()
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(calls.status.length).toBeGreaterThan(1)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(!result.ok && result.message).toContain("attempt 2")
   })
 
   test("NO STATUS ON THE CLIENT: the turn times out exactly as before", async () => {
