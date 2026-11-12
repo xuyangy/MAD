@@ -112,10 +112,11 @@ async function registeredTool() {
 }
 
 describe("README — status", () => {
-  test("the status line names both the offline suite and the hand runs the live-review section reports", () => {
-    expect(README).toContain("**Status: checked offline; tried by hand on a live host.**")
+  test("the status line names the offline suite, the hand runs and the authorized runs the live sections report", () => {
+    expect(README).toContain("**Status: checked offline; reviewed live on one host version.**")
     expect(README).toContain("No test here runs against a real OpenCode host.")
-    expect(README).toContain("Two reviews were run by hand on opencode-ai 1.19.5")
+    expect(README).toContain("On opencode-ai 1.19.5, two reviews were run by hand, and on 2026-11-12 one authorized review was run and recorded on each route; *What a live review showed* and *Target host* below say what they did and did not show.")
+    expect(README).not.toContain("tried by hand on a live host")
     expect(README).toContain("- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5")
     expect(README).not.toContain("not field-tested")
   })
@@ -128,16 +129,22 @@ describe("README — status", () => {
     expect(README).not.toContain("for the review-session policy only")
   })
 
-  test("the target host names one version and two routes, each not established, and cites its evidence", () => {
+  test("the target host names one version and two routes, each compatible with listed limitations, and cites its evidence", () => {
     expect(PROSE).toContain("MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. No other host version or route is targeted.")
-    expect(README).toContain("| TUI | not established |")
-    expect(README).toContain("| `opencode run` | not established |")
+    expect(README).toContain("| TUI | compatible with listed limitations |")
+    expect(README).toContain("| `opencode run` | compatible with listed limitations |")
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
     expect(PROSE).toContain(
-      "Both routes' verdict for this release, rendered on 2026-11-11, is *not established*: no authorized live review has completed on either route. The one authorized attempt, through `opencode run`, ended when the outer agent's own model request was refused, before any MAD review was observed. The authorization then ended, so the TUI was not attempted. The attempt and the verdict are recorded as N1 and the 2026-11-11 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files. The tool-calling filter, the replacement of refused slots and the replacement session's policy check have run only in the offline tests.",
+      "Both routes' verdict for this release, rendered on 2026-11-12, is *compatible with listed limitations*. One authorized live review completed on each route, through `opencode run` and through the TUI, returned a judged finding and left the reviewed repository unchanged. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. Each report was marked degraded: of the three pinned reviewer models only `openai/gpt-6-luna` answered, and the judge ran on that same model. `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent. For `opencode/nemotron-3.5-lightning-free` the host logged a provider usage-limit error within a second of each session's creation; the error never reached MAD, so each of its two turns waited out a 600-second deadline and each review took about 20 minutes. The runs, the verdict and every listed limitation are recorded as N3, N4 and the 2026-11-12 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files. Classified refusal, the replacement of refused slots, the replacement session's policy check, automatic selection of unpinned slots and the tool-calling filter's exclusions have run only in the offline tests.",
     )
     expect(README).not.toContain("the offline-only outcome was chosen")
+    expect(README).not.toContain("rendered on 2026-11-11")
+    expect(README).not.toContain("| TUI | not established |")
+    expect(README).not.toContain("| `opencode run` | not established |")
+    expect(README).not.toContain("The one authorized attempt")
+    expect(README).not.toContain("recorded as N1")
+    expect(README).not.toContain("The authorization then ended, so the TUI was not attempted.")
     expect(README).toContain("| How a plugin is loaded from a package | read from the 1.19.3 bundle; in 1.19.5 only the wrapper around a plugin's tools was read, and the loader itself is unverified.")
     expect(README).toContain("Registration was observed by hand on 1.19.5 (historical registration report E1, source commit `12af673`). |")
     expect(README).toContain("| The plugin reaches the host through the client OpenCode hands it | observed by hand on 1.19.5 in historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0` |")
@@ -187,7 +194,8 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain(
       "A 429 quota error, a 403, GitLab's no-credits text under a provider id other than `gitlab`, or a refusal in the prompt envelope's `result.error` is treated as an ordinary failure. It can receive the ordinary retry if the stop and budget gates permit it; that error alone does not qualify the slot for replacement.",
     )
-    expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below; neither has been run against a live host.")
+    expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below. The authorized runs of 2026-11-12 (see *Target host*) pinned every slot to a model that declares tool calling, so no model was left out; the filter's exclusions and the replacement of refused slots have not been run against a live host.")
+    expect(README).not.toContain("neither has been run against a live host")
     expect(PROSE).toContain("No test here runs that registration or a live review.")
     expect(PROSE).toContain("MAD sends every request through the client OpenCode hands the plugin, never to the plugin's `serverUrl`")
     expect(PROSE).toContain("`serverUrl` is not a supported way for the plugin to reach the host; MAD's evaluation and probe scripts keep it as their transport to a server they start or are given.")
