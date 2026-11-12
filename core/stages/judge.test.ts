@@ -3241,3 +3241,93 @@ describe("judge — a turn the backend ended before its prompt", () => {
     expect(result.cancelled).toBe(true)
   })
 })
+
+describe("judge — a refusal stops every slot it covers from taking a later role", () => {
+  /** discovery-1 and discovery-2 on provider `p`, discovery-3 on `q`; only discovery-2 can use tools. */
+  function mixedRoster(): Roster {
+    const base = roster(THREE)
+    return { ...base, slots: base.slots.map((s) => (s.slot === "discovery-3" ? { ...s, providerId: "q" } : s)) }
+  }
+  const PROVIDER_REFUSAL: Refusal = { kind: "auth", basis: "structured", scope: "provider", providerId: "p", modelId: "discovery-2" }
+
+  /** Refuses `slot`'s fact-check with `refusal`; every other turn answers with the defaults. */
+  function refusingFactCheckOn(slot: string, refusal: Refusal): FakeBackend & ModelBackend {
+    const inner = new FakeBackend({}, { "discovery-1": false, "discovery-3": false })
+    const runTurn = inner.runTurn.bind(inner)
+    inner.runTurn = (async (s: string, instructions: string, ...rest: unknown[]) => {
+      if (s === slot && judgeRoleOf(instructions) === "fact-check") {
+        inner.calls.push({ slot: s, attempt: 1, role: "fact-check" })
+        return { ok: false, slot: s, failure: "model-error", message: "unauthorized", refusal }
+      }
+      return (runTurn as (...args: unknown[]) => unknown)(s, instructions, ...rest)
+    }) as typeof inner.runTurn
+    return inner
+  }
+
+  // Visited first (critical), its only turn the fact-check, on the only tooled slot.
+  const first = () => finding({ id: "f-1", severity: "critical", author: "discovery-1", route: "judge", history: [] })
+  // Visited second; with discovery-2 gone its non-author choice would be discovery-1.
+  const second = () => finding({ id: "f-2", severity: "high", author: "discovery-3", route: "judge", history: [] })
+
+  test("MATRIX: a provider refusal on one finding's fact-check keeps covered slots off every later finding", async () => {
+    const backend = refusingFactCheckOn("discovery-2", PROVIDER_REFUSAL)
+    const f2 = second()
+    const result = await run([first(), f2], { backend, roster: mixedRoster() })
+
+    expect(backend.calls.filter((call) => call.slot === "discovery-1")).toEqual([])
+    expect(backend.calls).toContainEqual({ slot: "discovery-3", attempt: 1, role: "fact-check" })
+    expect(f2.factCheck).toBeDefined()
+
+    const excluded = result.warnings.filter(
+      (w) => w.code === "model-dropped-out" && w.detail?.slot === "discovery-1",
+    )
+    expect(excluded).toHaveLength(1)
+    expect(excluded[0]!.stage).toBe("judge")
+    expect(excluded[0]!.message).toContain(
+      "`p/discovery-1` (slot discovery-1) is not asked again in this run: slot discovery-2 " +
+        "(`p/discovery-2`) received a refusal that covers it (an authentication refusal for provider `p`, from the host's " +
+        "structured error)",
+    )
+    expect(excluded[0]!.detail?.excludedBy).toEqual({
+      slot: "discovery-2",
+      refusal: { kind: "auth", basis: "structured", scope: "provider" },
+    })
+    // discovery-3 is on another provider and is never excluded.
+    expect(result.warnings.filter((w) => w.detail?.slot === "discovery-3")).toEqual([])
+  })
+
+  test("a route refusal on one finding leaves another model on the same provider eligible", async () => {
+    const backend = refusingFactCheckOn("discovery-2", { ...PROVIDER_REFUSAL, scope: "route" })
+    const result = await run([first(), second()], { backend, roster: mixedRoster() })
+
+    expect(backend.calls).toContainEqual({ slot: "discovery-1", attempt: 1, role: "fact-check" })
+    expect(result.warnings.filter((w) => w.detail?.excludedBy !== undefined)).toEqual([])
+  })
+
+  test("refusals an earlier stage saw apply from the first finding", async () => {
+    const backend = new FakeBackend({}, { "discovery-1": false, "discovery-3": false })
+    const result = await run([second()], {
+      backend,
+      roster: mixedRoster(),
+      answeredSlots: ["discovery-1", "discovery-3"],
+      refusals: [{ slot: "discovery-2", refusal: PROVIDER_REFUSAL }],
+    })
+
+    expect(backend.calls.filter((call) => call.slot === "discovery-1")).toEqual([])
+    expect(backend.calls).toContainEqual({ slot: "discovery-3", attempt: 1, role: "fact-check" })
+    const excluded = result.warnings.filter((w) => w.detail?.excludedBy !== undefined)
+    expect(excluded.map((w) => w.detail?.slot)).toEqual(["discovery-1"])
+  })
+
+  test("with no refusal, the same findings are judged exactly as before", async () => {
+    const backend = new FakeBackend({}, { "discovery-1": false, "discovery-3": false })
+    const result = await run([first(), second()], { backend, roster: mixedRoster() })
+
+    // The tooled slot checks both findings, and nobody drops out.
+    expect(backend.calls.filter((call) => call.role === "fact-check").map((call) => call.slot)).toEqual([
+      "discovery-2",
+      "discovery-2",
+    ])
+    expect(result.warnings.filter((w) => w.code === "model-dropped-out")).toEqual([])
+  })
+})

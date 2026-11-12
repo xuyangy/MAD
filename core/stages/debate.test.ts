@@ -2568,3 +2568,93 @@ describe("debate — a seat the backend ended before its prompt", () => {
     expect(result.turns).toBe(2)
   })
 })
+
+describe("debate — a refusal stops every slot it covers from being seated again", () => {
+  /** discovery-1 and discovery-2 on `provider`, discovery-3 on `other`. */
+  function mixedRoster(): Roster {
+    const base = roster(["discovery-1", "discovery-2", "discovery-3"])
+    return { ...base, slots: base.slots.map((s) => (s.slot === "discovery-3" ? { ...s, providerId: "other" } : s)) }
+  }
+  const refusedBy = (refusal: Refusal): SlotStep => ({
+    kind: "fail",
+    failure: "model-error",
+    message: "payment required",
+    refusal,
+  })
+  // f-1: discovery-1 with discovery-2 seated; f-2: discovery-3 with discovery-1 seated.
+  const findings = () => [
+    contested({ id: "f-1", author: "discovery-1" }),
+    contested({ id: "f-2", author: "discovery-3", severity: "medium" }),
+  ]
+
+  test("MATRIX: a provider refusal in round 1 excludes another seat on that provider from round 2 on, warned once", async () => {
+    const [f1, f2] = findings()
+    // Round 1 has a stated disagreement on f-2, so a round 2 is planned.
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" }, { findingId: "f-2", position: "denies" })],
+      "discovery-2": [
+        refusedBy({ kind: "payment", basis: "structured", scope: "provider", providerId: "provider", modelId: "discovery-2" }),
+      ],
+      "discovery-3": [says({ findingId: "f-2", position: "upholds" })],
+    })
+    const result = await run([f1!, f2!], {}, { backend, roster: mixedRoster(), maxRounds: 3 })
+
+    // discovery-1 answered round 1 alongside the refused seat and kept what it said.
+    expect(backend.calls.filter((call) => call.slot === "discovery-1")).toEqual([{ slot: "discovery-1", attempt: 1 }])
+    expect(roundEntries(f1!).map((entry) => [entry.round, entry.actor])).toEqual([[1, "discovery-1"]])
+    // discovery-3 is on another provider and keeps arguing.
+    expect(backend.calls.filter((call) => call.slot === "discovery-3").length).toBeGreaterThan(1)
+    expect(result.droppedOut.sort()).toEqual(["discovery-1", "discovery-2"])
+    expect(result.refusals.map((entry) => entry.slot)).toEqual(["discovery-2"])
+
+    const excluded = result.warnings.filter(
+      (warning) => warning.code === "model-dropped-out" && warning.detail?.slot === "discovery-1",
+    )
+    expect(excluded).toHaveLength(1)
+    expect(excluded[0]!.stage).toBe("debate")
+    expect(excluded[0]!.message).toContain(
+      "`provider/discovery-1` (slot discovery-1) is not asked again in this run: slot discovery-2 " +
+        "(`provider/discovery-2`) received a refusal that covers it (a payment refusal for provider `provider`, from the " +
+        "host's structured error)",
+    )
+    expect(excluded[0]!.detail).toMatchObject({
+      round: 1,
+      excludedBy: { slot: "discovery-2", refusal: { kind: "payment", basis: "structured", scope: "provider" } },
+    })
+    // The refused seat itself keeps its one ordinary drop-out warning.
+    expect(
+      result.warnings.filter((warning) => warning.code === "model-dropped-out" && warning.detail?.slot === "discovery-2"),
+    ).toHaveLength(1)
+  })
+
+  test("MATRIX: a route refusal leaves another model on the same provider eligible", async () => {
+    const [f1, f2] = findings()
+    const backend = new FakeBackend({
+      "discovery-1": [says({ findingId: "f-1", position: "upholds" }, { findingId: "f-2", position: "denies" })],
+      "discovery-2": [
+        refusedBy({ kind: "payment", basis: "structured", scope: "route", providerId: "provider", modelId: "discovery-2" }),
+      ],
+      "discovery-3": [says({ findingId: "f-2", position: "upholds" })],
+    })
+    const result = await run([f1!, f2!], {}, { backend, roster: mixedRoster(), maxRounds: 3 })
+
+    expect(backend.calls.filter((call) => call.slot === "discovery-1").length).toBeGreaterThan(1)
+    expect(result.droppedOut).toEqual(["discovery-2"])
+    expect(result.warnings.filter((warning) => warning.detail?.excludedBy !== undefined)).toEqual([])
+  })
+
+  test("a refusal covering a slot already dropped out does not warn about it twice", async () => {
+    const [f1, f2] = findings()
+    const refusal: Refusal = { kind: "auth", basis: "structured", scope: "provider", providerId: "provider", modelId: "x" }
+    const backend = new FakeBackend({
+      "discovery-1": [refusedBy(refusal)],
+      "discovery-2": [refusedBy(refusal)],
+      "discovery-3": [says({ findingId: "f-2", position: "upholds" })],
+    })
+    const result = await run([f1!, f2!], {}, { backend, roster: mixedRoster(), maxRounds: 3 })
+
+    for (const slot of ["discovery-1", "discovery-2"]) {
+      expect(result.warnings.filter((w) => w.code === "model-dropped-out" && w.detail?.slot === slot)).toHaveLength(1)
+    }
+  })
+})

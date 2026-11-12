@@ -200,6 +200,9 @@ describe("README — registration (CAP-8)", () => {
       "A generic 401 or 402 error and a capability refusal each refuse only that route, meaning that model on that provider, so another model on the same provider can be chosen as the replacement, and may be refused the same way.",
     )
     expect(PROSE).toContain("on a provider and route that were not refused")
+    expect(PROSE).toContain(
+      "A recognised refusal also stops MAD asking any other slot it covers for the rest of the run, lens slots included: one on the same route, or, for a refusal of the whole provider, one on that provider; this starts at the next stage, the next debate round or the next judged finding, so a turn issued alongside the refused one (in discovery's concurrent first round, or in the same debate round) still counts, and the report names each slot it stopped asking.",
+    )
     expect(README).not.toContain("for an account reason (a recognised authentication or payment refusal")
     expect(README).not.toContain("A generic 401 or 402 error excludes only that model on that provider")
     expect(README).not.toContain("is not retried either and, for an unpinned discovery slot")

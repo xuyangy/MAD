@@ -426,6 +426,20 @@ export interface Warning {
   origin?: WarningOrigin
 }
 
+/**
+ * Whether a `model-dropped-out` warning records a slot excluded because a
+ * refusal another slot received covers it: `detail.excludedBy` is an object
+ * naming that slot. The exclusion is not a failure and says nothing about
+ * whether the slot answered discovery (a host-aborted slot carries its own
+ * `turn-host-aborted` warning), so readers that count discovery drop-outs as
+ * failed or unanswered slots skip it.
+ */
+export function isRefusalExclusion(warning: { code: string; detail?: Record<string, unknown> }): boolean {
+  if (warning.code !== "model-dropped-out") return false
+  const by = warning.detail?.excludedBy
+  return typeof by === "object" && by !== null && typeof (by as { slot?: unknown }).slot === "string"
+}
+
 /** See `Warning.origin`. */
 export interface WarningOrigin {
   runId: string

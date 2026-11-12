@@ -72,7 +72,13 @@
  * it. The stage returns the array it was given.
  */
 
-import { describeRefusal } from "../domain/refusal.ts"
+import {
+  coveredByRefusalWords,
+  coveringRefusal,
+  describeRefusal,
+  excludedByDetail,
+  type SlotRefusal,
+} from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -273,6 +279,12 @@ export interface DebateStageResult extends DebateCounts {
    * knows.
    */
   droppedOut: string[]
+  /**
+   * The refusals this stage's seats received, in the order seen. Every other
+   * eligible slot one covers (`refusalCovers`) is in `droppedOut` from the
+   * round after it was seen.
+   */
+  refusals: SlotRefusal[]
   warnings: Warning[]
   /**
    * AD-6f — whether this stage stopped issuing rounds because the run was
@@ -985,6 +997,11 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   }
 
   const droppedOutThisStage = new Set<string>()
+  /** The refusals seats received, kept for the exclusion at the end of each round. */
+  const refusals: SlotRefusal[] = []
+  const rosterSlotOf = new Map(
+    [...input.roster.slots, ...input.roster.lensSlots].map((rosterSlot) => [rosterSlot.slot, rosterSlot]),
+  )
   let rounds = 0
   let turns = 0
   let attempts = 0
@@ -1204,6 +1221,9 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         //
         // A REFUSED request (`Refusal`) was not retried when its first attempt
         // was refused, and the warning says so rather than counting two attempts.
+        if (outcome.envelope.refusal !== undefined) {
+          refusals.push({ slot: outcome.slot, refusal: outcome.envelope.refusal })
+        }
         if (!droppedOutThisStage.has(outcome.slot)) {
           droppedOutThisStage.add(outcome.slot)
           const { refusal } = outcome.envelope
@@ -1347,6 +1367,27 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         new Set(room.members.filter((member) => !droppedOutThisStage.has(member))),
       )
       if (decided) recordExit(room.finding, decided, round, at)
+    }
+
+    // A refusal covers every other slot on its route, or on its provider at
+    // provider scope (`refusalCovers`). Each eligible slot one covers drops
+    // out from the next round on, after this round's positions and exits are
+    // recorded, so a seat asked alongside the refused one keeps what it said.
+    for (const slot of answeredInRosterOrder) {
+      if (droppedOutThisStage.has(slot)) continue
+      const rosterSlot = rosterSlotOf.get(slot)
+      if (rosterSlot === undefined) continue
+      const by = coveringRefusal(refusals, rosterSlot)
+      if (by === undefined) continue
+      droppedOutThisStage.add(slot)
+      warnings.push({
+        code: "model-dropped-out",
+        stage: "debate",
+        message:
+          `MODEL DROPPED OUT OF DEBATE: \`${modelOf(slot)}\` (slot ${slot}) ${coveredByRefusalWords(by)}. ` +
+          `Any position it already stated stands; it is not seated in any later round of this debate.`,
+        detail: { slot, model: modelOf(slot), round, excludedBy: excludedByDetail(by) },
+      })
     }
   }
 
@@ -1635,6 +1676,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     warnings,
     debated: rooms.length,
     droppedOut: [...droppedOutThisStage],
+    refusals,
     converged,
     convergedUncontested,
     convergedUnsure,

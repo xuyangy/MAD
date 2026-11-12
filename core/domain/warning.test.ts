@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from "bun:test"
 
-import { DISCLOSURE_CODES, WARNING_CODES, type WarningCode } from "./warning.ts"
+import { DISCLOSURE_CODES, isRefusalExclusion, WARNING_CODES, type WarningCode } from "./warning.ts"
 
 describe("the warning vocabulary (AD-6)", () => {
   test("THE COUNT IS PINNED, so a new code forces somebody to classify it", () => {
@@ -181,5 +181,20 @@ describe("the warning vocabulary (AD-6)", () => {
     // must be told the review is worth less than it looks, not merely informed
     // of a configuration fact the way `provider-fan-out` informs them.
     expect(DISCLOSURE_CODES.has("run-cancelled")).toBe(false)
+  })
+})
+
+describe("isRefusalExclusion — only an exclusion naming the refused slot", () => {
+  const refusal = { kind: "auth", basis: "structured", scope: "provider" }
+  test("a `model-dropped-out` whose `excludedBy` names a slot is one", () => {
+    expect(isRefusalExclusion({ code: "model-dropped-out", detail: { slot: "a", excludedBy: { slot: "b", refusal } } })).toBe(true)
+  })
+  test("anything else is not: another code, no detail, or an `excludedBy` that names no slot", () => {
+    expect(isRefusalExclusion({ code: "turn-host-aborted", detail: { excludedBy: { slot: "b", refusal } } })).toBe(false)
+    expect(isRefusalExclusion({ code: "model-dropped-out" })).toBe(false)
+    expect(isRefusalExclusion({ code: "model-dropped-out", detail: { slot: "a" } })).toBe(false)
+    for (const excludedBy of [null, "b", true, {}, { slot: 1 }, { refusal }]) {
+      expect(isRefusalExclusion({ code: "model-dropped-out", detail: { slot: "a", excludedBy } })).toBe(false)
+    }
   })
 })

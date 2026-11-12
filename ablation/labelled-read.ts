@@ -74,6 +74,7 @@ import { basename, join, sep } from "node:path"
 
 import type { Finding } from "../core/domain/finding.ts"
 import type { Roster } from "../core/domain/roster.ts"
+import { isRefusalExclusion } from "../core/domain/warning.ts"
 import { adjudicate } from "../fixtures/seeded-defects/adjudicate.ts"
 import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"
 import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
@@ -832,6 +833,9 @@ function accountSlots(record: ScorableRecord): SlotIdentity {
     if (warning.code !== "model-dropped-out" && warning.code !== "partial-envelope" && warning.code !== "turn-host-aborted") {
       continue
     }
+    // An exclusion by another slot's refusal is not a drop-out; whether the
+    // slot answered is read from its other warnings, as for any slot.
+    if (isRefusalExclusion(warning)) continue
     const slot = warning.detail?.slot
     if (typeof slot !== "string") {
       both.push(`a discover-stage \`${warning.code}\` warning carries no string \`detail.slot\``)

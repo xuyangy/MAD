@@ -1379,6 +1379,30 @@ describe("slot identity and coverage", () => {
     })
   }
 
+  test("a slot a refusal covers answered discovery: its `model-dropped-out` exclusion is not read as a drop-out", async () => {
+    const { root } = await labelledBundle({
+      record: (record, block) => {
+        if (block !== 1) return
+        record.warnings.push({
+          code: "model-dropped-out",
+          stage: "discover",
+          message: "MODEL DROPPED OUT: slot discovery-lens-tests is not asked again in this run",
+          detail: {
+            slot: "discovery-lens-tests",
+            model: "x/y",
+            excludedBy: { slot: "discovery-1", refusal: { kind: "auth", basis: "structured", scope: "provider" } },
+          },
+        })
+      },
+    })
+    const block = blockOf(await labelled(root), 1)
+    expect(block.cap1.kind).toBe("measured")
+    if (block.cap11.kind !== "measured") throw new Error(JSON.stringify(block.cap11))
+    // The covered lens slot still counts as answered: every lens slot of four.
+    expect(block.cap11.lens).toEqual({ answered: 4, of: 4 })
+    expect(block.cap11.complete).toBe(true)
+  })
+
   test("a BUDGET-SKIPPED lens slot: CAP-11 reads over n of m lens slots, and a zero describes only those", async () => {
     const { root } = await labelledBundle({
       record: (record, block) => {

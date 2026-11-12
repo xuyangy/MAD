@@ -113,7 +113,7 @@ import { effectiveSeverity, severityRank, type Entry, type Finding } from "../do
 
 import { executionRoster, replacementsOf } from "../domain/recovery.ts"
 import { formatThreshold, type RunRecord } from "../domain/run-record.ts"
-import { DISCLOSURE_CODES, type WarningCode } from "../domain/warning.ts"
+import { DISCLOSURE_CODES, isRefusalExclusion, type WarningCode } from "../domain/warning.ts"
 import { LINE_BREAK_CLASS, listCell, oneLine } from "../prompt/material.ts"
 import { isStatedPosition, type DebatePosition } from "./debate.ts"
 
@@ -1481,8 +1481,11 @@ export function renderRunRecord(record: RunRecord): string {
   // The two facts the empty-findings branches below turn on, read once. A model
   // DROPPING OUT and the budget SKIPPING a slot are independent and can both be
   // true of one run; `record` carries no drop-out list, so the warning the
-  // discovery stage already raised is the signal (AD-6b).
-  const anyDroppedOut = record.warnings.some((warning) => warning.code === "model-dropped-out")
+  // discovery stage already raised is the signal (AD-6b). A slot excluded by
+  // another slot's refusal did not drop out by failing, so it is not counted.
+  const anyDroppedOut = record.warnings.some(
+    (warning) => warning.code === "model-dropped-out" && !isRefusalExclusion(warning),
+  )
   const skippedForBudget = record.skippedForBudget?.length ?? 0
   // CAP-5 — the cause the record supports for those slots, never assumed to be the budget.
   const unaskedBecause = whyUnasked(skipCauseOf(record, record.skippedForBudget ?? []))
@@ -1500,7 +1503,7 @@ export function renderRunRecord(record: RunRecord): string {
   const discoverySlotsWith = (code: WarningCode): number =>
     new Set(
       record.warnings
-        .filter((warning) => warning.code === code && warning.stage === "discover")
+        .filter((warning) => warning.code === code && warning.stage === "discover" && !isRefusalExclusion(warning))
         .map((warning) => warning.detail?.slot)
         .filter((slot): slot is string => typeof slot === "string" && poolSlotIds.has(slot)),
     ).size
@@ -1573,6 +1576,7 @@ export function renderRunRecord(record: RunRecord): string {
           (warning) =>
             warning.stage === "discover" &&
             (warning.code === "model-dropped-out" || warning.code === "turn-host-aborted") &&
+            !isRefusalExclusion(warning) &&
             warning.detail?.slot === slot,
         ) || (record.skippedForBudget ?? []).includes(slot)
       const lensAnswered = record.roster.lensSlots.filter((lensSlot) => !discoveryLost(lensSlot.slot)).length
@@ -1600,10 +1604,12 @@ export function renderRunRecord(record: RunRecord): string {
         )
       }
       // A drop-out that is not a pool discovery one (a lens slot, or a debate or
-      // judge seat) is still a model failure the reader should find.
+      // judge seat) is still a model failure the reader should find. A slot
+      // excluded because a refusal covers it did not fail, so it is not counted.
       const otherDropOuts = record.warnings.filter(
         (warning) =>
           warning.code === "model-dropped-out" &&
+          !isRefusalExclusion(warning) &&
           !(warning.stage === "discover" && poolSlotIds.has(warning.detail?.slot as string)),
       ).length
       if (otherDropOuts > 0) {

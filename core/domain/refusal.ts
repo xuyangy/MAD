@@ -77,3 +77,51 @@ function refusalKindWords(kind: Refusal["kind"]): string {
     }
   }
 }
+
+/** A refusal and the slot whose turn received it. */
+export interface SlotRefusal {
+  slot: string
+  refusal: Refusal
+}
+
+/**
+ * Whether a refusal covers a route: a provider-scope refusal covers every model
+ * on its provider, a route-scope refusal only its own provider/model route.
+ * Provider ids are compared without regard to case and model ids exactly, as
+ * `refusalExclusions` compares them; nothing else (lineage, identity) counts.
+ */
+export function refusalCovers(refusal: Refusal, route: { providerId: string; modelId: string }): boolean {
+  if (refusal.providerId.toLowerCase() !== route.providerId.toLowerCase()) return false
+  return refusal.scope === "provider" || refusal.modelId === route.modelId
+}
+
+/**
+ * The first refusal, received by another slot, that covers `slot`'s route; a
+ * slot's own refusal is never the one that excludes it.
+ */
+export function coveringRefusal(
+  refusals: readonly SlotRefusal[],
+  slot: { slot: string; providerId: string; modelId: string },
+): SlotRefusal | undefined {
+  return refusals.find((entry) => entry.slot !== slot.slot && refusalCovers(entry.refusal, slot))
+}
+
+/**
+ * The sentence every stage's exclusion warning uses: the covering refusal, the
+ * slot that received it, and that the covered slot is not asked again.
+ */
+export function coveredByRefusalWords(by: SlotRefusal): string {
+  return (
+    `is not asked again in this run: slot ${by.slot} ` +
+    `(\`${by.refusal.providerId}/${by.refusal.modelId}\`) received a refusal that covers it ` +
+    `(${describeRefusal(by.refusal)})`
+  )
+}
+
+/** The `detail.excludedBy` every stage's exclusion warning carries. */
+export function excludedByDetail(by: SlotRefusal): {
+  slot: string
+  refusal: Pick<Refusal, "kind" | "basis" | "scope">
+} {
+  return { slot: by.slot, refusal: { kind: by.refusal.kind, basis: by.refusal.basis, scope: by.refusal.scope } }
+}

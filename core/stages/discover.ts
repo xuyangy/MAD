@@ -82,7 +82,13 @@
  * stage could ship the exact failure story 7A exists to prevent.
  */
 
-import { describeRefusal } from "../domain/refusal.ts"
+import {
+  coveredByRefusalWords,
+  coveringRefusal,
+  describeRefusal,
+  excludedByDetail,
+  type SlotRefusal,
+} from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -235,6 +241,14 @@ export interface DiscoverResult {
   answered: number
   /** Slots that dropped out after their one retry — pool and lens alike. */
   droppedOut: string[]
+  /**
+   * Slots still eligible after discovery that a refusal received by another
+   * slot covers (`refusalCovers`), pool, replacement and lens alike: slots that
+   * answered, and slots whose turn the host aborted or the stop cancelled. Each
+   * was warned about once. What each answered, and the denominator, are
+   * unchanged; `review()` does not offer them to debate or the judge.
+   */
+  excludedByRefusal: string[]
   /**
    * AD-15 / CAP-7 (story 8) — slots the BUDGET refused, pool and lens alike, in
    * fan-out order. Never asked, so never billed and never blamed.
@@ -1070,6 +1084,46 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     }
   }
 
+  // A refusal also covers every other slot on its route, or, at provider scope,
+  // on its provider (`refusalCovers`). Discovery's own turns ran concurrently,
+  // so nothing in it is excluded and its counts are untouched; the covered
+  // slots that are still eligible are reported once here and are not offered
+  // to debate or the judge.
+  const seenRefusals: SlotRefusal[] = [...poolOutcomes, ...lensOutcomes, ...replacementOutcomes].flatMap(
+    (outcome) =>
+      outcome.skippedForBudget || outcome.envelope.ok || outcome.envelope.refusal === undefined
+        ? []
+        : [{ slot: outcome.rosterSlot.slot, refusal: outcome.envelope.refusal }],
+  )
+  const excludedByRefusal: string[] = []
+  if (seenRefusals.length > 0) {
+    const eligible = [
+      ...roster.slots,
+      ...(recovery?.replacements ?? []).map((replacement) => replacement.to),
+      ...roster.lensSlots,
+    ].filter((rosterSlot) => !droppedOut.includes(rosterSlot.slot) && !skippedForBudget.includes(rosterSlot.slot))
+    for (const rosterSlot of eligible) {
+      const by = coveringRefusal(seenRefusals, rosterSlot)
+      if (by === undefined) continue
+      excludedByRefusal.push(rosterSlot.slot)
+      const modelName = `${rosterSlot.providerId}/${rosterSlot.modelId}`
+      // A host-aborted or cancelled slot is eligible too, but it did not answer.
+      const answeredDiscovery =
+        !hostAborted.includes(rosterSlot.slot) && !cancelledSlots.some((entry) => entry.slot === rosterSlot.slot)
+      warnings.push({
+        code: "model-dropped-out",
+        stage: "discover",
+        message:
+          `MODEL DROPPED OUT: \`${modelName}\` (slot ${rosterSlot.slot}) ${coveredByRefusalWords(by)}. ` +
+          (answeredDiscovery
+            ? `What it raised in discovery stands, and its place in the co-discovery denominator is unchanged; `
+            : `It did not answer discovery, and that is reported separately; `) +
+          `it is not seated in debate or asked by the judge.`,
+        detail: { slot: rosterSlot.slot, model: modelName, excludedBy: excludedByDetail(by) },
+      })
+    }
+  }
+
   // AD-6a — make the shrunken denominator itself visible, not just implied by
   // the fraction. Compared against the POOL only: `roster.slots.length` never
   // includes a lens slot, so a dropped-out lens can never make this fire and a
@@ -1343,6 +1397,7 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     answered,
     droppedOut,
     skippedForBudget,
+    excludedByRefusal,
     lensInstructions,
     warnings,
     cancelled,

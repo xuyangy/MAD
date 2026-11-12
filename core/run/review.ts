@@ -556,7 +556,8 @@ export interface PreparedReview {
   framedChange: string
   /**
    * Slots still able to be seated or asked after discovery — neither dropped
-   * out nor refused by the budget. Derived from discovery's own lists, because
+   * out, refused by the budget, nor covered by a refusal another slot
+   * received. Derived from discovery's own lists, because
    * discovery is the only stage that knows who answered. Eligibility, not
    * answering: a slot whose discovery turn the host reported aborted did not
    * answer discovery and is still listed here.
@@ -812,13 +813,19 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // failing, so seating it is not paying for a known silence. And the bill
   // stays governed either way: the protocol's stop rule and the admission
   // still gate every later billed turn it is offered.
+  //
+  // A SLOT A REFUSAL COVERS is excluded as well: a refusal received by another
+  // slot on its route, or on its provider at provider scope, already says its
+  // request would be refused, and discovery warned about it once.
   const execution = executionRoster(record)
   const answeredSlots = execution.slots
     .map((slot) => slot.slot)
     .concat(execution.lensSlots.map((slot) => slot.slot))
     .filter(
       (slot) =>
-        !discovered.droppedOut.includes(slot) && !discovered.skippedForBudget.includes(slot),
+        !discovered.droppedOut.includes(slot) &&
+        !discovered.skippedForBudget.includes(slot) &&
+        !discovered.excludedByRefusal.includes(slot),
     )
 
   return {
@@ -1163,6 +1170,11 @@ export async function continueReview(
     findings: record.findings,
     roster,
     answeredSlots: answeredSlots.filter((slot) => !debated.droppedOut.includes(slot)),
+    // The refusals debate saw. The slots they cover are normally already in
+    // `debated.droppedOut`, but not when debate stopped before the end of the
+    // round that saw them (the run was stopped mid-round); handing them on lets the
+    // judge's own exclusion apply to those slots too.
+    refusals: debated.refusals,
     backend,
     input: framedChange,
     clock,

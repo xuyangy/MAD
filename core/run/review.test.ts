@@ -3866,3 +3866,360 @@ describe("review — a stop between discovery's two rounds", () => {
     expect(record.cancelled).toEqual({ stage: "debate" })
   })
 })
+
+describe("review — a refusal stops MAD asking every slot it covers for the rest of the run", () => {
+  const NOTHING: SlotStep = { kind: "ok", value: { findings: [] } }
+
+  test("MATRIX: a refused pool slot's route also covers the lens slot on it: not offered to debate or the judge, warned once", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+      ["security"],
+    )
+    const [first, second, third] = resolved.roster.slots
+    const lens = resolved.roster.lensSlots[0]!
+    expect([lens.providerId, lens.modelId]).toEqual([first!.providerId, first!.modelId])
+    const refusal: Refusal = {
+      kind: "capability",
+      basis: "host-signature",
+      scope: "route",
+      providerId: first!.providerId,
+      modelId: first!.modelId,
+    }
+    const backend = new FakeBackend({
+      [first!.slot]: [{ kind: "fail", failure: "model-error", message: "tool_choice", refusal }],
+      // The only author: 1/2 co-discovery sends its finding to debate.
+      [second!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+      [third!.slot]: [NOTHING, DEBATE_ABSTENTION],
+      [lens.slot]: [NOTHING, DEBATE_ABSTENTION],
+    })
+    const deps = {
+      roster: resolved.roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    }
+
+    const prepared = await prepareReview(deps)
+    expect(prepared.answeredSlots).toEqual([second!.slot, third!.slot])
+    // Discovery's counts are unchanged: two pool models answered.
+    expect(prepared.record.answered).toBe(2)
+    const excluded = prepared.record.warnings.filter(
+      (w) => w.code === "model-dropped-out" && w.detail?.slot === lens.slot,
+    )
+    expect(excluded).toHaveLength(1)
+    expect(excluded[0]!.stage).toBe("discover")
+    expect(excluded[0]!.message).toContain(
+      `is not asked again in this run: slot ${first!.slot} ` +
+        `(\`${first!.providerId}/${first!.modelId}\`) received a refusal that covers it (a capability refusal`,
+    )
+    expect(excluded[0]!.detail?.excludedBy).toEqual({
+      slot: first!.slot,
+      refusal: { kind: "capability", basis: "host-signature", scope: "route" },
+    })
+
+    const { record, rendered } = await continueReview(prepared, deps)
+    expect(record.findings.some((finding) => finding.route === "debate")).toBe(true)
+    // The lens was asked in discovery and never again; the refused slot likewise.
+    expect(backend.calls.filter((call) => call.slot === lens.slot)).toEqual([{ slot: lens.slot, attempt: 1 }])
+    expect(backend.calls.filter((call) => call.slot === first!.slot)).toEqual([{ slot: first!.slot, attempt: 1 }])
+    expect(record.warnings.filter((w) => w.detail?.slot === lens.slot && w.code === "model-dropped-out")).toHaveLength(1)
+    expect(rendered).toContain(`(slot ${lens.slot}) is not asked again in this run`)
+  })
+
+  test("MATRIX: a provider refusal seen in debate keeps the other slot on that provider out of the judge", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const [first, second, third] = resolved.roster.slots
+    // The third slot moved onto the second's provider: one provider, two models.
+    const roster = {
+      ...resolved.roster,
+      slots: resolved.roster.slots.map((slot) =>
+        slot.slot === third!.slot ? { ...slot, providerId: second!.providerId } : slot,
+      ),
+    }
+    const refusal: Refusal = {
+      kind: "payment",
+      basis: "structured",
+      scope: "provider",
+      providerId: second!.providerId,
+      modelId: second!.modelId,
+    }
+    const backend = new FakeBackend({
+      // The only author: 1/3 co-discovery sends its finding to debate, seating the second slot.
+      [first!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+      [second!.slot]: [NOTHING, { kind: "fail", failure: "model-error", message: "payment required", refusal }],
+      [third!.slot]: [NOTHING, DEBATE_ABSTENTION],
+    })
+
+    const { record } = await review({
+      roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(record.findings.some((finding) => finding.route === "debate")).toBe(true)
+    // The covered slot answered discovery and is never asked again: no judge role.
+    expect(backend.calls.filter((call) => call.slot === third!.slot)).toEqual([{ slot: third!.slot, attempt: 1 }])
+    const excluded = record.warnings.filter((w) => w.code === "model-dropped-out" && w.detail?.slot === third!.slot)
+    expect(excluded).toHaveLength(1)
+    expect(excluded[0]!.stage).toBe("debate")
+    expect(excluded[0]!.detail?.excludedBy).toEqual({
+      slot: second!.slot,
+      refusal: { kind: "payment", basis: "structured", scope: "provider" },
+    })
+  })
+
+  test("MATRIX: with ordinary failures only, nothing is excluded and no exclusion is warned", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+      ["security"],
+    )
+    const [first, second, third] = resolved.roster.slots
+    const lens = resolved.roster.lensSlots[0]!
+    const deps = {
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        [first!.slot]: [{ kind: "fail", failure: "model-error", message: "overloaded" }],
+        [second!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+        [third!.slot]: [NOTHING, DEBATE_ABSTENTION],
+        [lens.slot]: [NOTHING, DEBATE_ABSTENTION],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    }
+    const prepared = await prepareReview(deps)
+    expect(prepared.answeredSlots).toEqual([second!.slot, third!.slot, lens.slot])
+    expect(prepared.record.warnings.filter((w) => w.detail?.excludedBy !== undefined)).toEqual([])
+
+    const { record } = await continueReview(prepared, deps)
+    expect(record.findings.some((finding) => finding.route === "debate")).toBe(true)
+    expect(record.findings.every((finding) => finding.verdict !== undefined)).toBe(true)
+    expect(record.warnings.filter((w) => w.detail?.excludedBy !== undefined)).toEqual([])
+  })
+
+  test("MATRIX: a provider refusal in discovery covers another pool slot on that provider: not offered on, warned once", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const [first, second, third] = resolved.roster.slots
+    // The third slot moved onto the first's provider: one provider, two models.
+    const roster = {
+      ...resolved.roster,
+      slots: resolved.roster.slots.map((slot) =>
+        slot.slot === third!.slot ? { ...slot, providerId: first!.providerId } : slot,
+      ),
+    }
+    const refusal: Refusal = {
+      kind: "payment",
+      basis: "structured",
+      scope: "provider",
+      providerId: first!.providerId,
+      modelId: first!.modelId,
+    }
+    const backend = new FakeBackend({
+      [first!.slot]: [{ kind: "fail", failure: "model-error", message: "payment required", refusal }],
+      [second!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+      [third!.slot]: [NOTHING, DEBATE_ABSTENTION],
+    })
+    const deps = { roster, backend, clock: fakeClock(), change: fakeChange(), priorWarnings: resolved.warnings }
+
+    const prepared = await prepareReview(deps)
+    expect(prepared.answeredSlots).toEqual([second!.slot])
+    expect(prepared.record.answered).toBe(2)
+    const excluded = prepared.record.warnings.filter(
+      (w) => w.code === "model-dropped-out" && w.detail?.slot === third!.slot,
+    )
+    expect(excluded).toHaveLength(1)
+    expect(excluded[0]!.stage).toBe("discover")
+    expect(excluded[0]!.message).toContain("What it raised in discovery stands")
+    expect(excluded[0]!.detail?.excludedBy).toEqual({
+      slot: first!.slot,
+      refusal: { kind: "payment", basis: "structured", scope: "provider" },
+    })
+
+    await continueReview(prepared, deps)
+    expect(backend.calls.filter((call) => call.slot === third!.slot)).toEqual([{ slot: third!.slot, attempt: 1 }])
+  })
+
+  test("a covered slot whose discovery turn the host aborted is not said to have answered", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+      ["security"],
+    )
+    const [first, second, third] = resolved.roster.slots
+    const lens = resolved.roster.lensSlots[0]!
+    const refusal: Refusal = {
+      kind: "capability",
+      basis: "host-signature",
+      scope: "route",
+      providerId: first!.providerId,
+      modelId: first!.modelId,
+    }
+    const prepared = await prepareReview({
+      roster: resolved.roster,
+      backend: new FakeBackend({
+        [first!.slot]: [{ kind: "fail", failure: "model-error", message: "tool_choice", refusal }],
+        [second!.slot]: [{ kind: "ok", value: ENVELOPE }],
+        [third!.slot]: [NOTHING],
+        [lens.slot]: [{ kind: "fail", failure: "host-aborted", message: "MessageAbortedError: aborted" }],
+      }),
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(prepared.answeredSlots).toEqual([second!.slot, third!.slot])
+    const excluded = prepared.record.warnings.filter((w) => w.detail?.excludedBy !== undefined)
+    expect(excluded.map((w) => w.detail?.slot)).toEqual([lens.slot])
+    expect(excluded[0]!.message).toContain("It did not answer discovery, and that is reported separately")
+    expect(excluded[0]!.message).not.toContain("What it raised in discovery stands")
+  })
+
+  test("a provider refusal one replacement receives covers the other replacement on that provider", async () => {
+    const resolved = selectRoster(
+      [
+        candidate("anthropic", "claude-sonnet-4-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+        candidate("mistral", "mistral-large"),
+      ],
+      { slots: 3, providerConfigKey: "provider" },
+    )
+    const [first, second, third] = resolved.roster.slots
+    // Both replacement routes moved onto one provider.
+    const recovery = {
+      ...resolved.recovery,
+      candidates: resolved.recovery.candidates.map((candidate) => ({ ...candidate, providerId: "xai" })),
+    }
+    const [r1, r2] = recovery.candidates
+    const routeRefusal = (slot: { providerId: string; modelId: string }): SlotStep => ({
+      kind: "fail",
+      failure: "model-error",
+      refusal: { kind: "payment", basis: "structured", scope: "route", providerId: slot.providerId, modelId: slot.modelId },
+    })
+    const backend = new FakeBackend({
+      [first!.slot]: [routeRefusal(first!)],
+      [second!.slot]: [{ kind: "ok", value: ENVELOPE }],
+      [third!.slot]: [routeRefusal(third!)],
+      [r1!.slot]: [
+        {
+          kind: "fail",
+          failure: "model-error",
+          refusal: { kind: "auth", basis: "structured", scope: "provider", providerId: "xai", modelId: r1!.modelId },
+        },
+      ],
+      [r2!.slot]: [NOTHING],
+    })
+    const prepared = await prepareReview({
+      roster: resolved.roster,
+      recovery,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    expect(prepared.record.recovery!.replacements.map((replacement) => replacement.to.slot).sort()).toEqual(
+      [r1!.slot, r2!.slot].sort(),
+    )
+    expect(prepared.answeredSlots).toEqual([second!.slot])
+    const excluded = prepared.record.warnings.filter((w) => w.detail?.excludedBy !== undefined)
+    expect(excluded.map((w) => [w.stage, w.detail?.slot])).toEqual([["discover", r2!.slot]])
+    expect((excluded[0]!.detail!.excludedBy as { slot: string }).slot).toBe(r1!.slot)
+  })
+
+  test("a provider refusal covering every remaining slot (one provider): debate drops them all, judging stops, and the report says why", async () => {
+    const resolved = setup(
+      [
+        ["anthropic", "claude-sonnet-4-5"],
+        ["openai", "gpt-5"],
+        ["google", "gemini-2.5-pro"],
+      ],
+      3,
+    )
+    const [first, second, third] = resolved.roster.slots
+    // A single-provider host: every slot on the first's provider.
+    const roster = {
+      ...resolved.roster,
+      slots: resolved.roster.slots.map((slot) => ({ ...slot, providerId: first!.providerId })),
+      providers: [first!.providerId],
+    }
+    const backend = new FakeBackend({
+      // The only author: 1/3 co-discovery sends its finding to debate.
+      [first!.slot]: [{ kind: "ok", value: ENVELOPE }, DEBATE_ABSTENTION],
+      [second!.slot]: [
+        NOTHING,
+        {
+          kind: "fail",
+          failure: "model-error",
+          message: "unauthorized",
+          refusal: { kind: "auth", basis: "structured", scope: "provider", providerId: first!.providerId, modelId: second!.modelId },
+        },
+      ],
+      [third!.slot]: [NOTHING, DEBATE_ABSTENTION],
+    })
+
+    const { record, rendered } = await review({
+      roster,
+      backend,
+      clock: fakeClock(),
+      change: fakeChange(),
+      priorWarnings: resolved.warnings,
+    })
+
+    const finding = record.findings.find((f) => f.route === "debate")!
+    // Round 1 seated the author and the refused slot; neither the author nor the third slot is asked again.
+    expect(backend.calls.filter((call) => call.slot !== second!.slot && call.attempt > 1)).toEqual([
+      { slot: first!.slot, attempt: 2 },
+    ])
+    expect(backend.calls.filter((call) => call.slot === third!.slot)).toEqual([{ slot: third!.slot, attempt: 1 }])
+    const excluded = record.warnings.filter((w) => w.detail?.excludedBy !== undefined)
+    expect(excluded.map((w) => [w.stage, w.detail?.slot])).toEqual([
+      ["debate", first!.slot],
+      ["debate", third!.slot],
+    ])
+    // The judge has no slot left, says so, and names the refusal as a cause.
+    expect(backend.calls.some((call) => call.role !== undefined)).toBe(false)
+    expect(finding.verdict).toBeUndefined()
+    const stopped = record.warnings.find((w) => w.code === "judge-unavailable")!
+    expect(stopped.message).toContain("was stopped by a refusal another slot received that covers it")
+    expect(rendered).toContain("JUDGING STOPPED")
+    expect(rendered).toContain(`(slot ${third!.slot}) is not asked again in this run`)
+    // Round 1 stated no position (the author abstained, the other seat was refused), so it exits silent.
+    expect([finding.exit, finding.history.findLast((e) => e.kind.startsWith("debate-exit-"))?.kind]).toEqual([
+      "stalled",
+      "debate-exit-stalled-silent",
+    ])
+  })
+})

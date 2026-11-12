@@ -80,7 +80,14 @@
  * story 8's; it is filed in `deferred-work.md` rather than guessed at here.
  */
 
-import { describeRefusal, type Refusal } from "../domain/refusal.ts"
+import {
+  coveredByRefusalWords,
+  coveringRefusal,
+  describeRefusal,
+  excludedByDetail,
+  type Refusal,
+  type SlotRefusal,
+} from "../domain/refusal.ts"
 import { stopCauseOf, stoppedTheRun } from "../domain/stop-cause.ts"
 import { z } from "zod"
 
@@ -231,6 +238,15 @@ export interface JudgeInput {
    * verdict.
    */
   answeredSlots: readonly string[]
+  /**
+   * Refusals an earlier stage saw, each with the slot that received it. A slot
+   * one covers (`refusalCovers`) is excluded from the first finding on, as a
+   * refusal this stage sees on one finding excludes covered slots from every
+   * later finding. Optional: absent, only this stage's own refusals apply.
+   * `review()` passes debate's; discovery's act through `answeredSlots`
+   * instead, which already leaves out the slots they cover.
+   */
+  refusals?: readonly SlotRefusal[]
   backend: ModelBackend
   /**
    * AD-13's FIRST route (CAP-8, story 10) — the repo-facing port the CORE
@@ -982,6 +998,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
   }
 
   const droppedOut: string[] = []
+  /** Refusals seen so far, earlier stages' first; see `excludeCovered`. */
+  const refusals: SlotRefusal[] = [...(input.refusals ?? [])]
   const untooled: string[] = []
   /**
    * AD-6 / T4 — every `git blame` MAD tried to run and could not, one entry per
@@ -1130,6 +1148,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     failure: { message: string; raw?: unknown; refusal?: Refusal },
     { retryRefused = false, attempts }: { retryRefused?: boolean; attempts?: number } = {},
   ): void => {
+    if (failure.refusal !== undefined) refusals.push({ slot, refusal: failure.refusal })
     if (droppedOut.includes(slot)) return
     droppedOut.push(slot)
     const { message, refusal } = failure
@@ -1176,6 +1195,31 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     })
   }
 
+
+  /**
+   * A refusal covers every other slot on its route, or on its provider at
+   * provider scope (`refusalCovers`). Before each finding's roles are
+   * assigned, every eligible pool slot a refusal seen so far covers joins
+   * `droppedOut`, warned about once. Roles already assigned for a finding keep
+   * their slots, so a refusal seen on one finding applies from the next.
+   */
+  const excludeCovered = (): void => {
+    if (refusals.length === 0) return
+    for (const rosterSlot of input.roster.slots) {
+      if (!input.answeredSlots.includes(rosterSlot.slot) || droppedOut.includes(rosterSlot.slot)) continue
+      const by = coveringRefusal(refusals, rosterSlot)
+      if (by === undefined) continue
+      droppedOut.push(rosterSlot.slot)
+      warnings.push({
+        code: "model-dropped-out",
+        stage: "judge",
+        message:
+          `MODEL DROPPED OUT OF JUDGING: \`${modelOf(rosterSlot.slot)}\` (slot ${rosterSlot.slot}) ` +
+          `${coveredByRefusalWords(by)}. It takes no judge role on this finding or any later one.`,
+        detail: { slot: rosterSlot.slot, model: modelOf(rosterSlot.slot), excludedBy: excludedByDetail(by) },
+      })
+    }
+  }
 
   const ordered = visitOrder(findings)
   let exhausted = false
@@ -1401,6 +1445,7 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
     counts.judged += 1
     turnsBefore = counts.turns
 
+    excludeCovered()
     const slots = assignJudgeSlots({
       roster: input.roster,
       // The slots that answered discovery MINUS the ones that have since died in
@@ -2171,7 +2216,8 @@ export async function judge(input: JudgeInput): Promise<JudgeStageResult> {
       // undecided — has had a counted bucket all along.
       message:
         `JUDGING STOPPED: no reviewer model was left to check, weigh or decide anything — either ` +
-        `none from the main pool answered, or every one that did has since failed. ` +
+        `none from the main pool answered, or every one that did has since failed or was stopped ` +
+        `by a refusal another slot received that covers it. ` +
         `${counts.notExamined} finding(s) were never examined by anyone and are reported exactly ` +
         `as they were raised. Findings whose author withdrew were still decided: that costs no ` +
         `model turn.`,

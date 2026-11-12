@@ -3519,6 +3519,47 @@ describe("AD-6 — an empty finding list with a host-reported discovery abort (l
     expect(rendered).toContain(`3 ${HOST_CLAUSE}`)
   })
 
+  test("a lens slot a refusal covers answered: it is not counted as failed, and the pool headline holds", () => {
+    const rec = pooled(0)
+    const refusal = { kind: "auth", basis: "structured", scope: "provider" }
+    rec.warnings = [
+      aborted("discovery-1"),
+      aborted("discovery-2"),
+      droppedOut("discovery-3"),
+      {
+        code: "model-dropped-out",
+        stage: "discover",
+        message: "MODEL DROPPED OUT: (slot discovery-lens-security) is not asked again in this run",
+        detail: { slot: "discovery-lens-security", excludedBy: { slot: "discovery-3", refusal } },
+      },
+    ]
+    const rendered = output(rec)
+    expect(rendered).toContain("NO POOL MODEL ANSWERED — this is not a clean review.")
+    expect(rendered).toContain("1 lens slot(s) answered and raised nothing")
+    expect(rendered).toContain("1 pool slot(s) failed or dropped out")
+    expect(rendered).not.toContain("Other slot(s) failed or dropped out")
+  })
+
+  test("a host-aborted pool slot a refusal also covers is counted once, as host-aborted, not as failed", () => {
+    const rec = pooled(0)
+    const refusal = { kind: "auth", basis: "structured", scope: "provider" }
+    rec.warnings = [
+      aborted("discovery-1"),
+      aborted("discovery-2"),
+      droppedOut("discovery-3"),
+      {
+        code: "model-dropped-out",
+        stage: "discover",
+        message: "MODEL DROPPED OUT: (slot discovery-2) is not asked again in this run",
+        detail: { slot: "discovery-2", excludedBy: { slot: "discovery-3", refusal } },
+      },
+    ]
+    const rendered = output(rec)
+    expect(rendered).toContain(`2 ${HOST_CLAUSE}`)
+    expect(rendered).toContain("1 pool slot(s) failed or dropped out")
+    expect(rendered).not.toContain("2 pool slot(s) failed or dropped out")
+  })
+
   test("host abort + a lens drop-out: the drop-out is still named as a failure", () => {
     const rec = pooled(0)
     rec.warnings = [
