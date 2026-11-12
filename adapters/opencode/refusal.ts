@@ -1,6 +1,7 @@
 /**
- * Recognises a provider REFUSING a request for an account reason, from the
- * host's assistant-message error, and nothing else (`Refusal` in
+ * Recognises a provider REFUSING a request, for an account reason or because
+ * the route does not accept a request feature MAD needs, from the host's
+ * assistant-message error, and nothing else (`Refusal` in
  * `core/ports/model-backend.ts`).
  *
  * Every input is checked at run time: the error comes from the host and the
@@ -11,6 +12,14 @@
  * - `ProviderAuthError` whose `data.providerID` is the slot's provider,
  *   compared without regard to case as selection compares providers: an
  *   authentication refusal for that provider.
+ * - `APIError` whose `data.message` is exactly
+ *   `tool_choice: type "tool" and "any" are not supported for this model.`,
+ *   with `isRetryable` absent or `false` and any `statusCode` or none: a
+ *   capability refusal of this provider/model route, labelled
+ *   `host-signature`. The route rejects the forced tool choice MAD's
+ *   structured answers need, so a retry would fail the same way. It is checked
+ *   before the status rules, so the text decides the kind whatever the status.
+ *   Any other text, a variant included, is not read as this refusal.
  * - `APIError` with a numeric `statusCode` of 401 (auth) or 402 (payment), and
  *   `isRetryable` absent or `false`: a refusal of this provider/model route
  *   only. The error shows this request was refused; it does not show that
@@ -31,6 +40,8 @@
 
 import type { Refusal } from "../../core/ports/model-backend.ts"
 
+/** The exact host error text of a route that rejects MAD's forced tool choice. */
+export const TOOL_CHOICE_UNSUPPORTED = 'tool_choice: type "tool" and "any" are not supported for this model.'
 const GITLAB_CREDITS_PREFIX = "Failed to get direct access token: 402 Payment Required"
 const GITLAB_CREDITS_MARKER = "not enough GitLab Credits"
 
@@ -51,8 +62,11 @@ export function classifyRefusal(error: unknown, slot: { providerId: string; mode
   }
 
   if (error.name === "APIError") {
-    if (typeof data.statusCode !== "number") return undefined
     if (data.isRetryable !== undefined && data.isRetryable !== false) return undefined
+    if (data.message === TOOL_CHOICE_UNSUPPORTED) {
+      return { kind: "capability", basis: "host-signature", scope: "route", ...route }
+    }
+    if (typeof data.statusCode !== "number") return undefined
     if (data.statusCode === 401) return { kind: "auth", basis: "structured", scope: "route", ...route }
     if (data.statusCode === 402) return { kind: "payment", basis: "structured", scope: "route", ...route }
     return undefined

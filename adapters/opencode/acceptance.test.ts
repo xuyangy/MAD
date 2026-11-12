@@ -52,6 +52,7 @@ import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
 import { hostSessionFromPluginClient } from "./host-session.ts"
 import { HOST_RETRY_PAST_DEADLINE, OpencodeModelBackend } from "./model-backend.ts"
+import { TOOL_CHOICE_UNSUPPORTED } from "./refusal.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 import { OMIT, startFakeHost, THREE_PROVIDERS, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
 import {
@@ -728,6 +729,46 @@ describe("acceptance — mad_review through the shipped plugin entry", () => {
           answeredLineages: 3,
         })
         expect(run.host.creates.every((body) => JSON.stringify((body as { permission?: unknown }).permission) === JSON.stringify(REVIEW_SESSION_PERMISSION))).toBe(true)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "A ROUTE THAT REJECTS THE FORCED TOOL CHOICE IS REPLACED: the title counts the replacement, and the report names a capability refusal",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const modelOf = (id: string) => ({ ...THREE_PROVIDERS.providers[1]!.models.b, id, name: id })
+        const provider = (id: string, model: string) => ({ id, name: id, source: "env", env: [], options: {}, models: { m: modelOf(model) } })
+        const providers = { ...THREE_PROVIDERS, providers: [...THREE_PROVIDERS.providers, provider("xai", "grok-4")] }
+        const run = await runScenario(repo, {
+          discovery: [FEE_FINDING],
+          judge: { "fact-check": FEE_FACT_CHECK },
+          providers,
+          promptError: (_session, prompt) =>
+            prompt.model === "gpt-5" ? { name: "APIError", data: { message: TOOL_CHOICE_UNSUPPORTED } } : undefined,
+        })
+        expectClean(run)
+        expect(run.host.prompts.filter((p) => p.model === "gpt-5")).toHaveLength(1)
+        expect(run.host.prompts.filter((p) => p.model === "grok-4" && p.role === undefined)).toHaveLength(1)
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered, 1 replacement(s) dispatched")
+        const report = run.result.output
+        expect(report).toContain(
+          "MODEL REPLACED: `openai/gpt-5` (slot discovery-2) was refused (a capability refusal (the route does not " +
+            "accept MAD's forced tool choice) for the route `openai/gpt-5`, recognised from a known host error text)",
+        )
+        expect(report).toContain("| replacements dispatched: 1 | answered: 3 |")
+        expect(report).not.toContain("account balance")
+        expect(run.result.metadata?.recovery).toEqual({
+          refused: 1,
+          replacementsDispatched: 1,
+          replacementsAnswered: 1,
+          notReplaced: {},
+          answeredLineages: 3,
+        })
       } finally {
         await repo.remove()
       }

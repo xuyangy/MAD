@@ -191,6 +191,17 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain("If no offered model declares it, MAD refuses before asking any model.")
     expect(PROSE).toContain("For a recognised refusal, once every first-round discovery turn has finished, MAD replaces the refused slot once with a model not in the pool")
     expect(PROSE).toContain("A slot you pinned with `models` is not replaced, and lens slots are never replaced.")
+    expect(PROSE).toContain("When a provider refuses a discovery model's request in a way MAD recognises, MAD does not retry it.")
+    expect(PROSE).toContain(
+      "A recognised refusal is an authentication or payment refusal, such as GitLab's no-credits error, or a capability refusal: an `APIError` whose message is exactly `tool_choice: type \"tool\" and \"any\" are not supported for this model.`, with `isRetryable` absent or false, whatever its status code (a 401, 402 or 5xx carrying this text is a capability refusal, not an authentication or payment one), which means the route rejects the forced tool choice MAD's structured answers need.",
+    )
+    expect(PROSE).toContain(
+      "A generic 401 or 402 error and a capability refusal each refuse only that route, meaning that model on that provider, so another model on the same provider can be chosen as the replacement, and may be refused the same way.",
+    )
+    expect(PROSE).toContain("on a provider and route that were not refused")
+    expect(README).not.toContain("for an account reason (a recognised authentication or payment refusal")
+    expect(README).not.toContain("A generic 401 or 402 error excludes only that model on that provider")
+    expect(README).not.toContain("is not retried either and, for an unpinned discovery slot")
     expect(PROSE).toContain(
       "A 429 quota error, a 403, GitLab's no-credits text under a provider id other than `gitlab`, or a refusal in the prompt envelope's `result.error` is treated as an ordinary failure. It can receive the ordinary retry if the stop and budget gates permit it; that error alone does not qualify the slot for replacement.",
     )

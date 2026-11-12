@@ -4,9 +4,11 @@
  */
 
 /**
- * A failed turn the backend recognised as the provider REFUSING THE REQUEST for
- * an account reason. It describes this request's refusal, not the account's
- * state: MAD never checks a balance or a credential.
+ * A failed turn the backend recognised as the provider REFUSING THE REQUEST,
+ * for an account reason (`auth`, `payment`) or because the route does not
+ * accept a request feature MAD needs (`capability`). It describes this
+ * request's refusal, not the account's state or the model's general
+ * abilities: MAD never checks a balance or a credential.
  *
  * A backend sets it only on a `model-error`, and only from evidence it can name
  * in `basis`. Everything it cannot classify stays an ordinary failure. The
@@ -18,8 +20,13 @@
  * be unknown. Debate and judge retry as they do for any failure.
  */
 export interface Refusal {
-  /** `auth`: the request's credentials were refused. `payment`: payment was required. */
-  kind: "auth" | "payment"
+  /**
+   * `auth`: the request's credentials were refused. `payment`: payment was
+   * required. `capability`: the route rejected a request feature MAD needs; not
+   * an account reason. The only capability signature recognised today is the
+   * rejection of the forced tool choice MAD's structured answers use.
+   */
+  kind: "auth" | "payment" | "capability"
   /**
    * `structured`: from the host's typed error fields. `host-signature`: from a
    * known, fixed error text one host adapter emits; a heuristic, labelled so.

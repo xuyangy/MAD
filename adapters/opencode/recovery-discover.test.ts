@@ -17,6 +17,7 @@ import { discover } from "../../core/stages/discover.ts"
 import { candidate, fakeAdmission, fakeClock } from "../../core/test-support/fakes.ts"
 import { createTurnRecorder } from "./artifacts.ts"
 import { OpencodeModelBackend } from "./model-backend.ts"
+import { TOOL_CHOICE_UNSUPPORTED as TOOL_CHOICE } from "./refusal.ts"
 import { cancelledTurn } from "../../core/ports/model-backend.ts"
 import { REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 
@@ -26,6 +27,8 @@ const GITLAB_CREDITS =
   'Failed to get direct access token: 402 Payment Required - {"message":"Token creation failed: not enough GitLab Credits."}'
 const GITLAB_REFUSAL = { error: { name: "UnknownError", data: { message: GITLAB_CREDITS } }, tokens: ZERO }
 const PAYMENT_402 = { error: { name: "APIError", data: { statusCode: 402, isRetryable: false } }, tokens: ZERO }
+/** The captured shape from live runs N3 and N4: no status, no retryable flag. */
+const TOOL_CHOICE_REFUSAL = { error: { name: "APIError", data: { message: TOOL_CHOICE } }, tokens: ZERO }
 const AUTH_PROVIDER = (providerID: string) => ({ error: { name: "ProviderAuthError", data: { providerID } }, tokens: ZERO })
 const NOTHING_FOUND = { structured: { findings: [] }, tokens: KNOWN }
 const FOUND = {
@@ -693,6 +696,209 @@ describe("discovery recovery — pins, lineage and route scope", () => {
     const replacement = result.discovered.recovery!.replacements[0]!
     expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("Q/mistral-large")
     expect(result.prompts.filter((route) => route === "Q/codestral-latest")).toEqual([])
+  })
+})
+
+describe("a route that rejects the forced tool choice", () => {
+  const OPUS = "anthropic/claude-opus-5-5"
+  const CAPABILITY_WORDS =
+    "a capability refusal (the route does not accept MAD's forced tool choice) for the route " +
+    "`anthropic/claude-opus-5-5`, recognised from a known host error text"
+
+  test("an unpinned pool slot is not retried and gets one replacement on another route, named as a capability refusal", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-opus-5-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+      ],
+      slots: 3,
+      script: (route) => (route === OPUS ? TOOL_CHOICE_REFUSAL : NOTHING_FOUND),
+    })
+    const { discovered, prompts, rowOf } = result
+    const opus = result.roster.slots.find((slot) => `${slot.providerId}/${slot.modelId}` === OPUS)!
+    expect(opus).toBeDefined()
+    // Prompted once: the capability refusal skips the automatic retry.
+    expect(prompts.filter((route) => route === OPUS)).toHaveLength(1)
+    expect(discovered.recovery!.refused).toEqual([
+      {
+        slot: opus.slot,
+        refusal: { kind: "capability", basis: "host-signature", scope: "route", providerId: "anthropic", modelId: "claude-opus-5-5" },
+      },
+    ])
+    const replacement = discovered.recovery!.replacements[0]!
+    expect(discovered.recovery!.replacements).toHaveLength(1)
+    expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("xai/grok-4")
+    expect(replacement).toMatchObject({ from: opus.slot, dispatched: 1, answered: true })
+    expect(discovered.answered).toBe(3)
+
+    const row = rowOf(opus.slot)!
+    expect(row.message).toContain(`was refused on its only attempt (${CAPABILITY_WORDS}), so it was not retried`)
+    expect(row.message).toContain(TOOL_CHOICE)
+    expect(row.detail).toMatchObject({
+      attempts: 1,
+      failure: "model-error",
+      refusal: { kind: "capability", basis: "host-signature", scope: "route" },
+      retry: "skipped",
+    })
+    const replaced = discovered.warnings.find((w) => w.code === "model-replaced")!
+    expect(replaced.message).toContain(`MODEL REPLACED: \`${OPUS}\` (slot ${opus.slot}) was refused (${CAPABILITY_WORDS});`)
+    for (const warning of [row, replaced]) {
+      expect(warning.message).not.toContain("account balance")
+      expect(warning.message).not.toContain("authentication refusal")
+      expect(warning.message).not.toContain("payment refusal")
+    }
+  })
+
+  test("the refusal is route-scoped: another model on the same provider stays eligible as the replacement", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-opus-5-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("anthropic", "claude-sonnet-4-5"),
+      ],
+      slots: 3,
+      script: (route) => (route === OPUS ? TOOL_CHOICE_REFUSAL : NOTHING_FOUND),
+    })
+    const opus = result.roster.slots.find((slot) => `${slot.providerId}/${slot.modelId}` === OPUS)!
+    expect(opus).toBeDefined()
+    expect(result.plan.candidates.map((route) => `${route.providerId}/${route.modelId}`)).toEqual(["anthropic/claude-sonnet-4-5"])
+    const replacement = result.discovered.recovery!.replacements[0]!
+    expect(result.discovered.recovery!.replacements).toHaveLength(1)
+    expect(replacement).toMatchObject({ from: opus.slot, dispatched: 1, answered: true })
+    expect(`${replacement.to.providerId}/${replacement.to.modelId}`).toBe("anthropic/claude-sonnet-4-5")
+    expect(result.prompts.filter((route) => route === OPUS)).toHaveLength(1)
+    expect(result.discovered.answered).toBe(3)
+  })
+
+  test("a replacement whose route also rejects the forced tool choice ends cleanly: no second replacement, both disclosed", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-opus-5-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+        candidate("mistral", "mistral-large"),
+      ],
+      slots: 3,
+      script: (route) => (route === OPUS || route === "xai/grok-4" ? TOOL_CHOICE_REFUSAL : NOTHING_FOUND),
+    })
+    const { discovered, prompts, rowOf } = result
+    const opus = result.roster.slots.find((slot) => `${slot.providerId}/${slot.modelId}` === OPUS)!
+    // Each refused route was prompted once; nothing replaced the replacement.
+    expect(prompts.filter((route) => route === OPUS)).toHaveLength(1)
+    expect(prompts.filter((route) => route === "xai/grok-4")).toHaveLength(1)
+    expect(prompts.filter((route) => route.startsWith("mistral/"))).toEqual([])
+    expect(discovered.recovery!.refused.map((entry) => entry.slot)).toEqual([opus.slot])
+    expect(discovered.recovery!.replacements).toEqual([
+      expect.objectContaining({ from: opus.slot, to: expect.objectContaining({ slot: "discovery-r1", modelId: "grok-4" }), dispatched: 1, answered: false }),
+    ])
+    expect(discovered.answered).toBe(2)
+
+    expect(rowOf(opus.slot)!.message).toContain(`was refused on its only attempt (${CAPABILITY_WORDS}), so it was not retried`)
+    expect(rowOf(opus.slot)!.message).toEndWith("It was replaced by slot discovery-r1.")
+    const replacementRow = rowOf("discovery-r1")!
+    expect(replacementRow.message).toContain(
+      "was refused on its only attempt (a capability refusal (the route does not accept MAD's forced tool choice) for the route " +
+        "`xai/grok-4`, recognised from a known host error text), so it was not retried",
+    )
+    expect(replacementRow.detail).toMatchObject({ refusal: { kind: "capability" }, retry: "skipped" })
+    const replaced = discovered.warnings.find((w) => w.code === "model-replaced")!
+    expect(replaced.message).toContain(`MODEL REPLACED: \`${OPUS}\` (slot ${opus.slot}) was refused (${CAPABILITY_WORDS});`)
+    expect(replaced.message).toContain("did not answer discovery, so it is not in the co-discovery denominator")
+    expect(discovered.warnings.filter((w) => w.code === "model-replaced")).toHaveLength(1)
+    expect(discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(true)
+  })
+
+  test("a pinned slot is not retried and not replaced, and the refusal is disclosed", async () => {
+    const result = await run({
+      candidates: [
+        candidate("anthropic", "claude-opus-5-5"),
+        candidate("openai", "gpt-5"),
+        candidate("google", "gemini-2.5-pro"),
+        candidate("xai", "grok-4"),
+      ],
+      slots: 3,
+      pins: [{ providerId: "anthropic", modelId: "claude-opus-5-5" }],
+      script: (route) => (route === OPUS ? TOOL_CHOICE_REFUSAL : NOTHING_FOUND),
+    })
+    const pinned = result.roster.slots[0]!
+    expect(`${pinned.providerId}/${pinned.modelId}`).toBe(OPUS)
+    expect(result.prompts.filter((route) => route === OPUS)).toHaveLength(1)
+    expect(result.prompts.filter((route) => route === "xai/grok-4")).toEqual([])
+    expect(result.discovered.recovery!.replacements).toEqual([])
+    expect(result.discovered.recovery!.notReplaced).toEqual([{ from: pinned.slot, reason: "pinned", detail: OPUS }])
+    const row = result.rowOf(pinned.slot)!
+    expect(row.message).toContain(`was refused on its only attempt (${CAPABILITY_WORDS}), so it was not retried`)
+    expect(row.message).toEndWith(
+      `It was not replaced: the slot was pinned to \`${OPUS}\`, and MAD does not put a model or provider the pin did not name in its place.`,
+    )
+    expect(row.detail).toMatchObject({ refusal: { kind: "capability" }, retry: "skipped" })
+  })
+
+  test("a lens slot drops out unretried and unreplaced, and the refusal is disclosed", async () => {
+    const lens: LensSlot = {
+      slot: "discovery-lens-security",
+      lens: "security",
+      providerId: "anthropic",
+      modelId: "claude-opus-5-5",
+      identity: normalizeModelIdentity("claude-opus-5-5"),
+      lineage: lineageOf("claude-opus-5-5"),
+      toolcall: true,
+      alsoAvailableVia: [],
+    }
+    const result = await run({
+      candidates: [candidate("openai", "gpt-5"), candidate("google", "gemini-2.5-pro"), candidate("xai", "grok-4")],
+      slots: 2,
+      lensSlots: [lens],
+      script: (route) => (route === OPUS ? TOOL_CHOICE_REFUSAL : NOTHING_FOUND),
+    })
+    expect(result.prompts.filter((route) => route === OPUS)).toHaveLength(1)
+    expect(result.discovered.recovery?.replacements ?? []).toEqual([])
+    expect(result.prompts.filter((route) => route === "xai/grok-4")).toEqual([])
+    const row = result.rowOf(lens.slot)!
+    expect(row.message).toContain(`was refused on its only attempt (${CAPABILITY_WORDS}), so it was not retried`)
+    expect(row.detail).toMatchObject({ refusal: { kind: "capability", basis: "host-signature", scope: "route" }, retry: "skipped" })
+    expect(row.message).toBe(
+      `MODEL DROPPED OUT: \`${OPUS}\` (slot ${lens.slot}) was refused on its only attempt (${CAPABILITY_WORDS}), ` +
+        `so it was not retried (model-error: APIError: ${TOOL_CHOICE}). ` +
+        "The run continued without it, and it is excluded from the co-discovery denominator.",
+    )
+    // Lens slots are never replaced: no pool slot was refused, so there is no
+    // recovery record and no replacement warning.
+    expect(result.discovered.recovery).toBeUndefined()
+    expect(result.discovered.warnings.some((w) => w.code === "model-replaced")).toBe(false)
+  })
+
+  test("a near-miss text, or the text marked retryable, stays an ordinary failure: retried once and not replaced", async () => {
+    const nearMisses = [
+      { error: { name: "APIError", data: { message: TOOL_CHOICE.slice(0, -1) } }, tokens: ZERO },
+      { error: { name: "APIError", data: { message: `${TOOL_CHOICE} (request id 1)` } }, tokens: ZERO },
+      { error: { name: "APIError", data: { message: TOOL_CHOICE.toUpperCase() } }, tokens: ZERO },
+      { error: { name: "UnknownError", data: { message: TOOL_CHOICE } }, tokens: ZERO },
+      { error: { name: "APIError", data: { message: TOOL_CHOICE, isRetryable: true } }, tokens: ZERO },
+    ]
+    for (const answer of nearMisses) {
+      const result = await run({
+        candidates: [
+          candidate("anthropic", "claude-opus-5-5"),
+          candidate("openai", "gpt-5"),
+          candidate("google", "gemini-2.5-pro"),
+          candidate("xai", "grok-4"),
+        ],
+        slots: 3,
+        script: (route) => (route === OPUS ? answer : NOTHING_FOUND),
+      })
+      const opus = result.roster.slots.find((slot) => `${slot.providerId}/${slot.modelId}` === OPUS)!
+      expect(result.prompts.filter((route) => route === OPUS)).toHaveLength(2)
+      expect(result.prompts.filter((route) => route === "xai/grok-4")).toEqual([])
+      expect(result.discovered.recovery?.refused ?? []).toEqual([])
+      const row = result.rowOf(opus.slot)!
+      expect(row.message).toContain("failed twice")
+      expect(row.detail).not.toHaveProperty("refusal")
+    }
   })
 })
 

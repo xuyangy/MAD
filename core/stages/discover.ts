@@ -524,10 +524,11 @@ async function runWithOneRetry(
       return { skippedForBudget: false, envelope, attempts: attempt }
     }
     // A REFUSED REQUEST IS NOT RETRIED. When the backend classifies this
-    // attempt as an authentication or payment refusal (`Refusal`), discovery
-    // skips its automatic retry. The classification does not establish the
-    // account's state, and this attempt's usage may be unknown; it is recorded
-    // above either way. On the retry, this ends the slot as the loop would.
+    // attempt as an authentication, payment or capability refusal (`Refusal`),
+    // discovery skips its automatic retry. The classification does not
+    // establish the account's state, and this attempt's usage may be unknown;
+    // it is recorded above either way. On the retry, this ends the slot as the
+    // loop would.
     if (envelope.refusal !== undefined) {
       return { skippedForBudget: false, envelope, attempts: attempt }
     }
@@ -562,9 +563,19 @@ function notReplacedReason(entry: NotReplaced): string {
   }
 }
 
-/** One refusal, in words: what was refused, at what scope, and on what evidence. */
+/**
+ * One refusal, in words: what was refused, at what scope, and on what evidence.
+ * A capability refusal is named by the feature it rejected; the forced tool
+ * choice is the only capability signature recognised today, so the wording
+ * names it.
+ */
 function describeRefusal(refusal: Refusal): string {
-  const what = refusal.kind === "payment" ? "a payment refusal" : "an authentication refusal"
+  const what =
+    refusal.kind === "payment"
+      ? "a payment refusal"
+      : refusal.kind === "capability"
+        ? "a capability refusal (the route does not accept MAD's forced tool choice)"
+        : "an authentication refusal"
   const where =
     refusal.scope === "provider"
       ? `for provider \`${refusal.providerId}\``
@@ -572,7 +583,9 @@ function describeRefusal(refusal: Refusal): string {
   const evidence =
     refusal.basis === "structured"
       ? "from the host's structured error"
-      : "recognised from a known host error text, not from a checked account balance"
+      : refusal.kind === "capability"
+        ? "recognised from a known host error text"
+        : "recognised from a known host error text, not from a checked account balance"
   return `${what} ${where}, ${evidence}`
 }
 
