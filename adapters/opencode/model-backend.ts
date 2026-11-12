@@ -66,18 +66,35 @@ export interface HostPromptArgs {
 }
 
 /**
+ * What `session.status` resolves to: the SDK's envelope around a map from
+ * session id to that session's status. Every field is read and checked at run
+ * time (`hostRetryOf`), so the map stays `unknown` here.
+ */
+export interface StatusResultLike {
+  data?: unknown
+  error?: unknown
+}
+
+/**
  * THE SESSION SURFACE THIS BACKEND CALLS, and nothing more: create and prompt,
- * which every turn needs, and delete, which a client may lack. The arguments are
- * the v2 SDK's flat shapes, so a v2 client (`createOpencodeClient` from
- * `@opencode-ai/sdk/v2`) satisfies it as it is. The plugin passes the host's own
- * client through `hostSessionFromPluginClient` (`./host-session.ts`). The
- * results are the SDK's envelopes, read through the narrow shapes below.
+ * which every turn needs, and delete and status, which a client may lack. The
+ * arguments are the v2 SDK's flat shapes, so a v2 client (`createOpencodeClient`
+ * from `@opencode-ai/sdk/v2`) satisfies it as it is. The plugin passes the
+ * host's own client through `hostSessionFromPluginClient` (`./host-session.ts`).
+ * The results are the SDK's envelopes, read through the narrow shapes below.
  */
 export interface HostSessionApi {
   session: {
     create(args: { directory: string; title: string; permission?: PermissionRule[] }): Promise<SessionCreatedLike>
     prompt(args: HostPromptArgs): Promise<PromptResultLike>
     delete?(args: { sessionID: string; directory: string }): Promise<unknown>
+    /**
+     * `GET /session/status`: a map from session id to status for the
+     * directory. It may hold any state (`idle`, `busy`, `retry` or one this
+     * adapter does not know), and a session absent from it is idle. Read only
+     * while a prompt is pending (`withTimeout`).
+     */
+    status?(args: { directory: string }): Promise<StatusResultLike>
   }
 }
 
@@ -218,6 +235,15 @@ function timedOutInFlight(ms: number): string {
   )
 }
 
+/**
+ * The `why` of a turn settled because the host was retrying its session past
+ * the deadline. Same facts as a timeout: the request was issued, MAD stopped
+ * waiting, and the usage was never reported.
+ */
+export const HOST_RETRY_PAST_DEADLINE =
+  "the host was retrying this turn's session with its next try after the turn's deadline, so MAD " +
+  "stopped waiting while the request was in flight; the request was issued and its usage was never reported"
+
 export interface OpencodeBackendOptions {
   /**
    * A running opencode server's URL, for the evaluation and probe scripts
@@ -250,6 +276,17 @@ export interface OpencodeBackendOptions {
    * that case could never fire and a hung provider stalled the whole fan-out.
    */
   timeoutMs?: number
+  /**
+   * How often, while a prompt is pending, the host's session status is read
+   * (`withTimeout`); the first read comes after this or half the turn's
+   * deadline, whichever is shorter. A turn whose session the host reports in
+   * `retry` with its next try after the turn's deadline settles at that read
+   * instead of at the deadline. The host's `next` is on the host's clock and
+   * the deadline on MAD's; the two are assumed to agree, and no slack is
+   * added. A positive finite number; default 5000. Has no effect on a client
+   * without `session.status`.
+   */
+  statusPollMs?: number
   /**
    * AC3 (story 2.3) — HOW LONG SESSION DISPOSAL MAY TAKE.
    *
@@ -399,6 +436,9 @@ export const DEFAULT_TURN_TIMEOUT_MS = 600_000
  * "cancellation stays responsive").
  */
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000
+
+/** Five seconds between status reads while a prompt is pending. */
+export const DEFAULT_STATUS_POLL_MS = 5_000
 
 function mapTokens(tokens: {
   input?: number
@@ -589,6 +629,80 @@ class TurnTimedOutError extends Error {
   }
 }
 
+/** The host's `retry` status for one session, as the host reported it. */
+interface HostRetry {
+  attempt: number
+  message: string
+  next: number
+}
+
+/**
+ * Thrown when the host reports the turn's session in `retry` with its next try
+ * after the turn's deadline. Waiting longer could only end at the deadline, so
+ * the turn settles now. Like `TurnTimedOutError` it is an abandonment: the
+ * request is still in flight, and the envelope is the timeout's
+ * `transport-error`, so AD-6(b)'s retry is unchanged. The message's fixed
+ * prefix, up to `(attempt `, is what `ablation/host-error.ts` matches.
+ */
+class HostRetryPastDeadlineError extends Error {
+  constructor(
+    readonly ms: number,
+    readonly retry: HostRetry,
+  ) {
+    const at = new Date(retry.next)
+    const when = Number.isNaN(at.getTime()) ? String(retry.next) : `${retry.next} (${at.toISOString()})`
+    super(
+      `the host is retrying this turn's session past the turn's ${ms}ms deadline ` +
+        `(attempt ${retry.attempt}, next try at ${when}): ${hostRetryText(retry.message)}`,
+    )
+    this.name = "HostRetryPastDeadlineError"
+  }
+}
+
+/** The most characters of the host's retry message a failure carries. */
+const HOST_RETRY_TEXT_LIMIT = 300
+
+/**
+ * The host's retry message as a failure carries it: each control character
+ * (U+0000–U+001F, U+007F) becomes a space, and past `HOST_RETRY_TEXT_LIMIT`
+ * characters it is cut and marked.
+ */
+function hostRetryText(message: string): string {
+  const flat = message.replace(/[\u0000-\u001f\u007f]/g, " ")
+  const chars = Array.from(flat)
+  return chars.length <= HOST_RETRY_TEXT_LIMIT ? flat : `${chars.slice(0, HOST_RETRY_TEXT_LIMIT).join("")}… [truncated]`
+}
+
+/**
+ * The `retry` status of `sessionID` in a `session.status` answer, or
+ * `undefined` for anything else: an error envelope, no data, a session absent
+ * from the map, another status, or a retry whose `attempt` is not a
+ * non-negative integer, whose `message` is not a string or whose `next` is not
+ * a finite number.
+ */
+function hostRetryOf(answer: unknown, sessionID: string): HostRetry | undefined {
+  if (typeof answer !== "object" || answer === null) return undefined
+  const { data, error } = answer as StatusResultLike
+  if (error !== undefined && error !== null) return undefined
+  if (typeof data !== "object" || data === null || !Object.hasOwn(data, sessionID)) return undefined
+  const status = (data as Record<string, unknown>)[sessionID]
+  if (typeof status !== "object" || status === null) return undefined
+  const { type, attempt, message, next } = status as Record<string, unknown>
+  if (type !== "retry") return undefined
+  if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 0) return undefined
+  if (typeof message !== "string") return undefined
+  if (typeof next !== "number" || !Number.isFinite(next)) return undefined
+  return { attempt, message, next }
+}
+
+/** What `withTimeout` needs to watch the host's status for one pending prompt. */
+interface RetryWatch {
+  /** Reads the host's session status; may reject or never settle. */
+  read(): Promise<unknown>
+  sessionID: string
+  intervalMs: number
+}
+
 /**
  * A provider that never answers must not stall the whole fan-out. The port is
  * request/response (AD-2), so a hung call has no other way to become the
@@ -631,17 +745,37 @@ class TurnTimedOutError extends Error {
  *   queue and cannot throw, and if a future one does, the failure belongs to
  *   nobody: there is no turn left to fail and no stage left to tell.
  *
- * It fires for BOTH abandonment errors, because both mean a request is in flight
- * that MAD is no longer waiting for, and neither means a request that failed.
+ * It fires for every abandonment error, because each means a request is in
+ * flight that MAD is no longer waiting for, and none means a request that
+ * failed.
+ *
+ * THE HOST'S RETRY. With a `watch`, the host's session status is read while
+ * the prompt is pending: first after `intervalMs` or half the deadline,
+ * whichever is shorter, so even a long interval reads once, and then every
+ * `intervalMs`. Each tick issues a new read. A read still pending at the next
+ * tick is abandoned and its later answer ignored, so a read that never settles
+ * does not stop the ones after it. When an answer reports the session in
+ * `retry` with `next` later than this turn's deadline, the race rejects with
+ * `HostRetryPastDeadlineError`: the host would not try again before MAD
+ * stopped waiting anyway. `next` is the host's clock and the deadline MAD's;
+ * they are compared as they are, with no slack. Any other answer, a read that
+ * throws, rejects or never settles, and a `next` at or before the deadline
+ * change nothing. The reads stop in the same `finally`, and an answer that
+ * arrives after the race has settled is ignored.
  */
 async function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
   signal?: AbortSignal,
   onAbandoned?: (settled: T) => void,
+  watch?: RetryWatch,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
+  let firstPoll: ReturnType<typeof setTimeout> | undefined
+  let poll: ReturnType<typeof setInterval> | undefined
   let onAbort: (() => void) | undefined
+  let over = false
+  const deadline = Date.now() + ms
   try {
     const races: Promise<T>[] = [
       promise,
@@ -649,6 +783,39 @@ async function withTimeout<T>(
         timer = setTimeout(() => reject(new TurnTimedOutError(ms)), ms)
       }),
     ]
+    if (watch) {
+      races.push(
+        new Promise<never>((_, reject) => {
+          // Only the newest read's answer counts; each tick abandons the last.
+          let current = 0
+          const tick = () => {
+            if (over) return
+            const mine = ++current
+            let read: Promise<unknown>
+            try {
+              read = watch.read()
+            } catch {
+              return
+            }
+            Promise.resolve(read).then(
+              (answer) => {
+                if (over || mine !== current) return
+                const retry = hostRetryOf(answer, watch.sessionID)
+                if (retry !== undefined && retry.next > deadline) reject(new HostRetryPastDeadlineError(ms, retry))
+              },
+              () => {
+                // A failed read changes nothing; the next tick reads again.
+              },
+            )
+          }
+          firstPoll = setTimeout(() => {
+            if (over) return
+            poll = setInterval(tick, watch.intervalMs)
+            tick()
+          }, Math.min(watch.intervalMs, ms / 2))
+        }),
+      )
+    }
     if (signal) {
       races.push(
         new Promise<never>((_, reject) => {
@@ -663,7 +830,10 @@ async function withTimeout<T>(
     }
     return await Promise.race(races)
   } catch (error) {
-    const abandoned = error instanceof TurnTimedOutError || error instanceof TurnCancelledError
+    const abandoned =
+      error instanceof TurnTimedOutError ||
+      error instanceof TurnCancelledError ||
+      error instanceof HostRetryPastDeadlineError
     if (onAbandoned && abandoned) {
       // NOT AWAITED — see the header. `void` is the statement saying so out
       // loud, and the two handlers are what keep this from ever being heard
@@ -684,7 +854,10 @@ async function withTimeout<T>(
     }
     throw error
   } finally {
+    over = true
     if (timer) clearTimeout(timer)
+    if (firstPoll) clearTimeout(firstPoll)
+    if (poll) clearInterval(poll)
     if (signal && onAbort) signal.removeEventListener("abort", onAbort)
   }
 }
@@ -695,6 +868,7 @@ export class OpencodeModelBackend implements ModelBackend {
   private readonly bySlot: Map<string, RosterSlot>
   private readonly tools: Record<string, boolean> | undefined
   private readonly timeoutMs: number
+  private readonly statusPollMs: number
   private readonly cleanupTimeoutMs: number
   private readonly lateUsage: LateUsageReporter | undefined
   private readonly executionIdPrefix: string
@@ -725,6 +899,11 @@ export class OpencodeModelBackend implements ModelBackend {
     this.bySlot = new Map(options.slots.map((slot) => [slot.slot, slot]))
     this.tools = options.tools
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS
+    const statusPollMs = options.statusPollMs ?? DEFAULT_STATUS_POLL_MS
+    if (typeof statusPollMs !== "number" || !Number.isFinite(statusPollMs) || statusPollMs <= 0) {
+      throw new Error(`OpencodeModelBackend: statusPollMs must be a positive finite number, got ${String(statusPollMs)}`)
+    }
+    this.statusPollMs = statusPollMs
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS
     this.lateUsage = options.lateUsage
     this.executionIdPrefix = options.executionIdPrefix ?? ""
@@ -1164,6 +1343,13 @@ export class OpencodeModelBackend implements ModelBackend {
     // identity a late usage report can be matched back to.
     const executionId = this.nextExecutionId()
 
+    // Bound to `session` so a client's own `this` is kept on every read.
+    const session = this.client.session
+    const watch: RetryWatch | undefined =
+      session.status === undefined
+        ? undefined
+        : { read: () => session.status!({ directory: this.directory }), sessionID, intervalMs: this.statusPollMs }
+
     let result: PromptResultLike
     try {
       result = await withTimeout(
@@ -1185,6 +1371,7 @@ export class OpencodeModelBackend implements ModelBackend {
         this.lateUsage && !metered
           ? (settled: PromptResultLike) => this.reportLateUsage(executionId, settled, schema)
           : undefined,
+        watch,
       )
     } catch (error) {
       // AD-2 amended — THE USER'S STOP IS NOT A TRANSPORT FAILURE. Reporting it
@@ -1212,6 +1399,17 @@ export class OpencodeModelBackend implements ModelBackend {
           failure: "transport-error",
           message: describeError(error),
           usageUnknown: { executionId, why: timedOutInFlight(error.ms), abandoned: true },
+        }
+      }
+      // The host is retrying the session past the deadline: the timeout's
+      // envelope, settled earlier, with the host's retry in the message.
+      if (error instanceof HostRetryPastDeadlineError) {
+        return {
+          ok: false,
+          slot,
+          failure: "transport-error",
+          message: error.message,
+          usageUnknown: { executionId, why: HOST_RETRY_PAST_DEADLINE, abandoned: true },
         }
       }
       // Only thrown for genuine transport failures; provider errors are returned.

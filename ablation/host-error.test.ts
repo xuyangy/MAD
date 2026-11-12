@@ -129,6 +129,66 @@ describe("classifyHostError (story 2-8c6)", () => {
     expect(hostErrorOf(envelope)).toEqual({ category: "turn-timeout", code: null, summary: "the turn reached its deadline while in flight; no message is recorded" })
   })
 
+  test("the backend's early settle for a host retrying past the deadline is `host-retry-past-deadline`, its message omitted", () => {
+    const secret = "sk-proj-SECRETabcdef0123456789"
+    const message =
+      "the host is retrying this turn's session past the turn's 600000ms deadline " +
+      `(attempt 1, next try at 1800000000000 (2027-01-15T08:00:00.000Z)): Free usage limit reached ${secret}`
+    const error = classifyHostError("transport-error", message)
+    expect(error).toEqual({
+      category: "host-retry-past-deadline",
+      code: null,
+      summary:
+        "the host reported the turn's session retrying with its next try after the turn's deadline, so the turn " +
+        "settled early in flight; the host's message is omitted",
+    })
+    expect(emitted(error)).not.toContain(secret)
+    expect(emitted(error)).not.toContain("Free usage")
+  })
+
+  test("the host-retry prefix is anchored and needs the transport-error kind", () => {
+    const tail = "the host is retrying this turn's session past the turn's 600000ms deadline (attempt 1, next try at 1): x"
+    expect(classifyHostError("transport-error", `prefix ${tail}`).category).toBe("transport-failure")
+    expect(classifyHostError("transport-error", tail.replace("600000ms", "0600000ms")).category).toBe("transport-failure")
+    expect(classifyHostError("transport-error", tail.replace(" (attempt ", " attempt ")).category).toBe("transport-failure")
+    expect(classifyHostError("model-error", tail).category).toBe("unrecognized")
+  })
+
+  test("the production backend's early settle classifies as `host-retry-past-deadline`, end to end", async () => {
+    const client = {
+      session: {
+        create: async () => ({ data: { id: "ses_stand_in" } }),
+        prompt: () => new Promise(() => {}),
+        delete: async () => ({ data: true }),
+        status: async () => ({
+          data: { ses_stand_in: { type: "retry", attempt: 1, message: "Free usage limit reached", next: Date.now() + 3_600_000 } },
+        }),
+      },
+    }
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://127.0.0.1:9",
+      directory: "/stand-in",
+      slots: [
+        {
+          slot: "discovery-1",
+          providerId: "openai",
+          modelId: "gpt-6-luna",
+          identity: "gpt-6-luna",
+          lineage: { lineage: "unverified", label: "lineage unverified", verified: false },
+          toolcall: false,
+          alsoAvailableVia: [],
+        },
+      ],
+      client: client as never,
+      timeoutMs: 10_000,
+      statusPollMs: 10,
+      cleanupTimeoutMs: 10,
+    })
+    const envelope = await backend.runTurn("discovery-1", "i", "d", z.object({ reply: z.string() }))
+    expect(!envelope.ok && envelope.failure).toBe("transport-error")
+    expect(hostErrorOf(envelope)?.category).toBe("host-retry-past-deadline")
+  })
+
   test("the transport-failure summary omits the host's message", () => {
     expect(classifyHostError("transport-error", "ECONNREFUSED").summary).toBe("the call to the host failed in transport; the host's message is omitted")
   })

@@ -4,7 +4,7 @@
  * The OAuth pilot and the zero-bill probe used to record only a failure kind, so
  * a failed attempt's cause had to be recovered from the host's own database. This
  * classifier reads the envelope's `failure` and `message` (the backend's
- * `describeError` output) and returns one of six categories, an optional code
+ * `describeError` output) and returns one of seven categories, an optional code
  * and a summary.
  *
  * Redaction is structural rather than a filter: the summary comes from a fixed
@@ -20,6 +20,7 @@ export type HostErrorCategory =
   | "oauth-token-refresh-rejected"
   | "provider-api-error"
   | "turn-timeout"
+  | "host-retry-past-deadline"
   | "transport-failure"
   | "unrecognized"
 
@@ -42,12 +43,22 @@ const SUMMARY: { [K in HostErrorCategory]: (code: RefreshRejectionCode | null) =
     `the host reported that its OAuth token refresh was rejected with HTTP ${code}; the host's message is omitted`,
   "provider-api-error": () => "the host reported a provider API error; the host's message is omitted",
   "turn-timeout": () => "the turn reached its deadline while in flight; no message is recorded",
+  "host-retry-past-deadline": () =>
+    "the host reported the turn's session retrying with its next try after the turn's deadline, so the turn " +
+    "settled early in flight; the host's message is omitted",
   "transport-failure": () => "the call to the host failed in transport; the host's message is omitted",
   unrecognized: () => "the turn failed with an error outside the allowlisted categories; its message is omitted",
 }
 
 /** The backend's own deadline message (`TurnTimedOutError`), matched whole. */
 const TURN_TIMEOUT = /^turn timed out after (0|[1-9][0-9]{0,9})ms$/
+
+/**
+ * The fixed prefix of the backend's early settle for a session the host is
+ * retrying past the deadline (`HostRetryPastDeadlineError`). Anchored at the
+ * start; what follows the prefix is the host's and is never recorded.
+ */
+const HOST_RETRY_PAST_DEADLINE = /^the host is retrying this turn's session past the turn's (0|[1-9][0-9]{0,9})ms deadline \(attempt /
 
 function record(category: HostErrorCategory, code: RefreshRejectionCode | null = null): HostError {
   return { category, code, summary: SUMMARY[category](code) }
@@ -56,13 +67,15 @@ function record(category: HostErrorCategory, code: RefreshRejectionCode | null =
 /**
  * Classifies a failed turn. A `host-aborted` failure (ledger #7) is classified
  * by its kind alone, ahead of every message pattern. The refresh and timeout
- * patterns match the complete message; `provider-api-error` is a prefix
- * classification with a fixed output.
+ * patterns match the complete message; `host-retry-past-deadline` and
+ * `provider-api-error` are prefix classifications with a fixed output.
  */
 export function classifyHostError(failure: TurnFailure, message: string): HostError {
   if (failure === "host-aborted") return record("host-aborted")
   if (failure === "transport-error") {
-    return TURN_TIMEOUT.test(message) ? record("turn-timeout") : record("transport-failure")
+    if (TURN_TIMEOUT.test(message)) return record("turn-timeout")
+    if (HOST_RETRY_PAST_DEADLINE.test(message)) return record("host-retry-past-deadline")
+    return record("transport-failure")
   }
   for (const code of REFRESH_REJECTION_CODES) {
     if (message === `UnknownError: Token refresh failed: ${code}`) return record("oauth-token-refresh-rejected", code)

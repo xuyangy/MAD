@@ -41,6 +41,9 @@ type PromptBody = NonNullable<SessionPromptData["body"]> & {
 }
 
 export function hostSessionFromPluginClient(client: HostClient): HostSessionApi {
+  // A host client without `session.status` gives a session surface without it,
+  // so the backend takes its no-status path rather than calling a missing method.
+  const hasStatus = typeof (client.session as { status?: unknown }).status === "function"
   return {
     session: {
       create({ directory, title, permission }) {
@@ -54,6 +57,13 @@ export function hostSessionFromPluginClient(client: HostClient): HostSessionApi 
       delete({ sessionID, directory }) {
         return client.session.delete({ path: { id: sessionID }, query: { directory } })
       },
+      ...(hasStatus
+        ? {
+            status({ directory }: { directory: string }) {
+              return client.session.status({ query: { directory } })
+            },
+          }
+        : {}),
     },
   }
 }

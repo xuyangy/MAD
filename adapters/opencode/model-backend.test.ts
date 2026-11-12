@@ -25,7 +25,13 @@ import { candidate, fakeClock } from "../../core/test-support/fakes.ts"
 import { createOpencodeClient } from "@opencode-ai/sdk"
 
 import { hostSessionFromPluginClient } from "./host-session.ts"
-import { OpencodeModelBackend, type MeteredUsage, type RequestMeterPort } from "./model-backend.ts"
+import {
+  DEFAULT_STATUS_POLL_MS,
+  HOST_RETRY_PAST_DEADLINE,
+  OpencodeModelBackend,
+  type MeteredUsage,
+  type RequestMeterPort,
+} from "./model-backend.ts"
 
 const SCHEMA = z.object({ findings: z.array(z.object({ claim: z.string() })) })
 const PAYLOAD = { findings: [{ claim: "off-by-one in the retry loop" }] }
@@ -93,6 +99,12 @@ interface FakeV2Options {
    * that dropped the continuation entirely.
    */
   pendingPrompt?: boolean
+  /**
+   * When set, the client has `session.status`, and each call's answer is what
+   * this returns for it (`index` from 0): a value, a rejecting promise, or one
+   * that never settles. Absent, the client has no `status` at all.
+   */
+  status?: (args: unknown, index: number) => unknown
 }
 
 function fakeV2(options: FakeV2Options = {}) {
@@ -115,6 +127,8 @@ function fakeV2(options: FakeV2Options = {}) {
     abort: unknown[]
     message: unknown[]
     messages: unknown[]
+    /** Every `session.status` call, in order. */
+    status: unknown[]
   } = {
     create: [],
     prompt: [],
@@ -122,6 +136,7 @@ function fakeV2(options: FakeV2Options = {}) {
     abort: [],
     message: [],
     messages: [],
+    status: [],
   }
   let settle: ((value: unknown) => void) | undefined
   let fail: ((error: unknown) => void) | undefined
@@ -166,6 +181,14 @@ function fakeV2(options: FakeV2Options = {}) {
         if (options.deleteThrows) throw options.deleteThrows
         return { data: true }
       },
+      ...(options.status === undefined
+        ? {}
+        : {
+            status: async (args: unknown) => {
+              calls.status.push(args)
+              return options.status!(args, calls.status.length - 1)
+            },
+          }),
     },
   }
   return {
@@ -196,7 +219,13 @@ function fakeV2(options: FakeV2Options = {}) {
  */
 function backendWith(
   options: FakeV2Options = {},
-  tuning: { timeoutMs?: number; cleanupTimeoutMs?: number; lateUsage?: LateUsageReporter; executionIdPrefix?: string } = {},
+  tuning: {
+    timeoutMs?: number
+    cleanupTimeoutMs?: number
+    lateUsage?: LateUsageReporter
+    executionIdPrefix?: string
+    statusPollMs?: number
+  } = {},
 ) {
   const fake = fakeV2(options)
   const backend = new OpencodeModelBackend({
@@ -208,6 +237,7 @@ function backendWith(
     ...(tuning.cleanupTimeoutMs === undefined ? {} : { cleanupTimeoutMs: tuning.cleanupTimeoutMs }),
     ...(tuning.lateUsage === undefined ? {} : { lateUsage: tuning.lateUsage }),
     ...(tuning.executionIdPrefix === undefined ? {} : { executionIdPrefix: tuning.executionIdPrefix }),
+    ...(tuning.statusPollMs === undefined ? {} : { statusPollMs: tuning.statusPollMs }),
   })
   return { backend, calls: fake.calls, settlePrompt: fake.settlePrompt, rejectPrompt: fake.rejectPrompt }
 }
@@ -1994,5 +2024,391 @@ describe("recovery routes bound at construction", () => {
     expect(fake.calls.create).toEqual([])
     expect(fake.calls.prompt).toEqual([])
     expect(fake.calls.delete).toEqual([])
+  })
+})
+
+/**
+ * After a retryable provider error, opencode 1.19.5 keeps the session in its
+ * own retry loop and answers the prompt only after its retries are spent, so a
+ * turn waiting on the prompt alone waits out its deadline. The host reports
+ * such a session as `{ type: "retry", attempt, message, next }` on
+ * `session.status`, with `next` the epoch ms of its next try.
+ */
+const FREE_LIMIT = "Free usage limit reached. Free models work in OpenCode"
+
+function retrying(next: number, attempt = 1) {
+  return { data: { ses_test: { type: "retry", attempt, message: FREE_LIMIT, next } } }
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+describe("runTurn — a session the host is retrying past the turn's deadline", () => {
+  test("REPRODUCTION: the turn settles within a poll interval as a timeout would, naming the host's retry", async () => {
+    const next = Date.now() + 3_600_000
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => retrying(next, 2) },
+      { timeoutMs: 10_000, statusPollMs: 20, cleanupTimeoutMs: 10 },
+    )
+    const started = Date.now()
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const elapsed = Date.now() - started
+
+    expect(elapsed).toBeLessThan(2_000)
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(!result.ok && result.message).toContain(FREE_LIMIT)
+    expect(!result.ok && result.message).toContain("attempt 2")
+    expect(!result.ok && result.message).toContain(String(next))
+    expect(result.usageUnknown).toBeDefined()
+    expect(result.usageUnknown!.abandoned).toBe(true)
+    expect(result.usageUnknown!.why).toBe(HOST_RETRY_PAST_DEADLINE)
+    expect(result.usageUnknown!.why).not.toContain("timed out")
+    expect("tokens" in result).toBe(false)
+    expect(calls.status[0]).toEqual({ directory: "/repo" })
+  })
+
+  test("the host's message is flattened and capped before it reaches the failure", async () => {
+    const long = `first line\nsecond\tline\u0000\u007f${"y".repeat(1_000)}`
+    const { backend } = backendWith(
+      {
+        hang: true,
+        status: () => ({ data: { ses_test: { type: "retry", attempt: 1, message: long, next: Date.now() + 3_600_000 } } }),
+      },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const message = !result.ok ? result.message : ""
+    expect(message).toContain("first line second line  ")
+    expect(message).not.toMatch(/[\u0000-\u001f\u007f]/)
+    expect(message.endsWith("… [truncated]")).toBe(true)
+    const host = message.slice(message.indexOf("first line"), -"… [truncated]".length)
+    expect(Array.from(host)).toHaveLength(300)
+  })
+
+  test("a short host message is kept whole", async () => {
+    const { backend } = backendWith(
+      { hang: true, status: () => retrying(Date.now() + 3_600_000) },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.message.endsWith(`: ${FREE_LIMIT}`)).toBe(true)
+  })
+
+  test("the first read comes at half the deadline when the poll interval is longer", async () => {
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => retrying(Date.now() + 3_600_000) },
+      { timeoutMs: 400, statusPollMs: 60_000, cleanupTimeoutMs: 10 },
+    )
+    const started = Date.now()
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const elapsed = Date.now() - started
+    expect(calls.status).toHaveLength(1)
+    expect(elapsed).toBeGreaterThanOrEqual(150)
+    expect(elapsed).toBeLessThan(400)
+    expect(!result.ok && result.usageUnknown!.why).toBe(HOST_RETRY_PAST_DEADLINE)
+  })
+
+  test("a read that throws synchronously changes nothing, and the next read still counts", async () => {
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: () => retrying(Date.now() + 3_600_000),
+      },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const session = (backend as unknown as { client: { session: { status: (args: unknown) => unknown } } }).client.session
+    const answer = session.status
+    let thrown = 0
+    session.status = (args: unknown) => {
+      if (thrown < 2) {
+        thrown += 1
+        throw new Error("synchronous failure")
+      }
+      return answer(args)
+    }
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(thrown).toBe(2)
+    expect(calls.status.length).toBeGreaterThan(0)
+    expect(!result.ok && result.usageUnknown!.why).toBe(HOST_RETRY_PAST_DEADLINE)
+  })
+
+  test("a read that throws synchronously on every tick: the turn times out as before", async () => {
+    const { backend } = backendWith({ hang: true, status: () => ({ data: {} }) }, { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10 })
+    const session = (backend as unknown as { client: { session: { status: unknown } } }).client.session
+    let thrown = 0
+    session.status = () => {
+      thrown += 1
+      throw new Error("synchronous failure")
+    }
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(thrown).toBeGreaterThan(1)
+    expect(!result.ok && result.message).toBe("turn timed out after 80ms")
+  })
+
+  for (const attempt of [Number.NaN, -1, 1.5]) {
+    test(`a retry whose attempt is ${attempt}: waits for the deadline and times out as before`, async () => {
+      const { backend, calls } = backendWith(
+        {
+          hang: true,
+          status: () => ({ data: { ses_test: { type: "retry", attempt, message: FREE_LIMIT, next: Date.now() + 3_600_000 } } }),
+        },
+        { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10 },
+      )
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(calls.status.length).toBeGreaterThan(1)
+      expect(!result.ok && result.message).toBe("turn timed out after 80ms")
+    })
+  }
+
+  test("attempt 0 is a valid retry", async () => {
+    const { backend } = backendWith(
+      { hang: true, status: () => retrying(Date.now() + 3_600_000, 0) },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.message).toContain("attempt 0")
+  })
+
+  test("the poll interval defaults to 5000 ms", () => {
+    expect(DEFAULT_STATUS_POLL_MS).toBe(5_000)
+    const { backend } = backendWith()
+    expect((backend as unknown as { statusPollMs: number }).statusPollMs).toBe(5_000)
+  })
+
+  for (const statusPollMs of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, "10" as unknown as number]) {
+    test(`a poll interval of ${String(statusPollMs)} is refused at construction`, () => {
+      expect(() => backendWith({}, { statusPollMs })).toThrow("statusPollMs must be a positive finite number")
+    })
+  }
+
+  test("no status read is issued after the turn settles early", async () => {
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => retrying(Date.now() + 3_600_000) },
+      { timeoutMs: 2_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const reads = calls.status.length
+    await pause(60)
+    expect(calls.status).toHaveLength(reads)
+  })
+
+  test("a retry whose next try is within the deadline is waited out, and a later one past it settles", async () => {
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) => (index < 3 ? retrying(Date.now() + 50, 1) : retrying(Date.now() + 3_600_000, 2)),
+      },
+      { timeoutMs: 2_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(calls.status.length).toBeGreaterThanOrEqual(4)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(!result.ok && result.message).toContain("attempt 2")
+  })
+
+  test("SHORT HOST RETRY: a retry within the deadline, then an answer, succeeds", async () => {
+    const { backend, calls, settlePrompt } = backendWith(
+      { pendingPrompt: true, status: () => retrying(Date.now() + 100) },
+      { timeoutMs: 2_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    let settled = false
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA).then((result) => {
+      settled = true
+      return result
+    })
+    await pause(60)
+    expect(calls.status.length).toBeGreaterThan(0)
+    expect(settled).toBe(false)
+
+    settlePrompt({ data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } })
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.value).toEqual(PAYLOAD)
+  })
+
+  test("BUSY: the turn still succeeds when the prompt answers", async () => {
+    const { backend, calls, settlePrompt } = backendWith(
+      { pendingPrompt: true, status: () => ({ data: { ses_test: { type: "busy" } } }) },
+      { timeoutMs: 2_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    await pause(40)
+    expect(calls.status.length).toBeGreaterThan(0)
+    settlePrompt({ data: { info: { structured: PAYLOAD } } })
+    expect((await pending).ok).toBe(true)
+  })
+
+  const waited: Array<[string, (args: unknown, index: number) => unknown]> = [
+    ["busy", () => ({ data: { ses_test: { type: "busy" } } })],
+    ["idle", () => ({ data: { ses_test: { type: "idle" } } })],
+    ["absent from the map", () => ({ data: {} })],
+    ["only another session retrying", () => ({ data: { ses_other: retrying(Date.now() + 3_600_000).data.ses_test } })],
+    ["a read that rejects", () => Promise.reject(new Error("socket gone"))],
+    ["an error envelope", () => ({ error: { name: "BadRequestError", data: { message: "no" } } })],
+    ["an error envelope beside a retry", () => ({ ...retrying(Date.now() + 3_600_000), error: { name: "BadRequestError" } })],
+    ["no data", () => ({})],
+    ["a null answer", () => null],
+    ["a retry with a string next", () => ({ data: { ses_test: { type: "retry", attempt: 1, message: FREE_LIMIT, next: "later" } } })],
+    ["a retry with a non-finite next", () => ({ data: { ses_test: { type: "retry", attempt: 1, message: FREE_LIMIT, next: Infinity } } })],
+    ["a retry with no message", () => ({ data: { ses_test: { type: "retry", attempt: 1, next: Date.now() + 3_600_000 } } })],
+    ["a retry with no attempt", () => ({ data: { ses_test: { type: "retry", message: FREE_LIMIT, next: Date.now() + 3_600_000 } } })],
+  ]
+  for (const [name, status] of waited) {
+    test(`${name}: waits for the deadline and times out as before`, async () => {
+      const { backend, calls } = backendWith({ hang: true, status }, { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10 })
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(calls.status.length).toBeGreaterThan(1)
+      expect(!result.ok && result.failure).toBe("transport-error")
+      expect(!result.ok && result.message).toBe("turn timed out after 80ms")
+      expect(result.usageUnknown!.why).toContain("timed out")
+    })
+  }
+
+  test("reads that never settle: later reads continue, and the turn times out as before", async () => {
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => new Promise(() => {}) },
+      { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(calls.status.length).toBeGreaterThan(1)
+    expect(!result.ok && result.message).toBe("turn timed out after 80ms")
+    const reads = calls.status.length
+    await pause(40)
+    expect(calls.status).toHaveLength(reads)
+  })
+
+  test("a read that never settles does not stop a later read from settling the turn early", async () => {
+    let late: ((value: unknown) => void) | undefined
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) => {
+          if (index === 0) {
+            return new Promise((resolve) => {
+              late = resolve
+            })
+          }
+          return index < 3 ? { data: {} } : retrying(Date.now() + 3_600_000, 4)
+        },
+      },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const started = Date.now()
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(calls.status.length).toBeGreaterThanOrEqual(4)
+    expect(!result.ok && result.message).toContain("attempt 4")
+    // The abandoned first read answering afterwards changes nothing.
+    late!(retrying(Date.now() + 3_600_000, 9))
+    await flush()
+  })
+
+  test("an abandoned read's later answer is ignored", async () => {
+    let late: ((value: unknown) => void) | undefined
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) =>
+          index === 0
+            ? new Promise((resolve) => {
+                late = resolve
+              })
+            : new Promise(() => {}),
+      },
+      { timeoutMs: 150, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    await pause(40)
+    expect(calls.status.length).toBeGreaterThan(1)
+    late!(retrying(Date.now() + 3_600_000, 9))
+    const result = await pending
+    expect(!result.ok && result.message).toBe("turn timed out after 150ms")
+  })
+
+  test("NO STATUS ON THE CLIENT: the turn times out exactly as before", async () => {
+    const { backend, calls } = backendWith({ hang: true }, { timeoutMs: 50, statusPollMs: 10, cleanupTimeoutMs: 10 })
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(calls.status).toHaveLength(0)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(!result.ok && result.message).toBe("turn timed out after 50ms")
+  })
+
+  test("USER STOP while polling: `cancelled` as before, and no read after it", async () => {
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => ({ data: { ses_test: { type: "busy" } } }) },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10 },
+    )
+    const controller = new AbortController()
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+    await pause(40)
+    controller.abort()
+    const result = await pending
+    expect(!result.ok && result.failure).toBe("cancelled")
+    const reads = calls.status.length
+    expect(reads).toBeGreaterThan(0)
+    await pause(50)
+    expect(calls.status).toHaveLength(reads)
+  })
+
+  test("LATE ANSWER after an early settle reaches the late-usage sink, as for a timeout", async () => {
+    const lateUsage = collectingReporter()
+    const { backend, settlePrompt } = backendWith(
+      { pendingPrompt: true, status: () => retrying(Date.now() + 3_600_000) },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10, lateUsage },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(lateUsage.reports).toEqual([])
+
+    settlePrompt({ data: { info: { structured: PAYLOAD, tokens: HOST_TOKENS } } })
+    await flush()
+    expect(lateUsage.reports).toEqual([{ executionId: result.usageUnknown!.executionId, tokens: HOST_TOKENS_MAPPED }])
+  })
+
+  test("through `discover`: one AD-6(b) retry, then a drop-out warning naming the host's retry", async () => {
+    const roster = selectRoster([candidate("anthropic", "claude-sonnet-4-5")], {
+      slots: 1,
+      lenses: [],
+      providerConfigKey: "provider",
+    }).roster
+    const fake = fakeV2({ hang: true, status: () => retrying(Date.now() + 3_600_000) })
+    const backend = new OpencodeModelBackend({
+      serverUrl: "http://localhost:4096",
+      directory: "/repo",
+      slots: roster.slots,
+      client: fake.client as never,
+      timeoutMs: 10_000,
+      statusPollMs: 10,
+      cleanupTimeoutMs: 10,
+    })
+    const ledger = emptyLedger()
+    const started = Date.now()
+    const discovered = await discover({
+      roster,
+      backend,
+      instructions: DISCOVERY_INSTRUCTIONS,
+      input: "diff",
+      clock: fakeClock(),
+      ledger,
+    })
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(fake.calls.prompt).toHaveLength(2)
+    expect(discovered.answered).toBe(0)
+    expect(discovered.cancelled).toBe(false)
+    expect(discovered.droppedOut).toHaveLength(1)
+    const dropped = discovered.warnings.filter((warning) => warning.code === "model-dropped-out")
+    expect(dropped).toHaveLength(1)
+    expect(dropped[0]!.message).toContain("failed twice")
+    expect(dropped[0]!.message).toContain("transport-error")
+    expect(dropped[0]!.message).toContain(FREE_LIMIT)
+    expect(ledger.unknownUsage).toHaveLength(2)
+    expect(ledger.unknownUsage.map((entry) => entry.why)).toEqual([HOST_RETRY_PAST_DEADLINE, HOST_RETRY_PAST_DEADLINE])
+    const unquantified = discovered.warnings.find((warning) => warning.code === "usage-unquantified")
+    expect(unquantified).toBeDefined()
+    const executions = (unquantified!.detail as { executions: Array<{ why: string }> }).executions
+    expect(executions.map((entry) => entry.why)).toEqual([HOST_RETRY_PAST_DEADLINE, HOST_RETRY_PAST_DEADLINE])
   })
 })

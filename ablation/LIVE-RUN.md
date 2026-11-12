@@ -1954,7 +1954,7 @@ abort that settles after the turn was abandoned reports nothing, and a non-zero 
   usage-incomplete.
 
 **The host-error record.** The pilot's attempts and the probe's attempts each carry `hostError`, from
-`ablation/host-error.ts`. It classifies the envelope's failure and message into one of six categories:
+`ablation/host-error.ts`. It classifies the envelope's failure and message into one of seven categories:
 
 | Category | When | Code |
 |---|---|---|
@@ -1962,13 +1962,14 @@ abort that settles after the turn was abandoned reports nothing, and a non-zero 
 | `oauth-token-refresh-rejected` | the message is exactly `UnknownError: Token refresh failed: <status>`, status 400, 401 or 403 | that status |
 | `provider-api-error` | the message begins `APIError:` | none |
 | `turn-timeout` | a `transport-error` whose message is the backend's own deadline message | none |
+| `host-retry-past-deadline` | a `transport-error` whose message begins with the backend's fixed prefix for a session the host is retrying past the turn's deadline | none |
 | `transport-failure` | any other `transport-error` | none |
 | `unrecognized` | anything else | none |
 
 `host-aborted` is decided by the failure kind before any message pattern. The refresh and timeout
-patterns match the whole message; `provider-api-error` is a prefix match with a fixed output. The
-summary comes from a fixed table per category, with only the allowlisted code interpolated, so no
-character of the host's message reaches the evidence: a message carrying a credential, JSON, control
+patterns match the whole message; `host-retry-past-deadline` and `provider-api-error` are prefix
+matches with a fixed output. The summary comes from a fixed table per category, with only the
+allowlisted code interpolated, so no character of the host's message reaches the evidence: a message carrying a credential, JSON, control
 characters or 100 kB of text is `unrecognized` (or `provider-api-error` when it begins `APIError:`) and
 is recorded only as that category's fixed summary. A successful turn records `hostError: null`. The
 evidence files committed before this rule are left as they were written.

@@ -12,6 +12,9 @@
  * - `DELETE /session/:id` — the backend's bounded dispose.
  * - `POST /session/:id/abort` — counted and answered, so a test can assert MAD
  *   never sends it (CAP-5: a stop is disclosed, not aborted on the host).
+ * - `GET /session/status` — counted, its `directory` query recorded, and
+ *   answered with `status`'s map. The map may hold any state; a session absent
+ *   from it is idle, so the default `{}` says every session is idle.
  *
  * The answer to a prompt is chosen from what the request ASKS for, never from a
  * call counter. A judge turn is recognised by its instruction text
@@ -96,6 +99,11 @@ export interface FakeHostOptions {
    * test can hold one kind of turn.
    */
   holdPrompt?: (sessionID: string, prompt: FakePrompt) => Promise<void> | undefined
+  /**
+   * The map `GET /session/status` answers with, given the sessions created so
+   * far. Omitted means `{}`: a session absent from the map is idle.
+   */
+  status?: (sessionIds: readonly string[]) => Record<string, unknown>
 }
 
 /** One prompt as the fake host recorded it. */
@@ -117,9 +125,11 @@ export interface FakeHost {
   /** `http://127.0.0.1:<ephemeral port>` — no fixed port is assumed. */
   readonly url: string
   readonly origin: string
-  readonly counts: { providers: number; create: number; prompt: number; delete: number; abort: number }
+  readonly counts: { providers: number; create: number; prompt: number; delete: number; abort: number; status: number }
   /** Every `POST /session` body, in order, as JSON. */
   readonly creates: unknown[]
+  /** The `directory` query of every `GET /session/status`, in order (`null` when absent). */
+  readonly statusDirectories: (string | null)[]
   /** The ids handed out, in create order. */
   readonly sessionIds: string[]
   /** Every prompt, in arrival order. */
@@ -158,10 +168,11 @@ function json(body: unknown, status = 200): Response {
 }
 
 export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
-  const counts = { providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 }
+  const counts = { providers: 0, create: 0, prompt: 0, delete: 0, abort: 0, status: 0 }
   const problems: string[] = []
   const open = new Set<string>()
   const creates: unknown[] = []
+  const statusDirectories: (string | null)[] = []
   const sessionIds: string[] = []
   const prompts: FakePrompt[] = []
   let nextSession = 0
@@ -245,6 +256,11 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
         if (options.failProviders?.()) return json({ name: "UnknownError", data: { message: "fake provider failure" } }, 500)
         return json(options.providers ?? THREE_PROVIDERS)
       }
+      if (request.method === "GET" && path === "/session/status") {
+        counts.status++
+        statusDirectories.push(url.searchParams.get("directory"))
+        return json(options.status ? options.status(sessionIds) : {})
+      }
       if (request.method === "POST" && path === "/session") {
         const index = counts.create++
         let body: unknown
@@ -293,6 +309,7 @@ export function startFakeHost(options: FakeHostOptions = {}): FakeHost {
     origin,
     counts,
     creates,
+    statusDirectories,
     sessionIds,
     prompts,
     problems,

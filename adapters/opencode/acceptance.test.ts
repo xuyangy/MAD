@@ -43,12 +43,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { createOpencodeClient } from "@opencode-ai/sdk"
+import { z } from "zod"
 
 import { ISSUED_TURNS_MAY_BILL } from "../../core/run/review.ts"
 import { fenceOf, materialSpans } from "../../core/test-support/fakes.ts"
 import { clearBlameQuarantineForTests, ISSUED_TURNS_NOTE, latchBlameQuarantine, MadPlugin, SUBMODULE_SCOPE_NOTE } from "./plugin.ts"
 import { DEFAULT_PLUGIN_BUDGET } from "./plugin-budget.ts"
 import { clearChangeReadQuarantineForTests } from "./repo.ts"
+import { hostSessionFromPluginClient } from "./host-session.ts"
+import { HOST_RETRY_PAST_DEADLINE, OpencodeModelBackend } from "./model-backend.ts"
 import { READ_ONLY_SESSION_NOTICE, REVIEW_SESSION_PERMISSION } from "./session-policy.ts"
 import { OMIT, startFakeHost, THREE_PROVIDERS, type FakeHost, type FakeHostOptions, type FakePrompt } from "./test-support/fake-host.ts"
 import {
@@ -1544,7 +1547,7 @@ describe("acceptance — option-shaped targets and configured filters are refuse
         expect(run.result.title).toBe("MAD — unsupported target")
         expect(run.result.output).toContain('starts with "-"')
         expect(await counted.launches()).toBe(0)
-        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 })
+        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0, status: 0 })
         await expect(stat(written)).rejects.toThrow()
       } finally {
         await control.dispose()
@@ -2252,7 +2255,7 @@ describe("acceptance — the stop reaches MAD's own reads before any model is as
         expect(run.result.output).toBe("MAD reviewed nothing: the review was stopped before MAD read anything or asked any model.")
         expectNoBillingDisclosure(run.result.output)
         expect(await counted.launches()).toBe(0)
-        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0 })
+        expect(run.host.counts).toEqual({ providers: 0, create: 0, prompt: 0, delete: 0, abort: 0, status: 0 })
       } finally {
         await counted.dispose()
         await repo.remove()
@@ -3254,4 +3257,60 @@ describe("acceptance — CAP-5 integration: nothing starts after the stop is obs
     },
     TIMEOUT_MS,
   )
+})
+
+/**
+ * The host-retry early settle on the plugin's route: a real v1 client against
+ * the fake host, wrapped by `hostSessionFromPluginClient`, with the backend's
+ * deadline and poll interval shortened so the turn's timing is observable. The
+ * prompt is held unanswered while `GET /session/status` reports the prompted
+ * session retrying with its next try an hour away.
+ */
+describe("acceptance — a session the host is retrying past the deadline, on the plugin's client", () => {
+  test("the turn settles early as a transport-error, and every status read names the reviewed directory", async () => {
+    const directory = "/reviewed/repository"
+    const host = startFakeHost({
+      holdPrompt: () => new Promise<void>(() => {}),
+      status: (sessionIds) =>
+        Object.fromEntries(
+          sessionIds.map((id) => [id, { type: "retry", attempt: 1, message: "Free usage limit reached", next: Date.now() + 3_600_000 }]),
+        ),
+    })
+    try {
+      const client = createOpencodeClient({ baseUrl: host.url, directory })
+      const backend = new OpencodeModelBackend({
+        directory,
+        slots: [
+          {
+            slot: "discovery-1",
+            providerId: "anthropic",
+            modelId: "claude-sonnet-4-5",
+            identity: "claude-sonnet-4-5",
+            lineage: { lineage: "claude", label: "Claude (Anthropic)", verified: true },
+            toolcall: true,
+            alsoAvailableVia: [],
+          },
+        ],
+        client: hostSessionFromPluginClient(client),
+        timeoutMs: 10_000,
+        statusPollMs: 20,
+        cleanupTimeoutMs: 1_000,
+      })
+      const started = Date.now()
+      const result = await backend.runTurn("discovery-1", "i", "d", z.object({ findings: z.array(z.unknown()) }))
+
+      expect(Date.now() - started).toBeLessThan(2_000)
+      expect(!result.ok && result.failure).toBe("transport-error")
+      expect(!result.ok && result.message).toContain("Free usage limit reached")
+      expect(result.usageUnknown?.why).toBe(HOST_RETRY_PAST_DEADLINE)
+      expect(host.counts.prompt).toBe(1)
+      expect(host.counts.status).toBeGreaterThan(0)
+      expect(host.statusDirectories.length).toBe(host.counts.status)
+      expect(new Set(host.statusDirectories)).toEqual(new Set([directory]))
+      expect(host.problems).toEqual([])
+      expect([...host.openSessions]).toEqual([])
+    } finally {
+      await host.stop()
+    }
+  })
 })

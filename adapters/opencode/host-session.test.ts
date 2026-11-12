@@ -193,6 +193,44 @@ describe("session.prompt", () => {
   })
 })
 
+describe("session.status", () => {
+  test("sends GET /session/status with the directory and the host's auth header, and returns the map unchanged", async () => {
+    const map = { ses_1: { type: "retry", attempt: 1, message: "Free usage limit reached", next: 1_800_000_000_000 } }
+    const host = recordingHost(() => json(200, map))
+    const status = await host.api.session.status!({ directory: "/repo" })
+    expect(host.requests).toEqual([
+      { method: "GET", path: "/session/status", query: { directory: "/repo" }, authorization: AUTH, body: undefined },
+    ])
+    expect(status.error).toBeUndefined()
+    expect(status.data).toEqual(map)
+  })
+
+  test("a host client with `session.status` gives a surface with `status`", () => {
+    const host = recordingHost(() => json(200, {}))
+    expect(typeof host.api.session.status).toBe("function")
+  })
+
+  test("a host client without `session.status` gives a surface without it, so the backend takes its no-status path", () => {
+    const client = createOpencodeClient({ baseUrl: "http://localhost:4096", directory: "/repo" })
+    const session = client.session as unknown as Record<string, unknown>
+    const withoutStatus = {
+      ...client,
+      session: { create: session.create, prompt: session.prompt, delete: session.delete },
+    }
+    const api = hostSessionFromPluginClient(withoutStatus as unknown as typeof client)
+    expect("status" in api.session).toBe(false)
+    expect(api.session.status).toBeUndefined()
+  })
+
+  test("an HTTP error comes back as the envelope's error", async () => {
+    const refusal = { name: "BadRequestError", data: { message: "no" } }
+    const host = recordingHost(() => json(400, refusal))
+    const status = await host.api.session.status!({ directory: "/repo" })
+    expect(status.data).toBeUndefined()
+    expect(status.error).toEqual(refusal)
+  })
+})
+
 describe("session.delete", () => {
   test("sends DELETE /session/{id} with the directory and the host's auth header, and returns the boolean answer", async () => {
     const host = recordingHost(() => json(200, true))
