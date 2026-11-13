@@ -132,13 +132,21 @@ const KEY_ENV = "MAD_TEST_PROVIDER_KEY"
 const KEY = "test-marker-not-a-credential"
 const PROVIDER_URL = "http://127.0.0.1:1/v1"
 const MODELS = ["claude-sonnet-4-5", "gpt-5", "gemini-2.5-pro"]
+/**
+ * The api-key route's one provider id. A real api-key host gets exactly one
+ * provider block, named after the pin's provider and listing every
+ * `--provider-model`, so the fixtures offer every model under this one id. It
+ * is not a built-in provider id, which the host's registry check would refuse.
+ */
+const PROVIDER_ID = "relay"
+const PIN = `${PROVIDER_ID}/claude-sonnet-4-5`
 
 const argvFor = (directory: string, out: string, extra: string[] = []) => [
   "bun",
   "scripts/paired.ts",
   "--live",
   "--pin",
-  "anthropic/claude-sonnet-4-5",
+  PIN,
   "--provider-url",
   PROVIDER_URL,
   "--provider-key-env",
@@ -265,11 +273,7 @@ function overridesFor(
         clientCalls.push(init)
         return { fake: true }
       },
-      enumerate: async () => [
-        candidate("anthropic", "claude-sonnet-4-5"),
-        candidate("openai", "gpt-5"),
-        candidate("google", "gemini-2.5-pro"),
-      ],
+      enumerate: async () => MODELS.map((model) => candidate(PROVIDER_ID, model)),
       backendFor: (context, lateUsage) => backend.backendFor(context, lateUsage),
       clock: fakeClock("2026-09-23T00:00:00.000Z"),
       coin: () => "heads",
@@ -432,7 +436,7 @@ describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
     expect(meter.started).toEqual([{ upstream: PROVIDER_URL, credential: KEY }])
     expect(host.started.map((asked) => ({ block: apiKeyOptions(asked).block, credential: apiKeyOptions(asked).credential, signals: asked.signals }))).toEqual([
       {
-        block: { id: "anthropic", npm: OPENAI_COMPATIBLE_NPM, baseURL: RELAY_URL, apiKeyEnv: KEY_ENV, models: MODELS },
+        block: { id: PROVIDER_ID, npm: OPENAI_COMPATIBLE_NPM, baseURL: RELAY_URL, apiKeyEnv: KEY_ENV, models: MODELS },
         credential: RELAY_HOST_KEY,
         signals: null,
       },
@@ -448,7 +452,7 @@ describe("all checks pass (injected CLOSED gates, scripted backends)", () => {
     const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as PairedSchedule
     expect(schedule.config.provenance).toBe("live")
     expect(schedule.fixture).toEqual(LABELLED_CHANGE_SEAL)
-    expect(schedule.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`)[0]).toBe("anthropic/claude-sonnet-4-5")
+    expect(schedule.roster.slots.map((slot) => `${slot.providerId}/${slot.modelId}`)[0]).toBe(PIN)
     expect(schedule.config.gates).toBe(gatesIdentity(GATES_BLOB, closedGates, "api-key"))
     expect(String(schedule.config.gates)).toContain("gate 4 CLOSED")
     // The route is sealed: named in the gates identity, and the api-key default adds no config key.
@@ -622,7 +626,7 @@ describe("flags", () => {
     const env = await setup()
     const { overrides } = overridesFor(env, { gates: closedGates })
     const result = await captured(() =>
-      main(["bun", "paired", "--live", "--pin", "anthropic/claude-sonnet-4-5", "--out", env.out], overrides),
+      main(["bun", "paired", "--live", "--pin", PIN, "--out", env.out], overrides),
     )
     expect(result.code).toBe(1)
     expect(result.text).toContain("--directory is required")
@@ -648,8 +652,8 @@ describe("flags", () => {
       [["bun", "paired", "--live", "--pin", "a/b", "--directory", env.directory, "--out", "relative/bundle"], "--out must be an absolute path"],
       [argvFor(env.directory, env.out, ["--out", "/tmp/other"]), "--out was given 2 times"],
       [argvFor(env.directory, env.out, ["--cap", "5"]), "`--cap` is not a flag this command knows"],
-      ...["anthropic/ ", " /claude-sonnet-4-5", "anthropic"].map((pin): [string[], string] => [
-        argvFor(env.directory, env.out).map((arg) => (arg === "anthropic/claude-sonnet-4-5" ? pin : arg)),
+      ...[`${PROVIDER_ID}/ `, " /claude-sonnet-4-5", PROVIDER_ID].map((pin): [string[], string] => [
+        argvFor(env.directory, env.out).map((arg) => (arg === PIN ? pin : arg)),
         // The flag value arrives trimmed, so the message shows it trimmed.
         `--pin must be provider/model. It received \`${pin.trim()}\`.`,
       ]),
@@ -1179,7 +1183,7 @@ describe("stage 1 refuses a credential too short to redact safely", () => {
       const { overrides, meter } = overridesFor(env, {
         gates: closedGates,
         env: { [KEY_ENV]: value },
-        enumerate: async () => [candidate("openai", "gpt-5")],
+        enumerate: async () => [candidate(PROVIDER_ID, "gpt-5")],
       })
       const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
       expect(result.text).toContain("PASS  managed host provider block")
@@ -1203,14 +1207,14 @@ describe("stage 2 refuses a roster that does not honour the pin", () => {
 
   test("a host that does not offer the pinned model", async () => {
     await refusedWith(
-      [candidate("openai", "gpt-5"), candidate("google", "gemini-2.5-pro"), candidate("mistral", "mistral-large")],
-      ["the pinned model anthropic/claude-sonnet-4-5 holds no slot", "roster-pin-unhonoured"],
+      [candidate(PROVIDER_ID, "gpt-5"), candidate(PROVIDER_ID, "gemini-2.5-pro"), candidate(PROVIDER_ID, "mistral-large")],
+      [`the pinned model ${PIN} holds no slot`, "roster-pin-unhonoured"],
     )
   })
 
   test("a host too narrow to fill the default roster", async () => {
     await refusedWith(
-      [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")],
+      [candidate(PROVIDER_ID, "claude-sonnet-4-5"), candidate(PROVIDER_ID, "gpt-5")],
       ["the roster holds 2 of the 3 discovery slots it needs", "roster-underfilled"],
     )
   })
@@ -1506,7 +1510,7 @@ describe("the managed host (story 2-8c)", () => {
   test("the provider flags are required, and each missing one is named, with no host started", async () => {
     const env = await setup()
     const { overrides, host } = overridesFor(env, { gates: closedGates })
-    const argv = ["bun", "paired", "--live", "--pin", "anthropic/claude-sonnet-4-5", "--directory", env.directory, "--out", env.out]
+    const argv = ["bun", "paired", "--live", "--pin", PIN, "--directory", env.directory, "--out", env.out]
     const result = await captured(() => main(argv, overrides))
     expect(result.code).toBe(1)
     for (const text of ["--provider-url is required", "--provider-key-env is required", "--provider-model is required"]) {
@@ -1567,7 +1571,7 @@ describe("the managed host (story 2-8c)", () => {
 
   test("the host is stopped when stage 2's roster refuses, when stage 3 refuses and when stage 4 throws", async () => {
     const roster = await setup()
-    const narrow = overridesFor(roster, { gates: closedGates, enumerate: async () => [candidate("anthropic", "claude-sonnet-4-5")] })
+    const narrow = overridesFor(roster, { gates: closedGates, enumerate: async () => [candidate(PROVIDER_ID, "claude-sonnet-4-5")] })
     expect((await captured(() => main(argvFor(roster.directory, roster.out), narrow.overrides))).code).toBe(1)
     expect(narrow.host.stops()).toBe(1)
 
@@ -2416,7 +2420,7 @@ describe("gate 9's one authorized api-key evaluation: the run and the reservatio
     const bytes = await readFile(apiKeyReservationOf(root), "utf8")
     const recorded = JSON.parse(bytes) as ApiKeyEvaluationReservation
     expect(Object.keys(recorded)).toEqual(["run", "route", "createdAt", "gateTableBlob", "pins", "models", "out"])
-    expect(recorded).toMatchObject({ run: 1, route: "api-key", gateTableBlob: GATES_BLOB, pins: ["anthropic/claude-sonnet-4-5"], models: MODELS, out: env.out })
+    expect(recorded).toMatchObject({ run: 1, route: "api-key", gateTableBlob: GATES_BLOB, pins: [PIN], models: MODELS, out: env.out })
     expect(Number.isNaN(Date.parse(recorded.createdAt))).toBe(false)
     expect(bytes).toBe(`${JSON.stringify(recorded, null, 2)}\n`)
 
@@ -2516,7 +2520,7 @@ describe("gate 9's one authorized api-key evaluation: the run and the reservatio
       route: "api-key",
       createdAt: "2026-10-21T00:00:00.000Z",
       gateTableBlob: "abc",
-      pins: ["anthropic/claude-sonnet-4-5"],
+      pins: [PIN],
       models: MODELS,
       out: "/o",
     }
