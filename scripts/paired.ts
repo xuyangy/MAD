@@ -157,6 +157,8 @@ import { runPairedBlocks, type PairedPhaseContext } from "../ablation/paired.ts"
 import {
   identifyBinary,
   OAUTH_PAYLOAD,
+  credentialLengthProblem,
+  MIN_CREDENTIAL_LENGTH,
   OPENAI_COMPATIBLE_NPM,
   oauthRouteProblems,
   providerBlockProblems,
@@ -1636,6 +1638,12 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         const value = env[provider.apiKeyEnv]
         if (value === undefined || value.trim().length === 0) {
           problems.push(`the credential variable \`${provider.apiKeyEnv}\` is not set in this environment, or is empty or blank`)
+        } else if (credentialLengthProblem(value) !== null) {
+          // The value is never printed; it is used as given once it passes.
+          problems.push(
+            `the credential variable \`${provider.apiKeyEnv}\` holds a value shorter than ${MIN_CREDENTIAL_LENGTH} characters ` +
+              "once leading and trailing whitespace is ignored; set it to a credential at least that long",
+          )
         } else credential = value
         checks.push(
           problems.length === 0

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 
 import type { AdmissionSettlement, AdmittedTurn, StepDecision } from "../core/ports/admission.ts"
 import { stageGatedTurn } from "../core/stages/settlement.ts"
+import { credentialLengthProblem } from "./managed-host.ts"
 import { RELAY_KEY_PREFIX, startRequestMeter, usageFrom, type RequestMeter } from "./request-meter.ts"
 
 const CREDENTIAL = "sk-test-relay-credential-0123456789"
@@ -577,5 +578,27 @@ describe("the relay's settlement paths (review of story 2-8c2)", () => {
     await session.close()
     await meter.stop()
     expect(turn.first).toHaveLength(1)
+  })
+})
+
+describe("the relay refuses a credential too short to redact safely", () => {
+  test("a short credential throws before the relay exists, and nothing is forwarded or echoed", () => {
+    let forwarded = 0
+    const fetch = async () => (forwarded += 1, new Response("{}"))
+    expect(() => startRequestMeter({ upstream: "http://127.0.0.1:9/v1", credential: "  relayShortMk  ", fetch })).toThrow(
+      `the relay is refused: ${credentialLengthProblem("relayShortMk")}`,
+    )
+    try {
+      startRequestMeter({ upstream: "http://127.0.0.1:9/v1", credential: "relayShortMk", fetch })
+    } catch (error) {
+      expect(String(error)).not.toContain("relayShortMk")
+    }
+    expect(forwarded).toBe(0)
+  })
+
+  test("a credential of exactly the minimum starts the relay", async () => {
+    const meter = startRequestMeter({ upstream: "http://127.0.0.1:9/v1", credential: "relayExactMk16ch" })
+    cleanups.push(() => meter.stop())
+    expect(meter.hostKey.startsWith(RELAY_KEY_PREFIX)).toBe(true)
   })
 })

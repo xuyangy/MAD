@@ -1144,6 +1144,51 @@ describe("stage 1 refuses an api-key pin no --provider-model configures", () => 
   }
 })
 
+/**
+ * Deferred-work 2149: the provider credential must be at least
+ * MIN_CREDENTIAL_LENGTH characters once trimmed, or stage 1 refuses before
+ * anything starts; a credential that passes reaches the relay unchanged.
+ */
+describe("stage 1 refuses a credential too short to redact safely", () => {
+  test("a short value refuses at stage 1, naming the variable and the minimum, never the value", async () => {
+    const env = await setup()
+    const marker = "  pairShortMk7  "
+    const { overrides, host, meter, clientCalls, backend } = overridesFor(env, { gates: closedGates, env: { [KEY_ENV]: marker } })
+    const reservationRoot = join(dirname(env.scratchParent), "reservation-root")
+    const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("FAIL  managed host provider block")
+    expect(result.text).toContain(
+      `the credential variable \`${KEY_ENV}\` holds a value shorter than 16 characters once leading and trailing whitespace is ignored; set it to a credential at least that long`,
+    )
+    expect(result.text).not.toContain("pairShortMk7")
+    expect(result.text).not.toContain("stage 2 of 4")
+    expect(existsSync(reservationRoot)).toBe(false)
+    expect(meter.started).toEqual([])
+    expect(host.started).toEqual([])
+    expect(clientCalls).toEqual([])
+    expect(backend.calls).toEqual([])
+    expect(existsSync(env.out)).toBe(false)
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  for (const value of ["pairExactMk16chr", "  pairExactMk16chr  "]) {
+    test(`a value of ${JSON.stringify(value)} passes stage 1 and reaches the relay exactly as given`, async () => {
+      const env = await setup()
+      // The host offers no matching model, so the run stops at stage 2 on the scripted relay and host.
+      const { overrides, meter } = overridesFor(env, {
+        gates: closedGates,
+        env: { [KEY_ENV]: value },
+        enumerate: async () => [candidate("openai", "gpt-5")],
+      })
+      const result = await captured(() => main(argvFor(env.directory, env.out), overrides))
+      expect(result.text).toContain("PASS  managed host provider block")
+      expect(result.text).toContain("REFUSED at stage 2 (client and roster)")
+      expect(meter.started.map((options) => options.credential)).toEqual([value])
+    })
+  }
+})
+
 describe("stage 2 refuses a roster that does not honour the pin", () => {
   const refusedWith = async (candidates: ReturnType<typeof candidate>[], messages: string[]) => {
     const env = await setup()

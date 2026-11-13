@@ -322,6 +322,27 @@ export function hostConfig(block: ProviderBlock): Record<string, unknown> {
   }
 }
 
+/**
+ * The shortest provider credential MAD accepts, counted after ignoring leading
+ * and trailing whitespace. Redaction replaces every occurrence of the
+ * credential in every message, so a short value would blank ordinary text such
+ * as ports and process ids. A length rule only: it says nothing about a
+ * credential's strength or a provider's own requirements.
+ */
+export const MIN_CREDENTIAL_LENGTH = 16
+
+/**
+ * Why `credential` is refused, or `null`. The value itself is never named, and
+ * it is never changed: a credential that passes is used exactly as given.
+ */
+export function credentialLengthProblem(credential: unknown): string | null {
+  if (typeof credential === "string" && credential.trim().length >= MIN_CREDENTIAL_LENGTH) return null
+  return (
+    `the credential is shorter than ${MIN_CREDENTIAL_LENGTH} characters once leading and trailing whitespace ` +
+    `is ignored; supply one at least that long, because MAD redacts every occurrence of it from what it records`
+  )
+}
+
 /** A secret and the forms it takes inside JSON text, so an escaped copy is redacted too. */
 export function secretForms(secret: string): string[] {
   if (secret.length === 0) return []
@@ -852,6 +873,12 @@ export async function checkPrepared(prepared: string, pins: PayloadPins): Promis
  * they live until `stop()`. It never rejects.
  */
 export async function startManagedHost(options: ManagedHostOptions): Promise<ManagedHostStart> {
+  // Refused before anything is read, created or started, and not redacted:
+  // redacting with a short value would blank this very message.
+  if (options.mode !== "oauth") {
+    const problem = credentialLengthProblem(options.credential)
+    if (problem !== null) return { ok: false, reason: `the managed host is refused: ${problem}`, stopped: null }
+  }
   const secrets = options.mode === "oauth" ? [] : secretForms(options.credential)
   const redact = (text: string) => redactText(text, secrets)
   try {

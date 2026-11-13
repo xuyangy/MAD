@@ -924,7 +924,11 @@ did not start: `--server` is refused. The host's one provider is an `@ai-sdk/ope
 with one `--provider-model` per model, whose provider id is the one in `--pin`. The block points at
 MAD's relay (see "The relay" below), not at the provider: the relay forwards to `--provider-url` and
 holds the credential read from `--provider-key-env` (the NAME of the variable that holds it, never the
-credential itself). The host is given only the relay's host key.
+credential itself). The host is given only the relay's host key. The credential must be at least 16
+characters once leading and trailing whitespace is ignored (`MIN_CREDENTIAL_LENGTH`), because MAD redacts
+every occurrence of it from what it records; stage 1 refuses a shorter one without printing it, and the
+relay and the managed host refuse one too. A credential that passes is used exactly as given. This is a
+length rule only, not a check of the credential or of what the provider accepts.
 
 Once gate 9 is closed, it authorizes one named run, `API_KEY_EVALUATION_RUN` (run 1) in `ablation/paired-gates.ts`. Stage 1's
 "authorized evaluation run" check holds it to the shared run-identity rules (`ablation/launch-contract.ts`)

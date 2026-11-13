@@ -49,7 +49,7 @@ import { randomUUID } from "node:crypto"
 import type { AdmissionSettlement, AdmittedTurn, StepDecision } from "../core/ports/admission.ts"
 import { addTokens, emptyTokenUsage, type TokenUsage } from "../core/domain/run-record.ts"
 import type { MeteredUsage, RequestMeterPort, MeteredSession } from "../adapters/opencode/model-backend.ts"
-import { redactText, secretForms } from "./managed-host.ts"
+import { credentialLengthProblem, redactText, secretForms } from "./managed-host.ts"
 
 /** Every host key starts with this, so a record of a request can tell one from a provider credential. */
 export const RELAY_KEY_PREFIX = "mad-relay-host-key-"
@@ -232,6 +232,9 @@ async function boundedText(response: Response, limit: number): Promise<string> {
 }
 
 export function startRequestMeter(options: RequestMeterOptions): RequestMeter {
+  // A credential too short to redact safely is refused before the relay exists.
+  const credentialProblem = credentialLengthProblem(options.credential)
+  if (credentialProblem !== null) throw new Error(`the relay is refused: ${credentialProblem}`)
   const upstream = options.upstream.replace(/\/+$/, "")
   const send = options.fetch ?? ((request: Request) => fetch(request))
   const now = options.now ?? Date.now

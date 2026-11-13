@@ -13,7 +13,9 @@ import { join } from "node:path"
 import {
   checkPrepared,
   configDrift,
+  credentialLengthProblem,
   HOST_CONFIG_GITIGNORE,
+  MIN_CREDENTIAL_LENGTH,
   identifyBinary,
   FIXED_HOST_SETTINGS,
   hostConfig,
@@ -1166,4 +1168,47 @@ test("options without `mode` start the api-key host: the credential variable, th
   expect(result.host.oauth).toBeUndefined()
   const stopped = await result.host.stop()
   expect(stopped.postStop).toBeUndefined()
+})
+
+/**
+ * Deferred-work 2149: a credential shorter than MIN_CREDENTIAL_LENGTH after
+ * trimming would make redaction blank ordinary text, so it is refused; a
+ * credential that passes is used exactly as given.
+ */
+describe("the credential length rule", () => {
+  test("16 characters after trimming is the minimum, padding cannot make a short value pass, and no value is echoed", () => {
+    expect(MIN_CREDENTIAL_LENGTH).toBe(16)
+    const short = "shortMarkQ7zx15"
+    expect(short).toHaveLength(15)
+    const exact = "exactMarkQ7zx16c"
+    expect(exact).toHaveLength(16)
+    expect(credentialLengthProblem(short)).toContain("shorter than 16 characters once leading and trailing whitespace is ignored")
+    expect(credentialLengthProblem(`   ${short}   `)).not.toBeNull()
+    expect(credentialLengthProblem(exact)).toBeNull()
+    expect(credentialLengthProblem(`  ${exact}  `)).toBeNull()
+    for (const value of [undefined, 7, null]) expect(credentialLengthProblem(value)).not.toBeNull()
+    expect(credentialLengthProblem(short)).not.toContain(short)
+  })
+
+  test("startManagedHost refuses a short api-key credential before reading the binary, creating a directory or spawning", async () => {
+    const host = fakeHost()
+    const calls: string[] = []
+    const scratchParent = await parent()
+    const result = await start(host, {
+      credential: "hostShortMk9",
+      resolveBinary: async (path) => (calls.push(`resolve ${path}`), path),
+      hashFile: async () => (calls.push("hash"), MEASURED_HOST.sha256),
+      fetch: async (url) => (calls.push(`fetch ${url}`), new Response("no", { status: 500 })),
+      scratchParent,
+    })
+    expect(result).toEqual({
+      ok: false,
+      reason: `the managed host is refused: ${credentialLengthProblem("hostShortMk9")}`,
+      stopped: null,
+    })
+    if (!result.ok) expect(result.reason).not.toContain("hostShortMk9")
+    expect(calls).toEqual([])
+    expect(host.requests).toEqual([])
+    expect(await readdir(scratchParent)).toEqual([])
+  })
 })
