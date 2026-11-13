@@ -27,7 +27,14 @@ import { systemClock } from "../../core/ports/clock.ts"
 import type { ToolObservation } from "../../core/ports/tool-observation.ts"
 import { oneLine } from "../../core/prompt/material.ts"
 import { frameForHostAgent, review } from "../../core/run/review.ts"
-import { NoCandidatesError, NoEligibleCandidatesError, type Pin } from "../../core/roster/select.ts"
+import {
+  AllOfferingsExcludedError,
+  InvalidExclusionError,
+  NoCandidatesError,
+  NoEligibleCandidatesError,
+  type Exclusion,
+  type Pin,
+} from "../../core/roster/select.ts"
 import {
   artifactRootFrom,
   createTurnRecorder,
@@ -159,6 +166,42 @@ function normalizePins(models: readonly string[] | undefined): Pin[] {
 
 export function clampPins(models: readonly string[] | undefined): Pin[] {
   return normalizePins(models).slice(0, MAX_DISCOVERY_SLOTS)
+}
+
+/**
+ * The most routes one `exclude` argument may name. A list past it is REFUSED,
+ * never truncated: a dropped exclusion is a route the caller forbade and MAD
+ * would then use.
+ */
+export const MAX_EXCLUSIONS = 64
+
+/**
+ * The caller's `exclude` argument as `Exclusion`s, or the reason it is refused.
+ *
+ * Each entry is `provider/model`, split at the FIRST `/` as `normalizePins`
+ * splits a pin, so a model id keeps any `/` of its own. Nothing is dropped
+ * here: an entry with no `/`, or an empty half, is passed on with an empty
+ * `providerId` or `modelId`, and `selectRoster` refuses it by name
+ * (`InvalidExclusionError`). Only a list longer than `MAX_EXCLUSIONS` is
+ * refused here, because the core cannot know a list was cut.
+ */
+export function parseExclusions(exclude: readonly string[] | undefined): { exclusions: Exclusion[] } | { refused: string } {
+  if (exclude === undefined) return { exclusions: [] }
+  if (!Array.isArray(exclude)) return { refused: "`exclude` must be a list of `provider/model` strings" }
+  if (exclude.length > MAX_EXCLUSIONS) {
+    return {
+      refused: `\`exclude\` names ${exclude.length} models; at most ${MAX_EXCLUSIONS} are accepted, and MAD does not drop an exclusion you asked for`,
+    }
+  }
+  return {
+    exclusions: exclude.map((raw) => {
+      const value = typeof raw === "string" ? raw.trim() : ""
+      const cut = value.indexOf("/")
+      return cut < 0
+        ? { providerId: "", modelId: value }
+        : { providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() }
+    }),
+  }
 }
 
 function normalizeLenses(lenses: readonly string[] | undefined): string[] {
@@ -463,6 +506,20 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 `roster you pinned onto one model family is reported as narrow exactly as loudly ` +
                 `as one MAD chose.`,
             ),
+          exclude: tool.schema
+            .array(tool.schema.string())
+            .max(MAX_EXCLUSIONS)
+            .optional()
+            .describe(
+              `OPTIONAL models MAD must not use in this review, as \`provider/model\` strings, e.g. ` +
+                `\`["anthropic/claude-opus-5-5"]\`. Each names one provider's offering of one exact ` +
+                `model id (the provider without regard to case); the same model through another ` +
+                `provider stays eligible. An excluded model fills no slot, lens or replacement, and ` +
+                `a pin naming it is reported and not honoured. Every exclusion is reported, including ` +
+                `one that matches nothing. Maximum ${MAX_EXCLUSIONS}; a malformed entry refuses the ` +
+                `review before any model is asked. MAD remembers nothing between reviews, so pass it ` +
+                `again each time.`,
+            ),
         },
         async execute(args, context) {
           // CAP-5 — THE RUN'S OWN STOP, made at entry and linked to the host's,
@@ -522,10 +579,19 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
             // clamp deliberately discards nothing a user asked for.
             const pins = clampPins(args.models)
+            // Refused here, before the roster read, when the list is too long;
+            // a malformed entry is refused by the core, below.
+            const parsedExclusions = parseExclusions(args.exclude)
+            if ("refused" in parsedExclusions) {
+              return {
+                title: "MAD — invalid exclusions",
+                output: `MAD did not review anything: ${parsedExclusions.refused}.`,
+              }
+            }
 
             let resolved
             try {
-              resolved = await resolveRoster(client, slots, lenses, pins)
+              resolved = await resolveRoster(client, slots, lenses, pins, parsedExclusions.exclusions)
             } catch (error) {
               // CAP-5 — a roster failure that lands after the stop does not hide it.
               if (runControl.signal.aborted) return stoppedAfterRoster()
@@ -534,7 +600,21 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 return { title: "MAD — no providers configured", output: error.message }
               }
               if (error instanceof NoEligibleCandidatesError) {
-                return { title: "MAD — no model declares the required capability", output: error.message }
+                // With exclusions, an excluded model may declare the capability,
+                // so the title must not say none does.
+                return {
+                  title:
+                    error.excludedOfferings > 0
+                      ? "MAD — no eligible model remains after the exclusions"
+                      : "MAD — no model declares the required capability",
+                  output: error.message,
+                }
+              }
+              if (error instanceof InvalidExclusionError) {
+                return { title: "MAD — invalid exclusions", output: error.message }
+              }
+              if (error instanceof AllOfferingsExcludedError) {
+                return { title: "MAD — every model is excluded", output: error.message }
               }
               // Anything else — a transport failure reading the host's config, say
               // — is still the user's problem to act on, not a stack trace to read.

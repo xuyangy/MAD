@@ -37,7 +37,9 @@ describe("the warning vocabulary (AD-6)", () => {
     // here, in this file, before it could reach the renderer — which is exactly
     // the argument a reader needs, because the two codes are about the same
     // block of the judge and mean opposite things about the evidence.
-    expect(WARNING_CODES).toHaveLength(23)
+    // `roster-caller-excluded` is a disclosure beside `roster-capability-
+    // excluded`: both say how the roster was formed.
+    expect(WARNING_CODES).toHaveLength(24)
     expect(DISCLOSURE_CODES.has("model-replaced")).toBe(false)
   })
 
@@ -147,6 +149,7 @@ describe("the warning vocabulary (AD-6)", () => {
       "provider-fan-out",
       "session-cleanup-unresolved",
       "roster-capability-excluded",
+      "roster-caller-excluded",
     ])
     const degradations = WARNING_CODES.filter((code) => !DISCLOSURE_CODES.has(code))
     expect(degradations).toHaveLength(WARNING_CODES.length - DISCLOSURE_CODES.size)

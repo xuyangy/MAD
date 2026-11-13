@@ -11,7 +11,7 @@
 import type { PluginInput } from "@opencode-ai/plugin"
 
 import type { Candidate } from "../../core/domain/roster.ts"
-import { selectRoster, type HostGuidance, type Pin, type SelectResult } from "../../core/roster/select.ts"
+import { selectRoster, type Exclusion, type HostGuidance, type Pin, type SelectResult } from "../../core/roster/select.ts"
 
 /**
  * The opencode config key a user edits to add a provider. Named verbatim in the
@@ -120,6 +120,12 @@ export async function resolveRoster(
    * authority on which pins are usable.
    */
   pins: readonly Pin[] = [],
+  /**
+   * Routes the caller forbids (`SelectOptions.exclude`). Empty by default, so a
+   * caller that excludes nothing gets the same roster. Validated and applied by
+   * `selectRoster`, for the reason pins are.
+   */
+  exclude: readonly Exclusion[] = [],
 ): Promise<SelectResult> {
   const candidates = await enumerateCandidates(client)
   // Throws NoCandidatesError when the host has nothing configured — unusable
@@ -131,6 +137,7 @@ export async function resolveRoster(
     slots,
     lenses,
     pins,
+    exclude,
     providerConfigKey: OPENCODE_PROVIDER_CONFIG_KEY,
     hostGuidance: OPENCODE_HOST_GUIDANCE,
     requireToolcall: true,

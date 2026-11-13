@@ -123,6 +123,20 @@ export interface SelectOptions {
    * declares it for is left out, and `roster-capability-excluded` says so.
    */
   requireToolcall?: boolean
+  /**
+   * Routes the caller forbids for this run: each names one provider's offering
+   * of one exact model id. A matching offering is removed before dedupe, so it
+   * can fill no pool, lens or replacement slot, and a pin naming it is reported
+   * as `excluded`. The provider id is compared without regard to case and the
+   * model id exactly, after trimming; there is no wildcard, and another
+   * provider's offering of the same model, or another model id the same
+   * provider lists for it, stays eligible. Absent or empty means no exclusion
+   * and the roster this module resolved without the option.
+   *
+   * MAD keeps nothing between runs, so this is the caller's way to stop
+   * selection choosing a route it already knows the host refuses.
+   */
+  exclude?: readonly Exclusion[]
 }
 
 export interface SelectResult {
@@ -155,15 +169,73 @@ export class NoCandidatesError extends Error {
  * fact, so it says something different.
  */
 export class NoEligibleCandidatesError extends Error {
-  constructor(providerConfigKey: string, offered: number, guidance: HostGuidance = NEUTRAL_HOST_GUIDANCE) {
+  /** Offerings the caller's exclusions removed before the capability filter; 0 when none. */
+  readonly excludedOfferings: number
+  constructor(
+    providerConfigKey: string,
+    offered: number,
+    guidance: HostGuidance = NEUTRAL_HOST_GUIDANCE,
+    /** Offerings the caller's exclusions removed before the capability filter; 0 when none. */
+    excludedOfferings = 0,
+  ) {
     super(
-      `The host offers ${offered} provider/model offering(s), but none declares tool calling, which ` +
-        `${guidance.toolcallReason}, so there is nothing to review with. ` +
-        `Configure a provider whose models support tool calling in ${guidance.config} (the ` +
+      (excludedOfferings > 0
+        ? `The host offers ${offered} provider/model offering(s); the caller's exclusions remove ` +
+          `${excludedOfferings}, and none of the remaining ${offered - excludedOfferings} declares tool calling, which ` +
+          `${guidance.toolcallReason}, so there is nothing to review with. Exclude fewer models, or ` +
+          `configure a provider`
+        : `The host offers ${offered} provider/model offering(s), but none declares tool calling, which ` +
+          `${guidance.toolcallReason}, so there is nothing to review with. Configure a provider`) +
+        ` whose models support tool calling in ${guidance.config} (the ` +
         `\`${providerConfigKey}\` key) or authenticate one ${guidance.authenticate}, then run the ` +
         `review again. MAD holds no credentials and names no model of its own.`,
     )
     this.name = "NoEligibleCandidatesError"
+    this.excludedOfferings = excludedOfferings
+  }
+}
+
+/**
+ * Thrown when the caller's `exclude` list holds an entry that is not a
+ * provider/model pair. It refuses the selection rather than ignoring the
+ * entry, because an ignored exclusion would let through a route the caller
+ * meant to forbid.
+ */
+export class InvalidExclusionError extends Error {
+  readonly entries: { providerId: string; modelId: string }[]
+  constructor(entries: readonly Exclusion[]) {
+    // An entry may be anything at the exported seam, `null` included; render
+    // what arrived without dereferencing it.
+    const parts = entries.map((entry) =>
+      pinParts({
+        providerId: (entry as Partial<Exclusion> | null | undefined)?.providerId ?? "",
+        modelId: (entry as Partial<Exclusion> | null | undefined)?.modelId ?? "",
+      }),
+    )
+    const shown = parts.slice(0, PIN_LIST_MAX).map((part) => `\`${part.providerId}/${part.modelId}\``)
+    super(
+      `MAD did not select any model: ${entries.length} excluded model(s) are not provider/model pairs: ` +
+        shown.join(", ") +
+        (parts.length > shown.length ? `, … and ${parts.length - shown.length} more` : "") +
+        `. Write each as \`provider/model\`, for example \`anthropic/claude-opus-5-5\`, then run the review again.`,
+    )
+    this.name = "InvalidExclusionError"
+    this.entries = parts
+  }
+}
+
+/**
+ * Thrown when the caller's `exclude` list removes every offering the host
+ * lists. The host is usable; the caller's own list left nothing, so the remedy
+ * is the list, not the host's configuration.
+ */
+export class AllOfferingsExcludedError extends Error {
+  constructor(offered: number) {
+    super(
+      `The host offers ${offered} provider/model offering(s), and the caller's exclusions remove every ` +
+        `one of them, so there is nothing to review with. Exclude fewer models, then run the review again.`,
+    )
+    this.name = "AllOfferingsExcludedError"
   }
 }
 
@@ -216,6 +288,9 @@ export function dedupeByIdentity(candidates: readonly Candidate[]): Deduped[] {
  */
 export type Pin = Pick<Candidate, "providerId" | "modelId">
 
+/** One route the caller forbids (`SelectOptions.exclude`): a provider and an exact model id. */
+export type Exclusion = Pick<Candidate, "providerId" | "modelId">
+
 /**
  * Why one pin did not fill a slot — or that it did.
  *
@@ -242,6 +317,12 @@ export type PinOutcome =
    * this provider, and MAD does not reroute it.
    */
   | "lacks-capability"
+  /**
+   * The caller's own `exclude` list forbids this route: it names the pin's
+   * exact provider and model, or removes every offering of the model through
+   * this provider. Exclusion wins over the pin, and MAD does not reroute it.
+   */
+  | "excluded"
 
 export interface PinResolution {
   pin: Pin
@@ -359,6 +440,14 @@ export function resolvePins(
    * variant. Empty when no capability is required.
    */
   ineligibleRoutes: ReadonlySet<string> = new Set(),
+  /**
+   * What the caller's `exclude` list forbids: `exact` holds exclusion keys
+   * (`exclusionKey`), and `routes` the routes (`routeKey`) every offering of
+   * which it removed. `deduped` was built without the removed offerings, so
+   * without this a pin to one would read as `not-offered`. Empty when nothing
+   * is excluded.
+   */
+  excluded: { exact: ReadonlySet<string>; routes: ReadonlySet<string> } = { exact: new Set(), routes: new Set() },
 ): PinnedStep {
   const filled: Deduped[] = []
   const resolutions: PinResolution[] = []
@@ -374,6 +463,12 @@ export function resolvePins(
 
     const identity = normalizeModelIdentity(modelId)
     const wanted = providerId.toLowerCase()
+    // First: the caller's own prohibition is the fact that decides this pin,
+    // whatever the host declares for the route.
+    if (excluded.exact.has(exclusionKey(providerId, modelId)) || excluded.routes.has(routeKey(identity, wanted))) {
+      resolutions.push({ pin, outcome: "excluded" })
+      continue
+    }
     // Before the offered check: the host does offer it, through this provider,
     // and saying otherwise would be false. Before `no-slot` too, for the reason
     // `not-offered` is: it is the fact the caller can act on.
@@ -433,6 +528,71 @@ function servedBy(entry: Deduped, provider: string): Deduped {
 /** One provider's route to one model, for `ineligibleRoutes`. Provider case is ignored, as pins ignore it. */
 function routeKey(identity: string, provider: string): string {
   return `${identity}\u0000${provider.toLowerCase()}`
+}
+
+/** One exclusion's match key: provider without regard to case, model id exactly, both trimmed. */
+function exclusionKey(providerId: string, modelId: string): string {
+  return `${providerId.trim().toLowerCase()}\u0000${modelId.trim()}`
+}
+
+/** What `applyExclusions` kept, removed and could not match. */
+interface ExclusionStep {
+  /** The offerings no exclusion matched, in host order. */
+  allowed: readonly Candidate[]
+  /** One per distinct requested exclusion, in the order given, with the offerings it removed. */
+  requested: { exclusion: Exclusion; removed: number }[]
+  /** Exclusion keys of every requested exclusion. */
+  exact: Set<string>
+  /** Routes (`routeKey`) the host offers whose every offering was removed. */
+  routes: Set<string>
+  /** Offerings removed in all. */
+  removedOfferings: number
+}
+
+/**
+ * Remove the offerings the caller excluded, BEFORE dedupe, so dedupe and the
+ * capability filter only ever see allowed offerings and cannot bring an
+ * excluded route back as a winner, a variant or `alsoAvailableVia`.
+ *
+ * Throws `InvalidExclusionError` for any entry that is not a provider/model
+ * pair. Duplicate entries (same key) are reported once.
+ */
+function applyExclusions(candidates: readonly Candidate[], exclude: readonly Exclusion[]): ExclusionStep {
+  const malformed = exclude.filter(
+    (entry) =>
+      typeof entry?.providerId !== "string" ||
+      typeof entry?.modelId !== "string" ||
+      entry.providerId.trim().length === 0 ||
+      entry.modelId.trim().length === 0,
+  )
+  if (malformed.length > 0) throw new InvalidExclusionError(malformed)
+  if (exclude.length === 0) {
+    return { allowed: candidates, requested: [], exact: new Set(), routes: new Set(), removedOfferings: 0 }
+  }
+
+  const byKey = new Map<string, { exclusion: Exclusion; removed: number }>()
+  for (const exclusion of exclude) {
+    const key = exclusionKey(exclusion.providerId, exclusion.modelId)
+    if (!byKey.has(key)) byKey.set(key, { exclusion, removed: 0 })
+  }
+  const allowed: Candidate[] = []
+  const removedRoutes = new Set<string>()
+  let removedOfferings = 0
+  for (const candidate of candidates) {
+    const match = byKey.get(exclusionKey(candidate.providerId, candidate.modelId))
+    if (match === undefined) {
+      allowed.push(candidate)
+      continue
+    }
+    match.removed += 1
+    removedOfferings += 1
+    removedRoutes.add(routeKey(normalizeModelIdentity(candidate.modelId), candidate.providerId))
+  }
+  // A route keeps any offering no exclusion matched (another model id the
+  // provider lists for the same identity), so only routes left with none are
+  // excluded routes.
+  for (const candidate of allowed) removedRoutes.delete(routeKey(normalizeModelIdentity(candidate.modelId), candidate.providerId))
+  return { allowed, requested: [...byKey.values()], exact: new Set(byKey.keys()), routes: removedRoutes, removedOfferings }
 }
 
 /** What `requireCapability` kept, and what it left out. */
@@ -729,7 +889,11 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     lenses = [],
     pins = [],
     requireToolcall = false,
+    exclude = [],
   } = options
+  // A malformed exclusion refuses before anything else: it is the caller's
+  // request, and ignoring it would let through a route they meant to forbid.
+  const exclusion = applyExclusions(candidates, exclude)
   if (candidates.length === 0) throw new NoCandidatesError(providerConfigKey, guidance)
   // `Number.isFinite` FIRST, because `NaN < 1` is false (ledger triage
   // 2026-09-09). A NaN `slots` passed this guard, and then `filled.length >=
@@ -747,19 +911,28 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
   // to choose the one that serves it, and drops identities with none. Pins,
   // ranking and lenses work only on the entries that leaves. With no
   // requirement every entry is kept as it is and nothing is excluded.
-  const allDeduped = dedupeByIdentity(candidates)
+  //
+  // The caller's exclusions run before both: `allowed` is the raw list without
+  // the offerings they name, and nothing below reads `candidates` for
+  // selection, so an excluded offering cannot return as a winner, a variant or
+  // a route in `alsoAvailableVia`. With no exclusion `allowed` is `candidates`.
+  const { allowed } = exclusion
+  if (allowed.length === 0) throw new AllOfferingsExcludedError(candidates.length)
+  const allDeduped = dedupeByIdentity(allowed)
   const eligibility: Eligibility = requireToolcall
-    ? requireCapability(allDeduped, candidates)
+    ? requireCapability(allDeduped, allowed)
     : { eligible: allDeduped, ineligibleRoutes: new Set(), excludedModels: 0 }
   const deduped = eligibility.eligible
-  if (deduped.length === 0) throw new NoEligibleCandidatesError(providerConfigKey, candidates.length, guidance)
-  const incapableOfferings = requireToolcall ? candidates.filter((candidate) => !candidate.toolcall).length : 0
+  if (deduped.length === 0) {
+    throw new NoEligibleCandidatesError(providerConfigKey, candidates.length, guidance, exclusion.removedOfferings)
+  }
+  const incapableOfferings = requireToolcall ? allowed.filter((candidate) => !candidate.toolcall).length : 0
   // AD-4 step 0 (story 8A) — the pins claim from the deduped list; ranking gets
   // the remainder and the slots the pins did not take. When `pins` is empty this
   // is `resolvePins(deduped, [], slots)` returning `{filled: [], remaining:
   // deduped, resolutions: []}`, so `picked` is `rankByDiversity(deduped, slots)`
   // exactly as before — the pinless run is unchanged, not merely equivalent.
-  const pinning = resolvePins(deduped, pins, slots, eligibility.ineligibleRoutes)
+  const pinning = resolvePins(deduped, pins, slots, eligibility.ineligibleRoutes, exclusion)
   // The lineages the pins already hold, so the backfill does not spend a slot on
   // a second model from one of them while a fresh lineage goes unused. Verified
   // lineages only: an unverified claim is evidence of nothing in either
@@ -859,6 +1032,8 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
           return `there were only ${slots} slot(s) and earlier pins took them all`
         case "lacks-capability":
           return `the host does not declare tool calling for it through this provider, and ${guidance.toolcallReasonForPin}`
+        case "excluded":
+          return "the caller's exclusions forbid this route"
         default:
           return "it is not a usable provider/model pair"
       }
@@ -907,6 +1082,41 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
     })
   }
 
+  // How the roster was formed: the routes the caller excluded, every requested
+  // entry named once, including one that matched nothing, so a misspelt
+  // exclusion is visible rather than silently ineffective.
+  if (exclusion.requested.length > 0) {
+    const shown = exclusion.requested.slice(0, PIN_LIST_MAX)
+    const unmatched = exclusion.requested.filter((entry) => entry.removed === 0).length
+    warnings.push({
+      code: "roster-caller-excluded",
+      stage: "roster",
+      message:
+        `MODELS EXCLUDED BY THE CALLER: ${exclusion.requested.length} exclusion(s) removed ` +
+        `${exclusion.removedOfferings} of the ${candidates.length} provider/model offering(s) the host lists — ` +
+        shown
+          .map((entry) =>
+            `\`${pinLabel(entry.exclusion)}\` (` +
+            (entry.removed === 0 ? "matched no offering the host lists" : `${entry.removed} offering(s) removed`) +
+            `)`,
+          )
+          .join("; ") +
+        (exclusion.requested.length > shown.length
+          ? `; … and ${exclusion.requested.length - shown.length} further exclusion(s) not listed here`
+          : "") +
+        `. Selection, lenses and replacement did not use them.` +
+        (unmatched > 0
+          ? ` ${unmatched} exclusion(s) matched nothing; check the provider and model ids against the ` +
+            `\`${providerConfigKey}\` key in ${guidance.config}.`
+          : ""),
+      detail: {
+        exclusions: exclusion.requested.map((entry) => ({ ...pinParts(entry.exclusion), removed: entry.removed })),
+        offerings: candidates.length,
+        removedOfferings: exclusion.removedOfferings,
+      },
+    })
+  }
+
   // How the roster was formed: the offered models selection left out. Raised
   // whenever the requirement excluded any offering, whether or not the roster
   // still filled; the shortfall, if any, is `roster-underfilled`'s to report.
@@ -915,14 +1125,15 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       code: "roster-capability-excluded",
       stage: "roster",
       message:
-        `MODELS LEFT OUT: ${incapableOfferings} of the ${candidates.length} provider/model offering(s) ` +
-        `the host lists do not declare tool calling, which ${guidance.toolcallReason}, so selection ` +
+        `MODELS LEFT OUT: ${incapableOfferings} of the ${allowed.length} provider/model offering(s) ` +
+        (exclusion.removedOfferings > 0 ? `the caller did not exclude` : `the host lists`) +
+        ` do not declare tool calling, which ${guidance.toolcallReason}, so selection ` +
         `did not use them. ${eligibility.excludedModels} model(s) ` +
         `were left out entirely; other excluded offerings share a model identity with an eligible ` +
         `offering. A declared capability does not guarantee a working endpoint.`,
       detail: {
         requirement: "toolcall",
-        offerings: candidates.length,
+        offerings: allowed.length,
         incapableOfferings,
         excludedModels: eligibility.excludedModels,
       },
@@ -941,15 +1152,26 @@ export function selectRoster(candidates: readonly Candidate[], options: SelectOp
       message:
         `UNDERFILLED ROSTER: ${slots} discovery slot(s) requested but the host offers only ` +
         `${rosterSlots.length} distinct model(s)` +
-        (incapableOfferings > 0 ? ` that declare tool calling` : ``) +
-        ` (${candidates.length} candidate(s) before dedupe). ` +
+        (incapableOfferings > 0 && exclusion.removedOfferings > 0
+          ? ` that declare tool calling and are not excluded by the caller`
+          : incapableOfferings > 0
+            ? ` that declare tool calling`
+            : exclusion.removedOfferings > 0
+              ? ` that are not excluded by the caller`
+              : ``) +
+        ` (${candidates.length} candidate(s) before dedupe` +
+        (exclusion.removedOfferings > 0 ? `, ${exclusion.removedOfferings} of them excluded` : ``) +
+        `). ` +
         `The run proceeds with a smaller roster; every co-discovery fraction is over what ` +
         `answered, not over ${slots}. Add a provider under the \`${providerConfigKey}\` key in ` +
-        `${guidance.config} to fill the remaining slot(s).`,
+        `${guidance.config}` +
+        (exclusion.removedOfferings > 0 ? `, or exclude fewer models,` : ``) +
+        ` to fill the remaining slot(s).`,
       detail: {
         requested: slots,
         filled: rosterSlots.length,
         candidatesBeforeDedupe: candidates.length,
+        ...(exclusion.removedOfferings > 0 ? { excludedOfferings: exclusion.removedOfferings } : {}),
         providerConfigKey,
       },
     })

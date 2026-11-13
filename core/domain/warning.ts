@@ -360,6 +360,17 @@ export const WARNING_CODES = [
    * as the diversity the co-discovery fractions rest on.
    */
   "answered-lineages-reduced",
+  /**
+   * The caller's `exclude` list (`SelectOptions.exclude`) removed host
+   * offerings before selection, or named a route the host does not list.
+   * Raised once per run by `core/roster/select.ts`, naming each requested
+   * exclusion and how many offerings it removed.
+   *
+   * A DISCLOSURE, as `roster-capability-excluded` is: it states how the roster
+   * was formed, at the caller's request. A shortfall it causes is
+   * `roster-underfilled`'s to report.
+   */
+  "roster-caller-excluded",
 ] as const
 
 export type WarningCode = (typeof WARNING_CODES)[number]
@@ -398,6 +409,8 @@ export const DISCLOSURE_CODES: ReadonlySet<WarningCode> = new Set<WarningCode>([
   "session-cleanup-unresolved",
   /** How the roster was formed: which offered models selection left out, and why. */
   "roster-capability-excluded",
+  /** How the roster was formed: which routes the caller excluded. */
+  "roster-caller-excluded",
 ])
 
 export interface Warning {

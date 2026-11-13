@@ -42,8 +42,8 @@ import { isolateGitHome } from "./test-support/git-home.ts"
 
 isolateGitHome()
 
-function model(id: string) {
-  return { id, name: id, capabilities: { toolcall: true }, limit: { context: 200000 }, cost: { input: 3, output: 15 } }
+function model(id: string, toolcall = true) {
+  return { id, name: id, capabilities: { toolcall }, limit: { context: 200000 }, cost: { input: 3, output: 15 } }
 }
 
 /** Three lineages, so a 3-slot request can actually be filled (AD-4). */
@@ -181,8 +181,17 @@ async function executeWith(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<ToolResult> {
+  return executeIn(THREE_PROVIDERS, args, signal)
+}
+
+/** `executeWith` against a host listing `providers` instead of the three-provider default. */
+async function executeIn(
+  providers: unknown,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
   const plugin = await MadPlugin({
-    client: fakeClient(),
+    client: fakeClient(providers),
     directory: ".",
     worktree,
     // Nothing listens here; the sessions go through the host client, which
@@ -723,6 +732,58 @@ describe("mad_review.execute — AD-3 amended: `models` pins the roster (story 8
 
     expect(unpinned.metadata?.warnings).toContain("roster-underfilled")
     expect(pinned.metadata?.warnings).toEqual(unpinned.metadata?.warnings)
+  })
+})
+
+describe("mad_review.execute — `exclude` reaches selection", () => {
+  test("AN EXCLUDED MODEL IS NOT SENT THE CHANGE, and the report names the exclusion", async () => {
+    const result = await executeWith({ exclude: ["Google/gemini-2.5-pro"] })
+    expect(result.metadata?.warnings).toContain("roster-caller-excluded")
+    expect(result.metadata?.warnings).toContain("roster-underfilled")
+    expect(result.output).toContain("This review sends the change to 2 provider(s): anthropic, openai.")
+    expect(result.output).toContain("`Google/gemini-2.5-pro` (1 offering(s) removed)")
+  })
+
+  test("OMITTING `exclude` OR PASSING [] LEAVES TODAY'S ROSTER UNTOUCHED", async () => {
+    const base = await executeWith({})
+    const empty = await executeWith({ exclude: [] })
+    expect(empty.metadata?.warnings).toEqual(base.metadata?.warnings)
+    expect(base.metadata?.warnings).not.toContain("roster-caller-excluded")
+  })
+
+  test("A PINNED AND EXCLUDED MODEL IS REPORTED AS EXCLUDED, never served", async () => {
+    const result = await executeWith({ models: ["google/gemini-2.5-pro"], exclude: ["google/gemini-2.5-pro"], slots: 1 })
+    expect(result.output).toContain("`google/gemini-2.5-pro` (the caller's exclusions forbid this route)")
+    expect(result.output).not.toContain("This review sends the change to 1 provider(s): google")
+  })
+
+  test("A MALFORMED, OVER-LONG OR ALL-EXCLUDING LIST IS REFUSED BEFORE ANY REVIEW", async () => {
+    const malformed = await executeWith({ exclude: ["gpt-5"] })
+    expect(malformed.title).toBe("MAD — invalid exclusions")
+    expect(malformed.output).toContain("1 excluded model(s) are not provider/model pairs: `/gpt-5`")
+
+    const overLong = await executeWith({ exclude: Array.from({ length: 65 }, (_, i) => `p/m${i}`) })
+    expect(overLong.title).toBe("MAD — invalid exclusions")
+    expect(overLong.output).toContain("at most 64 are accepted")
+
+    const everything = await executeWith({ exclude: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"] })
+    expect(everything.title).toBe("MAD — every model is excluded")
+    expect(everything.output).toContain("the caller's exclusions remove every one of them")
+  })
+
+  test("EXCLUSIONS AND THE CAPABILITY FILTER LEAVING NOTHING: the title does not claim no model declares it", async () => {
+    const host = {
+      providers: [
+        { id: "p", name: "P", source: "env", env: [], options: {}, models: { a: model("gpt-5"), b: model("grok-4", false) } },
+      ],
+      default: {},
+    }
+    const mixed = await executeIn(host, { exclude: ["p/gpt-5"] })
+    expect(mixed.title).toBe("MAD — no eligible model remains after the exclusions")
+    expect(mixed.output).toContain("the caller's exclusions remove 1, and none of the remaining 1 declares tool calling")
+
+    const noExclusion = await executeIn({ ...host, providers: [{ ...host.providers[0]!, models: { b: model("grok-4", false) } }] }, {})
+    expect(noExclusion.title).toBe("MAD — no model declares the required capability")
   })
 })
 

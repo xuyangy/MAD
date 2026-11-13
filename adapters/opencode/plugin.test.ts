@@ -10,7 +10,9 @@ import {
   ISSUED_TURNS_NOTE,
   issuedTurnsNote,
   MAX_DISCOVERY_SLOTS,
+  MAX_EXCLUSIONS,
   MAX_LENS_SLOTS,
+  parseExclusions,
   truncatedListWarnings,
 } from "./plugin.ts"
 
@@ -365,5 +367,36 @@ describe("the issued-turns billing note (CAP-5)", () => {
 
   test("a run that was not cancelled gets no note", () => {
     expect(issuedTurnsNote({ ledger: { ...emptyLedger(), unknownUsage: [unknown] } })).toBe("")
+  })
+})
+
+describe("parseExclusions — the `exclude` argument, refused rather than cut", () => {
+  test("absent is no exclusion; each entry splits at its first slash, trimmed, and keeps the model id's own slashes", () => {
+    expect(parseExclusions(undefined)).toEqual({ exclusions: [] })
+    expect(parseExclusions([" OpenRouter / anthropic/claude-sonnet-4-5 ", "anthropic/claude-opus-5-5"])).toEqual({
+      exclusions: [
+        { providerId: "OpenRouter", modelId: "anthropic/claude-sonnet-4-5" },
+        { providerId: "anthropic", modelId: "claude-opus-5-5" },
+      ],
+    })
+  })
+
+  test("a malformed entry is passed on, not dropped, so the core refuses it by name", () => {
+    expect(parseExclusions(["gpt-5", "openai/", 7 as never])).toEqual({
+      exclusions: [
+        { providerId: "", modelId: "gpt-5" },
+        { providerId: "openai", modelId: "" },
+        { providerId: "", modelId: "" },
+      ],
+    })
+  })
+
+  test("a list past the ceiling, or not a list, is refused whole", () => {
+    expect(parseExclusions(Array.from({ length: MAX_EXCLUSIONS }, () => "a/b"))).toHaveProperty("exclusions")
+    const over = parseExclusions(Array.from({ length: MAX_EXCLUSIONS + 1 }, () => "a/b"))
+    expect(over).toEqual({
+      refused: `\`exclude\` names ${MAX_EXCLUSIONS + 1} models; at most ${MAX_EXCLUSIONS} are accepted, and MAD does not drop an exclusion you asked for`,
+    })
+    expect(parseExclusions("anthropic/claude-opus-5-5" as never)).toHaveProperty("refused")
   })
 })

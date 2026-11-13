@@ -27,6 +27,7 @@ import {
   DEFAULT_DISCOVERY_SLOTS,
   ISSUED_TURNS_NOTE,
   MadPlugin,
+  MAX_EXCLUSIONS,
 } from "../adapters/opencode/plugin.ts"
 import { DEFAULT_PLUGIN_BUDGET } from "../adapters/opencode/plugin-budget.ts"
 import { DEFAULT_TURN_TIMEOUT_MS } from "../adapters/opencode/model-backend.ts"
@@ -211,6 +212,11 @@ describe("README — registration (CAP-8)", () => {
     )
     expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below. The authorized runs of 2026-11-12 (see *Target host*) pinned every slot to a model that declares tool calling, so no model was left out; the filter's exclusions and the replacement of refused slots have not been run against a live host.")
     expect(README).not.toContain("neither has been run against a live host")
+    expect(PROSE).toContain(
+      "MAD does not remember a refusal from one review to the next, so a route you know rejects MAD, such as one that returned the capability refusal described under `slots`, is excluded only for the reviews you pass it to.",
+    )
+    expect(PROSE).toContain("Why `anthropic/claude-opus-5-5` rejected the forced tool choice in the 2026-11-12 runs is not established.")
+    expect(PROSE).toContain("An excluded model fills no slot, no lens and no replacement, and a model you both pin and exclude is reported as excluded and its slot is filled automatically.")
     expect(PROSE).toContain("No test here runs that registration or a live review.")
     expect(PROSE).toContain("MAD sends every request through the client OpenCode hands the plugin, never to the plugin's `serverUrl`")
     expect(PROSE).toContain("`serverUrl` is not a supported way for the plugin to reach the host; MAD's evaluation and probe scripts keep it as their transport to a server they start or are given.")
@@ -257,6 +263,10 @@ describe("README — arguments and defaults (CAP-8)", () => {
 
     expect(inner("models").def.type).toBe("array")
     expect(row("models")).toEqual(["list of `provider/model`", "MAD chooses the whole roster", `at most ${inner("models")._zod.bag.maximum}`])
+
+    expect(inner("exclude").def.type).toBe("array")
+    expect(inner("exclude")._zod.bag.maximum).toBe(MAX_EXCLUSIONS)
+    expect(row("exclude")).toEqual(["list of `provider/model`", "nothing excluded", `at most ${MAX_EXCLUSIONS}`])
   })
 
   test("the documented types are the schema's: strings, integers and lists of strings", async () => {
@@ -269,7 +279,7 @@ describe("README — arguments and defaults (CAP-8)", () => {
       expect(accepts(name, 2.5)).toBe(false)
       expect(accepts(name, "2")).toBe(false)
     }
-    for (const name of ["lenses", "models"]) {
+    for (const name of ["lenses", "models", "exclude"]) {
       expect(accepts(name, ["security"])).toBe(true)
       expect(accepts(name, [1])).toBe(false)
       expect(accepts(name, "security")).toBe(false)
