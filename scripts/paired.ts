@@ -1620,6 +1620,19 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       if (provider === undefined) checks.push(notEvaluated("managed host provider block", "--pin and the --provider-* flags"))
       else {
         const problems = providerBlockProblems(provider)
+        // The pin's model must be one the provider block configures, under the
+        // identity rule selection uses (`normalizeModelIdentity`), so a pin no
+        // configured model can satisfy refuses here, before the reservation and
+        // the host. Stage 2 still checks the host's own roster.
+        if (flags.pin !== undefined) {
+          const wanted = normalizeModelIdentity(flags.pin.modelId)
+          if (!provider.models.some((model) => normalizeModelIdentity(model) === wanted)) {
+            problems.push(
+              `the pin \`${flags.pin.providerId}/${flags.pin.modelId}\` names a model no --provider-model configures ` +
+                `(${provider.models.map((model) => `\`${model}\``).join(", ")}); add it with --provider-model, or pin one of those models`,
+            )
+          }
+        }
         const value = env[provider.apiKeyEnv]
         if (value === undefined || value.trim().length === 0) {
           problems.push(`the credential variable \`${provider.apiKeyEnv}\` is not set in this environment, or is empty or blank`)

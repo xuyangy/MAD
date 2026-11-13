@@ -991,7 +991,9 @@ api-key adversarial design is no gate here.
 Each stage gates the next, and a failure at any stage exits 1 with no schedule and no bill:
 
 - **Stage 1 — offline checks.** Flags, containment, the bundle root, the frozen protocol, the gate
-  table and whether it is committed, the provider block and its credential variable, the Tools wiring and the first
+  table and whether it is committed, the provider block and its credential variable (the pin's model must be one a
+  `--provider-model` names, compared as selection compares model ids, so a dated alias of a named model passes; the host's
+  own roster is still checked at stage 2), the Tools wiring and the first
   worktree-identity comparison; then MAD's own code revision, which must be known and clean (item 6 of
   "Before anything bills"). Every independent check runs and
   every failure prints together; a check that throws (a permission error, say) is a failed check, and

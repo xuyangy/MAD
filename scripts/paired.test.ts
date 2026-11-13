@@ -1075,6 +1075,75 @@ describe("the Tools report", () => {
   })
 })
 
+/**
+ * Deferred-work 2150: the api-key pin's model must be one a --provider-model
+ * configures, under selection's identity rule, or stage 1 refuses before the
+ * reservation, relay and host. The provider id here is not a built-in one.
+ */
+describe("stage 1 refuses an api-key pin no --provider-model configures", () => {
+  const argvWith = (env: { directory: string; out: string }, pin: string, models: string[], equals = false) => [
+    "bun",
+    "scripts/paired.ts",
+    "--live",
+    "--pin",
+    pin,
+    "--provider-url",
+    PROVIDER_URL,
+    "--provider-key-env",
+    KEY_ENV,
+    ...models.flatMap((model) => (equals ? [`--provider-model=${model}`] : ["--provider-model", model])),
+    "--directory",
+    env.directory,
+    "--out",
+    env.out,
+  ]
+  const relayCandidates = async () => [candidate("relay", "claude-sonnet-4-5"), candidate("relay", "gpt-5"), candidate("relay", "gemini-2.5-pro")]
+
+  for (const equals of [false, true]) {
+    test(`a pin whose model is not configured refuses at stage 1, naming the pin and the models (${equals ? "--provider-model=" : "--provider-model"} spelling)`, async () => {
+      const env = await setup()
+      const { overrides, host, meter, clientCalls, backend } = overridesFor(env, { gates: closedGates, enumerate: relayCandidates })
+      const reservationRoot = join(dirname(env.scratchParent), "reservation-root")
+      const result = await captured(() => main(argvWith(env, "relay/claude-opus-5-5", ["claude-sonnet-4-5", "gpt-5", "gemini-2.5-pro"], equals), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("FAIL  managed host provider block")
+      expect(result.text).toContain(
+        "the pin `relay/claude-opus-5-5` names a model no --provider-model configures (`claude-sonnet-4-5`, `gpt-5`, `gemini-2.5-pro`); add it with --provider-model, or pin one of those models",
+      )
+      expect(result.text).not.toContain(KEY)
+      expect(result.text).not.toContain("stage 2 of 4")
+      expect(existsSync(reservationRoot)).toBe(false)
+      expect(meter.started).toEqual([])
+      expect(host.started).toEqual([])
+      expect(clientCalls).toEqual([])
+      expect(backend.calls).toEqual([])
+      expect(existsSync(env.out)).toBe(false)
+      await nothingScheduled(env.out, env.scratchParent)
+    })
+  }
+
+  for (const [label, pin] of [
+    ["an exact match", "relay/claude-sonnet-4-5"],
+    ["a dated alias of a configured model", "relay/claude-sonnet-4-5-20250929"],
+  ] as const) {
+    test(`${label} passes the stage-1 check, and stage 2 still checks the host's roster`, async () => {
+      const env = await setup()
+      // The host offers no matching model, so the run stops at stage 2's roster check, on the scripted host and relay.
+      const { overrides, backend } = overridesFor(env, {
+        gates: closedGates,
+        enumerate: async () => [candidate("relay", "gpt-5"), candidate("relay", "gemini-2.5-pro"), candidate("relay", "mistral-large")],
+      })
+      const result = await captured(() => main(argvWith(env, pin, ["claude-sonnet-4-5", "gpt-5", "gemini-2.5-pro"]), overrides))
+      expect(result.text).toContain("PASS  managed host provider block")
+      expect(result.text).not.toContain("names a model no --provider-model configures")
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("REFUSED at stage 2 (client and roster)")
+      expect(result.text).toContain(`the pinned model ${pin} holds no slot`)
+      expect(backend.calls).toEqual([])
+    })
+  }
+})
+
 describe("stage 2 refuses a roster that does not honour the pin", () => {
   const refusedWith = async (candidates: ReturnType<typeof candidate>[], messages: string[]) => {
     const env = await setup()
