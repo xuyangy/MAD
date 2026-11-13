@@ -38,7 +38,8 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { chmod, mkdtemp, readdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -3354,4 +3355,118 @@ describe("acceptance — a session the host is retrying past the deadline, on th
       await host.stop()
     }
   })
+})
+
+/**
+ * Retro action item 11, on the plugin's route: with MAD_ARTIFACTS set, the
+ * plugin hands the backend a status recorder and the dump writes what it saw as
+ * `session-status.jsonl`. One discovery prompt is held past the first status
+ * read (the default interval, 5000 ms), while the host reports every session
+ * busy and a session that is not MAD's retrying.
+ */
+describe("acceptance — the host's status reads reach the artifacts dump", () => {
+  const withArtifacts = (value: string | undefined) => async <T>(body: () => Promise<T>): Promise<T> => {
+    const saved = process.env.MAD_ARTIFACTS
+    if (value === undefined) delete process.env.MAD_ARTIFACTS
+    else process.env.MAD_ARTIFACTS = value
+    try {
+      return await body()
+    } finally {
+      if (saved === undefined) delete process.env.MAD_ARTIFACTS
+      else process.env.MAD_ARTIFACTS = saved
+    }
+  }
+  const heldOnce = () => {
+    let held = false
+    return (_session: string, prompt: { role: unknown }) => {
+      if (held || prompt.role !== undefined) return undefined
+      held = true
+      return new Promise<void>((resolve) => setTimeout(resolve, 5_600))
+    }
+  }
+  /**
+   * Whether each turn's backend was handed a status observer: the plugin's
+   * gate, observed directly rather than through the dump, which refuses or
+   * skips its write on its own.
+   */
+  const observerSpy = () => {
+    const original = OpencodeModelBackend.prototype.runTurn
+    const observed: boolean[] = []
+    OpencodeModelBackend.prototype.runTurn = function (this: OpencodeModelBackend, ...args: unknown[]) {
+      observed.push((this as unknown as { onStatusRead?: unknown }).onStatusRead !== undefined)
+      return (original as (...a: unknown[]) => unknown).apply(this, args)
+    } as typeof original
+    return { observed, restore: () => void (OpencodeModelBackend.prototype.runTurn = original) }
+  }
+  const busyAndForeign = (sessionIds: readonly string[]) => ({
+    ...Object.fromEntries(sessionIds.map((id) => [id, { type: "busy" }])),
+    ses_foreign: { type: "retry", attempt: 3, message: "not MAD's session", next: Date.now() + 3_600_000 },
+  })
+
+  test(
+    "MAD_ARTIFACTS set: session-status.jsonl holds the held turn's reads, for MAD's sessions only",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      const root = await mkdtemp(join(tmpdir(), "mad-acceptance-artifacts-"))
+      const spy = observerSpy()
+      try {
+        const run = await runScenario(
+          repo,
+          { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, holdPrompt: heldOnce(), status: busyAndForeign },
+          { aroundExecute: withArtifacts(root) },
+        )
+        expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered")
+        expect(run.host.counts.status).toBeGreaterThan(0)
+        const [runDirectory] = await readdir(root)
+        const text = await readFile(join(root, runDirectory!, "session-status.jsonl"), "utf8")
+        const lines = text.trimEnd().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+        expect(lines.length).toBeGreaterThan(0)
+        expect(lines.length).toBeLessThanOrEqual(run.host.counts.status)
+        for (const line of lines) {
+          expect(line).toMatchObject({ outcome: "answered", status: { type: "busy" }, actedOn: false })
+          expect(String(line.sessionID).startsWith("ses_")).toBe(true)
+          expect(line.sessionID).not.toBe("ses_foreign")
+        }
+        expect(text).not.toContain("ses_foreign")
+        expect(text).not.toContain("not MAD's session")
+        expect(spy.observed.length).toBeGreaterThan(0)
+        expect(spy.observed.every(Boolean)).toBe(true)
+      } finally {
+        spy.restore()
+        await repo.remove()
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  for (const [label, value] of [
+    ["unset", undefined],
+    ["inside the reviewed repository (refused)", "inside"],
+  ] as const) {
+    test(
+      `MAD_ARTIFACTS ${label}: status reads still happen, but no backend gets an observer and nothing is written`,
+      async () => {
+        const repo = await makeReviewRepo({ dirty: true })
+        const spy = observerSpy()
+        try {
+          const inside = join(repo.dir, "mad-artifacts")
+          const run = await runScenario(
+            repo,
+            { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK }, holdPrompt: heldOnce(), status: busyAndForeign },
+            { aroundExecute: withArtifacts(value === "inside" ? inside : undefined) },
+          )
+          expect(run.result.title).toBe("MAD review — 1 finding(s), 3/3 models answered")
+          expect(run.host.counts.status).toBeGreaterThan(0)
+          expect(spy.observed.length).toBeGreaterThan(0)
+          expect(spy.observed.some(Boolean)).toBe(false)
+          expect(existsSync(inside)).toBe(false)
+        } finally {
+          spy.restore()
+          await repo.remove()
+        }
+      },
+      TIMEOUT_MS,
+    )
+  }
 })

@@ -289,6 +289,13 @@ export interface OpencodeBackendOptions {
    */
   statusPollMs?: number
   /**
+   * Told about every `session.status` read that settles while a prompt is
+   * pending, as a `StatusObservation` for that turn's session only. Absent means
+   * no observation is built. It is never awaited and a throw is swallowed, so it
+   * cannot change a turn, the reads or their timing.
+   */
+  onStatusRead?: (observation: StatusObservation) => unknown
+  /**
    * AC3 (story 2.3) — HOW LONG SESSION DISPOSAL MAY TAKE.
    *
    * A SECOND, MUCH SHORTER DEADLINE, and a separate dial rather than a reuse of
@@ -699,12 +706,77 @@ function hostRetryOf(answer: unknown, sessionID: string): HostRetry | undefined 
   return { attempt, message, next }
 }
 
+/**
+ * One settled `session.status` read for one of MAD's turns, as the optional
+ * `onStatusRead` observer receives it. Only this turn's session is kept, and
+ * only its whitelisted fields; the rest of the host's answer is not.
+ */
+export interface StatusObservation {
+  /** When MAD observed the read settle (ISO 8601, MAD's clock). */
+  at: string
+  sessionID: string
+  slot: string
+  executionId: string
+  /** 1-based, in the order the reads of this execution were ISSUED. */
+  readSeq: number
+  outcome: "answered" | "failed"
+  /**
+   * For `answered`: this session's entry, `null` when the host's status map
+   * does not list it. Each field is present only when the host gave it with the
+   * expected type. `next` is the host's number as received, on the host's clock.
+   * `type` and `message` are flattened and capped as `hostRetryText` does.
+   */
+  status?: { type?: string; attempt?: number; next?: number; message?: string } | null
+  /** For `failed`: why, flattened and capped as `hostRetryText` does. */
+  problem?: string
+  /**
+   * Whether this read is the one the watch acted on: it entered the branch that
+   * rejects with `HostRetryPastDeadlineError`. It does not say that rejection
+   * won the race against a prompt, deadline or stop settling at the same time.
+   */
+  actedOn: boolean
+}
+
+/** The part of a `StatusObservation` `withTimeout` knows; the backend adds the rest. */
+type ReadObservation = Pick<StatusObservation, "readSeq" | "outcome" | "status" | "problem" | "actedOn">
+
+/**
+ * One settled answer as an observation's `outcome`, `status` and `problem`. An
+ * SDK error envelope, a missing or non-object status map and a non-object entry
+ * are failed reads; a map that does not list the session is answered `null`.
+ */
+function statusProjection(answer: unknown, sessionID: string): Pick<StatusObservation, "outcome" | "status" | "problem"> {
+  const failed = (problem: string) => ({ outcome: "failed" as const, problem: hostRetryText(problem) })
+  if (typeof answer !== "object" || answer === null || Array.isArray(answer)) return failed("the status answer is not an object")
+  const { data, error } = answer as StatusResultLike
+  if (error !== undefined && error !== null) return failed(`the host answered with an error: ${describeError(error)}`)
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return failed("the status answer carries no status map")
+  if (!Object.hasOwn(data, sessionID)) return { outcome: "answered", status: null }
+  const entry = (data as Record<string, unknown>)[sessionID]
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return failed("this session's status entry is not an object")
+  const { type, attempt, next, message } = entry as Record<string, unknown>
+  return {
+    outcome: "answered",
+    status: {
+      ...(typeof type === "string" ? { type: hostRetryText(type) } : {}),
+      ...(typeof attempt === "number" && Number.isFinite(attempt) ? { attempt } : {}),
+      ...(typeof next === "number" && Number.isFinite(next) ? { next } : {}),
+      ...(typeof message === "string" ? { message: hostRetryText(message) } : {}),
+    },
+  }
+}
+
 /** What `withTimeout` needs to watch the host's status for one pending prompt. */
 interface RetryWatch {
   /** Reads the host's session status; may reject or never settle. */
   read(): Promise<unknown>
   sessionID: string
   intervalMs: number
+  /**
+   * Told about every read that settles, or throws, while the watch is active,
+   * stale answers included. Never awaited; a throw is swallowed.
+   */
+  observe?(observation: ReadObservation): unknown
 }
 
 /**
@@ -796,24 +868,48 @@ async function withTimeout<T>(
           // read's answer has already been applied.
           let issued = 0
           let applied = 0
+          // The observer sees what the watch saw and can change none of it.
+          const observe = (build: () => ReadObservation) => {
+            if (watch.observe === undefined) return
+            try {
+              const returned = watch.observe(build())
+              // An observer that returns a promise is not awaited, and its
+              // rejection is handled here so it cannot surface as unhandled.
+              if (typeof (returned as PromiseLike<unknown> | undefined)?.then === "function") {
+                void Promise.resolve(returned).catch(() => {})
+              }
+            } catch {
+              // ignored on purpose: recording must never affect the turn
+            }
+          }
           const tick = () => {
             if (over) return
             const mine = ++issued
             let read: Promise<unknown>
             try {
               read = watch.read()
-            } catch {
+            } catch (error) {
+              observe(() => ({ readSeq: mine, outcome: "failed", problem: hostRetryText(describeError(error)), actedOn: false }))
               return
             }
             Promise.resolve(read).then(
               (answer) => {
-                if (over || mine <= applied) return
-                applied = mine
-                const retry = hostRetryOf(answer, watch.sessionID)
-                if (retry !== undefined && retry.next > deadline) reject(new HostRetryPastDeadlineError(ms, retry))
+                if (over) return
+                let actedOn = false
+                if (mine > applied) {
+                  applied = mine
+                  const retry = hostRetryOf(answer, watch.sessionID)
+                  if (retry !== undefined && retry.next > deadline) {
+                    actedOn = true
+                    reject(new HostRetryPastDeadlineError(ms, retry))
+                  }
+                }
+                observe(() => ({ readSeq: mine, ...statusProjection(answer, watch.sessionID), actedOn }))
               },
-              () => {
+              (error) => {
                 // A failed read changes nothing; the next tick reads again.
+                if (over) return
+                observe(() => ({ readSeq: mine, outcome: "failed", problem: hostRetryText(describeError(error)), actedOn: false }))
               },
             )
           }
@@ -886,6 +982,7 @@ export class OpencodeModelBackend implements ModelBackend {
   private readonly promptNotice: string | undefined
   private readonly sessionGuard: OpencodeBackendOptions["sessionGuard"]
   private readonly onPolicyMismatch: OpencodeBackendOptions["onPolicyMismatch"]
+  private readonly onStatusRead: OpencodeBackendOptions["onStatusRead"]
 
   /**
    * How many `executionId`s this backend has minted. See `nextExecutionId`.
@@ -920,6 +1017,7 @@ export class OpencodeModelBackend implements ModelBackend {
       )
     }
     this.statusPollMs = statusPollMs
+    this.onStatusRead = options.onStatusRead
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS
     this.lateUsage = options.lateUsage
     this.executionIdPrefix = options.executionIdPrefix ?? ""
@@ -1361,10 +1459,21 @@ export class OpencodeModelBackend implements ModelBackend {
 
     // Bound to `session` so a client's own `this` is kept on every read.
     const session = this.client.session
+    const onStatusRead = this.onStatusRead
     const watch: RetryWatch | undefined =
       session.status === undefined
         ? undefined
-        : { read: () => session.status!({ directory: this.directory }), sessionID, intervalMs: this.statusPollMs }
+        : {
+            read: () => session.status!({ directory: this.directory }),
+            sessionID,
+            intervalMs: this.statusPollMs,
+            ...(onStatusRead === undefined
+              ? {}
+              : {
+                  observe: (read: ReadObservation) =>
+                    onStatusRead({ at: new Date().toISOString(), sessionID, slot: rosterSlot.slot, executionId, ...read }),
+                }),
+          }
 
     let result: PromptResultLike
     try {

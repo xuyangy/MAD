@@ -345,6 +345,8 @@ describe("README — tool and evidence policy (CAP-8)", () => {
     expect(refusalFor("/work/repo/dumps", "/work/repo")).toBeDefined()
     expect(refusalFor("/var/dumps", "/work/repo")).toBeUndefined()
     expect(PROSE).toContain("`MAD_ARTIFACTS=1` (or `true`, `yes`, `on`): the dump goes to `mad-runs` under the system temp directory")
+    expect(PROSE).toContain("When the dump is on, it also holds `session-status.jsonl`")
+    expect(PROSE).toContain("No other session's status is kept.")
     expect(PROSE).toContain("A relative path, or one inside the repository, is refused.")
   })
 

@@ -21,11 +21,13 @@ import { candidate, fakeChange } from "../../core/test-support/fakes.ts"
 import {
   ARTIFACTS_ENV,
   artifactRootFrom,
+  createStatusRecorder,
   createTurnRecorder,
   defaultArtifactRoot,
   dumpRunArtifacts,
   refusalFor,
 } from "./artifacts.ts"
+import type { StatusObservation } from "./model-backend.ts"
 
 const scratch: string[] = []
 
@@ -538,5 +540,44 @@ describe("the run manifest (story 2.2)", () => {
       }),
     )
     expect(outcome.kind).toBe("failed")
+  })
+})
+
+describe("session-status.jsonl — the host's status reads, when a status recorder ran", () => {
+  const observation = (readSeq: number, extra: Partial<StatusObservation> = {}): StatusObservation => ({
+    at: "2026-11-13T20:00:00.000Z",
+    sessionID: "ses_a",
+    slot: "discovery-1",
+    executionId: "x-1",
+    readSeq,
+    outcome: "answered",
+    status: { type: "busy" },
+    actedOn: false,
+    ...extra,
+  })
+
+  test("the recorder keeps observations in the order recorded, and the dump writes one JSON line each", async () => {
+    const recorder = createStatusRecorder()
+    recorder.record(observation(2))
+    recorder.record(observation(1, { status: { type: "retry", attempt: 1, next: 1_800_000_000_000, message: "limit" }, actedOn: true }))
+    const root = await tempDir("mad-artifacts-")
+    const outcome = await dumpRunArtifacts(dumpInput({ env: { [ARTIFACTS_ENV]: root }, statusObservations: recorder.observations }))
+    expect(outcome.kind).toBe("written")
+    const text = await readFile(join(root, "run-7a-1", "session-status.jsonl"), "utf8")
+    expect(text.endsWith("\n")).toBe(true)
+    expect(text.trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(recorder.observations)
+    expect((await stat(join(root, "run-7a-1", "session-status.jsonl"))).mode & 0o777).toBe(0o600)
+  })
+
+  test("a recorder that saw no read still writes an empty file", async () => {
+    const root = await tempDir("mad-artifacts-")
+    await dumpRunArtifacts(dumpInput({ env: { [ARTIFACTS_ENV]: root }, statusObservations: createStatusRecorder().observations }))
+    expect(await readFile(join(root, "run-7a-1", "session-status.jsonl"), "utf8")).toBe("")
+  })
+
+  test("with no recorder the file is not written and the file set is unchanged", async () => {
+    const root = await tempDir("mad-artifacts-")
+    await dumpRunArtifacts(dumpInput({ env: { [ARTIFACTS_ENV]: root } }))
+    expect((await readdir(join(root, "run-7a-1"))).includes("session-status.jsonl")).toBe(false)
   })
 })

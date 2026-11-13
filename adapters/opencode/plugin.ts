@@ -37,6 +37,7 @@ import {
 } from "../../core/roster/select.ts"
 import {
   artifactRootFrom,
+  createStatusRecorder,
   createTurnRecorder,
   dumpRunArtifacts,
   refusalFor,
@@ -806,6 +807,18 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
 
             let policyStop: { problem: string } | undefined
 
+            // AD-16 amended (story 7A) — the recorders are constructed ONLY
+            // when the user turned the dump on and the dump would not refuse,
+            // so a fresh install allocates nothing and holds no prompt, answer
+            // or host status in memory, and a refused root pays nothing for a
+            // dump it will not get. The same `artifactRootFrom` the dump itself
+            // calls, on the same `process.env`, so the two cannot disagree.
+            // Decided here, before the backend, because the status recorder is
+            // handed to it.
+            const artifactRoot = artifactRootFrom(process.env)
+            const dumping = artifactRoot !== undefined && refusalFor(artifactRoot, worktree) === undefined
+            const statusRecorder = dumping ? createStatusRecorder() : undefined
+
             const backend = new OpencodeModelBackend({
               // The host's own client, not one built from `serverUrl`: outside
               // `opencode serve` the host passes a placeholder URL nothing
@@ -821,6 +834,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               sessionPermission: REVIEW_SESSION_PERMISSION,
               promptNotice: READ_ONLY_SESSION_NOTICE,
               sessionGuard,
+              ...(statusRecorder === undefined ? {} : { onStatusRead: statusRecorder.record }),
               onPolicyMismatch: ({ problem }) => {
                 // THE FIRST STOP IS THE CAUSE. A mismatch that arrives after the
                 // run was already stopped (the user's stop, or an earlier
@@ -866,29 +880,14 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               }
             }
 
-            // AD-16 amended (story 7A) — the turn recorder is constructed ONLY
-            // when the user turned the dump on. With the flag off `review()` gets
-            // the bare backend, so a fresh install allocates nothing and holds no
-            // prompt or answer in memory. The decorator satisfies the port and
-            // does nothing else: no retry, no swallowed failure, and the
-            // cancellation signal forwarded untouched — a stage cannot tell it is
-            // there, which is AD-16's "no stage learns that a file exists".
-            //
-            // The same `artifactRootFrom` the dump itself calls, on the same
-            // `process.env`, so the two cannot disagree about whether the flag is
-            // on.
-            //
-            // AND THE REFUSAL IS CHECKED HERE TOO (code review 2026-08-31). The
-            // gate used to read `artifactRootFrom` alone, so a user who pointed
-            // the variable at their own repository paid the memory cost of holding
-            // every prompt, instruction set and envelope for the whole run — and
-            // then got nothing, because the dump refused. The recorder is built
-            // only when there is a dump for it to feed.
-            const artifactRoot = artifactRootFrom(process.env)
-            const recorder =
-              artifactRoot !== undefined && refusalFor(artifactRoot, worktree) === undefined
-                ? createTurnRecorder()
-                : undefined
+            // The turn recorder, under the same `dumping` gate as the status
+            // recorder above. The decorator satisfies the port and does nothing
+            // else: no retry, no swallowed failure, and the cancellation signal
+            // forwarded untouched — a stage cannot tell it is there, which is
+            // AD-16's "no stage learns that a file exists". The refusal is part
+            // of the gate (code review 2026-08-31): a root the dump would refuse
+            // gets no recorder and holds nothing.
+            const recorder = dumping ? createTurnRecorder() : undefined
 
             const { record, rendered } = await review({
               roster: resolved.roster,
@@ -970,6 +969,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 // editor is not the reader AD-18's notice sentence is addressed to.
                 rendered,
                 turns: recorder?.turns,
+                statusObservations: statusRecorder?.observations,
                 worktree,
               })
             } catch (error) {

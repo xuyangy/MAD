@@ -31,6 +31,7 @@ import {
   OpencodeModelBackend,
   type MeteredUsage,
   type RequestMeterPort,
+  type StatusObservation,
 } from "./model-backend.ts"
 
 const SCHEMA = z.object({ findings: z.array(z.object({ claim: z.string() })) })
@@ -225,6 +226,7 @@ function backendWith(
     lateUsage?: LateUsageReporter
     executionIdPrefix?: string
     statusPollMs?: number
+    onStatusRead?: (observation: StatusObservation) => void
   } = {},
 ) {
   const fake = fakeV2(options)
@@ -238,6 +240,7 @@ function backendWith(
     ...(tuning.lateUsage === undefined ? {} : { lateUsage: tuning.lateUsage }),
     ...(tuning.executionIdPrefix === undefined ? {} : { executionIdPrefix: tuning.executionIdPrefix }),
     ...(tuning.statusPollMs === undefined ? {} : { statusPollMs: tuning.statusPollMs }),
+    ...(tuning.onStatusRead === undefined ? {} : { onStatusRead: tuning.onStatusRead }),
   })
   return { backend, calls: fake.calls, settlePrompt: fake.settlePrompt, rejectPrompt: fake.rejectPrompt }
 }
@@ -2459,5 +2462,251 @@ describe("runTurn — a session the host is retrying past the turn's deadline", 
     expect(unquantified).toBeDefined()
     const executions = (unquantified!.detail as { executions: Array<{ why: string }> }).executions
     expect(executions.map((entry) => entry.why)).toEqual([HOST_RETRY_PAST_DEADLINE, HOST_RETRY_PAST_DEADLINE])
+  })
+})
+
+/**
+ * Retro action item 11: every settled `session.status` read for a turn is
+ * handed to `onStatusRead` as a bounded observation of that turn's session
+ * only, without changing the turn, the reads or their timing.
+ */
+describe("runTurn — the status observer", () => {
+  const observing = () => {
+    const seen: StatusObservation[] = []
+    return { seen, onStatusRead: (observation: StatusObservation) => void seen.push(observation) }
+  }
+
+  test("a retry past the deadline: each read is observed in order, and only the settling read is acted on", async () => {
+    const next = Date.now() + 3_600_000
+    const { seen, onStatusRead } = observing()
+    const { backend } = backendWith(
+      { hang: true, status: (_args, index) => (index < 2 ? { data: { ses_test: { type: "busy" } } } : retrying(next, 3)) },
+      { timeoutMs: 10_000, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead, executionIdPrefix: "run-x" },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.message).toContain("attempt 3")
+    expect(seen.map((o) => o.readSeq)).toEqual([1, 2, 3])
+    expect(seen.map((o) => o.actedOn)).toEqual([false, false, true])
+    expect(seen[0]).toMatchObject({ sessionID: "ses_test", slot: "discovery-1", outcome: "answered", status: { type: "busy" } })
+    expect(seen[2]!.status).toEqual({ type: "retry", attempt: 3, next, message: FREE_LIMIT })
+    expect(new Set(seen.map((o) => o.executionId)).size).toBe(1)
+    expect(seen[0]!.executionId.startsWith("run-x")).toBe(true)
+    for (const o of seen) expect(Number.isNaN(Date.parse(o.at))).toBe(false)
+  })
+
+  test("a retry inside the deadline, an absent session and another session's retry are answered and not acted on; other sessions are not kept", async () => {
+    const { seen, onStatusRead } = observing()
+    const { backend } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) =>
+          index === 0
+            ? retrying(Date.now() + 5)
+            : { data: { ses_other: { type: "retry", attempt: 7, message: "someone else's secret", next: Date.now() + 3_600_000 } } },
+      },
+      { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.message).toBe("turn timed out after 80ms")
+    expect(seen[0]).toMatchObject({ outcome: "answered", status: { type: "retry", attempt: 1 }, actedOn: false })
+    expect(seen.slice(1).every((o) => o.outcome === "answered" && o.status === null && !o.actedOn)).toBe(true)
+    expect(JSON.stringify(seen)).not.toContain("ses_other")
+    expect(JSON.stringify(seen)).not.toContain("someone else's secret")
+  })
+
+  test("an error envelope, a malformed answer, a rejection and a synchronous throw are failed observations", async () => {
+    const { seen, onStatusRead } = observing()
+    const answers: unknown[] = [
+      { error: { name: "BadRequestError", data: { message: "no" } } },
+      { data: null },
+      { data: { ses_test: "busy" } },
+      "not an object",
+    ]
+    const { backend } = backendWith(
+      { hang: true, status: (_args, index) => (index < answers.length ? answers[index] : Promise.reject(new Error("socket gone"))) },
+      { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const failed = seen.filter((o) => o.outcome === "failed").map((o) => o.problem)
+    expect(failed.slice(0, 4)).toEqual([
+      "the host answered with an error: BadRequestError: no",
+      "the status answer carries no status map",
+      "this session's status entry is not an object",
+      "the status answer is not an object",
+    ])
+    expect(failed.slice(4).every((problem) => problem === "socket gone")).toBe(true)
+    expect(seen.every((o) => !o.actedOn && o.status === undefined)).toBe(true)
+
+    // A read that throws before returning a promise is observed too.
+    const thrown = observing()
+    const { backend: throwing } = backendWith({ hang: true, status: () => ({ data: {} }) }, { timeoutMs: 60, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead: thrown.onStatusRead })
+    const session = (throwing as unknown as { client: { session: { status: unknown } } }).client.session
+    session.status = () => {
+      throw new Error("status threw synchronously")
+    }
+    await throwing.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(thrown.seen.length).toBeGreaterThan(0)
+    expect(thrown.seen.every((o) => o.outcome === "failed" && o.problem === "status threw synchronously")).toBe(true)
+  })
+
+  test("overlapping reads answering out of order are observed in settlement order, and the stale answer is not acted on", async () => {
+    const { seen, onStatusRead } = observing()
+    let late: ((value: unknown) => void) | undefined
+    const { backend, calls } = backendWith(
+      {
+        hang: true,
+        status: (_args, index) =>
+          index === 0
+            ? new Promise((resolve) => {
+                late = resolve
+              })
+            : index === 1
+              ? { data: {} }
+              : new Promise(() => {}),
+      },
+      { timeoutMs: 150, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    await pause(40)
+    expect(calls.status.length).toBeGreaterThan(2)
+    late!(retrying(Date.now() + 3_600_000, 9))
+    const result = await pending
+    expect(!result.ok && result.message).toBe("turn timed out after 150ms")
+    expect(seen.map((o) => o.readSeq)).toEqual([2, 1])
+    expect(seen[1]).toMatchObject({ outcome: "answered", status: { type: "retry", attempt: 9 }, actedOn: false })
+  })
+
+  test("the host's message and type are flattened and capped", async () => {
+    const { seen, onStatusRead } = observing()
+    const long = `line one\nline\ttwo ${"x".repeat(400)}`
+    const { backend } = backendWith(
+      { hang: true, status: () => ({ data: { ses_test: { type: "retry\nX", attempt: 1, message: long, next: Date.now() + 5 } } }) },
+      { timeoutMs: 40, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    const status = seen[0]!.status!
+    expect(status.type).toBe("retry X")
+    expect(status.message!.startsWith("line one line two ")).toBe(true)
+    expect(status.message!.endsWith("… [truncated]")).toBe(true)
+    expect(Array.from(status.message!.replace("… [truncated]", ""))).toHaveLength(300)
+  })
+
+  test("nothing is observed after the prompt settles: a read answering later is dropped", async () => {
+    const { seen, onStatusRead } = observing()
+    let late: ((value: unknown) => void) | undefined
+    const { backend, settlePrompt } = backendWith(
+      {
+        pendingPrompt: true,
+        status: () =>
+          new Promise((resolve) => {
+            late = resolve
+          }),
+      },
+      { timeoutMs: 2_000, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    await pause(30)
+    settlePrompt({ data: { info: { structured: PAYLOAD } } })
+    expect((await pending).ok).toBe(true)
+    late!({ data: { ses_test: { type: "busy" } } })
+    await pause(20)
+    expect(seen).toEqual([])
+  })
+
+  test("a throwing observer changes nothing: the turn settles early exactly as without one", async () => {
+    const { backend, calls } = backendWith(
+      { hang: true, status: () => retrying(Date.now() + 3_600_000, 2) },
+      {
+        timeoutMs: 10_000,
+        statusPollMs: 10,
+        cleanupTimeoutMs: 10,
+        onStatusRead: () => {
+          throw new Error("observer broke")
+        },
+      },
+    )
+    const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(!result.ok && result.failure).toBe("transport-error")
+    expect(!result.ok && result.message).toContain("attempt 2")
+    expect(result.usageUnknown!.why).toBe(HOST_RETRY_PAST_DEADLINE)
+    expect(calls.status.length).toBeGreaterThan(0)
+  })
+
+  test("arrays where the host answers with objects are failed observations, not answered ones", async () => {
+    const { seen, onStatusRead } = observing()
+    const answers: unknown[] = [[], { data: [] }, { data: { ses_test: [] } }]
+    const { backend } = backendWith(
+      { hang: true, status: (_args, index) => answers[index] ?? new Promise(() => {}) },
+      { timeoutMs: 80, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+    )
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(seen.map((o) => [o.outcome, o.problem, o.status])).toEqual([
+      ["failed", "the status answer is not an object", undefined],
+      ["failed", "the status answer carries no status map", undefined],
+      ["failed", "this session's status entry is not an object", undefined],
+    ])
+  })
+
+  test("an observer whose promise rejects changes nothing and leaves no unhandled rejection", async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      const { backend } = backendWith(
+        { hang: true, status: () => retrying(Date.now() + 3_600_000, 2) },
+        {
+          timeoutMs: 10_000,
+          statusPollMs: 10,
+          cleanupTimeoutMs: 10,
+          onStatusRead: async () => {
+            throw new Error("recorder failed")
+          },
+        },
+      )
+      const result = await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+      expect(!result.ok && result.message).toContain("attempt 2")
+      expect(result.usageUnknown!.why).toBe(HOST_RETRY_PAST_DEADLINE)
+      await pause(20)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
+  })
+
+  for (const stop of ["the prompt answering", "the deadline", "the user's stop"] as const) {
+    for (const late of ["answers", "rejects"] as const) {
+      test(`a read still pending at ${stop} that later ${late} is not observed`, async () => {
+        const { seen, onStatusRead } = observing()
+        const pendingReads: { resolve: (value: unknown) => void; reject: (error: unknown) => void }[] = []
+        const status = () => new Promise((resolve, reject) => void pendingReads.push({ resolve, reject }))
+        const controller = new AbortController()
+        const { backend, settlePrompt } = backendWith(
+          stop === "the prompt answering" ? { pendingPrompt: true, status } : { hang: true, status },
+          { timeoutMs: stop === "the deadline" ? 60 : 2_000, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead },
+        )
+        const pending = backend.runTurn("discovery-1", "i", "d", SCHEMA, controller.signal)
+        await pause(30)
+        expect(pendingReads.length).toBeGreaterThan(0)
+        if (stop === "the prompt answering") settlePrompt({ data: { info: { structured: PAYLOAD } } })
+        if (stop === "the user's stop") controller.abort()
+        const result = await pending
+        if (stop === "the prompt answering") expect(result.ok).toBe(true)
+        if (stop === "the deadline") expect(!result.ok && result.message).toBe("turn timed out after 60ms")
+        if (stop === "the user's stop") expect(result.ok).toBe(false)
+        for (const read of pendingReads) {
+          if (late === "answers") read.resolve(retrying(Date.now() + 3_600_000, 5))
+          else read.reject(new Error("late failure"))
+        }
+        await pause(20)
+        expect(seen).toEqual([])
+      })
+    }
+  }
+
+  test("a client without `session.status` gives no observation", async () => {
+    const { seen, onStatusRead } = observing()
+    const { backend } = backendWith({ hang: true }, { timeoutMs: 40, statusPollMs: 10, cleanupTimeoutMs: 10, onStatusRead })
+    await backend.runTurn("discovery-1", "i", "d", SCHEMA)
+    expect(seen).toEqual([])
   })
 })

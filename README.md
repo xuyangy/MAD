@@ -109,6 +109,8 @@ Examples of what an agent would pass:
 - `MAD_ARTIFACTS=1` (or `true`, `yes`, `on`): the dump goes to `mad-runs` under the system temp directory;
 - any other value: the dump goes to that directory, which must be an absolute path outside the repository under review. A relative path, or one inside the repository, is refused.
 
+When the dump is on, it also holds `session-status.jsonl`: one line for each of the host's session-status answers MAD read while one of its prompts was pending. Each line names MAD's session, slot and turn, and gives the read's order, whether it was answered or failed, and only that session's `type`, `attempt`, `next` and message. `next` is the host's own number, and text is flattened and capped at 300 characters. It also says whether MAD acted on that answer. No other session's status is kept. The message is the provider's text as the host reports it, so it can include account wording.
+
 **It sends the change to each model it asks.** The report's disclosure lists every provider and model in the roster. A slot the report marks NEVER ASKED, a zero budget, or a run stopped early sends it to fewer.
 
 **It runs git, and only git, read-only.**

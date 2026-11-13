@@ -47,6 +47,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import type { RunRecord } from "../../core/domain/run-record.ts"
 import type { Envelope, ModelBackend } from "../../core/ports/model-backend.ts"
 import type { ChangeSet } from "../../core/ports/repo.ts"
+import type { StatusObservation } from "./model-backend.ts"
 
 /**
  * The one environment variable this feature has.
@@ -257,6 +258,22 @@ export function createTurnRecorder(): TurnRecorder {
   }
 }
 
+/**
+ * The host's `session.status` reads for MAD's turns, in the order they settled,
+ * from `OpencodeModelBackend`'s `onStatusRead`. Like the turn recorder it is
+ * built only when the dump is on, one per invocation, and it keeps only the
+ * bounded fields `StatusObservation` names.
+ */
+export interface StatusRecorder {
+  readonly observations: StatusObservation[]
+  record(observation: StatusObservation): void
+}
+
+export function createStatusRecorder(): StatusRecorder {
+  const observations: StatusObservation[] = []
+  return { observations, record: (observation) => void observations.push(observation) }
+}
+
 /** What a dump attempt did, so the caller can say so without knowing how it works. */
 export type ArtifactOutcome =
   /** No flag set. The default, and the only outcome a fresh install can produce. */
@@ -295,6 +312,13 @@ export interface DumpInput {
    * not what it said.
    */
   turns?: readonly TurnArtifact[]
+  /**
+   * The host's status reads from `createStatusRecorder`, written as
+   * `session-status.jsonl`, one observation per line in settlement order, an
+   * empty file when there were none. Absent means nobody was recording, and the
+   * file is not written.
+   */
+  statusObservations?: readonly StatusObservation[]
   /**
    * FR1 (story 2.2) — the evaluation's run manifest, serialized beside the debug
    * files as `manifest.json`.
@@ -404,6 +428,10 @@ async function writeArtifacts(input: DumpInput, directory: string): Promise<Arti
   // and the slot id is MAD's own vocabulary (`discovery-1`, `judge-*`) rather
   // than anything a model supplies, so nothing here can name a file after
   // attacker-chosen bytes.
+  if (input.statusObservations !== undefined) {
+    files.push(["session-status.jsonl", input.statusObservations.map((observation) => `${JSON.stringify(observation)}\n`).join("")])
+  }
+
   for (const turn of input.turns ?? []) {
     files.push([`turn-${String(turn.seq).padStart(3, "0")}-${safeName(turn.slot)}.json`, json(turn)])
   }
