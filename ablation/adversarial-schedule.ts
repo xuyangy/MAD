@@ -241,6 +241,43 @@ export function adversarialProtocolProblem(
 }
 
 /**
+ * Why the frozen protocol just read is not the one the config's declared
+ * authorization names, or `null`.
+ *
+ * The authorization's `protocolHash` is the caller's expectation: the hash its
+ * own stage 1 checked before any reread. Schedule creation and runner
+ * verification each read the protocol again, and each holds that read to this
+ * expectation, so a protocol replaced after stage 1 by another self-consistent
+ * frozen file is refused rather than sealed or run. A declared authorization
+ * whose `protocolHash` is not a non-blank string fails closed. A config that
+ * declares no authorization is not checked here.
+ */
+export function adversarialAuthorizationProblem(
+  config: Pick<AdversarialConfig, "authorization">,
+  protocol: { hash: string },
+): string | null {
+  const authorization = (config as { authorization?: unknown }).authorization
+  if (authorization === undefined) return null
+  const declared =
+    authorization !== null && typeof authorization === "object"
+      ? (authorization as { protocolHash?: unknown }).protocolHash
+      : undefined
+  if (typeof declared !== "string" || declared.trim().length === 0) {
+    return (
+      `the config declares an authorization whose protocol hash is ${JSON.stringify(declared ?? null)}, ` +
+      "not the frozen protocol hash stage 1 checked; declare it, or declare no authorization"
+    )
+  }
+  if (protocol.hash !== declared) {
+    return (
+      `the frozen protocol read now has hash ${protocol.hash}, but the authorization names ${declared}; ` +
+      "the protocol was replaced after the authorized hash was checked"
+    )
+  }
+  return null
+}
+
+/**
  * Every setting the runs receive, as the schedule binds it. The run cap and
  * shares are fixed here.
  *
@@ -425,6 +462,8 @@ async function publishAdversarialSchedule(input: CreateAdversarialScheduleInput,
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
   const protocolProblem = adversarialProtocolProblem(input.config, protocol)
   if (protocolProblem !== null) return { ok: false, reason: `${protocolProblem}; nothing was tossed` }
+  const authorizationProblem = adversarialAuthorizationProblem(input.config, protocol)
+  if (authorizationProblem !== null) return { ok: false, reason: `${authorizationProblem}; nothing was tossed` }
   if (adversarialAttemptMode(input.config)) {
     const isolation = await isolatedRootProblem(root, { marker: "optional" })
     if (isolation !== null) return { ok: false, reason: `${isolation}; nothing was tossed` }
@@ -565,6 +604,8 @@ export async function verifyAdversarialSchedule(
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
   const protocolProblem = adversarialProtocolProblem(binding.config, protocol)
   if (protocolProblem !== null) return { ok: false, reason: protocolProblem }
+  const authorizationProblem = adversarialAuthorizationProblem(binding.config, protocol)
+  if (authorizationProblem !== null) return { ok: false, reason: authorizationProblem }
   if (canonicalJson(schedule.protocol) !== canonicalJson({ id: protocol.id, version: protocol.version, hash: protocol.hash })) {
     return refuse(`is bound to protocol ${canonicalJson(schedule.protocol)}, not to the frozen protocol this runner read`)
   }

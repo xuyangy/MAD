@@ -2199,7 +2199,12 @@ and the data root, `--out`, the prepared directory and the user's own opencode s
 again to be disjoint. A failed recheck, or one that cannot be made, refuses before either root is
 created. A failed `mkdir` refuses before any schedule is sealed or host started, and may leave a
 root it already created. Both say the reservation is already spent. These path checks narrow the
-window before the `mkdir`; they do not remove every filesystem race.
+window before the `mkdir`; they do not remove every filesystem race. Sealing reads protocol v3
+again, and so does the suite before its journal opens; each read must have the hash stage 1
+checked, which the sealed authorization carries. A v3 replaced after stage 1, even by another
+self-consistent frozen file, is refused by name with both hashes: at sealing before any coin is
+tossed or schedule written, and in the suite before any journal, worktree or host. Either way the
+reservation stays spent.
 
 **Isolation per run (protocol v3 B9).** The schedule is sealed with the host offer
 `ADVERSARIAL_HOST_TOOLS` (`{ "*": false, StructuredOutput: true }`, passed to every run's

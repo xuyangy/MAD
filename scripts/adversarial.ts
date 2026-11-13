@@ -50,7 +50,11 @@
  *    narrow, and do not remove, the window before the `mkdir`. Then the
  *    one-slot roster is built from the pin, and the schedule is sealed for
  *    attempts on the oauth route, declaring the host offer
- *    (`ADVERSARIAL_HOST_TOOLS`) and `hostIsolation: "fresh-per-run"`.
+ *    (`ADVERSARIAL_HOST_TOOLS`) and `hostIsolation: "fresh-per-run"`, and the
+ *    authorization: the gate table's identity and the protocol hash stage 1
+ *    checked. Sealing reads the protocol again and refuses one whose hash is
+ *    not that one (`adversarialAuthorizationProblem`), with the reservation
+ *    spent; the suite's verification holds its own read to it the same way.
  * 4. **The suite.** `runAdversarialSuite` writes all sixteen worktrees, then for
  *    each run in schedule order the lifecycle here creates
  *    `<data-root>/run-<position>/opencode` holding only the `auth.json` symlink

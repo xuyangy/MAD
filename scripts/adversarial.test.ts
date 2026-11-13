@@ -20,12 +20,14 @@ import { dirname, join, resolve } from "node:path"
 import { OpencodeModelBackend, type OpencodeBackendOptions } from "../adapters/opencode/model-backend.ts"
 import { worktreeFor } from "../ablation/adversarial.ts"
 import { spawnGit, type RunGit } from "../ablation/adversarial-materialize.ts"
-import { frozenV3Copy, scriptedAdversarialBackend, type ScriptedAdversarial } from "../ablation/adversarial-read.fixture.ts"
+import { frozenV3Copy, resealAdversarialAuthorization, scriptedAdversarialBackend, type ScriptedAdversarial } from "../ablation/adversarial-read.fixture.ts"
 import {
   ADVERSARIAL_BILL_FILE,
   ADVERSARIAL_START_MARKER_FILE,
   adversarialDirectory,
   adversarialSlots,
+  createAdversarialSchedule,
+  hasAdversarialSchedule,
   readAdversarialSlotStatuses,
 } from "../ablation/adversarial-schedule.ts"
 import { MEASURED_HOST, type BinaryIdentityOptions, type ManagedHostOptions, type ManagedHostStart, type StopOutcome } from "../ablation/managed-host.ts"
@@ -34,7 +36,7 @@ import type { PayloadPins } from "../ablation/oauth-payload.ts"
 import { HALT_MARKER_FILE } from "../ablation/governor.ts"
 import { JOURNAL_FILE } from "../ablation/journal.ts"
 import { ADVERSARIAL_PROTOCOL, ADVERSARIAL_RUN, GATE_11_EVIDENCE_SCOPE, GATE_11_PIN_LABELS, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
-import type { CoinFace } from "../ablation/schedule.ts"
+import { sha256, type CoinFace } from "../ablation/schedule.ts"
 import { candidate, fakeClock } from "../core/test-support/fakes.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import {
@@ -2012,4 +2014,115 @@ describe("the launch holds every authorization-enforcing value to HEAD", () => {
     expect(result.text).toContain("stage 2 of 4")
     expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
   }, 120_000)
+})
+
+/**
+ * Deferred-work 2408: stage 1 checks the frozen protocol's hash, and stage 3
+ * reads the protocol again to seal the schedule. Each later read is held to
+ * the hash stage 1 authorized, so a self-consistent replacement between the
+ * reads is refused, not sealed or run.
+ */
+describe("the authorized protocol hash holds after stage 1", () => {
+  /** Rewrite `file` as another self-consistent frozen v3: one date differs, so its frozen hash differs. */
+  async function refreezeAs(file: string): Promise<string> {
+    const text = await readFile(file, "utf8")
+    const pending = text.replace(/^frozen_on: .*$/m, "frozen_on: 2026-10-09").replace(/^frozen_hash: .*$/m, "frozen_hash: PENDING")
+    const hash = sha256(pending)
+    await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`))
+    return hash
+  }
+
+  test("a protocol replaced after stage 1 is refused at sealing, naming both hashes; the reservation stays spent and nothing runs", async () => {
+    const env = await setup()
+    const authorized = await frozenV3Copy(scratch)
+    let replacedHash = ""
+    let tossed = 0
+    const { overrides, hosts, backends } = await runnable(env, {
+      protocolV3File: authorized.file,
+      protocolHash: authorized.hash,
+      // The code revision is read after every stage-1 check, so the swap lands between that read and stage 3's.
+      codeRevision: async () => {
+        replacedHash = await refreezeAs(authorized.file)
+        return { kind: "known", value: { commit: "abc123", dirty: false } }
+      },
+      coin: () => ((tossed += 1), "heads"),
+    })
+    const result = await captured(() => main(argvFor(env), overrides))
+    expect(replacedHash).not.toBe("")
+    expect(replacedHash).not.toBe(authorized.hash)
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`PASS  frozen protocol v3`)
+    expect(result.text).toContain(`${authorized.hash}, the hash gate 10's authorization names`)
+    expect(result.text).toContain(
+      `REFUSED by createAdversarialSchedule: the frozen protocol read now has hash ${replacedHash}, but the authorization names ${authorized.hash}`,
+    )
+    expect(result.text).toContain("No host was started. The reservation is kept; a further run needs a new authorization.")
+    expect(existsSync(join(env.reservationRoot, ADVERSARIAL_RUN.reservation))).toBe(true)
+    expect(tossed).toBe(0)
+    expect(await hasAdversarialSchedule(env.out)).toBe(false)
+    expect(existsSync(join(adversarialDirectory(env.out), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
+    expect(existsSync(join(adversarialDirectory(env.out), "worktrees"))).toBe(false)
+    expect(hosts.started).toEqual([])
+    expect(backends).toEqual([])
+  })
+
+  test("the suite stage refuses a self-consistent schedule and protocol B bound to its own config when that config's authorization names A, before its journal", async () => {
+    const env = await setup()
+    await mkdir(env.out, { recursive: true })
+    const wiring = productionTools({ worktree: join(adversarialDirectory(env.out), "worktrees") })!
+    const resolved = adversarialRoster({ providerId: "anthropic", modelId: "claude-sonnet-5" })
+    const authorized = await frozenV3Copy(scratch)
+    const protocol = await frozenV3Copy(scratch)
+    const otherHash = await refreezeAs(protocol.file)
+    const gates = "ablation/paired-gates.ts blob 0123; route oauth; gate 10 CLOSED"
+    const codeRevision = { kind: "known" as const, value: { commit: "abc123", dirty: false } }
+    // The stage holds stage 1's authorization: protocol A.
+    const held = adversarialSuiteConfig("live", wiring, { gates, protocolHash: authorized.hash })
+    // Schedule B is sealed against protocol B, then re-sealed to bind exactly the held config.
+    const created = await createAdversarialSchedule({
+      experimentRoot: env.out,
+      protocolFile: protocol.file,
+      codeRevision,
+      roster: resolved.roster,
+      config: adversarialSuiteConfig("live", wiring, { gates, protocolHash: otherHash }),
+      createdAt: "2026-11-13T00:00:00.000Z",
+      coin: () => "heads",
+    })
+    if (!created.ok) throw new Error(created.reason)
+    await resealAdversarialAuthorization(env.out, held.authorization)
+    const hosts = scriptedHosts()
+    let backendsBuilt = 0
+    const { outcome } = await runSuiteStage({
+      out: env.out,
+      protocolFile: protocol.file,
+      codeRevision,
+      resolved,
+      config: held,
+      clock: fakeClock(),
+      signal: new AbortController().signal,
+      ownStop: () => {},
+      scheduleHash: created.schedule.scheduleHash,
+      provider: "anthropic",
+      pin: { providerId: "anthropic", modelId: "claude-sonnet-5" },
+      prepared: env.prepared,
+      dataRoot: env.dataRoot,
+      home: env.home,
+      payloadPins: env.pins,
+      startHost: hosts.startHost,
+      createClient: (init) => ({ fake: init }),
+      createBackend: () => {
+        backendsBuilt += 1
+        throw new Error("no backend may be built for a refused schedule")
+      },
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      reason: `the frozen protocol read now has hash ${otherHash}, but the authorization names ${authorized.hash}; the protocol was replaced after the authorized hash was checked`,
+    })
+    expect(existsSync(join(env.out, JOURNAL_FILE))).toBe(false)
+    expect(existsSync(join(adversarialDirectory(env.out), ADVERSARIAL_START_MARKER_FILE))).toBe(false)
+    expect(existsSync(join(adversarialDirectory(env.out), "worktrees"))).toBe(false)
+    expect(hosts.started).toEqual([])
+    expect(backendsBuilt).toBe(0)
+  })
 })

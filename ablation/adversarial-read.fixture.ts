@@ -9,7 +9,7 @@
  */
 
 import { $ } from "bun"
-import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -24,8 +24,15 @@ import { selectRoster } from "../core/roster/select.ts"
 import { candidate, DEFAULT_JUDGE_ANSWERS, fakeClock, judgeRoleOf } from "../core/test-support/fakes.ts"
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import type { AdversarialRunContext, RunAdversarialSuiteInput } from "./adversarial.ts"
-import { createAdversarialSchedule, type AdversarialConfig, type AdversarialSchedule } from "./adversarial-schedule.ts"
-import { sha256, type CoinFace } from "./schedule.ts"
+import {
+  ADVERSARIAL_SCHEDULE_FILE,
+  adversarialDirectory,
+  adversarialScheduleHashOf,
+  createAdversarialSchedule,
+  type AdversarialConfig,
+  type AdversarialSchedule,
+} from "./adversarial-schedule.ts"
+import { canonicalJson, sha256, type CoinFace } from "./schedule.ts"
 import { known } from "./manifest.ts"
 
 export const PROTOCOL_FILE = new URL("../_bmad-output/specs/spec-mad-orchestrator/evaluation-protocol.md", import.meta.url).pathname
@@ -228,4 +235,20 @@ export async function sealedSuite(
       backendFor: backend.backendFor,
     },
   }
+}
+
+/**
+ * Re-seal the schedule under `experimentRoot` so its sealed config's
+ * `authorization` is `authorization` exactly, with `configDigest` and
+ * `scheduleHash` recomputed: a schedule that reads as sealed and binds a
+ * config the caller chooses. Test-only; it rewrites a temporary schedule.
+ */
+export async function resealAdversarialAuthorization(experimentRoot: string, authorization: unknown): Promise<void> {
+  const file = join(adversarialDirectory(experimentRoot), ADVERSARIAL_SCHEDULE_FILE)
+  const schedule = JSON.parse(await readFile(file, "utf8")) as AdversarialSchedule
+  const config = { ...(schedule.config as Record<string, unknown>), authorization }
+  const { scheduleHash: _old, ...unsealed } = { ...schedule, config, configDigest: sha256(canonicalJson(config)) }
+  const resealed = { ...unsealed, scheduleHash: adversarialScheduleHashOf(unsealed as unknown as AdversarialSchedule) }
+  await chmod(file, 0o600)
+  await writeFile(file, JSON.stringify(resealed, null, 2))
 }

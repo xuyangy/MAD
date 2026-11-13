@@ -10,7 +10,16 @@ import { dirname, join } from "node:path"
 import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"
 import { ADVERSARIAL_CASES } from "../fixtures/adversarial/material.ts"
 import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"
-import { ATTEMPT_CONFIG, experimentRoot, frozenV3Copy, oneSlotRoster, PROTOCOL_FILE, PROTOCOL_V3_FILE, SCRIPTED_CONFIG } from "./adversarial-read.fixture.ts"
+import {
+  ATTEMPT_CONFIG,
+  experimentRoot,
+  frozenV3Copy,
+  oneSlotRoster,
+  PROTOCOL_FILE,
+  PROTOCOL_V3_FILE,
+  resealAdversarialAuthorization,
+  SCRIPTED_CONFIG,
+} from "./adversarial-read.fixture.ts"
 import {
   adversarialHostProblem,
   ADVERSARIAL_ROOT_MARKER_FILE,
@@ -18,6 +27,7 @@ import {
   ADVERSARIAL_START_MARKER_FILE,
   adversarialAccountingProblem,
   adversarialDirectory,
+  adversarialAuthorizationProblem,
   adversarialProtocolProblem,
   adversarialRunConfig,
   isolatedRootProblem,
@@ -667,5 +677,128 @@ describe("the authorization a launcher seals", () => {
     // The token mode binds it too, only when declared.
     expect(adversarialRunConfig({ provenance: "scripted", tools: "t", authorization: base }, sealed.roster).authorization).toEqual(base)
     expect("authorization" in adversarialRunConfig({ provenance: "scripted", tools: "t" }, sealed.roster)).toBe(false)
+  })
+})
+
+/**
+ * A second self-consistent frozen v3, B, written over `file`: one front-matter
+ * date differs, so its bytes and its frozen hash differ from the copy's.
+ */
+async function refreezeAs(file: string): Promise<string> {
+  const text = await readFile(file, "utf8")
+  const pending = text.replace(/^frozen_on: .*$/m, "frozen_on: 2026-10-09").replace(/^frozen_hash: .*$/m, "frozen_hash: PENDING")
+  const hash = sha256(pending)
+  await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`))
+  return hash
+}
+
+describe("the authorized protocol hash is held through sealing and verification", () => {
+  const GATES = "ablation/paired-gates.ts blob 0123; route oauth; gate 10 CLOSED"
+
+  test("a protocol whose hash the authorization names is sealed and verified", async () => {
+    const root = await experimentRoot(scratch)
+    const frozen = await frozenV3Copy(scratch)
+    const config = { ...ATTEMPT_CONFIG, authorization: { gates: GATES, protocolHash: frozen.hash } }
+    const created = await createAdversarialSchedule({ ...input(root), protocolFile: frozen.file, config })
+    if (!created.ok) throw new Error(created.reason)
+    expect((await verifyAdversarialSchedule(root, { ...binding(root), protocolFile: frozen.file, config })).ok).toBe(true)
+  })
+
+  test("creation refuses another self-consistent frozen v3 than the one authorized, naming both hashes, with nothing tossed or written", async () => {
+    const root = await experimentRoot(scratch)
+    const authorized = await frozenV3Copy(scratch)
+    const replaced = await frozenV3Copy(scratch)
+    const replacedHash = await refreezeAs(replaced.file)
+    expect(replacedHash).not.toBe(authorized.hash)
+    let tossed = 0
+    const refused = await createAdversarialSchedule({
+      ...input(root),
+      protocolFile: replaced.file,
+      config: { ...ATTEMPT_CONFIG, authorization: { gates: GATES, protocolHash: authorized.hash } },
+      coin: () => ((tossed += 1), "heads"),
+    })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) {
+      expect(refused.reason).toContain(`the frozen protocol read now has hash ${replacedHash}, but the authorization names ${authorized.hash}`)
+      expect(refused.reason).toContain("nothing was tossed")
+    }
+    expect(tossed).toBe(0)
+    expect(await hasAdversarialSchedule(root)).toBe(false)
+    expect(await readFile(join(root, ADVERSARIAL_ROOT_MARKER_FILE), "utf8").catch(() => "absent")).toBe("absent")
+  })
+
+  test("verification refuses a self-consistent protocol and schedule B bound to the runner's own config, when that config's authorization names A", async () => {
+    const root = await experimentRoot(scratch)
+    const authorized = await frozenV3Copy(scratch)
+    const other = await frozenV3Copy(scratch)
+    const otherHash = await refreezeAs(other.file)
+    const held = { ...ATTEMPT_CONFIG, authorization: { gates: GATES, protocolHash: authorized.hash } }
+    // Schedule B is sealed against protocol B, then re-sealed so its config is exactly the one the
+    // runner holds: protocol, seal, revision, roster and config all agree, and only the hash differs.
+    const created = await createAdversarialSchedule({ ...input(root), protocolFile: other.file, config: { ...held, authorization: { gates: GATES, protocolHash: otherHash } } })
+    if (!created.ok) throw new Error(created.reason)
+    await resealAdversarialAuthorization(root, held.authorization)
+    const read = await readAdversarialSchedule(root)
+    if (!read.ok) throw new Error(read.reason)
+    expect(read.schedule.protocol.hash).toBe(otherHash)
+    expect(read.schedule.configDigest).toBe(sha256(canonicalJson(adversarialRunConfig(held, oneSlotRoster().roster))))
+    const refused = await verifyAdversarialSchedule(root, { ...binding(root), protocolFile: other.file, config: held })
+    expect(refused).toEqual({ ok: false, reason: adversarialAuthorizationProblem(held, { hash: otherHash })! })
+    expect(adversarialAuthorizationProblem(held, { hash: otherHash })).toContain(`hash ${otherHash}, but the authorization names ${authorized.hash}`)
+  })
+
+  test("verification refuses a protocol replaced at the sealed path after sealing", async () => {
+    const root = await experimentRoot(scratch)
+    const frozen = await frozenV3Copy(scratch)
+    const config = { ...ATTEMPT_CONFIG, authorization: { gates: GATES, protocolHash: frozen.hash } }
+    const created = await createAdversarialSchedule({ ...input(root), protocolFile: frozen.file, config })
+    if (!created.ok) throw new Error(created.reason)
+    const replacedHash = await refreezeAs(frozen.file)
+    const refused = await verifyAdversarialSchedule(root, { ...binding(root), protocolFile: frozen.file, config })
+    expect(refused.ok).toBe(false)
+    if (!refused.ok) expect(refused.reason).toContain(`hash ${replacedHash}, but the authorization names ${frozen.hash}`)
+  })
+
+  test("a declared authorization with no usable protocol hash fails closed in creation and verification", async () => {
+    const frozen = await frozenV3Copy(scratch)
+    for (const authorization of [
+      { gates: GATES },
+      { gates: GATES, protocolHash: "" },
+      { gates: GATES, protocolHash: "   " },
+      { gates: GATES, protocolHash: 7 },
+      null,
+    ]) {
+      const label = JSON.stringify(authorization)
+      const config = { ...ATTEMPT_CONFIG, authorization } as never
+      const expected = `the config declares an authorization whose protocol hash is ${JSON.stringify((authorization as { protocolHash?: unknown } | null)?.protocolHash ?? null)}, not the frozen protocol hash stage 1 checked`
+
+      const refusedRoot = await experimentRoot(scratch)
+      let tossed = 0
+      const refused = await createAdversarialSchedule({ ...input(refusedRoot), protocolFile: frozen.file, config, coin: () => ((tossed += 1), "heads") })
+      expect(refused.ok, label).toBe(false)
+      if (!refused.ok) expect(refused.reason, label).toContain(expected)
+      expect(tossed, label).toBe(0)
+      expect(await hasAdversarialSchedule(refusedRoot), label).toBe(false)
+
+      // Verification over a readable schedule re-sealed with that same authorization.
+      const root = await experimentRoot(scratch)
+      const created = await createAdversarialSchedule({ ...input(root), protocolFile: frozen.file, config: ATTEMPT_CONFIG })
+      if (!created.ok) throw new Error(created.reason)
+      await resealAdversarialAuthorization(root, authorization)
+      const read = await readAdversarialSchedule(root)
+      if (!read.ok) throw new Error(`${label}: ${read.reason}`)
+      const verified = await verifyAdversarialSchedule(root, { ...binding(root), protocolFile: frozen.file, config })
+      expect(verified.ok, label).toBe(false)
+      if (!verified.ok) expect(verified.reason, label).toContain(expected)
+    }
+  })
+
+  test("a config that declares no authorization is not held to any hash", async () => {
+    const frozen = await frozenV3Copy(scratch)
+    expect(adversarialAuthorizationProblem(ATTEMPT_CONFIG, { hash: frozen.hash })).toBeNull()
+    expect(adversarialAuthorizationProblem(SCRIPTED_CONFIG, { hash: "anything" })).toBeNull()
+    const root = await experimentRoot(scratch)
+    const created = await createAdversarialSchedule({ ...input(root), protocolFile: frozen.file, config: ATTEMPT_CONFIG })
+    expect(created.ok).toBe(true)
   })
 })
