@@ -425,30 +425,71 @@ export interface HostRecord {
   detail: string
 }
 
+/** The calls `appendHostRecord` makes on an opened host-record file. */
+export interface HostRecordHandle {
+  appendFile(data: string, encoding: "utf8"): Promise<void>
+  sync(): Promise<void>
+  close(): Promise<void>
+}
+
+/** Opens the host-record file for appending, as `node:fs`'s `open(file, "a", 0o600)`. */
+export type OpenHostRecord = (file: string, flags: "a", mode: number) => Promise<HostRecordHandle>
+
 /**
- * Appends one line, syncs the file, then syncs the file's directory, on every
- * call. Returns `null` once the directory sync resolved, else why not.
+ * Appends one line, syncs the file, closes it, then syncs the file's
+ * directory, on every call. Returns `null` once all four resolved, else a
+ * reason that says which steps completed.
  *
- * A line whose directory sync could not be completed stays in the file: it is
- * not removed and not appended again, and the reason says the line is there.
- * `syncDir` is the tests' seam.
+ * - The file could not be opened: nothing was appended.
+ * - The append rejected: part of the line may be in the file.
+ * - The append resolved and the file sync rejected: the line was appended, and
+ *   its persistence is not established.
+ * - The append and file sync resolved and the close rejected: the line was
+ *   appended and synced, and the handle may still be open.
+ * - Every file step resolved and the directory sync rejected: the line is in
+ *   the file, and the persistence of its directory is not established.
+ *
+ * The file is closed exactly once whenever it was opened, after a failed
+ * append or sync too, and a rejected close is reported beside the earlier
+ * failure rather than in its place. No later step runs after a failure: no
+ * file sync after a failed append, no directory sync after any file step
+ * failed. A line is never removed, appended again or repaired. `syncDir` and
+ * `openFile` are the tests' seams.
  */
 export async function appendHostRecord(
   file: string,
   line: HostRecord,
   syncDir: (directory: string) => Promise<void> = syncDirectory,
+  openFile: OpenHostRecord = (path, flags, mode) => open(path, flags, mode),
 ): Promise<string | null> {
+  let handle: HostRecordHandle
   try {
-    const handle = await open(file, "a", 0o600)
-    try {
-      await handle.appendFile(`${JSON.stringify(line)}\n`, "utf8")
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
+    handle = await openFile(file, "a", 0o600)
   } catch (error) {
-    return `the host record \`${file}\` could not be appended: ${messageOf(error)}`
+    return `the host record \`${file}\` could not be opened, so nothing was appended: ${messageOf(error)}`
   }
+  let failure: string | null = null
+  try {
+    await handle.appendFile(`${JSON.stringify(line)}\n`, "utf8")
+  } catch (error) {
+    failure = `the append to the host record \`${file}\` failed, and part of the line may be in the file: ${messageOf(error)}`
+  }
+  if (failure === null) {
+    try {
+      await handle.sync()
+    } catch (error) {
+      failure = `the host record \`${file}\` has the line, but its file sync failed, so its persistence is not established: ${messageOf(error)}`
+    }
+  }
+  try {
+    await handle.close()
+  } catch (error) {
+    failure =
+      failure === null
+        ? `the host record \`${file}\` has the line and its file sync completed, but closing the file failed: ${messageOf(error)}`
+        : `${failure}; closing the file then failed too: ${messageOf(error)}`
+  }
+  if (failure !== null) return failure
   const directory = dirname(file)
   try {
     await syncDir(directory)

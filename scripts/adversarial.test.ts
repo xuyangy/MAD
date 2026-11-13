@@ -798,15 +798,98 @@ describe("the host record's directory is synced with every line", () => {
     expect(await linesOf(file)).toEqual([JSON.stringify(lineFor(1)), JSON.stringify(lineFor(2))])
   })
 
-  test("a line that cannot be appended keeps its own reason, and the directory sync is not attempted", async () => {
+  test("a file that cannot be opened keeps its own reason, and the directory sync is not attempted", async () => {
     const dir = await tempDir()
     const file = join(dir, "missing", ADVERSARIAL_HOSTS_FILE)
     const { calls, sync } = recordingSync(file)
     const reason = await appendHostRecord(file, lineFor(1), sync)
-    expect(reason).toContain(`the host record \`${file}\` could not be appended: `)
+    expect(reason).toContain(`the host record \`${file}\` could not be opened, so nothing was appended: `)
     expect(reason).not.toContain("has the line")
     expect(calls).toEqual([])
     expect(existsSync(file)).toBe(false)
+  })
+
+  /**
+   * A stand-in handle: each step resolves unless `fail` names it, and every
+   * call, the directory sync's included, is recorded in order.
+   */
+  function scriptedFile(fail: { open?: string; append?: string; sync?: string; close?: string; dir?: string } = {}) {
+    const calls: string[] = []
+    const step = async (name: string, why: string | undefined) => {
+      calls.push(name)
+      if (why !== undefined) throw new Error(why)
+    }
+    const openFile = async (_path: string, flags: "a", mode: number) => {
+      await step(`open ${flags} ${mode.toString(8)}`, fail.open)
+      return {
+        appendFile: (data: string, encoding: "utf8") => step(`append ${encoding} ${JSON.stringify(data)}`, fail.append),
+        sync: () => step("sync", fail.sync),
+        close: () => step("close", fail.close),
+      }
+    }
+    const syncDir = (directory: string) => step(`syncDir ${directory}`, fail.dir)
+    return { calls, openFile, syncDir }
+  }
+  const FILE = "/stand-in/adversarial/hosts.jsonl"
+  const appendWith = (script: ReturnType<typeof scriptedFile>) => appendHostRecord(FILE, lineFor(1), script.syncDir, script.openFile)
+
+  test("success runs open, append, file sync, close and directory sync in that order, closing once", async () => {
+    const script = scriptedFile()
+    expect(await appendWith(script)).toBeNull()
+    expect(script.calls).toEqual(["open a 600", `append utf8 ${JSON.stringify(`${JSON.stringify(lineFor(1))}\n`)}`, "sync", "close", "syncDir /stand-in/adversarial"])
+  })
+
+  test("each failing step gives a reason that says only what completed, and no later step runs but the close", async () => {
+    const append = `append utf8 ${JSON.stringify(`${JSON.stringify(lineFor(1))}\n`)}`
+    const rows: { fail: Parameters<typeof scriptedFile>[0]; reason: string; calls: string[] }[] = [
+      {
+        fail: { open: "EACCES" },
+        reason: `the host record \`${FILE}\` could not be opened, so nothing was appended: EACCES`,
+        calls: ["open a 600"],
+      },
+      {
+        fail: { append: "ENOSPC" },
+        reason: `the append to the host record \`${FILE}\` failed, and part of the line may be in the file: ENOSPC`,
+        calls: ["open a 600", append, "close"],
+      },
+      {
+        fail: { sync: "EIO" },
+        reason: `the host record \`${FILE}\` has the line, but its file sync failed, so its persistence is not established: EIO`,
+        calls: ["open a 600", append, "sync", "close"],
+      },
+      {
+        fail: { close: "EBADF" },
+        reason: `the host record \`${FILE}\` has the line and its file sync completed, but closing the file failed: EBADF`,
+        calls: ["open a 600", append, "sync", "close"],
+      },
+      {
+        fail: { dir: "EIO" },
+        reason: `the host record \`${FILE}\` has the line, but the persistence of its directory \`/stand-in/adversarial\` could not be established: EIO`,
+        calls: ["open a 600", append, "sync", "close", "syncDir /stand-in/adversarial"],
+      },
+    ]
+    for (const row of rows) {
+      const script = scriptedFile(row.fail)
+      const label = JSON.stringify(row.fail)
+      expect(await appendWith(script), label).toBe(row.reason)
+      expect(script.calls, label).toEqual(row.calls)
+    }
+  })
+
+  test("a failed close beside a failed append or sync keeps both causes and the earlier step's state", async () => {
+    const appendAndClose = scriptedFile({ append: "ENOSPC", close: "EBADF" })
+    expect(await appendWith(appendAndClose)).toBe(
+      `the append to the host record \`${FILE}\` failed, and part of the line may be in the file: ENOSPC; closing the file then failed too: EBADF`,
+    )
+    expect(appendAndClose.calls.filter((call) => call === "close")).toHaveLength(1)
+    expect(appendAndClose.calls).not.toContain("sync")
+
+    const syncAndClose = scriptedFile({ sync: "EIO", close: "EBADF" })
+    expect(await appendWith(syncAndClose)).toBe(
+      `the host record \`${FILE}\` has the line, but its file sync failed, so its persistence is not established: EIO; closing the file then failed too: EBADF`,
+    )
+    expect(syncAndClose.calls.filter((call) => call === "close")).toHaveLength(1)
+    expect(syncAndClose.calls.some((call) => call.startsWith("syncDir"))).toBe(false)
   })
 
   test("with no sync given, the real directory sync runs and the append succeeds", async () => {
