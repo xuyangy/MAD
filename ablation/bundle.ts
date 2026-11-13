@@ -404,6 +404,53 @@ export const lstatPathKind: PathKind = async (path) => {
   }
 }
 
+/** The fixed arguments of every `git hash-object` batch; the paths follow them. */
+const HASH_OBJECT_ARGS = ["hash-object", "--"] as const
+
+/** At most this many paths go to one `git hash-object` call. */
+export const HASH_OBJECT_MAX_PATHS = 128
+
+/**
+ * At most this many argument bytes go to one `git hash-object` call: every
+ * argument's UTF-8 bytes plus its NUL terminator, `git` and the fixed
+ * arguments included. A limit on what MAD sends, not a promise about every
+ * system's own argument limit, which can still refuse a call.
+ */
+export const HASH_OBJECT_MAX_ARG_BYTES = 64 * 1024
+
+/** One argument's cost against `HASH_OBJECT_MAX_ARG_BYTES`. */
+const argBytes = (arg: string): number => Buffer.byteLength(arg, "utf8") + 1
+
+/**
+ * `paths` in order, cut into consecutive batches of at most
+ * `HASH_OBJECT_MAX_PATHS` paths and `HASH_OBJECT_MAX_ARG_BYTES` argument bytes,
+ * or why a path cannot fit even alone. No path is dropped or shortened.
+ */
+export function hashBatches(paths: readonly string[]): string[][] | { why: string } {
+  const fixed = argBytes("git") + HASH_OBJECT_ARGS.reduce((sum, arg) => sum + argBytes(arg), 0)
+  const batches: string[][] = []
+  let batch: string[] = []
+  let bytes = fixed
+  for (const path of paths) {
+    const cost = argBytes(path)
+    if (fixed + cost > HASH_OBJECT_MAX_ARG_BYTES) {
+      return {
+        why: `the path ${JSON.stringify(path)} takes ${cost} argument bytes, more than one \`git hash-object\` call ` +
+          `may carry (${HASH_OBJECT_MAX_ARG_BYTES - fixed} after its fixed arguments)`,
+      }
+    }
+    if (batch.length === HASH_OBJECT_MAX_PATHS || bytes + cost > HASH_OBJECT_MAX_ARG_BYTES) {
+      batches.push(batch)
+      batch = []
+      bytes = fixed
+    }
+    batch.push(path)
+    bytes += cost
+  }
+  if (batch.length > 0) batches.push(batch)
+  return batches
+}
+
 /** U+FFFD, the character a decoder puts in place of bytes it could not decode. */
 const REPLACEMENT = "\uFFFD"
 
@@ -437,12 +484,16 @@ const MISDECODED =
  *
  * Porcelain paths are relative to the repository root, so each one is resolved
  * against `git rev-parse --show-toplevel` and hashed by its absolute path; the
- * caller's working directory does not matter.
+ * caller's working directory does not matter. The regular files are hashed in
+ * sequential `git hash-object -- <path>…` batches (`hashBatches`), and each
+ * batch must print exactly one blob id line per path, in order; each id is
+ * kept with its record by position, so a path listed twice is hashed twice.
  *
  * EVERY FAILURE IS AN UNKNOWN, NEVER A GUESS. No git, a non-zero exit, empty
  * output, a directory that is not a repository, an unparseable status, a path
  * that is a symlink, a directory or any other non-regular file, a path that
- * cannot be inspected, a failed `hash-object`, a path or toplevel that carries
+ * cannot be inspected, a path too long for one batch, a failed batch or one
+ * whose output is not one valid id per path, a path or toplevel that carries
  * U+FFFD: each returns `{ kind: "unknown", why }` for the whole revision. Paths
  * in a reason are JSON-quoted. A symlink is never identified by its target's
  * bytes. A manifest that recorded `""`, a stale default or a partial entry list
@@ -516,8 +567,11 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
     }
   }
 
-  const entries: DirtyEntry[] = []
-  for (const record of records) {
+  // Inspect every record first; the regular files are then hashed in batches,
+  // each blob kept with its record by position.
+  const blobs: (string | null)[] = records.map(() => null)
+  const toHash: { record: number; absolute: string }[] = []
+  for (const [index, record] of records.entries()) {
     const absolute = join(toplevel, record.path)
     let kind: Awaited<ReturnType<PathKind>>
     try {
@@ -525,23 +579,45 @@ export async function codeRevisionFrom(run: RunCommand, pathKind: PathKind = lst
     } catch (error) {
       return unestablished(`${JSON.stringify(record.path)} could not be inspected (${messageOf(error)})`)
     }
-    let blob: string | null = null
-    if (kind !== "absent") {
-      if (kind !== "file") {
-        return unestablished(`${JSON.stringify(record.path)} is a ${kind.other}, not a regular file, and only a regular file's content is recorded`)
-      }
-      const command = `\`git hash-object -- ${JSON.stringify(absolute)}\``
-      try {
-        const hashed = await run("git", ["hash-object", "--", absolute])
-        if (hashed.exitCode !== 0) return unestablished(`${command} exited ${hashed.exitCode}: ${hashed.stderr.trim()}`)
-        blob = hashed.stdout.trim()
-      } catch (error) {
-        return unestablished(`${command} could not be run (${messageOf(error)})`)
-      }
-      if (!GIT_BLOB.test(blob)) return unestablished(`${command} printed ${JSON.stringify(blob)}, which is not a blob id`)
+    if (kind === "absent") continue
+    if (kind !== "file") {
+      return unestablished(`${JSON.stringify(record.path)} is a ${kind.other}, not a regular file, and only a regular file's content is recorded`)
     }
-    entries.push({ ...record, blob })
+    toHash.push({ record: index, absolute })
   }
+
+  const batches = hashBatches(toHash.map((item) => item.absolute))
+  if (!Array.isArray(batches)) return unestablished(batches.why)
+  let offset = 0
+  for (const [number, batch] of batches.entries()) {
+    const first = offset
+    offset += batch.length
+    const command =
+      `\`git hash-object --\` over ${batch.length} path(s) (batch ${number + 1} of ${batches.length}, ` +
+      `paths ${first + 1} to ${offset} of ${toHash.length}, the first ${JSON.stringify(batch[0])})`
+    let hashed: Awaited<ReturnType<RunCommand>>
+    try {
+      hashed = await run("git", [...HASH_OBJECT_ARGS, ...batch])
+    } catch (error) {
+      return unestablished(`${command} could not be run (${messageOf(error)})`)
+    }
+    if (hashed.exitCode !== 0) return unestablished(`${command} exited ${hashed.exitCode}: ${hashed.stderr.trim()}`)
+    // One id per path, each ending in git's line terminator: exactly one
+    // terminator is removed, and no blank line is filtered out.
+    const out = hashed.stdout.endsWith("\n") ? hashed.stdout.slice(0, -1) : hashed.stdout
+    const ids = out.split("\n")
+    if (!hashed.stdout.endsWith("\n") || ids.length !== batch.length) {
+      return unestablished(`${command} printed ${JSON.stringify(hashed.stdout)}, not one blob id line per path`)
+    }
+    for (const [position, id] of ids.entries()) {
+      if (!GIT_BLOB.test(id)) {
+        return unestablished(`${command} printed ${JSON.stringify(id)} for ${JSON.stringify(batch[position])}, which is not a blob id`)
+      }
+      blobs[toHash[first + position]!.record] = id
+    }
+  }
+
+  const entries: DirtyEntry[] = records.map((record, index) => ({ ...record, blob: blobs[index]! }))
   entries.sort(compareDirtyEntries)
   return known({ commit, dirty: entries.length > 0, entries })
 }

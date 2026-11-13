@@ -18,6 +18,9 @@ import {
   DIRTY_REASON_LIMIT,
   DIRTY_REVISION_NEXT_STEP,
   dirtyRevisionReasons,
+  HASH_OBJECT_MAX_ARG_BYTES,
+  HASH_OBJECT_MAX_PATHS,
+  hashBatches,
   type PathKind,
   type RunCommand,
   writeArmDump,
@@ -399,9 +402,16 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
       }
       if (args[0] === "status") return ok(options.status)
       if (args[0] === "hash-object") {
-        const answer = options.blobs?.[args.at(-1)!]
-        if (answer === undefined) throw new Error(`no blob stubbed for ${args.at(-1)}`)
-        return typeof answer === "string" ? ok(`${answer}\n`) : { stdout: "", ...answer }
+        // One answer per path after `--`, in order; a failing path fails the whole call.
+        if (args[1] !== "--") throw new Error(`hash-object without --: ${args.join(" ")}`)
+        let stdout = ""
+        for (const path of args.slice(2)) {
+          const answer = options.blobs?.[path]
+          if (answer === undefined) throw new Error(`no blob stubbed for ${path}`)
+          if (typeof answer !== "string") return { stdout, ...answer }
+          stdout += `${answer}\n`
+        }
+        return ok(stdout)
       }
       throw new Error(`unexpected git ${args.join(" ")}`)
     }
@@ -451,10 +461,10 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
         ],
       }),
     )
-    // Each regular file is hashed by its absolute path under the toplevel.
-    expect(git.calls.filter((args) => args[0] === "hash-object").map((args) => args.at(-1)).sort()).toEqual(
-      ["/repo/copy.ts", "/repo/core/run/review.ts", "/repo/moved.ts", "/repo/notes/new.md"],
-    )
+    // Each regular file is hashed by its absolute path under the toplevel, all in one call, in status order.
+    expect(git.calls.filter((args) => args[0] === "hash-object")).toEqual([
+      ["hash-object", "--", "/repo/core/run/review.ts", "/repo/notes/new.md", "/repo/moved.ts", "/repo/copy.ts"],
+    ])
   })
 
   test("a path listed twice keeps both records, sorted by status code unit, each with the file now at the path", async () => {
@@ -513,7 +523,7 @@ describe("the code revision is established or explicitly unknown (AC4)", () => {
     const hashing = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": { exitCode: 128, stderr: "fatal: cannot open" } } })
     const hashed = await codeRevisionFrom(hashing.run, hashing.pathKind)
     if (hashed.kind !== "unknown") throw new Error("recorded")
-    expect(hashed.why).toContain('git hash-object -- "/repo/x.ts"')
+    expect(hashed.why).toContain('`git hash-object --` over 1 path(s) (batch 1 of 1, paths 1 to 1 of 1, the first "/repo/x.ts")')
     expect(hashed.why).toContain("fatal: cannot open")
 
     const junk = stubbed({ status: " M x.ts\0", files: { "/repo/x.ts": "file" }, blobs: { "/repo/x.ts": "not-a-blob" } })
@@ -666,6 +676,32 @@ describe("the code revision over real git", () => {
     if ("error" in read) throw new Error(read.error)
     expect(read.comparable).toEqual([])
     expect(read.segregated).toHaveLength(2)
+  })
+
+  test("batched hashing records the blob each file gets when hashed alone, a newline-bearing name and a name listed twice included", async () => {
+    const root = await repository()
+    await writeFile(join(root, "a"), "changed\n")
+    await writeFile(join(root, "line\nbreak.txt"), "two\nlines\n")
+    await writeFile(join(root, "nested", "deeper", "new"), "new\n")
+    await sh(root, "rm", "-q", "--cached", "b")
+    await writeFile(join(root, "b"), "recreated\n")
+    const calls: string[][] = []
+    const recording: RunCommand = async (command, args) => {
+      calls.push([...args])
+      return gitIn(root)(command, args)
+    }
+    const revision = await codeRevisionFrom(recording)
+    if (revision.kind !== "known") throw new Error(revision.why)
+    const alone = async (path: string) => sh(root, "hash-object", "--", join(root, path))
+    expect(revision.value.entries).toEqual([
+      { status: " M", path: "a", blob: await alone("a") },
+      { status: "??", path: "b", blob: await alone("b") },
+      { status: "D ", path: "b", blob: await alone("b") },
+      { status: "??", path: "line\nbreak.txt", blob: await alone("line\nbreak.txt") },
+      { status: "??", path: "nested/deeper/new", blob: await alone("nested/deeper/new") },
+    ])
+    // Five regular-file records, one hash-object call.
+    expect(calls.filter((args) => args[0] === "hash-object")).toHaveLength(1)
   })
 
   test("a symlink in the worktree makes the revision unknown, naming it", async () => {
@@ -881,5 +917,141 @@ describe("boundedCodeRevisionLines: the launchers' printed revision stays bounde
     for (const revision of [known({ commit: "abc123", dirty: true, entries }), known({ commit: "abc123", dirty: false, entries: [] }), unknownValue("no git")]) {
       expect(boundedCodeRevisionLines(revision)).toEqual(codeRevisionLines(revision))
     }
+  })
+})
+
+/**
+ * Deferred-work 2424 (the spawn half): regular files are hashed in bounded
+ * `git hash-object -- <path>…` batches, each id kept with its record by
+ * position, and any batch that is not one valid id per path makes the whole
+ * revision unknown.
+ */
+describe("codeRevisionFrom hashes in bounded batches", () => {
+  const ok = (stdout: string) => ({ exitCode: 0, stdout, stderr: "" })
+  /** A distinct blob id for the nth hash-object argument overall. */
+  const idFor = (n: number) => n.toString(16).padStart(40, "0")
+  const FIXED = "git".length + 1 + "hash-object".length + 1 + "--".length + 1
+
+  /** A stubbed git whose status lists `names` untracked, each a regular file, answered by `answer`. */
+  function batched(names: readonly string[], answer?: (args: readonly string[], call: number, first: number) => Awaited<ReturnType<RunCommand>> | "throw") {
+    const calls: string[][] = []
+    let hashed = 0
+    const run: RunCommand = async (_command, args) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return ok("c0ffee\n")
+      if (args[0] === "rev-parse") return ok("/r\n")
+      if (args[0] === "status") return ok(names.map((name) => `?? ${name}\0`).join(""))
+      if (args[0] !== "hash-object") throw new Error(`unexpected git ${args.join(" ")}`)
+      calls.push([...args])
+      const first = hashed
+      hashed += args.length - 2
+      const custom = answer?.(args, calls.length, first)
+      if (custom === "throw") throw new Error("spawn E2BIG")
+      return custom ?? ok(args.slice(2).map((_path, index) => `${idFor(first + index)}\n`).join(""))
+    }
+    const pathKind: PathKind = async () => "file"
+    return { run, pathKind, calls }
+  }
+  const names = (count: number, prefix = "f") => Array.from({ length: count }, (_, index) => `${prefix}${String(index).padStart(4, "0")}`)
+
+  test("300 files take three calls of 128, 128 and 44 paths, and each record keeps the id its own position got", async () => {
+    const git = batched(names(300))
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "known") throw new Error(revision.why)
+    expect(git.calls.map((args) => args.length - 2)).toEqual([128, 128, 44])
+    expect(git.calls.flatMap((args) => args.slice(2))).toEqual(names(300).map((name) => `/r/${name}`))
+    expect(revision.value.entries).toEqual(names(300).map((name, index) => ({ status: "??", path: name, blob: idFor(index) })))
+  })
+
+  test("batches the byte budget ends below the path count keep every record's id by its overall position", async () => {
+    // Each path is 2 + 6000×2 UTF-8 bytes under "/r/": five fit in one call, a sixth does not.
+    const long = Array.from({ length: 12 }, (_, index) => `${String(index).padStart(2, "0")}${"é".repeat(6000)}`)
+    const git = batched(long)
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "known") throw new Error(revision.why)
+    expect(git.calls.map((args) => args.length - 2)).toEqual([5, 5, 2])
+    for (const args of git.calls) {
+      expect(["git", ...args].reduce((sum, arg) => sum + Buffer.byteLength(arg, "utf8") + 1, 0)).toBeLessThanOrEqual(HASH_OBJECT_MAX_ARG_BYTES)
+    }
+    expect(git.calls.flatMap((args) => args.slice(2))).toEqual(long.map((name) => `/r/${name}`))
+    expect(revision.value.entries).toEqual(long.map((name, index) => ({ status: "??", path: name, blob: idFor(index) })))
+  })
+
+  test("a name listed twice is hashed twice, and each record keeps its own position's id", async () => {
+    const run: RunCommand = async (_command, args) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return ok("c0ffee\n")
+      if (args[0] === "rev-parse") return ok("/r\n")
+      if (args[0] === "status") return ok("?? a\0D  a\0")
+      expect(args).toEqual(["hash-object", "--", "/r/a", "/r/a"])
+      return ok(`${idFor(1)}\n${idFor(2)}\n`)
+    }
+    const revision = await codeRevisionFrom(run, async () => "file")
+    expect(revision).toEqual(
+      known({ commit: "c0ffee", dirty: true, entries: [{ status: "??", path: "a", blob: idFor(1) }, { status: "D ", path: "a", blob: idFor(2) }] }),
+    )
+  })
+
+  test("hashBatches cuts at exactly the path count and the argument-byte budget, counting UTF-8 bytes", () => {
+    expect(hashBatches([])).toEqual([])
+    expect(hashBatches(names(HASH_OBJECT_MAX_PATHS))).toEqual([names(HASH_OBJECT_MAX_PATHS)])
+    expect(hashBatches(names(HASH_OBJECT_MAX_PATHS + 1))).toEqual([names(HASH_OBJECT_MAX_PATHS), [names(HASH_OBJECT_MAX_PATHS + 1).at(-1)!]])
+
+    // Two paths that fill the budget exactly share one call; one more byte splits them.
+    const room = HASH_OBJECT_MAX_ARG_BYTES - FIXED
+    const half = 2 * Math.floor(room / 4)
+    const exact = ["x".repeat(half), "y".repeat(room - 2 - half)]
+    expect(hashBatches(exact)).toEqual([exact])
+    const over = ["x".repeat(half), "y".repeat(room - 1 - half)]
+    expect(hashBatches(over)).toEqual([[over[0]!], [over[1]!]])
+
+    // "é" is one character and two bytes: by characters these would fit, by bytes they do not.
+    const wide = ["é".repeat(half / 2 + 1), "y".repeat(room - 2 - half)]
+    expect(wide[0]!.length + 1 + wide[1]!.length + 1).toBeLessThanOrEqual(room)
+    expect(hashBatches(wide)).toEqual([[wide[0]!], [wide[1]!]])
+
+    // One path alone too long for any call is refused, never cut.
+    const alone = hashBatches(["z".repeat(room)])
+    expect(alone).toEqual({ why: expect.stringContaining(`takes ${room + 1} argument bytes`) })
+    const fits = hashBatches(["z".repeat(room - 1)])
+    expect(Array.isArray(fits)).toBe(true)
+  })
+
+  test("a path too long for one call makes the revision unknown, and nothing is hashed", async () => {
+    const git = batched(["z".repeat(HASH_OBJECT_MAX_ARG_BYTES)])
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    if (revision.kind !== "unknown") throw new Error("recorded")
+    expect(revision.why).toContain("more than one `git hash-object` call may carry")
+    expect(git.calls).toEqual([])
+  })
+
+  test("output that is not one valid id per path, a failed call or a thrown one makes the whole revision unknown", async () => {
+    const two = (stdout: string) => () => ok(stdout)
+    const cases: [string, Parameters<typeof batched>[1], string][] = [
+      ["too few ids", two(`${idFor(0)}\n`), "not one blob id line per path"],
+      ["too many ids", two(`${idFor(0)}\n${idFor(1)}\n${idFor(2)}\n`), "not one blob id line per path"],
+      ["an interior empty line", two(`${idFor(0)}\n\n`), "printed \"\" for"],
+      ["a blank leading line", two(`\n${idFor(1)}\n`), "printed \"\" for"],
+      ["no final terminator", two(`${idFor(0)}\n${idFor(1)}`), "not one blob id line per path"],
+      ["an invalid id", two(`${idFor(0)}\nnot-a-blob\n`), 'printed "not-a-blob" for "/r/f0001"'],
+      ["partial stdout and a non-zero exit", () => ({ exitCode: 128, stdout: `${idFor(0)}\n`, stderr: "fatal: cannot open" }), "exited 128: fatal: cannot open"],
+      ["a thrown call", () => "throw", "could not be run (spawn E2BIG)"],
+    ]
+    for (const [label, answer, why] of cases) {
+      const git = batched(names(2), answer)
+      const revision = await codeRevisionFrom(git.run, git.pathKind)
+      expect(revision.kind, label).toBe("unknown")
+      if (revision.kind === "unknown") {
+        expect(revision.why, label).toContain(why)
+        expect(revision.why, label).toContain("`git hash-object --` over 2 path(s) (batch 1 of 1, paths 1 to 2 of 2")
+      }
+    }
+  })
+
+  test("a failure in a later batch discards the earlier batches' ids", async () => {
+    const git = batched(names(200), (_args, call) => (call === 2 ? { exitCode: 1, stdout: "", stderr: "fatal: later" } : undefined as never))
+    const revision = await codeRevisionFrom(git.run, git.pathKind)
+    expect(git.calls).toHaveLength(2)
+    if (revision.kind !== "unknown") throw new Error("a partial revision was recorded")
+    expect(revision.why).toContain("(batch 2 of 2, paths 129 to 200 of 200")
+    expect(revision.why).toContain("fatal: later")
   })
 })
