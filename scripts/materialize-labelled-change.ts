@@ -50,9 +50,9 @@
  *
  * `scripts/ablation.ts` and `scripts/clustering-rates.ts` return 0 because they
  * are REPORTERS: the tests are what fail CI, and a reporter that also exited
- * non-zero would give one regression two voices (`scripts/ablation.ts` makes one
- * exception, its `--labelled-change` containment refusal, which returns 1). This
- * script is not a reporter —
+ * non-zero would give one regression two voices (`scripts/ablation.ts` returns 1
+ * for every argument refusal of an invocation that names `--labelled-change`,
+ * and for a stopped change read). This script is not a reporter —
  * it either produced a worktree or it did not, and the ordinary use is
  * `bun run materialize-change --out X && bun run ablation --live --labelled-change …`.
  * A refusal that exited 0 there would hand the next command a directory that does

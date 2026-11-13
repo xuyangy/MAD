@@ -20,14 +20,18 @@
  * not an error, so exiting non-zero on it would be actively wrong.
  *
  * TWO EXCEPTIONS return 1, because a script or CI wrapper that checks only the
- * exit status (`materialize … && ablation …`) must see them fail:
- * - the `--labelled-change` containment refusal. A `--directory` that is this
- *   repository, sits inside it, contains it, is relative, or links into or above
- *   it would let a live model read the answer key, so that refusal stands in for
- *   an invalidated measurement.
+ * exit status (`materialize … && ablation --live --labelled-change …`) must see
+ * them fail:
+ * - every argument refusal of an invocation that names `--labelled-change`,
+ *   made before anything runs: a missing or unreadable `--pin`, an unreadable
+ *   dial or flag, and each `--labelled-change` refusal, the containment refusal
+ *   among them.
+ *   Such an invocation is the evaluation step of that chain, and a refusal there
+ *   means no bundle was written.
  * - a `--live` change read that stopped (`ChangeReadStopped`). It stops before
  *   the calibration and before any arm, so no evaluation ran at all.
- * Every other refusal and every completed report returns 0.
+ * Every argument refusal of an invocation without `--labelled-change`, an
+ * evaluation the bundle writer stopped, and every completed report return 0.
  */
 
 import { resolve } from "node:path"
@@ -106,7 +110,8 @@ function has(argv: readonly string[], name: string): boolean {
  *   that under `--live` spends real credentials.
  *
  * It REFUSES, it does not gate: like the missing-`--pin` path above, an invalid
- * invocation prints and `main` still returns 0. The tests are what fail CI.
+ * invocation prints and `main` returns the refusal status the file header
+ * states. The tests are what fail CI.
  */
 /**
  * The two ceilings, stated once (human decision, 2026-09-08).
@@ -233,16 +238,13 @@ function changeReadStoppedPage(error: ChangeReadStopped): string {
 }
 
 /**
- * Print why the invocation was refused, and return `status`.
- *
- * Refusing is not gating: this is the same shape the missing-`--pin` path uses,
- * for the same reason recorded in the file header, so `status` defaults to 0.
- * Of the refusals, the `--labelled-change` containment refusal alone passes 1,
- * an exception the file header records. What `refuse` buys is that the refusal happens before
+ * Print why the invocation's arguments were refused, and return `status`: 1
+ * for an invocation that names `--labelled-change` and 0 otherwise, as the file header
+ * states. What `refuse` buys is that the refusal happens before
  * `scriptedAblation` or `runLiveAblation` is called at all, so "nothing was
  * billed" is a structural fact rather than a promise.
  */
-function refuse(message: string, status = 0): number {
+function refuse(message: string, status: number): number {
   console.log(
     `CAP-9 ablation — ${message}\n` +
       "\n" +
@@ -296,6 +298,10 @@ export async function main(
   argv: readonly string[] = Bun.argv,
   overrides: AblationOverrides = {},
 ): Promise<number> {
+  // Decided before the first refusal, so every refusal of a labelled invocation,
+  // the shared ones below included, exits 1. `has` matches the value spelling
+  // too, which is itself refused below.
+  const refusalStatus = has(argv, "labelled-change") ? 1 : 0
   const raw = flag(argv, "pin")
   const pin = raw === undefined ? undefined : parsePin(raw)
   if (!pin) {
@@ -308,30 +314,30 @@ export async function main(
         "not by anything committed in this repository. Under the scripted backend the pin\n" +
         "changes no answer — it is what lets the report say what the control arm WAS.",
     )
-    return 0
+    return refusalStatus
   }
 
   // Both dials are read and checked BEFORE either path runs, so a mistyped flag
   // costs nothing — not a scripted run, and under `--live` not a billed turn.
   const cap = numericFlag(argv, "cap", 0, MAX_TOKEN_CAP)
-  if (!cap.ok) return refuse(cap.message)
+  if (!cap.ok) return refuse(cap.message, refusalStatus)
   const repeats = numericFlag(argv, "repeats", 1, MAX_REPEATS)
-  if (!repeats.ok) return refuse(repeats.message)
+  if (!repeats.ok) return refuse(repeats.message, refusalStatus)
   const tokenCap = cap.value
   const repeatCount = repeats.value ?? 1
 
   // FR1 (story 2.2) — `--out` writes the evaluation bundle. Read and checked
   // here, before either path runs, for the reason the dials above are.
   const out = stringFlag(argv, "out")
-  if (!out.ok) return refuse(out.message)
+  if (!out.ok) return refuse(out.message, refusalStatus)
   const protocolVersion = numericFlag(argv, "protocol-version", 1, 1000)
-  if (!protocolVersion.ok) return refuse(protocolVersion.message)
+  if (!protocolVersion.ok) return refuse(protocolVersion.message, refusalStatus)
   const protocolHash = stringFlag(argv, "protocol-hash")
-  if (!protocolHash.ok) return refuse(protocolHash.message)
+  if (!protocolHash.ok) return refuse(protocolHash.message, refusalStatus)
   const fixtureVersion = stringFlag(argv, "fixture-version")
-  if (!fixtureVersion.ok) return refuse(fixtureVersion.message)
+  if (!fixtureVersion.ok) return refuse(fixtureVersion.message, refusalStatus)
   const fixtureHash = stringFlag(argv, "fixture-hash")
-  if (!fixtureHash.ok) return refuse(fixtureHash.message)
+  if (!fixtureHash.ok) return refuse(fixtureHash.message, refusalStatus)
 
   // A SCRIPTED RUN WRITES NOTHING, and that is story 9's A20 rather than a
   // preference: the worktree is byte-identical before and after a scripted
@@ -341,6 +347,7 @@ export async function main(
     return refuse(
       "--out writes an evaluation bundle and only the --live path produces one. A scripted " +
         "ablation compares records in memory and writes nothing, deliberately.",
+      refusalStatus,
     )
   }
 
@@ -355,7 +362,7 @@ export async function main(
   // string `"--out"` as a directory — a path that then failed containment for the
   // wrong reason, or on another machine passed it.
   const directoryFlag = stringFlag(argv, "directory")
-  if (!directoryFlag.ok) return refuse(directoryFlag.message)
+  if (!directoryFlag.ok) return refuse(directoryFlag.message, refusalStatus)
   const directory = directoryFlag.value ?? process.cwd()
 
   // `--labelled-change` IS A BOOLEAN AND TAKES NO VALUE, and a value spelling is
@@ -370,6 +377,7 @@ export async function main(
       `--labelled-change takes no value; it received \`${labelledValue[0]}\`. It is a switch, ` +
         "and MAD will not read `=false` as OFF while the flag is present — pass the bare " +
         "`--labelled-change` to review the sealed labelled change, or omit it entirely.",
+      refusalStatus,
     )
   }
   const labelled = has(argv, "labelled-change")
@@ -381,6 +389,7 @@ export async function main(
         "through `ablation/seeded-defects.ts`, against a backend that bills a constant and " +
         "upholds everything — so the flag would claim a labelled evaluation and deliver the " +
         "scripted one.",
+      refusalStatus,
     )
   }
 
@@ -397,6 +406,7 @@ export async function main(
       "--labelled-change reviews the sealed labelled change itself, so nothing reads a " +
         "worktree and --target has nothing to select. Drop --target, or drop " +
         "--labelled-change and review the range you named.",
+      refusalStatus,
     )
   }
 
@@ -411,6 +421,7 @@ export async function main(
         `itself (\`${LABELLED_CHANGE_SEAL.version}\`, \`${LABELLED_CHANGE_SEAL.materialHash}\`), ` +
         "so passing either by hand gives the manifest two authorities on what was reviewed. " +
         "Drop the flag you typed; the seal is the one that cannot be wrong.",
+      refusalStatus,
     )
   }
 
@@ -447,9 +458,7 @@ export async function main(
   // pointing at this repository, or one whose target contains it, cannot slip
   // past the lexical test.
   //
-  // THIS REFUSAL EXITS 1, the one exception to the file header's 0. Passing it
-  // would mean a measurement the answer key invalidates, so an exit-status
-  // check (`materialize … && ablation …`) has to see the refusal as a failure.
+  // Like every refusal of a labelled invocation, this one exits 1 (file header).
   if (labelled) {
     const repoRoot = resolve(import.meta.dir, "..")
     const contained =
@@ -465,7 +474,7 @@ export async function main(
           "repository holds `fixtures/seeded-defects/labels.ts` — the ids, loci, summaries and " +
           "markers of all thirteen planted defects. A model that can read the answer key " +
           "measures nothing.",
-        1,
+        refusalStatus,
       )
     }
   }
@@ -488,6 +497,7 @@ export async function main(
         "the manifest of every run that reviews it, and without --out no manifest is written " +
         "at all — the run would bill a live roster and leave numbers that trace to nothing " +
         "(FR1). Add --out <a bundle directory outside every repository>.",
+      refusalStatus,
     )
   }
 

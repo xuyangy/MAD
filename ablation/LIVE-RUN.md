@@ -320,12 +320,15 @@ That channel is invisible to `core/` and is exercised by no CI test, which is wh
 refusal in the CLI rather than a paragraph here. A relative `--directory` is refused too:
 containment cannot be decided on a path that has not been resolved.
 
-**This refusal exits 1.** It is the one refusal that stands for an invalidated measurement,
-so a script or CI wrapper that checks only the exit status, such as a
-`materialize … && ablation --live --labelled-change …` chain, sees it as a failure. Every
-other refusal, including those below and a missing `--pin`, exits 0, and so do an evaluation
-the bundle writer stopped and every completed report, whatever benefit it measured. Read the
-printed text of those, not the status.
+**This refusal exits 1, and so does every other argument refusal of an invocation that names
+`--labelled-change`,** including those below, a missing or unreadable `--pin`, and an unreadable
+`--cap`, `--repeats`, `--out` or other flag. Each happens before anything runs and writes no
+bundle, so a script or CI wrapper that checks only the exit status, such as a
+`materialize … && ablation --live --labelled-change …` chain, sees it as a failure. Without
+`--labelled-change`, an argument refusal exits 0. Either way, a `--live` change read that
+stopped before any arm ran exits 1, and an evaluation the bundle writer stopped and every
+completed report exit 0, whatever benefit it measured; read the printed text of those, not
+the status.
 
 Three more refusals, all of them before anything bills:
 

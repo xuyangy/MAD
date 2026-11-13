@@ -174,12 +174,13 @@ describe("LIVE-RUN.md states the human pre-spend steps (epic-2 retro items 6 and
   })
 })
 
-describe("LIVE-RUN.md states the labelled-change containment refusal's exit status", () => {
-  test("the containment refusal exits 1, and every other refusal, a stopped evaluation and every report exit 0", async () => {
+describe("LIVE-RUN.md states the labelled-change refusals' exit status", () => {
+  test("every argument refusal of a labelled invocation exits 1; unlabelled argument refusals, a stopped evaluation and every report exit 0; a stopped change read exits 1", async () => {
     const doc = (await liveRunDoc()).replace(/\s+/g, " ")
+    expect(doc).not.toContain("It is the one refusal that stands for an invalidated measurement")
     for (const phrase of [
-      "**This refusal exits 1.**",
-      "Every other refusal, including those below and a missing `--pin`, exits 0, and so do an evaluation the bundle writer stopped and every completed report, whatever benefit it measured.",
+      "**This refusal exits 1, and so does every other argument refusal of an invocation that names `--labelled-change`,** including those below, a missing or unreadable `--pin`, and an unreadable `--cap`, `--repeats`, `--out` or other flag.",
+      "Without `--labelled-change`, an argument refusal exits 0. Either way, a `--live` change read that stopped before any arm ran exits 1, and an evaluation the bundle writer stopped and every completed report exit 0, whatever benefit it measured;",
     ]) {
       expect(doc, phrase).toContain(phrase)
     }

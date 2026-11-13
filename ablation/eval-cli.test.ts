@@ -432,10 +432,9 @@ describe("`--labelled-change` refuses before anything bills", () => {
   ]
 
   /**
-   * THE CONTAINMENT REFUSAL EXITS 1 (ledger #12). It is the one refusal an
-   * exit-status check must see as a failure, since passing it would invalidate
-   * the measurement. `--out` is given, so nothing after the guard refuses first:
-   * a guard that let the call through would reach the `runLive` tripwire.
+   * THE CONTAINMENT REFUSAL EXITS 1, as every refusal of a labelled invocation
+   * does. `--out` is given, so nothing after the guard refuses first: a guard
+   * that let the call through would reach the `runLive` tripwire.
    */
   async function containmentRefusal(directory: string): Promise<string> {
     const bundleRoot = await tempDir("mad-labelled-contained-bundle-")
@@ -465,9 +464,16 @@ describe("`--labelled-change` refuses before anything bills", () => {
 
   test("without --live it is refused — the scripted path has no roster", async () => {
     const { code, text } = await captured(() => ablationMain(labelledArgv()))
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(text).toContain("--labelled-change points a LIVE roster")
     expect(text).toContain("Nothing was run and nothing was billed.")
+  })
+
+  test("without --live but with --out, the earlier shared --out refusal exits 1 too", async () => {
+    const bundleRoot = await tempDir("mad-labelled-scripted-out-")
+    const { code, text } = await captured(() => ablationMain(labelledArgv("--out", bundleRoot)))
+    expect(code).toBe(1)
+    expect(text).toContain("only the --live path produces one")
   })
 
   test("an explicit --fixture-version beside it is refused", async () => {
@@ -477,7 +483,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
         labelledArgv("--live", "--directory", out, "--fixture-version", "something-else"),
       ),
     )
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(text).toContain("two authorities on what was reviewed")
     expect(text).toContain(LABELLED_CHANGE_SEAL.version)
   })
@@ -487,7 +493,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
     const { code, text } = await captured(() =>
       ablationMain(labelledArgv("--live", "--directory", out, "--fixture-hash", "sha256:nope")),
     )
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(text).toContain("two authorities on what was reviewed")
   })
 
@@ -544,8 +550,9 @@ describe("`--labelled-change` refuses before anything bills", () => {
   /**
    * THE REAL CLI EXIT STATUS. `main`'s return value reaches the OS through
    * `process.exit(await main())`, and this pins that end of it. No `--out` is
-   * given, so a regressed guard falls through to the missing-`--out` refusal,
-   * which exits 0 and fails this test without anything able to bill.
+   * given, so a regressed guard falls through to the missing-`--out` refusal
+   * without anything able to bill. That refusal exits 1 as well, so it is the
+   * containment message, not the status, that tells the two apart.
    */
   test("the real CLI exits 1 on a contained --directory", async () => {
     const cli = Bun.spawn(
@@ -580,7 +587,7 @@ describe("`--labelled-change` refuses before anything bills", () => {
         labelledArgv("--live", "--directory", worktree, "--target", "main...HEAD"),
       ),
     )
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(text).toContain("--target has nothing to select")
     expect(text).toContain("Nothing was run and nothing was billed.")
   })
@@ -590,23 +597,25 @@ describe("`--labelled-change` refuses before anything bills", () => {
    * finding P8, 2026-09-11).
    */
   test("a repeated --directory is refused, never resolved to the first spelling", async () => {
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain(labelledArgv("--live", "--directory", "/a", "--directory", "/b")),
     )
+    expect(code).toBe(1)
     expect(text).toContain("--directory was given 2 times")
   })
 
   test("a --directory with nothing readable after it is refused by name", async () => {
     const bundleRoot = await tempDir("mad-labelled-dangling-")
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain(labelledArgv("--live", "--directory", "--out", bundleRoot)),
     )
+    expect(code).toBe(1)
     expect(text).toContain("--directory needs a value")
   })
 
   test("`--labelled-change=false` is refused, not read as ON", async () => {
     const worktree = await tempDir("mad-labelled-false-")
-    const { text } = await captured(() =>
+    const { code, text } = await captured(() =>
       ablationMain([
         "bun",
         "ablation",
@@ -618,8 +627,63 @@ describe("`--labelled-change` refuses before anything bills", () => {
         worktree,
       ]),
     )
+    expect(code).toBe(1)
     expect(text).toContain("--labelled-change takes no value")
   })
+
+  /**
+   * THE SHARED REFUSALS THAT RUN BEFORE THE LABELLED BLOCK exit 1 in a labelled
+   * invocation and 0 without one, so the policy follows the invocation, not the
+   * refusal.
+   */
+  test("a shared pin, dial or flag refusal exits 1 with --labelled-change and 0 without it", async () => {
+    const worktree = await tempDir("mad-labelled-shared-")
+    const bundleRoot = await tempDir("mad-labelled-shared-bundle-")
+    const live = ["--live", "--directory", worktree, "--out", bundleRoot]
+    const cases: { argv: string[]; says: string }[] = [
+      { argv: [...live], says: "`--pin provider/model` is required" },
+      { argv: ["--pin", "no-slash", ...live], says: "`--pin provider/model` is required" },
+      { argv: ["--pin", "anthropic/claude-sonnet-4-5", "--cap", "abc", ...live], says: "--cap must be a whole number" },
+      { argv: ["--pin", "anthropic/claude-sonnet-4-5", "--repeats", "0", ...live], says: "--repeats must be 1 or more" },
+      {
+        argv: ["--pin", "anthropic/claude-sonnet-4-5", "--protocol-hash", "a", "--protocol-hash", "b", ...live],
+        says: "--protocol-hash was given 2 times",
+      },
+    ]
+    for (const { argv, says } of cases) {
+      let calls = 0
+      const runLive = async () => {
+        calls += 1
+        throw new Error("no refused invocation may reach the live path")
+      }
+      const labelled = await captured(() => ablationMain(["bun", "ablation", ...argv, "--labelled-change"], { runLive }))
+      expect(labelled.code, says).toBe(1)
+      expect(labelled.text, says).toContain(says)
+      const unlabelled = await captured(() => ablationMain(["bun", "ablation", ...argv], { runLive }))
+      expect(unlabelled.code, says).toBe(0)
+      expect(unlabelled.text, says).toContain(says)
+      expect(calls, says).toBe(0)
+    }
+  })
+
+  /**
+   * A NON-CONTAINMENT REFUSAL'S 1 REACHES THE OS. No `--live` is given, so even a
+   * regressed guard could only reach the scripted path, which asks no model.
+   */
+  test("the real CLI exits 1 on a labelled invocation without --live", async () => {
+    const cli = Bun.spawn(
+      [process.execPath, "run", "scripts/ablation.ts", "--pin", "anthropic/claude-sonnet-4-5", "--labelled-change"],
+      { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" },
+    )
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(cli.stdout).text(),
+      new Response(cli.stderr).text(),
+      cli.exited,
+    ])
+    expect(code).toBe(1)
+    expect(stderr).not.toContain("error:")
+    expect(stdout).toContain("--labelled-change points a LIVE roster")
+  }, 30_000)
 
   test("the refusal is NOT vacuous — a directory outside this repo is accepted", async () => {
     const worktree = await tempDir("mad-labelled-ok-")
@@ -768,7 +832,7 @@ describe("`--labelled-change` writes the sealed identity into the manifest (AC4)
         },
       ),
     )
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(text).toContain("--labelled-change needs --out")
     expect(text).toContain("Nothing was run and nothing was billed.")
     expect(reached).toBe(false)
