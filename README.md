@@ -33,16 +33,17 @@ MAD is a private TypeScript checkout. It is not published to npm.
 | package `main` | `adapters/opencode/entry.ts` |
 | package export `.` | `./adapters/opencode/entry.ts` |
 | package export `./server` | `./adapters/opencode/entry.ts` |
+| package export `./core` | `./core/run/review.ts` |
 | entry module exports | the default export `MadPlugin`, and nothing else |
 
-The entry module exports only the plugin because the host calls every export of a plugin module as a plugin. MAD's own code imports from `adapters/opencode/plugin.ts`.
+The entry module exports only the plugin because the host calls every export of a plugin module as a plugin. MAD's own code imports from `adapters/opencode/plugin.ts`. The `./core` export is MAD's core `review` entry point, used by MAD's own evaluation scripts. OpenCode does not load it as a plugin, and it is not a promised stable public API.
 
 To register it with OpenCode 1.19.5, a person (not MAD) would do two things:
 
-1. Install the checkout's dependencies, from the checkout's root:
+1. Install the checkout's dependencies, from the checkout's root, with Bun 1.4.3, the version CI uses. `--frozen-lockfile` installs exactly the versions in the committed `bun.lock` and stops if it would change them:
 
    ```sh
-   bun install
+   bun install --frozen-lockfile
    ```
 
 2. Add the checkout's absolute path to the `plugin` list of an OpenCode config file. That is either the global `~/.config/opencode/opencode.json` (under `$XDG_CONFIG_HOME` when it is set), a project's `opencode.json` or `.opencode/opencode.json`, or the file named by `OPENCODE_CONFIG`:
