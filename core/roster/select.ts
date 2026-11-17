@@ -811,7 +811,7 @@ function recoveryPlan(
  *
  * It takes `RosterSlot[]` and is called with pool slots and nothing else:
  * `roster.slots` here, and in `core/stages/discover.ts` the pool that answered
- * after recovery (answered originals and answered replacements). `LensSlot` structurally extends `RosterSlot`, so a caller COULD hand it lens
+ * discovery (answered originals and answered replacements). `LensSlot` structurally extends `RosterSlot`, so a caller COULD hand it lens
  * slots — which is exactly why AD-4's amendment puts them in a separate
  * collection: there is no array anywhere in the tree that holds both, so the
  * lens slots have no route into this count. That is what "by construction"

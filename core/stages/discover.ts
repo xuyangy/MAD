@@ -877,6 +877,11 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     collect(outcome, { source: "lens", lens: outcome.lens })
   }
 
+  // The pool that answered discovery: the original pool slots that answered
+  // round 1, then any replacements that answered. Never `executionRoster`,
+  // which keeps the refused originals, and never a lens slot.
+  const answeredPool: RosterSlot[] = [...answeredOriginals]
+
   // ---- round 2: discovery recovery ----
   //
   // A POOL slot whose turn ended in a classified refusal (`Refusal`) gets at
@@ -1005,14 +1010,10 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
     }
     const order = new Map(refused.map((entry, index) => [entry.slot, index]))
     notReplaced.sort((a, b) => order.get(a.from)! - order.get(b.from)!)
-    // The pool that answered: originals that answered round 1 and replacements
-    // that answered. Never `executionRoster`, which keeps the refused originals.
-    const answeredPool = [
-      ...answeredOriginals,
+    answeredPool.push(
       ...replacements.filter((replacement) => replacement.answered).map((replacement) => replacement.to),
-    ]
-    const answeredLineages = countVerifiedLineages(answeredPool)
-    recovery = { refused, replacements, notReplaced, answeredLineages }
+    )
+    recovery = { refused, replacements, notReplaced, answeredLineages: countVerifiedLineages(answeredPool) }
 
     // Each refused original's drop-out row says what became of its slot, and
     // each dispatched replacement gets its own row.
@@ -1054,34 +1055,34 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
       row.detail = { ...row.detail, recovery: { notReplaced: entry.reason } }
     }
 
-    // AD-6c over the pool that answered, after recovery. The selection's own
-    // report (`roster-single-lineage`) describes the roster MAD chose; this
-    // says the pool whose answers the co-discovery fractions count holds fewer
-    // verified lineages than that roster did, whether or not a replacement
-    // restored the answer count.
-    if (answeredLineages < roster.distinctLineages) {
-      const lineages = [
-        ...new Set(answeredPool.filter((slot) => slot.lineage.verified).map((slot) => slot.lineage.label)),
-      ]
-      warnings.push({
-        code: "answered-lineages-reduced",
-        stage: "discover",
-        message:
-          `FEWER LINEAGES ANSWERED: the initial selection held ${roster.distinctLineages} distinct verified ` +
-          `lineage(s), but the pool that answered discovery after recovery holds ${answeredLineages}` +
-          (lineages.length > 0 ? ` (${lineages.join(", ")})` : ``) +
-          `. Co-discovery over this pool is a weaker signal than the selection's lineage count suggests: ` +
-          `models from one lineage share blind spots, whatever the answer count reads.`,
-        detail: {
-          initialLineages: roster.distinctLineages,
-          answeredLineages,
-          lineages: [
-            ...new Set(answeredPool.filter((slot) => slot.lineage.verified).map((slot) => slot.lineage.lineage)),
-          ],
-          replacements: replacements.length,
-        },
-      })
-    }
+  }
+
+  // AD-6c over the pool that answered discovery, whatever reduced it: an
+  // ordinary drop-out, a cancellation, a budget skip, or a refusal recovery did
+  // not make up for. The selection's own report (`roster-single-lineage`)
+  // describes the roster MAD chose; this says the pool whose answers the
+  // co-discovery fractions count holds fewer verified lineages than that roster
+  // did, whether or not a replacement restored the answer count.
+  const answeredLineages = countVerifiedLineages(answeredPool)
+  if (answeredLineages < roster.distinctLineages) {
+    const verifiedAnswered = answeredPool.filter((slot) => slot.lineage.verified)
+    const labels = [...new Set(verifiedAnswered.map((slot) => slot.lineage.label))]
+    warnings.push({
+      code: "answered-lineages-reduced",
+      stage: "discover",
+      message:
+        `FEWER LINEAGES ANSWERED: the initial selection held ${roster.distinctLineages} distinct verified ` +
+        `lineage(s), but the pool that answered discovery holds ${answeredLineages}` +
+        (labels.length > 0 ? ` (${labels.join(", ")})` : ``) +
+        `. Co-discovery over this pool is a weaker signal than the selection's lineage count suggests: ` +
+        `models from one lineage share blind spots, whatever the answer count reads.`,
+      detail: {
+        initialLineages: roster.distinctLineages,
+        answeredLineages,
+        lineages: [...new Set(verifiedAnswered.map((slot) => slot.lineage.lineage))],
+        replacements: recovery?.replacements.length ?? 0,
+      },
+    })
   }
 
   // A refusal also covers every other slot on its route, or, at provider scope,

@@ -633,7 +633,7 @@ describe("discovery recovery — pins, lineage and route scope", () => {
     expect(reduced.stage).toBe("discover")
     expect(reduced.message).toContain(
       "FEWER LINEAGES ANSWERED: the initial selection held 3 distinct verified lineage(s), but the pool that " +
-        "answered discovery after recovery holds 2 (Claude (Anthropic), Gemini (Google)).",
+        "answered discovery holds 2 (Claude (Anthropic), Gemini (Google)).",
     )
     expect(reduced.detail).toEqual({ initialLineages: 3, answeredLineages: 2, lineages: ["claude", "gemini"], replacements: 1 })
   })
@@ -1120,5 +1120,125 @@ describe("discovery — a retry the backend ended before its prompt", () => {
     const reduced = discovered.warnings.find((w) => w.code === "denominator-reduced")!
     expect(reduced.message).toContain("1 did not answer because the run was cancelled")
     expect(reduced.message).not.toContain("never asked")
+  })
+})
+
+describe("fewer verified lineages answered discovery, whatever the cause", () => {
+  // An ordinary failure: not a recognised refusal, so it is retried once and
+  // never replaced.
+  const ORDINARY_FAILURE = { error: { name: "UnknownError", data: { message: "upstream unavailable" } }, tokens: ZERO }
+  const THREE_LINEAGES = [
+    candidate("anthropic", "claude-sonnet-4-5"),
+    candidate("openai", "gpt-5"),
+    candidate("google", "gemini-2.5-pro"),
+  ]
+  const reducedOf = (result: Awaited<ReturnType<typeof run>>) =>
+    result.discovered.warnings.filter((w) => w.code === "answered-lineages-reduced")
+
+  test("an ordinary drop-out with no refusal (live run N6's shape) raises the warning, with no recovery", async () => {
+    const result = await run({
+      candidates: THREE_LINEAGES,
+      slots: 3,
+      script: (route) => (route === "google/gemini-2.5-pro" ? ORDINARY_FAILURE : NOTHING_FOUND),
+    })
+    const { discovered, prompts } = result
+    expect(result.roster.distinctLineages).toBe(3)
+    expect(prompts.filter((route) => route === "google/gemini-2.5-pro")).toHaveLength(2)
+    expect(discovered.answered).toBe(2)
+    expect(discovered.recovery).toBeUndefined()
+    const reduced = reducedOf(result)
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.stage).toBe("discover")
+    expect(reduced[0]!.message).toContain(
+      "FEWER LINEAGES ANSWERED: the initial selection held 3 distinct verified lineage(s), but the pool that " +
+        "answered discovery holds 2 (Claude (Anthropic), GPT (OpenAI)).",
+    )
+    expect(reduced[0]!.detail).toEqual({ initialLineages: 3, answeredLineages: 2, lineages: ["claude", "gpt"], replacements: 0 })
+    expect(discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(true)
+    expect(discovered.warnings.some((w) => w.code === "model-dropped-out" && w.detail?.slot !== undefined)).toBe(true)
+  })
+
+  test("a drop-out that leaves every selected lineage answering raises no warning", async () => {
+    const result = await run({
+      candidates: [...THREE_LINEAGES.slice(0, 2), candidate("anthropic", "claude-opus-4-1")],
+      slots: 3,
+      script: (route) => (route === "anthropic/claude-opus-4-1" ? ORDINARY_FAILURE : NOTHING_FOUND),
+    })
+    expect(result.roster.distinctLineages).toBe(2)
+    expect(result.discovered.answered).toBe(2)
+    expect(reducedOf(result)).toEqual([])
+    expect(result.discovered.warnings.some((w) => w.code === "denominator-reduced")).toBe(true)
+  })
+
+  test("an answering lens slot does not restore a pool lineage that dropped out", async () => {
+    const lens: LensSlot = {
+      slot: "discovery-lens-security",
+      lens: "security",
+      providerId: "google",
+      modelId: "gemini-2.5-flash",
+      identity: normalizeModelIdentity("gemini-2.5-flash"),
+      lineage: lineageOf("gemini-2.5-flash"),
+      toolcall: true,
+      alsoAvailableVia: [],
+    }
+    const result = await run({
+      candidates: [...THREE_LINEAGES, candidate("google", "gemini-2.5-flash")],
+      slots: 3,
+      lensSlots: [lens],
+      script: (route) => (route === "google/gemini-2.5-pro" ? ORDINARY_FAILURE : NOTHING_FOUND),
+    })
+    expect(result.prompts).toContain("google/gemini-2.5-flash")
+    const reduced = reducedOf(result)
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.detail).toEqual({ initialLineages: 3, answeredLineages: 2, lineages: ["claude", "gpt"], replacements: 0 })
+  })
+
+  test("a slot that answers no lineage the selection verified does not count toward the answered lineages", async () => {
+    const result = await run({
+      candidates: [...THREE_LINEAGES.slice(0, 2), candidate("acme", "house-model-7")],
+      slots: 3,
+      script: (route) => (route === "openai/gpt-5" ? ORDINARY_FAILURE : NOTHING_FOUND),
+    })
+    expect(result.roster.distinctLineages).toBe(2)
+    expect(result.discovered.answered).toBe(2)
+    const reduced = reducedOf(result)
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.detail).toEqual({ initialLineages: 2, answeredLineages: 1, lineages: ["claude"], replacements: 0 })
+  })
+
+  test("a refusal recovery and an ordinary drop-out in one run raise one warning, over the pool that answered", async () => {
+    const result = await run({
+      candidates: [...THREE_LINEAGES, candidate("xai", "grok-4")],
+      slots: 3,
+      script: (route) =>
+        route === "openai/gpt-5" ? PAYMENT_402 : route === "google/gemini-2.5-pro" ? ORDINARY_FAILURE : NOTHING_FOUND,
+    })
+    const { discovered } = result
+    expect(discovered.recovery!.replacements).toEqual([
+      expect.objectContaining({ to: expect.objectContaining({ modelId: "grok-4" }), answered: true }),
+    ])
+    expect(discovered.recovery!.answeredLineages).toBe(2)
+    const reduced = reducedOf(result)
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.detail).toEqual({ initialLineages: 3, answeredLineages: 2, lineages: ["claude", "grok"], replacements: 1 })
+  })
+
+  test("a run cancelled during discovery counts only the slots that answered before the stop", async () => {
+    const controller = new AbortController()
+    const result = await run({
+      candidates: THREE_LINEAGES,
+      slots: 3,
+      signal: controller.signal,
+      script: (route) => {
+        if (route !== "google/gemini-2.5-pro") return NOTHING_FOUND
+        controller.abort()
+        return new Promise(() => {})
+      },
+    })
+    expect(result.discovered.cancelled).toBe(true)
+    const reduced = reducedOf(result)
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.detail).toMatchObject({ initialLineages: 3, replacements: 0 })
+    expect((reduced[0]!.detail as { answeredLineages: number }).answeredLineages).toBeLessThan(3)
   })
 })

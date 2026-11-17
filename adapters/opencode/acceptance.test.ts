@@ -1097,6 +1097,7 @@ describe("acceptance — each result state says what happened (CAP-7, part 7a)",
         expect(run.result.metadata?.warnings).toEqual([
           "provider-fan-out",
           "model-dropped-out",
+          "answered-lineages-reduced",
           "denominator-reduced",
           "usage-unquantified",
         ])
@@ -1296,6 +1297,7 @@ describe("acceptance — combined result states state each fact and contradict n
         expect(run.result.metadata?.warnings).toEqual([
           "provider-fan-out",
           "model-dropped-out",
+          "answered-lineages-reduced",
           "denominator-reduced",
           "usage-unquantified",
           "unresolved-findings",
@@ -1428,6 +1430,7 @@ describe("acceptance — combined result states state each fact and contradict n
           "roster-underfilled",
           "roster-single-lineage",
           "model-dropped-out",
+          "answered-lineages-reduced",
           "denominator-reduced",
           "usage-unquantified",
         ])
@@ -1478,6 +1481,7 @@ describe("acceptance — combined result states state each fact and contradict n
         expect(run.result.metadata?.warnings).toEqual([
           "provider-fan-out",
           "model-dropped-out",
+          "answered-lineages-reduced",
           "denominator-reduced",
           "usage-unquantified",
           "unresolved-findings",
