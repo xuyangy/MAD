@@ -1,4 +1,4 @@
-**Draft — not released.** v1.0.0 is not tagged; its route gate is unmet (the TUI is *not compatible*).
+**Draft — not released.** v1.0.0 is not tagged; release preparation (candidate revision, version and gate check) is still to do.
 
 # MAD release notes
 
@@ -12,10 +12,10 @@ v1 targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. 
 
 | Route | Verdict |
 | --- | --- |
-| TUI | not compatible |
+| TUI | compatible with listed limitations |
 | `opencode run` | compatible with listed limitations |
 
-Both verdicts were rendered on 2026-11-16 from one authorized live run per route. In the TUI run, fewer verified model lineages answered than were selected after an ordinary drop-out, and MAD did not warn about it. MAD now warns in that case, but that fix is checked only offline; the TUI verdict stays until a new authorized TUI run shows it. The runs, the criteria and the revision they used are in [`EVIDENCE.md`](EVIDENCE.md).
+Each verdict rests on one authorized live run: `opencode run` on 2026-11-16, and the TUI on 2026-11-17. The TUI's first run, on 2026-11-16, was *not compatible*: fewer verified model lineages answered than were selected after an ordinary drop-out, and MAD did not warn about it. MAD now warns in that case, and the 2026-11-17 TUI run showed the warning. The runs, the criteria and the revisions they used are in [`EVIDENCE.md`](EVIDENCE.md).
 
 ### What is in v1
 
@@ -45,7 +45,7 @@ These match [`EVIDENCE.md`, *Residual limitations*](EVIDENCE.md#residual-limitat
 
 - Replacement of a refused slot, the replacement session's policy check, a refusal in debate or the judge, and a refusal stopping MAD from asking the slots it covers have run only offline.
 - A model that declares tool calling can still have an endpoint that rejects MAD's forced tool choice. `exclude` keeps such a route out, for the reviews it is passed to.
-- A free model at its usage limit is retried once as an ordinary failure; it is not classified as a refusal.
+- A model at its usage limit, free or on a paid account, is retried once as an ordinary failure; it is not classified as a refusal.
 - Few models may answer, and a model may judge its own finding.
 - The tool-calling filter's exclusions, and refusing a review when no offered model declares tool calling, were not exercised live.
 - The budget is an admission budget, not a spend cap. Every known token total is a floor, and the outer agent's usage is not metered.

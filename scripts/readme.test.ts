@@ -120,7 +120,7 @@ describe("README — status", () => {
   test("the status line names the offline suite, the hand runs and the authorized runs the live sections report", () => {
     expect(README).toContain("**Status: checked offline; reviewed live on one host version.**")
     expect(README).toContain("No test here runs against a real OpenCode host.")
-    expect(README).toContain("On opencode-ai 1.19.5, two reviews were run by hand, and on 2026-11-12 and again on 2026-11-16 one authorized review was run and recorded on each route; *What a live review showed* and *Target host* below say what they did and did not show.")
+    expect(README).toContain("On opencode-ai 1.19.5, two reviews were run by hand, and authorized reviews were run and recorded on each route from 2026-11-12 to 2026-11-17; *What a live review showed* and *Target host* below say what they did and did not show.")
     expect(README).not.toContain("tried by hand on a live host")
     expect(README).toContain("- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5")
     expect(README).not.toContain("not field-tested")
@@ -136,15 +136,19 @@ describe("README — status", () => {
 
   test("the target host names one version and two routes with their verdicts, and cites its evidence", () => {
     expect(PROSE).toContain("MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. No other host version or route is targeted.")
-    expect(README).toContain("| TUI | not compatible |")
+    expect(README).toContain("| TUI | compatible with listed limitations |")
     expect(README).toContain("| `opencode run` | compatible with listed limitations |")
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
     expect(PROSE).toContain(
-      "This release's verdicts were rendered on 2026-11-16: `opencode run` is *compatible with listed limitations*, and the TUI is *not compatible*. On 2026-11-16 one authorized live re-check completed on each route; each returned at least one judged finding and left the reviewed repository unchanged. The TUI verdict comes from the validation plan's written criteria, not from a safety failure: in the TUI run three verified model lineages were selected and two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require. At that revision it warned only after a refusal. The report did disclose the drop-out and the reduced co-discovery denominator. The same gap applied on `opencode run` to a drop-out without a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause; that fix is checked only offline, and clearing the TUI verdict needs a new authorized run. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. On `opencode run`, with three pinned models, `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. In the TUI, one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose the other two models itself, including `anthropic/claude-sonnet-4-6` from the same provider, and both of the models that answered judged their own findings. A free `opencode` model hit its usage limit in each run (`nemotron-3.5-lightning-free` on `opencode run`, `deepseek-v4.1-flash-free` in the TUI), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. The review took 16 seconds on `opencode run` and 29 seconds in the TUI, where the 2026-11-12 runs took about 20 minutes. The runs, the verdict and every listed limitation are recorded as N5, N6 and the 2026-11-16 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files; the 2026-11-12 runs are recorded there as N3, N4 and that day's verdict. `EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
+      "This release's verdicts: both routes are *compatible with listed limitations*, `opencode run` from a run on 2026-11-16 and the TUI from a run on 2026-11-17. Each run returned a judged finding and left the reviewed repository unchanged. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. On `opencode run`, with three pinned models, `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. The TUI was not compatible after its 2026-11-16 run: three verified model lineages were selected, two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require; MAD then warned only after a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause, and the 2026-11-17 TUI run showed it: one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose `anthropic/claude-sonnet-4-6` and `opencode/deepseek-v4.1-flash-free` itself; `openai/gpt-6-luna` failed both attempts on its account's usage limit, the free model hit its usage limit, and the report warned that one of three verified lineages answered. The review rested on `anthropic/claude-sonnet-4-6` alone, which also judged its own finding. A free `opencode` model hit its usage limit in each run (`nemotron-3.5-lightning-free` on `opencode run`, `deepseek-v4.1-flash-free` in the TUI), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. Neither usage limit is treated as a refusal. The review took 16 seconds on `opencode run` and 2 minutes 43 seconds in the TUI, where each attempt on the pinned model's usage limit took about 75 seconds. The runs, the verdicts and every listed limitation are recorded as N5 and the 2026-11-16 verdict, and N8 and the 2026-11-17 TUI verdict, in the validation spec's live-evidence record, which is not among this repository's tracked files. `EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
     )
     expect(README).not.toContain("the offline-only outcome was chosen")
     expect(README).not.toContain("It warns only after a refusal.")
+    expect(README).not.toContain("At that revision it warned only after a refusal.")
+    expect(README).not.toContain("This release's verdicts were rendered on 2026-11-16")
+    expect(README).not.toContain("that fix is checked only offline, and clearing the TUI verdict needs a new authorized run")
+    expect(README).not.toContain("and 29 seconds in the TUI")
     expect(README).not.toContain("clearing the TUI verdict needs a fix and a new authorized run")
     expect(README).not.toContain("rendered on 2026-11-11")
     expect(README).not.toContain("rendered on 2026-11-12")
@@ -152,7 +156,7 @@ describe("README — status", () => {
     expect(README).not.toContain("Classified refusal, the replacement of refused slots")
     expect(README).not.toContain("pinned every slot to a model that declares tool calling, so no model was left out")
     expect(README).not.toContain("each returned judged findings")
-    expect(README).not.toContain("| TUI | compatible with listed limitations |")
+    expect(README).not.toContain("| TUI | not compatible |")
     expect(README).not.toContain("Both routes' verdict for this release, rendered on 2026-11-16")
     expect(README).not.toContain("so the reviews took 16 and 29 seconds")
     expect(README).not.toContain("stopping MAD asking")
@@ -186,14 +190,15 @@ describe("EVIDENCE.md — the tracked evidence summary", () => {
       expect(readme).toBeDefined()
       expect(evidence).toBeDefined()
       expect(evidence![2]).toBe(readme![2])
-      expect(evidence![5]).toBe("`e09ef1e`")
     }
-    expect(rowOf(EVIDENCE, "TUI")![4]).toBe("N6")
-    expect(rowOf(EVIDENCE, "`opencode run`")![4]).toBe("N5")
+    expect(rowOf(EVIDENCE, "TUI")!.slice(3, 6)).toEqual(["2026-11-17", "N8", "`7622913`"])
+    expect(rowOf(EVIDENCE, "`opencode run`")!.slice(3, 6)).toEqual(["2026-11-16", "N5", "`e09ef1e`"])
     expect(EVIDENCE).toContain(
-      "The TUI is not compatible because V4's lineage warning was missing after an ordinary drop-out in N6",
+      "The TUI was *not compatible* on 2026-11-16 because V4's lineage warning was missing after an ordinary drop-out in N6",
     )
-    expect(EVIDENCE).toContain("This fixes the TUI's V4 gap offline only.")
+    expect(EVIDENCE).toContain("N8 observed that warning live on the TUI after ordinary drop-outs.")
+    expect(EVIDENCE).not.toContain("This fixes the TUI's V4 gap offline only.")
+    expect(EVIDENCE).not.toContain("That gate is unmet while the TUI is *not compatible*.")
   })
 
   test("the README points to it", () => {
@@ -207,13 +212,14 @@ describe("EVIDENCE.md — the tracked evidence summary", () => {
 
 describe("RELEASE-NOTES.md — the v1 release notes", () => {
   const DRAFT_MARKER =
-    "**Draft — not released.** v1.0.0 is not tagged; its route gate is unmet (the TUI is *not compatible*)."
+    "**Draft — not released.** v1.0.0 is not tagged; release preparation (candidate revision, version and gate check) is still to do."
   const rowOf = (text: string, route: string) =>
     text.split("\n").find((line) => line.startsWith(`| ${route} |`))?.split("|").map((cell) => cell.trim())
 
   test("it opens with the draft marker while v1.0.0 is not the package version", () => {
     expect(PACKAGE.version).not.toBe("1.0.0")
     expect(RELEASE_NOTES.split("\n")[0]).toBe(DRAFT_MARKER)
+    expect(RELEASE_NOTES).not.toContain("its route gate is unmet")
   })
 
   test("its route verdicts are the README's", () => {
@@ -296,7 +302,7 @@ describe("README — registration (CAP-8)", () => {
     expect(PROSE).toContain(
       "A 429 quota error, a 403, GitLab's no-credits text under a provider id other than `gitlab`, or a refusal in the prompt envelope's `result.error` is treated as an ordinary failure. It can receive the ordinary retry if the stop and budget gates permit it; that error alone does not qualify the slot for replacement.",
     )
-    expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below. In the authorized TUI run of 2026-11-16 (see *Target host*), MAD chose two slots itself from models the host declares able to call tools; all 69 models the host offered declared tool calling, so the filter left none out. The filter's exclusions and the replacement of refused slots have not been run against a live host.")
+    expect(PROSE).toContain("Those runs predate the tool-calling filter and the replacement of refused slots described under `slots` below. In the authorized TUI runs of 2026-11-16 and 2026-11-17 (see *Target host*), MAD chose two slots itself from models the host declares able to call tools; each time all 69 models the host offered declared tool calling, so the filter left none out. The filter's exclusions and the replacement of refused slots have not been run against a live host.")
     expect(README).not.toContain("neither has been run against a live host")
     expect(PROSE).toContain(
       "MAD does not remember a refusal from one review to the next, so a route you know rejects MAD, such as one that returned the capability refusal described under `slots`, is excluded only for the reviews you pass it to.",
