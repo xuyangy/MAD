@@ -42,6 +42,7 @@ import { CODING_LENSES } from "../core/instructions/coding/lenses.ts"
 
 const ROOT = join(import.meta.dir, "..")
 const README = readFileSync(join(ROOT, "README.md"), "utf8")
+const EVIDENCE = readFileSync(join(ROOT, "EVIDENCE.md"), "utf8")
 const PACKAGE = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
   private?: boolean
   main?: string
@@ -137,7 +138,7 @@ describe("README — status", () => {
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
     expect(PROSE).toContain(
-      "This release's verdicts were rendered on 2026-11-16: `opencode run` is *compatible with listed limitations*, and the TUI is *not compatible*. On 2026-11-16 one authorized live re-check completed on each route; each returned at least one judged finding and left the reviewed repository unchanged. The TUI verdict comes from the validation plan's written criteria, not from a safety failure: in the TUI run three verified model lineages were selected and two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require. At that revision it warned only after a refusal. The report did disclose the drop-out and the reduced co-discovery denominator. The same gap applied on `opencode run` to a drop-out without a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause; that fix is checked only offline, and clearing the TUI verdict needs a new authorized run. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. On `opencode run`, with three pinned models, `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. In the TUI, one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose the other two models itself, including `anthropic/claude-sonnet-4-6` from the same provider, and both of the models that answered judged their own findings. A free `opencode` model hit its usage limit in each run (`nemotron-3.5-lightning-free` on `opencode run`, `deepseek-v4.1-flash-free` in the TUI), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. The review took 16 seconds on `opencode run` and 29 seconds in the TUI, where the 2026-11-12 runs took about 20 minutes. The runs, the verdict and every listed limitation are recorded as N5, N6 and the 2026-11-16 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files; the 2026-11-12 runs are recorded there as N3, N4 and that day's verdict. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
+      "This release's verdicts were rendered on 2026-11-16: `opencode run` is *compatible with listed limitations*, and the TUI is *not compatible*. On 2026-11-16 one authorized live re-check completed on each route; each returned at least one judged finding and left the reviewed repository unchanged. The TUI verdict comes from the validation plan's written criteria, not from a safety failure: in the TUI run three verified model lineages were selected and two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require. At that revision it warned only after a refusal. The report did disclose the drop-out and the reduced co-discovery denominator. The same gap applied on `opencode run` to a drop-out without a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause; that fix is checked only offline, and clearing the TUI verdict needs a new authorized run. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. On `opencode run`, with three pinned models, `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. In the TUI, one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose the other two models itself, including `anthropic/claude-sonnet-4-6` from the same provider, and both of the models that answered judged their own findings. A free `opencode` model hit its usage limit in each run (`nemotron-3.5-lightning-free` on `opencode run`, `deepseek-v4.1-flash-free` in the TUI), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. The review took 16 seconds on `opencode run` and 29 seconds in the TUI, where the 2026-11-12 runs took about 20 minutes. The runs, the verdict and every listed limitation are recorded as N5, N6 and the 2026-11-16 verdict in the validation spec's live-evidence record, which is not among this repository's tracked files; the 2026-11-12 runs are recorded there as N3, N4 and that day's verdict. `EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
     )
     expect(README).not.toContain("the offline-only outcome was chosen")
     expect(README).not.toContain("It warns only after a refusal.")
@@ -168,6 +169,36 @@ describe("README — status", () => {
     expect(PROSE).toContain("holding one uncommitted file (historical hand-review reports E2 (`opencode run`) and E3 (TUI), source commit `f7efaa0`).")
     expect(README).not.toMatch(/(\bTUI\b|`opencode run`)[^.\n]*\bsupport(s|ed)?\b/i)
     expect(README).not.toMatch(/\bsupport(s|ed)?\b[^.\n]*(\bTUI\b|`opencode run`)/i)
+  })
+})
+
+describe("EVIDENCE.md — the tracked evidence summary", () => {
+  const rowOf = (text: string, route: string) =>
+    text.split("\n").find((line) => line.startsWith(`| ${route} |`))?.split("|").map((cell) => cell.trim())
+
+  test("its route verdicts are the README's, and each names the run and revision it rests on", () => {
+    for (const route of ["TUI", "`opencode run`"]) {
+      const readme = rowOf(README, route)
+      const evidence = rowOf(EVIDENCE, route)
+      expect(readme).toBeDefined()
+      expect(evidence).toBeDefined()
+      expect(evidence![2]).toBe(readme![2])
+      expect(evidence![5]).toBe("`e09ef1e`")
+    }
+    expect(rowOf(EVIDENCE, "TUI")![4]).toBe("N6")
+    expect(rowOf(EVIDENCE, "`opencode run`")![4]).toBe("N5")
+    expect(EVIDENCE).toContain(
+      "The TUI is not compatible because V4's lineage warning was missing after an ordinary drop-out in N6",
+    )
+    expect(EVIDENCE).toContain("This fixes the TUI's V4 gap offline only.")
+  })
+
+  test("the README points to it", () => {
+    expect(PROSE).toContain("`EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations.")
+  })
+
+  test("it carries no local path and nothing that identifies the reviewed repository", () => {
+    for (const forbidden of ["/Users/", "ansible", "login_rdp", "dbconf"]) expect(EVIDENCE).not.toContain(forbidden)
   })
 })
 
