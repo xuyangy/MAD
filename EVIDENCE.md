@@ -56,7 +56,7 @@ N5 used `e09ef1e` and N8 used `7622913`. Between them:
 - N5 raised the lineage warning after a refusal, the case MAD warned about before `14dba29`, so the `opencode run` verdict still holds. The new branch, a warning after a drop-out with no refusal, was observed on the TUI only.
 - `117b938` changes only the license declared in `package.json`. The remaining commits change documentation and tests.
 
-Commits after `7622913` are checked against these runs when the release's candidate revision is chosen.
+Commits after `7622913` change documentation, tests and `package.json` metadata (`version` and `description`) only, with no runtime code change, so N5's and N8's compatibility claims hold for the v1.0.0 candidate revision.
 
 ## Residual limitations
 
@@ -72,7 +72,7 @@ Commits after `7622913` are checked against these runs when the release's candid
 
 ## Release gates today
 
-v1 is planned as a tagged source release. It needs both routes at least *compatible with listed limitations*, and both now are. Release preparation is still to do: choosing the candidate revision, setting the version, and running the offline suite, typecheck and lint on that revision.
+v1 is a tagged source release. Both routes meet its route bar, *compatible with listed limitations*. The offline suite, typecheck and lint pass on the v1.0.0 candidate revision, and every v1 gate holds for it. v1.0.0 is not yet tagged; tagging is left to the owner.
 
 ## History
 

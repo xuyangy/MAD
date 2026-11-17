@@ -48,6 +48,7 @@ const PACKAGE = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as 
   private?: boolean
   version?: string
   license?: string
+  description?: string
   main?: string
   exports?: Record<string, string>
 }
@@ -211,15 +212,20 @@ describe("EVIDENCE.md — the tracked evidence summary", () => {
 })
 
 describe("RELEASE-NOTES.md — the v1 release notes", () => {
-  const DRAFT_MARKER =
-    "**Draft — not released.** v1.0.0 is not tagged; release preparation (candidate revision, version and gate check) is still to do."
   const rowOf = (text: string, route: string) =>
     text.split("\n").find((line) => line.startsWith(`| ${route} |`))?.split("|").map((cell) => cell.trim())
 
-  test("it opens with the draft marker while v1.0.0 is not the package version", () => {
-    expect(PACKAGE.version).not.toBe("1.0.0")
-    expect(RELEASE_NOTES.split("\n")[0]).toBe(DRAFT_MARKER)
-    expect(RELEASE_NOTES).not.toContain("its route gate is unmet")
+  test("they are the v1.0.0 notes, no longer a draft, and the package is version 1.0.0", () => {
+    expect(PACKAGE.version).toBe("1.0.0")
+    expect(PACKAGE.license).toBe("AGPL-3.0-only")
+    expect(PACKAGE.description).toBe(
+      "MAD — multi-agent debate code review for OpenCode: several models review a change, contested findings are debated, and a judge checks each against the code.",
+    )
+    expect(RELEASE_NOTES.startsWith("# MAD release notes\n\n## v1.0.0\n")).toBe(true)
+    expect(RELEASE_NOTES).not.toContain("Draft — not released")
+    expect(RELEASE_NOTES).not.toContain("(draft)")
+    expect(EVIDENCE).not.toContain("Release preparation is still to do")
+    expect(EVIDENCE).toContain("so N5's and N8's compatibility claims hold for the v1.0.0 candidate revision.")
   })
 
   test("its route verdicts are the README's", () => {

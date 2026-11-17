@@ -1,8 +1,6 @@
-**Draft — not released.** v1.0.0 is not tagged; release preparation (candidate revision, version and gate check) is still to do.
-
 # MAD release notes
 
-## v1.0.0 (draft)
+## v1.0.0
 
 MAD reviews a code change with several models at once, inside OpenCode. Each model reviews the change on its own, contested findings are debated, and a judge checks each finding against the code. The report says every way the run was degraded, stopped or left incomplete.
 

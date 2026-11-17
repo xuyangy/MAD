@@ -4,6 +4,18 @@ MAD reviews a code change with several models at once. Each model reviews the ch
 
 **Status: checked offline; reviewed live on one host version.** The behaviour this README describes is checked by an offline test suite with a scripted fake host and fake models (`bun test`). No test here runs against a real OpenCode host. On opencode-ai 1.19.5, two reviews were run by hand, and authorized reviews were run and recorded on each route from 2026-11-12 to 2026-11-17; *What a live review showed* and *Target host* below say what they did and did not show. Whether MAD is useful on your changes is a separate, later question.
 
+## Design strengths
+
+Compared to an ad-hoc multi-model review prompt, MAD enforces its review pipeline, safety boundaries and failure accounting in TypeScript:
+
+- **Anti-bias and independence.** Discovery prefers distinct model lineages (`core/roster/select.ts`). Optional persona lenses add coverage without counting toward unprompted co-discovery (`core/stages/cluster.ts`). Before judging, debate speakers are anonymized and their order is randomized per finding (`core/judge/anonymize.ts`), and model-authored prose is fenced as untrusted material separate from MAD-computed facts (`core/stages/judge.ts`).
+- **Cost-aware routing and sparse debate.** Findings meeting the preset's co-discovery threshold skip debate and go to a single `verify-independently` judge turn; only contested or `critical` findings are debated (`core/stages/route.ts`). Debate rooms are sparse (author, co-finders and one non-author), batch all of a model's rooms into one call per round, exit early on `converged` or `stalled`, and treat silent slots as abstentions rather than blocking the round (`core/stages/debate.ts`).
+- **Decomposed, evidence-grounded judging.** Contested findings go through Extract, parallel Fact-Check and Logic-Evaluate, and Aggregate (`core/stages/judge.ts`). Fact outranks logic (the logic evaluation is advisory), the Fact-Checker receives read-only `git blame` output that MAD runs itself (`core/judge/blame.ts`), and rejected claims remain in the report as `judge-ruled-invalid`.
+- **Hard read-only host and git isolation.** Review sessions deny every host tool except `StructuredOutput`, checked before prompting and on every tool call. Git runs read-only with pagers, external diff drivers and network transport disabled; executable git filter drivers and `U+FFFD` filenames are refused (`adapters/opencode/change-input.ts`), and a timed-out git process is sent `SIGKILL` and its worktree quarantined if MAD cannot confirm it ended.
+- **Explicit budget and degradation reporting.** Calls are admitted against a token budget (`core/budget/ledger.ts`, `core/budget/limiter.ts`), refusals are classified and unpinned refused slots replaced once (`adapters/opencode/refusal.ts`), and the report discloses every drop-out, lineage shortfall, unresolved item, budget overshoot and observed-floor token total.
+
+These are architectural guarantees verified by the offline suite (`bun test`); slot replacement, debate/judge refusals and multi-model co-discovery/debate have not been exercised in live runs (see *Target host* and `EVIDENCE.md`).
+
 ## Target host
 
 MAD targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. No other host version or route is targeted.
