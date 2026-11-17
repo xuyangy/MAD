@@ -43,8 +43,11 @@ import { CODING_LENSES } from "../core/instructions/coding/lenses.ts"
 const ROOT = join(import.meta.dir, "..")
 const README = readFileSync(join(ROOT, "README.md"), "utf8")
 const EVIDENCE = readFileSync(join(ROOT, "EVIDENCE.md"), "utf8")
+const RELEASE_NOTES = readFileSync(join(ROOT, "RELEASE-NOTES.md"), "utf8")
 const PACKAGE = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
   private?: boolean
+  version?: string
+  license?: string
   main?: string
   exports?: Record<string, string>
 }
@@ -199,6 +202,37 @@ describe("EVIDENCE.md — the tracked evidence summary", () => {
 
   test("it carries no local path and nothing that identifies the reviewed repository", () => {
     for (const forbidden of ["/Users/", "ansible", "login_rdp", "dbconf"]) expect(EVIDENCE).not.toContain(forbidden)
+  })
+})
+
+describe("RELEASE-NOTES.md — the v1 release notes", () => {
+  const DRAFT_MARKER =
+    "**Draft — not released.** v1.0.0 is not tagged; its route gate is unmet (the TUI is *not compatible*)."
+  const rowOf = (text: string, route: string) =>
+    text.split("\n").find((line) => line.startsWith(`| ${route} |`))?.split("|").map((cell) => cell.trim())
+
+  test("it opens with the draft marker while v1.0.0 is not the package version", () => {
+    expect(PACKAGE.version).not.toBe("1.0.0")
+    expect(RELEASE_NOTES.split("\n")[0]).toBe(DRAFT_MARKER)
+  })
+
+  test("its route verdicts are the README's", () => {
+    for (const route of ["TUI", "`opencode run`"]) {
+      const readme = rowOf(README, route)
+      expect(readme).toBeDefined()
+      expect(rowOf(RELEASE_NOTES, route)?.[2]).toBe(readme![2])
+    }
+  })
+
+  test("it names the license, the Bun version and the install command the README gives", () => {
+    expect(RELEASE_NOTES).toContain(`(\`${PACKAGE.license}\`)`)
+    expect(RELEASE_NOTES).toContain("with Bun 1.4.3, the version CI uses")
+    expect(PROSE).toContain("with Bun 1.4.3, the version CI uses.")
+    expect(RELEASE_NOTES).toContain("```sh\nbun install --frozen-lockfile\n```")
+  })
+
+  test("it carries no local path and nothing that identifies the reviewed repository", () => {
+    for (const forbidden of ["/Users/", "ansible", "login_rdp", "dbconf"]) expect(RELEASE_NOTES).not.toContain(forbidden)
   })
 })
 
