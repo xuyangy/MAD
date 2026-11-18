@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test"
 
 import { usageIsComplete } from "../core/budget/ledger.ts"
 import { createLateUsageSink, type LateUsageSink } from "../core/ports/late-usage.ts"
-import { FakeBackend, candidate, fakeChange, fakeClock, tokens } from "../core/test-support/fakes.ts"
+import { FakeBackend, candidate, fakeChange, fakeClock, tokens, type SlotStep } from "../core/test-support/fakes.ts"
+import type { ModelBackend } from "../core/ports/model-backend.ts"
+import type { ZodType } from "zod"
+import {
+  debateEnvelopeSchema,
+  debateEnvelopeWithMissingEvidenceSchema,
+  debateEnvelopeWithReferencesSchema,
+} from "../core/stages/debate.ts"
 import { runAblation, runArm, type ArmSpec } from "./arms.ts"
 
 /**
@@ -154,5 +161,90 @@ describe("runArm — the late-usage sink reaches BOTH the backend and review() (
 
     expect(run.record.ledger.unknownUsage.length).toBeGreaterThan(0)
     expect(run.record.runId).toBeDefined()
+  })
+})
+
+describe("runArm — the B5 debate variants (plan item B5d)", () => {
+  const FINDING = {
+    claim: "Fee is computed before the rate is validated.",
+    reasoning: "If `rate` is NaN the total silently becomes NaN.",
+    severity: "high",
+    file: "src/pay.ts",
+    startLine: 12,
+    endLine: 14,
+  }
+  const turn = (position: "upholds" | "denies"): SlotStep => ({
+    kind: "ok",
+    value: {
+      turns: [
+        { findingId: "finding-2", position, argument: `I ${position}.`, references: ["R1E1"], missingEvidence: ["Is it checked upstream?"] },
+      ],
+    },
+  })
+
+  /** Records each prompt and schema, then answers through the scripted backend. */
+  class Recording implements ModelBackend {
+    readonly seen: { schema: unknown; prompt: string }[] = []
+    constructor(private readonly inner: FakeBackend) {}
+    capabilities(slot: string) {
+      return this.inner.capabilities(slot)
+    }
+    runTurn<T>(...args: Parameters<ModelBackend["runTurn"]>) {
+      this.seen.push({ schema: args[3], prompt: args[2] })
+      return this.inner.runTurn(...(args as [string, string, string, ZodType<T>, AbortSignal | undefined, undefined]))
+    }
+  }
+
+  /** Two slots; discovery-1 alone raises the finding (1/2), so it is debated. */
+  function recordingBackend() {
+    const backend = new Recording(
+      new FakeBackend({
+        "discovery-1": [{ kind: "ok", value: { findings: [FINDING] } }, turn("upholds"), turn("upholds"), turn("upholds")],
+        "discovery-2": [{ kind: "ok", value: { findings: [] } }, turn("denies"), turn("denies"), turn("denies")],
+      }),
+    )
+    return { backend, seen: backend.seen }
+  }
+
+  const TWO = [candidate("anthropic", "claude-sonnet-4-5"), candidate("openai", "gpt-5")]
+  const debateSchemas = [debateEnvelopeSchema, debateEnvelopeWithReferencesSchema, debateEnvelopeWithMissingEvidenceSchema]
+
+  async function armWith(debate?: ArmSpec["debate"]) {
+    const { backend, seen } = recordingBackend()
+    const spec: ArmSpec = { ...SPEC, slots: 2, ...(debate === undefined ? {} : { debate }) }
+    const run = await runArm(spec, deps({ backend, candidates: TWO }))
+    const debateTurns = seen.filter((s) => debateSchemas.includes(s.schema as never))
+    const entries = run.record.findings.flatMap((f) => f.history.filter((e) => e.kind === "debate-round"))
+    return { run, debateTurns, entries }
+  }
+
+  test("references only: the references schema and ids, and questions stay off", async () => {
+    const { debateTurns, entries } = await armWith({ references: true })
+    expect(debateTurns.length).toBeGreaterThan(0)
+    expect(debateTurns.every((s) => s.schema === debateEnvelopeWithReferencesSchema)).toBe(true)
+    expect(entries.length).toBeGreaterThan(0)
+    expect(entries.every((e) => e.refId !== undefined)).toBe(true)
+    expect(entries.some((e) => "missingEvidence" in e)).toBe(false)
+    expect(debateTurns.some((s) => s.prompt.includes("missingEvidence"))).toBe(false)
+  })
+
+  test("questions only: the questions schema and recorded questions, and references stay off", async () => {
+    const { debateTurns, entries } = await armWith({ missingEvidence: true })
+    expect(debateTurns.length).toBeGreaterThan(0)
+    expect(debateTurns.every((s) => s.schema === debateEnvelopeWithMissingEvidenceSchema)).toBe(true)
+    expect(entries.some((e) => e.missingEvidence !== undefined)).toBe(true)
+    expect(entries.some((e) => "refId" in e)).toBe(false)
+    expect(debateTurns.some((s) => s.prompt.includes("[R1E"))).toBe(false)
+  })
+
+  test("no debate field, an empty one and both false: the same record and report as before", async () => {
+    const plain = await armWith()
+    for (const debate of [{}, { references: false, missingEvidence: false }]) {
+      const other = await armWith(debate)
+      expect(other.run.rendered).toBe(plain.run.rendered)
+      expect(other.run.record).toEqual(plain.run.record)
+      expect(other.debateTurns.every((s) => s.schema === debateEnvelopeSchema)).toBe(true)
+    }
+    expect(plain.debateTurns.length).toBeGreaterThan(0)
   })
 })

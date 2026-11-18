@@ -65,6 +65,13 @@ export interface ArmSpec {
   lenses?: readonly string[]
   /** AD-3 amended (story 8A) — how the control arm names its single model. */
   pins?: readonly Pin[]
+  /**
+   * Plan item B5 — the opt-in debate variants this arm runs with
+   * (`ReviewDeps.debateReferences`, `ReviewDeps.debateMissingEvidence`). Each is
+   * passed only when true, so an arm without this field, or with both false,
+   * runs exactly as an arm did before it existed. See `ablation/DEBATE-VARIANTS.md`.
+   */
+  debate?: { references?: boolean; missingEvidence?: boolean }
 }
 
 export interface ArmRun {
@@ -202,6 +209,8 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     clock: deps.clock,
     change: deps.change,
     priorWarnings: resolved.warnings,
+    ...(spec.debate?.references === true ? { debateReferences: true } : {}),
+    ...(spec.debate?.missingEvidence === true ? { debateMissingEvidence: true } : {}),
     ...(deps.dials ?? {}),
     // BELOW THE DIALS SPREAD, for the reason `stopOnUnknownUsage` is below it:
     // `dials` is the caller's object and this is not the caller's to unset. The
