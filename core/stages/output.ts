@@ -517,10 +517,23 @@ function renderTranscript(finding: Finding): string[] {
   const lines = [`      the argument, in the participants' own words:`]
   for (const entry of rounds) {
     const conceded = entry.concession ? `  (conceded: ${oneLine(entry.concession)})` : ""
-    lines.push(`        round ${entry.round} — ${oneLine(entry.actor)} ${entry.position}${conceded}`)
+    // B5 — the entry's MAD id, when the debate ran with references.
+    const id = entry.refId === undefined ? "" : ` [${entry.refId}]`
+    lines.push(`        round ${entry.round}${id} — ${oneLine(entry.actor)} ${entry.position}${conceded}`)
     lines.push(`          ${oneLine(entry.body)}`)
     if (entry.citations && entry.citations.length > 0) {
       lines.push(`          cites: ${entry.citations.map(listCell).join(", ")}`)
+    }
+    // The record's own facts, as in `anonymize`'s `referenceNote`: stored valid
+    // ids, or the stored flag; nothing when the entry records neither.
+    if (entry.refId !== undefined && entry.positionChanged === true) {
+      const valid = entry.references ?? []
+      const invalid = entry.invalidReferences ?? 0
+      const notShown = invalid > 0 ? `; ${invalid} cited id(s) were not shown to it` : ""
+      if (valid.length > 0) lines.push(`          changed position, citing entries ${valid.join(", ")}${notShown}`)
+      else if (entry.shiftWithoutValidReference === true) {
+        lines.push(`          changed position without citing an entry it was shown${notShown}`)
+      }
     }
   }
   return lines

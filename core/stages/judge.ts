@@ -651,6 +651,19 @@ function transcriptSection(transcript: AnonymizedTranscript): string[] {
     who,
     ``,
     material("anonymized debate transcript", transcript.rows.join("\n")),
+    // B5 — MAD's own record of position changes, outside the span: letters,
+    // round numbers, MAD ids and counts only (`anonymize`'s `referenceNotes`).
+    ...(transcript.referenceNotes.length === 0
+      ? []
+      : [
+          ``,
+          `# Position changes MAD recorded`,
+          ``,
+          `MAD recorded these facts about position changes. A citation shows that the cited entry was shown ` +
+            `to the speaker, not that it persuaded them; neither these facts nor their absence is a rule for ` +
+            `your answer.`,
+          ...transcript.referenceNotes,
+        ]),
   ]
 }
 

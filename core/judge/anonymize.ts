@@ -53,7 +53,7 @@
  * gates.
  */
 
-import type { Finding } from "../domain/finding.ts"
+import type { Entry, Finding } from "../domain/finding.ts"
 import { listCell, oneLine } from "../prompt/material.ts"
 import { seededRandom, shuffled } from "./seeded.ts"
 
@@ -97,6 +97,30 @@ export interface AnonymizedTranscript {
   authorLabel?: string
   /** No debate rounds at all: a `route: "judge"` finding, or a silent room. */
   empty: boolean
+  /**
+   * Plan item B5 — MAD-authored facts about position changes, one per round
+   * entry that carries a MAD id (`refId`) and changed position. Only the
+   * anonymized letter, the round number, the valid MAD ids the entry stored and
+   * a count of ids that were not shown reach a note; never an argument, a
+   * concession or a raw citation. Empty when no entry carries an id.
+   */
+  referenceNotes: string[]
+}
+
+/** B5 — one note for an entry that changed position, or `undefined`. */
+export function referenceNote(entry: Entry, who: string): string | undefined {
+  if (entry.refId === undefined || entry.positionChanged !== true || entry.round === undefined) return undefined
+  // The record's own facts, never recomputed: stored valid ids for the
+  // positive note, the stored flag for the negative one, and nothing when the
+  // entry records neither.
+  const valid = entry.references ?? []
+  const invalid = entry.invalidReferences ?? 0
+  const notShown = invalid > 0 ? `, and ${invalid} id(s) that were not shown to it` : ""
+  if (valid.length > 0) return `- Participant ${who}, round ${entry.round}: changed position, citing ${valid.join(", ")}${notShown}.`
+  if (entry.shiftWithoutValidReference === true) {
+    return `- Participant ${who}, round ${entry.round}: changed position without citing an entry it was shown${notShown}.`
+  }
+  return undefined
 }
 
 /**
@@ -141,13 +165,19 @@ export function anonymize(finding: Finding, seed: string): AnonymizedTranscript 
     const conceded = entry.concession ? ` (conceded: ${oneLine(entry.concession)})` : ""
     const moved = entry.positionChanged ? ` (moved)` : ""
     const position = oneLine(entry.position ?? "")
-    return `- round ${entry.round}, ${who} — ${position}${moved}: ${oneLine(entry.body)}${cited}${conceded}`
+    // B5 — the entry's MAD id, the one its debaters saw, when it has one.
+    const id = entry.refId === undefined ? "" : `[${entry.refId}] `
+    return `- ${id}round ${entry.round}, ${who} — ${position}${moved}: ${oneLine(entry.body)}${cited}${conceded}`
   })
+  const referenceNotes = entries
+    .map((entry) => referenceNote(entry, labels.get(entry.actor) ?? "an unrecorded participant"))
+    .filter((note): note is string => note !== undefined)
 
   return {
     rows,
     labels,
     authorLabel: labels.get(finding.author),
     empty: entries.length === 0,
+    referenceNotes,
   }
 }
