@@ -1004,6 +1004,17 @@ describe("discover — AD-15 / CAP-7: the budget gate (story 8)", () => {
     expect(out.droppedOut).toEqual([])
     expect(out.skippedForBudget).toEqual(["discovery-2", "discovery-3"])
     expect(out.warnings.map((w) => w.code)).not.toContain("model-dropped-out")
+    // A budget skip is one of the causes `answered-lineages-reduced` names: the
+    // two skipped slots carried the selection's other two verified lineages, so
+    // the pool that answered holds one of three.
+    const reduced = out.warnings.filter((w) => w.code === "answered-lineages-reduced")
+    expect(reduced).toHaveLength(1)
+    expect(reduced[0]!.detail).toEqual({
+      initialLineages: 3,
+      answeredLineages: 1,
+      lineages: ["claude"],
+      replacements: 0,
+    })
   })
 
   test("`discovery-truncated` is raised ONCE, and counts pool and lens slots apart", async () => {
