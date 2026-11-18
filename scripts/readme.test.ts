@@ -407,6 +407,9 @@ describe("README — arguments and defaults (CAP-8)", () => {
     expect(inner("exclude").def.type).toBe("array")
     expect(inner("exclude")._zod.bag.maximum).toBe(MAX_EXCLUSIONS)
     expect(row("exclude")).toEqual(["list of `provider/model`", "nothing excluded", `at most ${MAX_EXCLUSIONS}`])
+
+    expect(inner("format").options).toEqual(["text", "json"])
+    expect(row("format")).toEqual(["`text` or `json`", "`text`", "one of the two"])
   })
 
   test("the documented types are the schema's: strings, integers and lists of strings", async () => {
