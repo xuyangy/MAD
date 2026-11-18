@@ -25,6 +25,7 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 
 import { BASE_TREE, SEEDED_CHANGE } from "./material.ts"
+import { MATERIAL_IDENTITY } from "./material-seal.ts"
 import { LABELLED_CHANGE_SEAL, canonicalLabels, canonicalMaterial } from "./seal.ts"
 
 /** Sealed 2026-09-11, story 2.4, before this fixture's first live run. */
@@ -52,6 +53,14 @@ describe("the labelled change is sealed", () => {
 
   test("the two hashes are different, so one cannot stand in for the other", () => {
     expect(LABELLED_CHANGE_SEAL.materialHash).not.toBe(LABELLED_CHANGE_SEAL.labelsHash)
+  })
+
+  test("the label-free identity the materializer prints is the seal's version and material hash", () => {
+    // `scripts/materialize-labelled-change.ts` cannot load this module, so it
+    // prints `MATERIAL_IDENTITY`; the operator checks it against the manifest.
+    expect(MATERIAL_IDENTITY).toEqual({ version: "labelled-change-1", materialHash: SEALED_MATERIAL_HASH })
+    expect(MATERIAL_IDENTITY.version).toBe(LABELLED_CHANGE_SEAL.version)
+    expect(MATERIAL_IDENTITY.materialHash).toBe(LABELLED_CHANGE_SEAL.materialHash)
   })
 })
 

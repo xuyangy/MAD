@@ -315,7 +315,7 @@ describe("AC2 — the answer key is not in the tree a model reads", () => {
     expect(await answerKeyBytesIn(out)).toContain(`summary: ${leaked.summary}`)
   })
 
-  test("the materializer's source imports neither the labels nor the adjudicator", async () => {
+  test("the materializer's source imports neither the labels, the seal nor the adjudicator", async () => {
     // STRUCTURAL, and it is the claim the leak check above cannot make: the leak
     // check proves this ONE invocation wrote nothing incriminating, while the
     // failure mode is a later edit that reaches the answer key at all. The door
@@ -325,6 +325,8 @@ describe("AC2 — the answer key is not in the tree a model reads", () => {
     const imports = [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]!)
 
     expect(imports).toContain("../fixtures/seeded-defects/material.ts")
+    expect(imports).toContain("../fixtures/seeded-defects/material-seal.ts")
+    expect(imports).not.toContain("../fixtures/seeded-defects/seal.ts")
     expect(imports).not.toContain("../fixtures/seeded-defects/labels.ts")
     expect(imports).not.toContain("../fixtures/seeded-defects/adjudicate.ts")
     expect(imports).not.toContain("../fixtures/seeded-defects/change.ts")

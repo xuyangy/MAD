@@ -13,7 +13,8 @@
  */
 
 import { Glob } from "bun"
-import { dirname, join, relative, resolve } from "node:path"
+import { readFileSync, realpathSync } from "node:fs"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 const ROOT = resolve(import.meta.dir, "..")
 
@@ -56,6 +57,46 @@ const FORBIDDEN_FOR_CORE: { pattern: RegExp; why: string }[] = [
  */
 const IMPORT_RE =
   /(?:^|\n)\s*(?:import|export)\s[\s\S]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']|(?:^|[^\w.])import\s*\(\s*["']([^"']+)["']\s*\)|(?:^|[^\w.])require\s*\(\s*["']([^"']+)["']\s*\)/g
+
+/**
+ * The imports Bun loads at run time, read by its own parser, in source order.
+ * Strings and comments are not imports to it, and neither are type-only
+ * imports, which the build erases. A leading `#!` line, which Bun's run time
+ * skips and its scanner refuses, is dropped first. Throws when the source does
+ * not parse.
+ */
+export function runtimeImports(file: string, source: string): string[] {
+  const loader = file.endsWith(".tsx") ? "tsx" : file.endsWith(".js") ? "js" : "ts"
+  const body = source.startsWith("#!") ? source.replace(/^#![^\n]*/, "") : source
+  return new Bun.Transpiler({ loader }).scanImports(body).map((entry) => entry.path)
+}
+
+/**
+ * The specifiers the AD-1 and adapter rules judge: every match of
+ * {@link IMPORT_RE}, type-only imports included, then every run-time import the
+ * pattern missed. Its first form spans lazily to the next `from`, so a
+ * side-effect `import "x"` or a dynamic `import("x")` before an ordinary import
+ * can sit inside one match and go unseen; the parser sees them. A source the
+ * parser refuses is judged by the pattern alone, since the typecheck refuses it
+ * too.
+ */
+export function importSpecifiers(file: string, source: string): string[] {
+  const specifiers: string[] = []
+  IMPORT_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = IMPORT_RE.exec(source)) !== null) {
+    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
+    if (specifier) specifiers.push(specifier)
+  }
+  let parsed: string[] = []
+  try {
+    parsed = runtimeImports(file, source)
+  } catch {
+    parsed = []
+  }
+  for (const specifier of parsed) if (!specifiers.includes(specifier)) specifiers.push(specifier)
+  return specifiers
+}
 
 export interface Violation {
   file: string
@@ -182,12 +223,7 @@ export function scanSource(file: string, source: string): Violation[] {
     }
   }
 
-  IMPORT_RE.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = IMPORT_RE.exec(source)) !== null) {
-    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
-    if (!specifier) continue
-
+  for (const specifier of importSpecifiers(file, source)) {
     if (MUST_NOT_IMPORT.has(unix)) {
       violations.push({
         file,
@@ -241,11 +277,8 @@ const ADAPTER_MUST_NOT_REACH = [
 export function scanAdapterSource(file: string, source: string): Violation[] {
   const violations: Violation[] = []
   const unix = file.replaceAll("\\", "/")
-  IMPORT_RE.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = IMPORT_RE.exec(source)) !== null) {
-    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4]
-    if (!specifier || !specifier.startsWith(".")) continue
+  for (const specifier of importSpecifiers(file, source)) {
+    if (!specifier.startsWith(".")) continue
     const resolved = join(dirname(unix), specifier).replaceAll("\\", "/")
     for (const { tree, why } of ADAPTER_MUST_NOT_REACH) {
       if (resolved === tree || resolved.startsWith(`${tree}/`)) {
@@ -257,39 +290,222 @@ export function scanAdapterSource(file: string, source: string): Violation[] {
   return violations
 }
 
-export async function main(): Promise<number> {
+/**
+ * The answer key never reaches the labelled worktree writer (story 2-4's AC2,
+ * ledger #13).
+ *
+ * `scripts/materialize-labelled-change.ts` writes the worktree the models
+ * review, and `fixtures/seeded-defects/labels.ts` holds the defects they are
+ * scored against. No module the writer can load, followed transitively through
+ * relative run-time imports, may load the labels. A direct import and one
+ * through a helper, a barrel such as `fixtures/seeded-defects/change.ts`, or a
+ * module that only hashes them such as `fixtures/seeded-defects/seal.ts`, are
+ * all a leak: whatever loads the labels can export them.
+ */
+export const ANSWER_KEY = "fixtures/seeded-defects/labels.ts"
+
+/** The modules that write a reviewed worktree, whose module graphs are checked. */
+export const ANSWER_KEY_ISOLATED_ROOTS: readonly string[] = ["scripts/materialize-labelled-change.ts"]
+
+/** Resolves a relative specifier in `file` to a repository path, or undefined. */
+export type ResolveImport = (specifier: string, file: string) => string | undefined
+
+/**
+ * The resolver `main` uses: Bun's own, over the files on disk under `root`, so
+ * an extension, a directory's `package.json` entry or its `index` file is found
+ * exactly as Bun's run time finds it. Undefined when Bun cannot resolve it or
+ * it resolves outside `root`. Bun answers with real paths, so `root` is
+ * compared by its real path too.
+ */
+export function bunResolver(root: string): ResolveImport {
+  const realRoot = realpathSync(root)
+  return (specifier, file) => {
+    let absolute: string
+    try {
+      absolute = Bun.resolveSync(specifier, resolve(realRoot, dirname(file)))
+    } catch {
+      return undefined
+    }
+    const path = relative(realRoot, absolute).replaceAll("\\", "/")
+    return path.startsWith("../") || isAbsolute(path) ? undefined : path
+  }
+}
+
+/** The extensions {@link candidateResolver} tries for a specifier without one. */
+const RESOLVE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".mts", ".cts", ".json"]
+
+/**
+ * A resolver over an in-memory file set, for graphs that are not on disk. A
+ * specifier is tried as written, then with each of {@link RESOLVE_EXTENSIONS}
+ * appended, then with a `.js`, `.jsx`, `.mjs` or `.cjs` ending replaced by its
+ * TypeScript counterpart, then as a directory's `index` with each extension;
+ * `exists` decides. It reads no `package.json`; {@link bunResolver} does.
+ */
+export function candidateResolver(exists: (path: string) => boolean): ResolveImport {
+  return (specifier, file) => {
+    const base = join(dirname(file), specifier).replaceAll("\\", "/")
+    const swapped = base.replace(/\.(m|c)?js(x?)$/, (_, kind: string | undefined, x: string) => `.${kind ?? ""}ts${x}`)
+    const candidates = [
+      base,
+      ...RESOLVE_EXTENSIONS.map((extension) => `${base}${extension}`),
+      swapped,
+      ...RESOLVE_EXTENSIONS.map((extension) => `${base}/index${extension}`),
+    ]
+    return candidates.find(exists)
+  }
+}
+
+/**
+ * The repository paths a module's relative run-time imports load, in source
+ * order, read by {@link runtimeImports} and resolved by `resolveImport`. A
+ * specifier that resolves to no file comes back with `path` undefined, for the
+ * caller to refuse: an edge that cannot be followed cannot be vouched for.
+ * Throws when the source does not parse.
+ */
+export function localReferences(
+  file: string,
+  source: string,
+  resolveImport: ResolveImport,
+): { specifier: string; path: string | undefined }[] {
+  return runtimeImports(file, source)
+    .filter((specifier) => specifier.startsWith("."))
+    .map((specifier) => ({ specifier, path: resolveImport(specifier, file) }))
+}
+
+/**
+ * Every way each root reaches {@link ANSWER_KEY}: one violation per module that
+ * imports it, naming the chain from the root. Breadth-first, so each chain is a
+ * shortest one, and each module is expanded once, so a cycle ends. A root that
+ * cannot be read, a module in its graph that does not parse, and a relative
+ * import that resolves to no file are violations too: what they load cannot be
+ * vouched for. `resolveImport` defaults to {@link candidateResolver} over `read`;
+ * `main` passes {@link bunResolver}, so the files on disk are resolved as Bun
+ * loads them.
+ */
+export function answerKeyViolations(
+  roots: readonly string[],
+  read: (path: string) => string | undefined,
+  resolveImport: ResolveImport = candidateResolver((path) => read(path) !== undefined),
+): Violation[] {
+  const violations: Violation[] = []
+  for (const root of roots) {
+    const parent = new Map<string, string | null>([[root, null]])
+    const chainTo = (file: string) => {
+      const chain = [file]
+      for (let at = parent.get(file); at; at = parent.get(at)) chain.push(at)
+      return chain.reverse().join(" -> ")
+    }
+    const queue = [root]
+    while (queue.length > 0) {
+      const file = queue.shift()!
+      const source = read(file)
+      if (source === undefined) {
+        violations.push({ file, specifier: file, why: `answer-key isolation root \`${file}\` could not be read` })
+        continue
+      }
+      let references: { specifier: string; path: string | undefined }[]
+      try {
+        references = localReferences(file, source, resolveImport)
+      } catch (error) {
+        violations.push({
+          file,
+          specifier: file,
+          why:
+            `\`${file}\`, reached from \`${root}\` as ${chainTo(file)}, does not parse, so its ` +
+            `imports cannot be checked for the answer key: ${error instanceof Error ? error.message : String(error)}`,
+        })
+        continue
+      }
+      for (const { specifier, path } of references) {
+        if (path === undefined) {
+          violations.push({
+            file,
+            specifier,
+            why:
+              `\`${file}\`, reached from \`${root}\` as ${chainTo(file)}, imports \`${specifier}\`, ` +
+              `which resolves to no file this rule can read, so what it loads cannot be checked ` +
+              `for the answer key`,
+          })
+          continue
+        }
+        if (path === ANSWER_KEY) {
+          violations.push({
+            file,
+            specifier,
+            why:
+              `the answer key must not be loadable by \`${root}\`, which writes the reviewed ` +
+              `worktree (story 2-4 AC2); it is reached as ${chainTo(file)} -> ${path}`,
+          })
+          continue
+        }
+        if (parent.has(path)) continue
+        parent.set(path, file)
+        queue.push(path)
+      }
+    }
+  }
+  return violations
+}
+
+/**
+ * `answerKeyRoots` and `root`, the repository directory, let a test point the
+ * rules at another root module or another tree.
+ */
+export async function main(
+  answerKeyRoots: readonly string[] = ANSWER_KEY_ISOLATED_ROOTS,
+  root: string = ROOT,
+): Promise<number> {
   const violations: Violation[] = []
   let checked = 0
 
   const glob = new Glob("core/**/*.ts")
-  for await (const path of glob.scan({ cwd: ROOT })) {
-    const absolute = resolve(ROOT, path)
+  for await (const path of glob.scan({ cwd: root })) {
+    const absolute = resolve(root, path)
     const source = await Bun.file(absolute).text()
     checked += 1
-    violations.push(...scanSource(relative(ROOT, absolute), source))
+    violations.push(...scanSource(relative(root, absolute), source))
   }
 
   const adapterGlob = new Glob("adapters/**/*.ts")
-  for await (const path of adapterGlob.scan({ cwd: ROOT })) {
-    const absolute = resolve(ROOT, path)
+  for await (const path of adapterGlob.scan({ cwd: root })) {
+    const absolute = resolve(root, path)
     const source = await Bun.file(absolute).text()
     checked += 1
-    violations.push(...scanAdapterSource(relative(ROOT, absolute), source))
+    violations.push(...scanAdapterSource(relative(root, absolute), source))
   }
+
+  const sources = new Map<string, string | undefined>()
+  const read = (path: string): string | undefined => {
+    if (!sources.has(path)) {
+      let source: string | undefined
+      try {
+        source = readFileSync(resolve(root, path), "utf8")
+      } catch {
+        source = undefined
+      }
+      sources.set(path, source)
+    }
+    return sources.get(path)
+  }
+  violations.push(...answerKeyViolations(answerKeyRoots, read, bunResolver(root)))
 
   if (violations.length > 0) {
     console.error("AD-1 dependency-direction violations:\n")
     for (const violation of violations) {
       console.error(`  ${violation.file}: imports "${violation.specifier}" — ${violation.why}`)
     }
-    console.error(`\n${violations.length} violation(s) in ${checked} file(s) under core/.`)
+    console.error(
+      `\n${violations.length} violation(s) in ${checked} file(s) under core/ and adapters/, ` +
+        `and in the module graphs of the answer-key isolation roots.`,
+    )
     return 1
   }
 
   console.log(
     `AD-1 dependency direction OK — ${checked} file(s) under core/ and adapters/ checked ` +
       `(${[...MUST_NOT_IMPORT].map((f) => `\`${f}\``).join(" and ")} import nothing; ` +
-      `no stage builds a limiter or meters its own budget).`,
+      `no stage builds a limiter or meters its own budget; ` +
+      `${answerKeyRoots.map((f) => `\`${f}\``).join(" and ")} cannot load \`${ANSWER_KEY}\`).`,
   )
   return 0
 }

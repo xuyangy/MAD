@@ -14,7 +14,7 @@
  *
  * ## The import list is the argument (AC2)
  *
- * This module imports `material.ts` and `seal.ts`. It imports NEITHER
+ * This module imports `material.ts` and `material-seal.ts`. It imports NEITHER
  * `labels.ts` NOR `adjudicate.ts`, and it may never import
  * `seeded-defects/change.ts` either — that file re-exports both sides, so
  * importing the door reaches the answer key just as surely as importing the
@@ -26,10 +26,11 @@
  * a promise cannot carry: "a model that can read the answer key measures
  * nothing".
  *
- * `seal.ts` DOES read the labels, and importing it here is deliberate and safe:
- * what it exports is a version string and two hex digests, and a digest reveals
- * nothing about the summaries it was computed over. They are printed so the
- * operator pastes the manifest identity rather than typing it from memory.
+ * Nor does it import `seal.ts`, which reads the labels to hash them. The version
+ * and material hash it prints come from `material-seal.ts`, which `seal.ts`
+ * builds on, so they are the manifest identity the operator pastes rather than
+ * types from memory. `scripts/lint-dependency-direction.ts` fails CI if this
+ * module can load `labels.ts` by any chain of imports.
  *
  * ## `--out` goes through AD-16's containment check, not a new one
  *
@@ -64,7 +65,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 
 import { realRefusalFor, refusalFor } from "../adapters/opencode/artifacts.ts"
 import { BASE_TREE, SEEDED_CHANGE } from "../fixtures/seeded-defects/material.ts"
-import { LABELLED_CHANGE_SEAL } from "../fixtures/seeded-defects/seal.ts"
+import { MATERIAL_IDENTITY } from "../fixtures/seeded-defects/material-seal.ts"
 
 /** This repository — the one a materialized tree must land OUTSIDE of. */
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -470,8 +471,8 @@ export async function main(
       `as the working tree. Point the ablation at it and pass the identity below verbatim —\n` +
       `--labelled-change fills both from the seal, so these are for checking, not for typing:\n` +
       `\n` +
-      `  --fixture-version ${LABELLED_CHANGE_SEAL.version}\n` +
-      `  --fixture-hash ${LABELLED_CHANGE_SEAL.materialHash}\n` +
+      `  --fixture-version ${MATERIAL_IDENTITY.version}\n` +
+      `  --fixture-hash ${MATERIAL_IDENTITY.materialHash}\n` +
       `\n` +
       `  bun run ablation --live --labelled-change \\\n` +
       `    --pin provider/model \\\n` +

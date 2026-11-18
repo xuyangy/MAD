@@ -18,8 +18,8 @@
  * ## `version` is bumped BY HAND, never derived
  *
  * A version derived from the hashes would move silently with every edit and
- * would therefore say nothing a hash does not already say. This literal is a
- * human statement that a deliberate revision happened; the hashes are the
+ * would therefore say nothing a hash does not already say. The literal, in
+ * `material-seal.ts`, is a human statement that a deliberate revision happened; the hashes are the
  * machine check that nothing else did. Changing the material or the labels
  * without bumping it turns `seal.test.ts` red, which is the point.
  *
@@ -58,40 +58,17 @@
  *
  * ## This module is NOT importable from the materializer path
  *
- * It reads the labels, so it can never be reached by code that writes the
- * reviewed worktree... except that `scripts/materialize-labelled-change.ts` DOES
- * import it, to print the identity. That is safe and it is not an accident:
- * `LABELLED_CHANGE_SEAL` is three strings — a version and two hex digests — and a
- * digest reveals nothing about the summaries it was computed over. What the
- * materializer must never do is re-export, print or write anything else this
- * module touched, and its leak test asserts exactly that over the files it wrote.
+ * It reads the labels, so code that writes the reviewed worktree never loads it.
+ * `scripts/materialize-labelled-change.ts` prints the version and material hash
+ * from `material-seal.ts`, which holds the version literal and the material
+ * serialization this module builds on, and `scripts/lint-dependency-direction.ts`
+ * fails CI if the materializer can load `labels.ts` by any chain of imports.
  */
 
-import { createHash } from "node:crypto"
-
 import { SEEDED_DEFECTS } from "./labels.ts"
-import { BASE_TREE, SEEDED_CHANGE } from "./material.ts"
+import { MATERIAL_IDENTITY, canonicalMaterial, sha256 } from "./material-seal.ts"
 
-function sha256(text: string): string {
-  return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`
-}
-
-/** The material's canonical text. Exported so the test can hash it a second way. */
-export function canonicalMaterial(): string {
-  return JSON.stringify([
-    "description",
-    SEEDED_CHANGE.description,
-    "files",
-    [...SEEDED_CHANGE.files].sort(),
-    "diff",
-    SEEDED_CHANGE.diff,
-    // THE BASE TREE IS INSIDE THE SEAL. It is written to the reviewed worktree
-    // and committed there, so editing it changes the bytes the models see; a
-    // hash that did not cover it would let that happen with CI green.
-    "baseTree",
-    Object.entries(BASE_TREE).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-  ])
-}
+export { canonicalMaterial }
 
 /** The labels' canonical text, in declaration order. */
 export function canonicalLabels(): string {
@@ -121,7 +98,7 @@ export interface LabelledChangeSeal {
 }
 
 export const LABELLED_CHANGE_SEAL: LabelledChangeSeal = {
-  version: "labelled-change-1",
-  materialHash: sha256(canonicalMaterial()),
+  version: MATERIAL_IDENTITY.version,
+  materialHash: MATERIAL_IDENTITY.materialHash,
   labelsHash: sha256(canonicalLabels()),
 }

@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 
-import { main, scanAdapterSource, scanSource } from "./lint-dependency-direction.ts"
+import {
+  ANSWER_KEY,
+  ANSWER_KEY_ISOLATED_ROOTS,
+  answerKeyViolations,
+  bunResolver,
+  main,
+  scanAdapterSource,
+  scanSource,
+} from "./lint-dependency-direction.ts"
 
 describe("AD-1 dependency-direction rule", () => {
   test("fails a core file importing from adapters/", () => {
@@ -305,5 +317,327 @@ describe("the SECOND direction: adapters/ must not reach into fixtures/ or ablat
 
   test("THE REAL TREE PASSES — this is measured, not assumed", async () => {
     expect(await main()).toBe(0)
+  })
+})
+
+describe("the AD-1 and adapter rules see every import, a side-effect or dynamic one before an ordinary import included", () => {
+  test("a side-effect import before an ordinary one is seen, and so is the ordinary one", () => {
+    const violations = scanSource(
+      "core/run/review.ts",
+      `import "../../adapters/opencode/repo.ts"\nimport { a } from "@opencode-ai/plugin"\n`,
+    )
+    expect(violations.map((v) => v.specifier).sort()).toEqual(["../../adapters/opencode/repo.ts", "@opencode-ai/plugin"])
+  })
+
+  test("a dynamic import between an export and a later `from` is seen", () => {
+    const violations = scanSource(
+      "core/run/review.ts",
+      `export const k = await import("../../adapters/opencode/repo.ts")\nexport { b } from "./b.ts"\n`,
+    )
+    expect(violations.map((v) => v.specifier)).toEqual(["../../adapters/opencode/repo.ts"])
+  })
+
+  test("a non-ASCII alias or a quoted export name in the clause is still seen", () => {
+    for (const clause of ["{ läs }", `{ "quoted name" as q }`, "{ a as läs, b }"]) {
+      expect(
+        scanSource("core/run/review.ts", `import ${clause} from "../../adapters/opencode/repo.ts"\n`).map((v) => v.specifier),
+      ).toEqual(["../../adapters/opencode/repo.ts"])
+      expect(
+        scanAdapterSource("adapters/opencode/plugin.ts", `export ${clause} from "../../fixtures/recall.ts"\n`).map(
+          (v) => v.specifier,
+        ),
+      ).toEqual(["../../fixtures/recall.ts"])
+    }
+  })
+
+  test("a type-only import is still judged by the AD-1 rule", () => {
+    expect(
+      scanSource("core/run/review.ts", `import type { Repo } from "../../adapters/opencode/repo.ts"\n`),
+    ).toHaveLength(1)
+  })
+
+  test("an adapter's side-effect import before an ordinary one is seen", () => {
+    expect(
+      scanAdapterSource(
+        "adapters/opencode/plugin.ts",
+        `import "../../fixtures/recall.ts"\nimport { a } from "./repo.ts"\n`,
+      ).map((v) => v.specifier),
+    ).toEqual(["../../fixtures/recall.ts"])
+  })
+
+  test("a clause with comments still reaches its `from`", () => {
+    expect(
+      scanSource("core/run/review.ts", `import {\n  a, // it's the first\n  /* b */ b,\n} from "@opencode-ai/plugin"\n`),
+    ).toHaveLength(1)
+  })
+})
+
+describe("the answer key never reaches the labelled worktree writer (ledger #13)", () => {
+  const ROOT = "scripts/materialize-labelled-change.ts"
+  const MATERIAL = "fixtures/seeded-defects/material.ts"
+  const reader = (files: Record<string, string>) => (path: string) => files[path]
+
+  test("the root is the labelled worktree writer and the labels are the answer key", () => {
+    expect(ANSWER_KEY_ISOLATED_ROOTS).toEqual([ROOT])
+    expect(ANSWER_KEY).toBe("fixtures/seeded-defects/labels.ts")
+  })
+
+  test("a direct import is a violation naming the chain", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({ [ROOT]: `import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"\n`, [ANSWER_KEY]: "" }),
+    )
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.file).toBe(ROOT)
+    expect(violations[0]!.specifier).toBe("../fixtures/seeded-defects/labels.ts")
+    expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> ${ANSWER_KEY}`)
+  })
+
+  test("a helper that loads the barrel, which re-exports the labels, is a violation", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({
+        [ROOT]: `import { helper } from "./helper.ts"\n`,
+        "scripts/helper.ts": `import { SEEDED_CHANGE } from "../fixtures/seeded-defects/change.ts"\n`,
+        "fixtures/seeded-defects/change.ts": `export { SEEDED_DEFECTS } from "./labels.ts"\n`,
+        [ANSWER_KEY]: "",
+      }),
+    )
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.file).toBe("fixtures/seeded-defects/change.ts")
+    expect(violations[0]!.why).toContain(
+      `it is reached as ${ROOT} -> scripts/helper.ts -> fixtures/seeded-defects/change.ts -> ${ANSWER_KEY}`,
+    )
+  })
+
+  test("a material-only graph with a cycle passes", () => {
+    expect(
+      answerKeyViolations(
+        [ROOT],
+        reader({
+          [ROOT]: `import { BASE_TREE } from "../fixtures/seeded-defects/material.ts"\nimport { x } from "./a.ts"\n`,
+          [MATERIAL]: `import type { ChangeSet } from "../../core/ports/repo.ts"\n`,
+          "core/ports/repo.ts": "",
+          "scripts/a.ts": `import { y } from "./b.ts"\n`,
+          "scripts/b.ts": `import { x } from "./a.ts"\nimport "node:fs"\n`,
+          [ANSWER_KEY]: "",
+        }),
+      ),
+    ).toEqual([])
+  })
+
+  test("a side-effect import of a leaking helper, before an ordinary import, is a violation", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({
+        [ROOT]: `import "./helper.ts"\nimport { BASE_TREE } from "../fixtures/seeded-defects/material.ts"\n`,
+        "scripts/helper.ts": `import "../fixtures/seeded-defects/labels.ts"\n`,
+        [MATERIAL]: "",
+        [ANSWER_KEY]: "",
+      }),
+    )
+    expect(violations.map((v) => v.file)).toEqual(["scripts/helper.ts"])
+  })
+
+  test("a non-canonical, extensionless, `.js` or dynamic reference is resolved", () => {
+    for (const specifier of [
+      "./x/../../fixtures/seeded-defects/labels.ts",
+      "../fixtures/seeded-defects/labels",
+      "../fixtures/seeded-defects/labels.js",
+    ]) {
+      for (const line of [`import { a } from "${specifier}"`, `const a = await import("${specifier}")`]) {
+        const violations = answerKeyViolations([ROOT], reader({ [ROOT]: `${line}\n`, [ANSWER_KEY]: "" }))
+        expect(violations.map((v) => v.specifier)).toEqual([specifier])
+        expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> ${ANSWER_KEY}`)
+      }
+    }
+  })
+
+  test("an extensionless import of a `.js` helper is followed, to a leak or to a clean module", () => {
+    const leaking = answerKeyViolations(
+      [ROOT],
+      reader({
+        [ROOT]: `import "./helper"\n`,
+        "scripts/helper.js": `require("../fixtures/seeded-defects/labels.ts")\n`,
+        [ANSWER_KEY]: "",
+      }),
+    )
+    expect(leaking.map((v) => v.file)).toEqual(["scripts/helper.js"])
+    expect(leaking[0]!.why).toContain(`it is reached as ${ROOT} -> scripts/helper.js -> ${ANSWER_KEY}`)
+    expect(
+      answerKeyViolations(
+        [ROOT],
+        reader({ [ROOT]: `import "./helper"\n`, "scripts/helper.js": `module.exports = 1\n`, [ANSWER_KEY]: "" }),
+      ),
+    ).toEqual([])
+  })
+
+  test("a directory import is followed to its index", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({ [ROOT]: `import { a } from "./lib"\n`, "scripts/lib/index.mjs": `export * from "../../fixtures/seeded-defects/labels.ts"\n`, [ANSWER_KEY]: "" }),
+    )
+    expect(violations.map((v) => v.file)).toEqual(["scripts/lib/index.mjs"])
+  })
+
+  /** Runs `run` with the lint's console output discarded. */
+  const quietly = async <T>(run: () => Promise<T>): Promise<T> => {
+    const { log, error } = console
+    console.log = () => {}
+    console.error = () => {}
+    try {
+      return await run()
+    } finally {
+      console.log = log
+      console.error = error
+    }
+  }
+
+  test("on disk, a directory import follows its package.json entry as Bun does, not its index", async () => {
+    // `scripts/lib/` holds both a clean `index.ts` and a `package.json` whose
+    // `main` is `entry.js`; Bun loads `entry.js`, so that is the module checked.
+    const dir = await mkdtemp(join(tmpdir(), "mad-answer-key-"))
+    try {
+      const write = async (path: string, text: string) => {
+        await mkdir(dirname(join(dir, path)), { recursive: true })
+        await writeFile(join(dir, path), text)
+      }
+      await write(ROOT, `import "./lib"\n`)
+      await write("scripts/lib/package.json", `{ "main": "entry.js" }\n`)
+      await write("scripts/lib/index.ts", `export const clean = 1\n`)
+      await write(ANSWER_KEY, "export const SEEDED_DEFECTS = []\n")
+      const read = (path: string) => {
+        try {
+          return readFileSync(join(dir, path), "utf8")
+        } catch {
+          return undefined
+        }
+      }
+
+      await write("scripts/lib/entry.js", `require("../../fixtures/seeded-defects/labels.ts")\n`)
+      const violations = answerKeyViolations([ROOT], read, bunResolver(dir))
+      expect(violations.map((v) => v.file)).toEqual(["scripts/lib/entry.js"])
+      expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> scripts/lib/entry.js -> ${ANSWER_KEY}`)
+
+      expect(await quietly(() => main([ROOT], dir))).toBe(1)
+
+      await write("scripts/lib/entry.js", `module.exports = 1\n`)
+      expect(answerKeyViolations([ROOT], read, bunResolver(dir))).toEqual([])
+      expect(await quietly(() => main([ROOT], dir))).toBe(0)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("on disk, an import Bun cannot resolve, or one outside the root, is a violation", async () => {
+    // The repository is `<parent>/repo`; `../../outside.ts` from its `scripts/`
+    // is `<parent>/outside.ts`, a real file Bun resolves, outside the root.
+    const parent = await mkdtemp(join(tmpdir(), "mad-answer-key-"))
+    const dir = join(parent, "repo")
+    try {
+      await mkdir(join(dir, "scripts"), { recursive: true })
+      await writeFile(join(dir, ROOT), `import "./gone"\nimport "../../outside.ts"\n`)
+      await writeFile(join(parent, "outside.ts"), "")
+      const read = (path: string) => {
+        try {
+          return readFileSync(join(dir, path), "utf8")
+        } catch {
+          return undefined
+        }
+      }
+      expect(answerKeyViolations([ROOT], read, bunResolver(dir)).map((v) => v.specifier)).toEqual([
+        "./gone",
+        "../../outside.ts",
+      ])
+    } finally {
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  test("a relative import that resolves to no file is a violation naming its chain, not a pass", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({ [ROOT]: `import { a } from "./helper.ts"\n`, "scripts/helper.ts": `import "./gone.wasm"\n` }),
+    )
+    expect(violations.map((v) => [v.file, v.specifier])).toEqual([["scripts/helper.ts", "./gone.wasm"]])
+    expect(violations[0]!.why).toContain(`as ${ROOT} -> scripts/helper.ts, imports \`./gone.wasm\`, which resolves to no file`)
+  })
+
+  test("the seal, which loads the labels to hash them, is a leak like any other module", async () => {
+    // `seal.ts` exports `canonicalLabels()`, the ids, loci, summaries and
+    // markers; a writer that could load it could print them.
+    const seal = "fixtures/seeded-defects/seal.ts"
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({
+        [ROOT]: `import { canonicalLabels } from "../fixtures/seeded-defects/seal.ts"\n`,
+        [seal]: await Bun.file(new URL(`../${seal}`, import.meta.url)).text(),
+        "fixtures/seeded-defects/material-seal.ts": "",
+        [ANSWER_KEY]: "",
+      }),
+    )
+    expect(violations.map((v) => v.file)).toEqual([seal])
+    expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> ${seal} -> ${ANSWER_KEY}`)
+  })
+
+  test("an import line inside a string is data, even when the file it names exists", () => {
+    const real = `import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"`
+    const files = { [ANSWER_KEY]: "" }
+    expect(answerKeyViolations([ROOT], reader({ ...files, [ROOT]: `const s = \`\n${real}\n\`\n` }))).toEqual([])
+    expect(answerKeyViolations([ROOT], reader({ ...files, [ROOT]: `const s = "${real.replaceAll('"', "'")}"\n` }))).toEqual([])
+    expect(answerKeyViolations([ROOT], reader({ ...files, [ROOT]: `// ${real}\n` }))).toEqual([])
+    expect(answerKeyViolations([ROOT], reader({ ...files, [ROOT]: `${real}\n` })).map((v) => v.file)).toEqual([ROOT])
+  })
+
+  test("a type-only import loads nothing at run time and is not followed", () => {
+    expect(
+      answerKeyViolations(
+        [ROOT],
+        reader({ [ROOT]: `import type { SeededDefect } from "../fixtures/seeded-defects/labels.ts"\n`, [ANSWER_KEY]: "" }),
+      ),
+    ).toEqual([])
+  })
+
+  test("a module in the graph that does not parse is a violation naming its chain", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({ [ROOT]: `import { a } from "./broken.ts"\n`, "scripts/broken.ts": "import { from\n" }),
+    )
+    expect(violations.map((v) => v.file)).toEqual(["scripts/broken.ts"])
+    expect(violations[0]!.why).toContain(`as ${ROOT} -> scripts/broken.ts, does not parse`)
+  })
+
+  test("a leading `#!` line does not stop the root being read", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({ [ROOT]: `#!/usr/bin/env bun\nimport "../fixtures/seeded-defects/labels.ts"\n`, [ANSWER_KEY]: "" }),
+    )
+    expect(violations.map((v) => v.file)).toEqual([ROOT])
+    expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> ${ANSWER_KEY}`)
+  })
+
+  test("a root that cannot be read is a violation, not a pass", () => {
+    const violations = answerKeyViolations([ROOT], reader({}))
+    expect(violations).toHaveLength(1)
+    expect(violations[0]!.why).toContain("could not be read")
+  })
+
+  test("the lint entry point fails a real root that reaches the labels, and names the chain", async () => {
+    // `fixtures/seeded-defects/arms.ts` loads `change.ts`, which re-exports the labels.
+    const errors: string[] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "))
+    try {
+      expect(await main(["fixtures/seeded-defects/arms.ts"])).toBe(1)
+    } finally {
+      console.error = original
+    }
+    expect(errors.join("\n")).toContain(
+      `fixtures/seeded-defects/change.ts: imports "./labels.ts" — the answer key must not be loadable by ` +
+        "`fixtures/seeded-defects/arms.ts`",
+    )
+    expect(errors.join("\n")).toContain(
+      `it is reached as fixtures/seeded-defects/arms.ts -> fixtures/seeded-defects/change.ts -> ${ANSWER_KEY}`,
+    )
   })
 })

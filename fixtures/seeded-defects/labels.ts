@@ -11,9 +11,10 @@
  *
  * The split from `material.ts` is what makes that checkable rather than
  * promised. `scripts/materialize-labelled-change.ts` writes the tree a live model
- * reviews; it imports `material.ts` and `seal.ts` and it must never reach here.
- * Its test asserts no file it wrote contains any `id`, `summary` or `markers`
- * entry from this file.
+ * reviews; it imports `material.ts` and `material-seal.ts` and it must never
+ * reach here. `scripts/lint-dependency-direction.ts` fails CI if it can load this
+ * file by any chain of imports, and its test asserts no file it wrote contains
+ * any `id`, `summary` or `markers` entry from this file.
  *
  * The evidence for WHY each of these thirteen is a real defect — which
  * `evaluation-protocol.md:465` delegates to story 2.4 — is in
