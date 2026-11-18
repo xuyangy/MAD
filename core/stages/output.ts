@@ -1986,6 +1986,18 @@ export function renderRunRecord(record: RunRecord): string {
   // and a sentence are two states a truthiness test collapses, and two states a
   // truthiness test collapses is the whole subject of story 2.3.
   const unknownUsage = unknownUsageClause(record.ledger)
+  // Plan item B6 — the variant each stage was configured with, sent on the
+  // requests that stage issues. Whether a host or provider applied it is not
+  // established here.
+  if (record.reasoningVariants !== undefined) {
+    const asked = (["discover", "debate", "judge"] as const)
+      .filter((stage) => record.reasoningVariants![stage] !== undefined)
+      .map((stage) => `${stage} ${oneLine(record.reasoningVariants![stage]!)}`)
+    lines.push(
+      `REASONING VARIANTS CONFIGURED — ${asked.join(", ")}. Each is sent on the requests its stage ` +
+        `issues, and on none for a stage that issued no turn; whether a provider applied it is not established.`,
+    )
+  }
   // SPEC.md "Evaluation exception" / AD-15 amended — A FORKED RUN'S FIGURES ARE
   // ATTRIBUTED. A branch's ledger holds the prefix it inherited as well as its
   // own turns, so its total is what the branch counts against its cap and not

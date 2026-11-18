@@ -329,6 +329,11 @@ export interface DebateInput {
    * Off: prompts, schema and record are exactly what they are without this field.
    */
   missingEvidence?: boolean
+  /**
+   * Plan item B6 — the reasoning variant every turn of this stage asks the host
+   * for, retries and replacements included. Absent: no variant is sent.
+   */
+  variant?: string
 }
 
 export interface DebateStageResult extends DebateCounts {
@@ -532,6 +537,7 @@ async function runDebateTurn(
         schema,
         input.signal,
         admitted,
+        input.variant === undefined ? undefined : { variant: input.variant },
       )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,

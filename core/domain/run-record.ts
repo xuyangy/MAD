@@ -473,6 +473,13 @@ export interface RunRecord {
    * budget carries `unresolved` with a budget reason (AD-6d, AD-6f: same
    * section, distinct causes).
    */
+  /**
+   * Plan item B6 — the reasoning variant each stage was configured with, set
+   * only for a configured stage, and sent on every request that stage issues.
+   * Recorded even when the stage issued no request; never a claim that a host
+   * or provider applied it. Absent when no stage was configured.
+   */
+  reasoningVariants?: { discover?: string; debate?: string; judge?: string }
   cancelled?: {
     stage: Stage
     /**

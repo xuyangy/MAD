@@ -1613,7 +1613,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
     })
     return {
       capabilities: (slotId) => inner.capabilities(slotId),
-      async runTurn(slotId, instructions, input, schema, signal, admitted) {
+      async runTurn(slotId, instructions, input, schema, signal, admitted, turnOptions) {
         const entry = await unsettledIn(root)
         const call: CallFact = {
           position: run?.position ?? null,
@@ -1632,7 +1632,7 @@ export async function runScenario(context: ProbeContext, transport: Transport, s
         open += 1
         maxConcurrentCalls = Math.max(maxConcurrentCalls, open)
         try {
-          const envelope = await inner.runTurn(slotId, instructions, input, schema, signal, admitted)
+          const envelope = await inner.runTurn(slotId, instructions, input, schema, signal, admitted, turnOptions)
           call.disposition = envelope.ok ? "ok" : "failed"
           call.failure = envelope.ok ? null : envelope.failure
           call.usageUnknown = envelope.usageUnknown !== undefined

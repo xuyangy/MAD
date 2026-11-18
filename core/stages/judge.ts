@@ -227,6 +227,11 @@ export type AggregateEnvelope = z.infer<typeof aggregateEnvelopeSchema>
 
 export interface JudgeInput {
   /**
+   * Plan item B6 — the reasoning variant every turn of this stage asks the host
+   * for, retries and replacements included. Absent: no variant is sent.
+   */
+  variant?: string
+  /**
    * The CANONICAL findings, already routed and debated. Mutated in place (AD-7)
    * and returned unfiltered — this stage decides about findings and drops none.
    */
@@ -438,7 +443,15 @@ async function runJudgeTurn<T>(
     let envelope: Envelope<T>
     let threw = false
     try {
-      envelope = await input.backend.runTurn(slot, instructions, prompt, schema, input.signal, admitted)
+      envelope = await input.backend.runTurn(
+        slot,
+        instructions,
+        prompt,
+        schema,
+        input.signal,
+        admitted,
+        input.variant === undefined ? undefined : { variant: input.variant },
+      )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,
       // Errors). One judge role throwing must not cost the finding its verdict,

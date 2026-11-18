@@ -415,12 +415,12 @@ export function deliveryProbe(payload: string | null) {
     wrap(inner: ModelBackend): ModelBackend {
       return {
         capabilities: (slot) => inner.capabilities(slot),
-        async runTurn(slot, instructions, input, schema, signal, admitted) {
+        async runTurn(slot, instructions, input, schema, signal, admitted, options) {
           const holds = payload !== null && (input.includes(payload) || instructions.includes(payload))
           let envelope: Awaited<ReturnType<ModelBackend["runTurn"]>>
           try {
             // `admitted` passes through untouched: its admission owns the settlement.
-            envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
+            envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted, options)
           } catch (error) {
             uncertain += 1
             if (holds) uncertainCarrying += 1
@@ -1124,13 +1124,13 @@ function cancellationWatch(signal: AbortSignal | undefined) {
     wrap(inner: ModelBackend): ModelBackend {
       return {
         capabilities: (slot) => inner.capabilities(slot),
-        async runTurn(slot, instructions, input, schema, turnSignal) {
+        async runTurn(slot, instructions, input, schema, turnSignal, admitted, options) {
           // Read through a function: the signal can change across the `await`.
           const aborted = (): boolean => signal?.aborted === true || turnSignal?.aborted === true
           const before = aborted()
           let envelope: Awaited<ReturnType<ModelBackend["runTurn"]>>
           try {
-            envelope = await inner.runTurn(slot, instructions, input, schema, turnSignal)
+            envelope = await inner.runTurn(slot, instructions, input, schema, turnSignal, admitted, options)
           } catch (error) {
             if (!before && aborted()) seen = "open"
             throw error

@@ -2710,3 +2710,14 @@ describe("runTurn — the status observer", () => {
     expect(seen).toEqual([])
   })
 })
+
+describe("OpencodeModelBackend — plan item B6", () => {
+  test("a turn's variant reaches the prompt request beside the model; without one there is no variant key", async () => {
+    const { backend, calls } = backendWith()
+    await backend.runTurn("discovery-1", "instructions", "the diff", SCHEMA, undefined, undefined, { variant: "max" })
+    await backend.runTurn("discovery-1", "instructions", "the diff", SCHEMA)
+    expect(calls.prompt[0].variant).toBe("max")
+    expect("variant" in calls.prompt[0].model).toBe(false)
+    expect("variant" in calls.prompt[1]).toBe(false)
+  })
+})

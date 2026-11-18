@@ -17,6 +17,7 @@ import {
   type Envelope,
   type ModelBackend,
   type TurnFailure,
+  type TurnOptions,
 } from "../ports/model-backend.ts"
 import type { ChangeSet } from "../ports/repo.ts"
 import { type MaterialLabel, MATERIAL_NOTICES, noticeFor } from "../prompt/material.ts"
@@ -160,6 +161,8 @@ export class FakeBackend implements ModelBackend {
   readonly calls: { slot: string; attempt: number; role?: JudgeRoleTag }[] = []
   /** Story 2-8c2 — the admission handle each issued turn was handed, in call order. */
   readonly admittedTurns: (AdmittedTurn | undefined)[] = []
+  /** Plan item B6 — the per-turn options each issued turn was handed, in call order. */
+  readonly turnOptions: (TurnOptions | undefined)[] = []
   private readonly attempts = new Map<string, number>()
 
   constructor(
@@ -204,6 +207,7 @@ export class FakeBackend implements ModelBackend {
     schema: ZodType<T>,
     signal?: AbortSignal,
     admitted?: AdmittedTurn,
+    options?: TurnOptions,
   ): Promise<Envelope<T>> {
     const role = judgeRoleOf(instructions)
 
@@ -219,6 +223,7 @@ export class FakeBackend implements ModelBackend {
     this.attempts.set(key, attempt)
     this.calls.push(role === undefined ? { slot, attempt } : { slot, attempt, role })
     this.admittedTurns.push(admitted)
+    this.turnOptions.push(options)
 
     this.inFlight += 1
     this.peakInFlight = Math.max(this.peakInFlight, this.inFlight)

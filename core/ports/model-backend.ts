@@ -360,6 +360,10 @@ export interface ModelBackend {
    * an evaluation admitted the attempt. A backend that meters physical requests
    * admits and settles each one after the first through it; any other backend
    * ignores it.
+   *
+   * `options` (plan item B6) carries per-turn request settings. `variant` names
+   * the reasoning variant the caller asked the host for; a backend that cannot
+   * send one ignores it, and asking is not a claim that a provider applied it.
    */
   runTurn<T>(
     slot: string,
@@ -368,5 +372,12 @@ export interface ModelBackend {
     schema: ZodType<T>,
     signal?: AbortSignal,
     admitted?: AdmittedTurn,
+    options?: TurnOptions,
   ): Promise<Envelope<T>>
+}
+
+/** Plan item B6 — per-turn request settings. Absent fields are not sent. */
+export interface TurnOptions {
+  /** The host's name for a model's reasoning variant (OpenCode's prompt-level `variant`). */
+  variant?: string
 }

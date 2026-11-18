@@ -38,6 +38,8 @@ type CreateBody = NonNullable<SessionCreateData["body"]> & { permission?: Permis
 /** v1's prompt body, plus the structured-output format the v1 types leave out. */
 type PromptBody = NonNullable<SessionPromptData["body"]> & {
   format: { type: "json_schema"; schema: Record<string, unknown> }
+  /** Plan item B6 — the prompt-level reasoning variant the v1 types also leave out. */
+  variant?: string
 }
 
 export function hostSessionFromPluginClient(client: HostClient): HostSessionApi {
@@ -50,8 +52,15 @@ export function hostSessionFromPluginClient(client: HostClient): HostSessionApi 
         const body: CreateBody = permission === undefined ? { title } : { title, permission }
         return client.session.create({ body, query: { directory } })
       },
-      prompt({ sessionID, directory, model, system, format, tools, parts }) {
-        const body: PromptBody = tools === undefined ? { model, system, format, parts } : { model, system, format, tools, parts }
+      prompt({ sessionID, directory, model, system, format, variant, tools, parts }) {
+        const body: PromptBody = {
+          model,
+          system,
+          format,
+          ...(variant === undefined ? {} : { variant }),
+          ...(tools === undefined ? {} : { tools }),
+          parts,
+        }
         return client.session.prompt({ path: { id: sessionID }, query: { directory }, body })
       },
       delete({ sessionID, directory }) {

@@ -321,6 +321,44 @@ export interface ReviewDeps {
    * (`DebateInput.missingEvidence`), independent of `debateReferences`.
    */
   debateMissingEvidence?: boolean
+  /**
+   * Plan item B6 — opt-in reasoning variants, per stage: the host's name for a
+   * model's variant, sent on every turn of that stage. Absent: none is sent and
+   * the record has no `reasoningVariants`. Each value must be letters, digits,
+   * `.`, `_` or `-`, at most 64 characters; anything else is refused before the
+   * stage could issue a request. Discovery's is fixed when the review is
+   * prepared; a continuation may set debate's and judge's, and may not change
+   * discovery's.
+   */
+  reasoningVariants?: { discover?: string; debate?: string; judge?: string }
+}
+
+/** B6 — the accepted shape of a variant name. */
+export const REASONING_VARIANT = /^[A-Za-z0-9._-]{1,64}$/
+
+type ReasoningVariants = NonNullable<ReviewDeps["reasoningVariants"]>
+
+/**
+ * B6 — the caller's variants, read once, validated, and frozen. Every request
+ * and the record use this copy, so a caller changing its own object while a
+ * stage is awaited changes nothing. Throws, before any request, on a name
+ * outside `REASONING_VARIANT`. `undefined` when nothing is configured.
+ */
+function snapshotReasoningVariants(variants: ReviewDeps["reasoningVariants"]): Readonly<ReasoningVariants> | undefined {
+  if (variants === undefined) return undefined
+  const snapshot: ReasoningVariants = {}
+  for (const stage of ["discover", "debate", "judge"] as const) {
+    const value: unknown = variants[stage]
+    if (value === undefined) continue
+    if (typeof value !== "string" || !REASONING_VARIANT.test(value)) {
+      throw new Error(
+        `reasoning variant for ${stage} must be letters, digits, ".", "_" or "-", at most 64 characters; ` +
+          `${JSON.stringify(value)} is not. Nothing was asked.`,
+      )
+    }
+    snapshot[stage] = value
+  }
+  return Object.keys(snapshot).length === 0 ? undefined : Object.freeze(snapshot)
 }
 
 export interface ReviewResult {
@@ -616,6 +654,7 @@ export type ContinueDeps = Pick<
   | "progress"
   | "debateReferences"
   | "debateMissingEvidence"
+  | "reasoningVariants"
 >
 
 /**
@@ -705,6 +744,7 @@ function discloseAddedDestinations(record: RunRecord): void {
 }
 
 export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
+  const variants = snapshotReasoningVariants(deps.reasoningVariants)
   const { roster, backend, clock, change } = deps
   // AD-11 amended — the pool's set comes from the registry, addressed by task
   // type + role. The lens sets are resolved inside `discover`, per lens slot.
@@ -765,6 +805,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
       ),
       stopOnUnknownUsage: deps.stopOnUnknownUsage === true,
     },
+    ...(variants?.discover === undefined ? {} : { reasoningVariants: { discover: variants.discover } }),
   }
 
   // AD-6 / `dial-clamped` (epic-1 retrospective) — raised HERE, once, because
@@ -824,6 +865,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
     signal,
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
     ...(deps.recovery === undefined ? {} : { recovery: deps.recovery }),
+    ...(variants?.discover === undefined ? {} : { variant: variants.discover }),
   })
 
   record.answered = discovered.answered
@@ -1143,9 +1185,32 @@ export async function continueReview(
         "source continued beside its branches would be an unmarked copy of their prefix.",
     )
   }
+  // B6 — CHECKED BEFORE ANYTHING IS CONSUMED, with the policy above, and read
+  // once: the snapshot is what the record names and what the stages send.
+  const variants = snapshotReasoningVariants(deps.reasoningVariants)
+  const inheritedDiscover = prepared.record.reasoningVariants?.discover
+  const askedDiscover = variants?.discover
+  if (askedDiscover !== undefined && askedDiscover !== inheritedDiscover) {
+    throw new Error(
+      `this continuation names discovery's reasoning variant as ${JSON.stringify(askedDiscover)}, but the ` +
+        `prepared review ran discovery with ${inheritedDiscover === undefined ? "none" : JSON.stringify(inheritedDiscover)}. ` +
+        `A continuation cannot change it. Nothing was routed and the prepared review is still unused.`,
+    )
+  }
   continued.add(prepared.record)
 
   const { record, framedChange, answeredSlots } = prepared
+  {
+    const debateVariant = variants?.debate
+    const judgeVariant = variants?.judge
+    if (debateVariant !== undefined || judgeVariant !== undefined) {
+      record.reasoningVariants = {
+        ...(record.reasoningVariants ?? {}),
+        ...(debateVariant === undefined ? {} : { debate: debateVariant }),
+        ...(judgeVariant === undefined ? {} : { judge: judgeVariant }),
+      }
+    }
+  }
   // The execution view: the initial selection plus any dispatched replacement
   // slot, so debate and the judge can seat and name them. `record.roster`
   // itself stays the initial selection.
@@ -1209,6 +1274,7 @@ export async function continueReview(
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
     ...(deps.debateReferences === true ? { references: true } : {}),
     ...(deps.debateMissingEvidence === true ? { missingEvidence: true } : {}),
+    ...(variants?.debate === undefined ? {} : { variant: variants.debate }),
   })
   // Re-stamped from the stage's return for routing's reason exactly: the record
   // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is
@@ -1273,6 +1339,7 @@ export async function continueReview(
     // and that is what keeps an unobserved run's bytes identical.
     ...(deps.toolObservation === undefined ? {} : { toolObservation: deps.toolObservation }),
     ...(deps.observationTimeoutMs === undefined ? {} : { observationTimeoutMs: deps.observationTimeoutMs }),
+    ...(variants?.judge === undefined ? {} : { variant: variants.judge }),
   })
   // Re-stamped from the stage's return for routing's and debate's reason: the
   // record reports what the STAGE did, never a renderer's recount over the
@@ -1409,5 +1476,12 @@ export async function continueReview(
  * halves, drained once as the record closes.
  */
 export async function review(deps: ReviewDeps): Promise<ReviewResult> {
-  return continueReview(await prepareReview(deps), deps)
+  // B6 — ONE SNAPSHOT FOR BOTH HALVES, so a caller changing its object during
+  // preparation cannot make the continuation disagree with what discovery sent.
+  // Absence is pinned too: both halves get this copy of `deps`, never the
+  // caller's object, so a property the caller adds later is not seen.
+  const variants = snapshotReasoningVariants(deps.reasoningVariants)
+  const { reasoningVariants: _callerOwned, ...rest } = deps
+  const pinned: ReviewDeps = variants === undefined ? rest : { ...rest, reasoningVariants: variants }
+  return continueReview(await prepareReview(pinned), pinned)
 }

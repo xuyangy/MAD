@@ -17,7 +17,7 @@ import { join } from "node:path"
 import { emptyLedger, type RunRecord } from "../../core/domain/run-record.ts"
 import type { Envelope, ModelBackend } from "../../core/ports/model-backend.ts"
 import { selectRoster } from "../../core/roster/select.ts"
-import { candidate, fakeChange } from "../../core/test-support/fakes.ts"
+import { candidate, fakeChange, FakeBackend } from "../../core/test-support/fakes.ts"
 import {
   ARTIFACTS_ENV,
   artifactRootFrom,
@@ -579,5 +579,16 @@ describe("session-status.jsonl — the host's status reads, when a status record
     const root = await tempDir("mad-artifacts-")
     await dumpRunArtifacts(dumpInput({ env: { [ARTIFACTS_ENV]: root } }))
     expect((await readdir(join(root, "run-7a-1"))).includes("session-status.jsonl")).toBe(false)
+  })
+})
+
+describe("createTurnRecorder — plan item B6", () => {
+  test("the wrapped backend forwards the per-turn options, and absent options stay absent", async () => {
+    const inner = new FakeBackend({ "discovery-1": [{ kind: "ok", value: { findings: [] } }] })
+    const wrapped = createTurnRecorder().wrap(inner)
+    const schema = (await import("zod")).z.object({ findings: (await import("zod")).z.array((await import("zod")).z.unknown()) })
+    await wrapped.runTurn("discovery-1", "instr", "prompt", schema, undefined, undefined, { variant: "high" })
+    await wrapped.runTurn("discovery-1", "instr", "prompt", schema)
+    expect(inner.turnOptions).toEqual([{ variant: "high" }, undefined])
   })
 })

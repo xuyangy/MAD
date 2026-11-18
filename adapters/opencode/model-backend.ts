@@ -42,6 +42,7 @@ import {
   type Refusal,
   type TurnFailure,
   type UsageUnknown,
+  type TurnOptions,
 } from "../../core/ports/model-backend.ts"
 
 /**
@@ -61,6 +62,8 @@ export interface HostPromptArgs {
   model: { providerID: string; modelID: string }
   system: string
   format: { type: "json_schema"; schema: Record<string, unknown> }
+  /** Plan item B6 — the prompt-level reasoning variant, present only when one was asked for. */
+  variant?: string
   tools?: Record<string, boolean>
   parts: Array<{ type: "text"; text: string }>
 }
@@ -1278,6 +1281,7 @@ export class OpencodeModelBackend implements ModelBackend {
     schema: ZodType<T>,
     signal?: AbortSignal,
     admitted?: AdmittedTurn,
+    options?: TurnOptions,
   ): Promise<Envelope<T>> {
     const rosterSlot = this.bySlot.get(slot)
     if (!rosterSlot) {
@@ -1392,6 +1396,7 @@ export class OpencodeModelBackend implements ModelBackend {
       schema,
       signal,
       metered: metered !== undefined,
+      ...(options === undefined ? {} : { options }),
     })
     if (metered !== undefined) {
       const usage = await metered.close().catch(
@@ -1428,8 +1433,9 @@ export class OpencodeModelBackend implements ModelBackend {
     schema: ZodType<T>
     signal?: AbortSignal
     metered: boolean
+    options?: TurnOptions
   }): Promise<Envelope<T>> {
-    const { sessionID, rosterSlot, slot, instructions, input, schema, signal, metered } = request
+    const { sessionID, rosterSlot, slot, instructions, input, schema, signal, metered, options } = request
 
     // A schema zod cannot render as JSON Schema is a programmer error, but it
     // must not throw THROUGH the port — `runTurn` returns failures, it does not
@@ -1485,6 +1491,8 @@ export class OpencodeModelBackend implements ModelBackend {
           system: this.promptNotice === undefined ? instructions : `${instructions}\n\n${this.promptNotice}`,
           // AD-12 — structured output.
           format: { type: "json_schema", schema: jsonSchema },
+          // B6 — beside the model, never inside it, and absent when unset.
+          ...(options?.variant === undefined ? {} : { variant: options.variant }),
           ...(this.tools ? { tools: this.tools } : {}),
           parts: [{ type: "text", text: input }],
         }),

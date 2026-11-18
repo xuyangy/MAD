@@ -252,3 +252,16 @@ describe("session.delete", () => {
     expect(deleted.error).toEqual(refusal)
   })
 })
+
+describe("session.prompt — plan item B6", () => {
+  test("a variant is sent beside the model, and no variant key is sent without one", async () => {
+    const host = recordingHost(() => json(200, { info: {}, parts: [] }))
+    await host.api.session.prompt({ ...PROMPT, variant: "high" })
+    const body = host.requests[0]!.body as Record<string, unknown>
+    expect(body["variant"]).toBe("high")
+    expect(body["model"]).toEqual(PROMPT.model)
+    await host.api.session.prompt(PROMPT)
+    expect("variant" in (host.requests[1]!.body as object)).toBe(false)
+    expect(Object.keys(host.requests[1]!.body as object).sort()).toEqual(["format", "model", "parts", "system", "tools"])
+  })
+})

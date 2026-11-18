@@ -823,9 +823,9 @@ async function stopHost(context: ProbeContext, host: ProbeHost): Promise<string>
 function countingBackend(inner: ModelBackend, calls: { count: number }): ModelBackend {
   return {
     capabilities: (slot) => inner.capabilities(slot),
-    runTurn(slot, instructions, input, schema, signal, admitted) {
+    runTurn(slot, instructions, input, schema, signal, admitted, options) {
       calls.count += 1
-      return inner.runTurn(slot, instructions, input, schema, signal, admitted)
+      return inner.runTurn(slot, instructions, input, schema, signal, admitted, options)
     },
   }
 }

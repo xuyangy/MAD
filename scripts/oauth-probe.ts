@@ -756,9 +756,9 @@ export async function runRegistry(context: ProbeContext, scenario: Extract<Scena
 function countingBackend(inner: ModelBackend, calls: { count: number }): ModelBackend {
   return {
     capabilities: (slot) => inner.capabilities(slot),
-    runTurn(slot, instructions, input, schema, signal, admitted) {
+    runTurn(slot, instructions, input, schema, signal, admitted, options) {
       calls.count += 1
-      return inner.runTurn(slot, instructions, input, schema, signal, admitted)
+      return inner.runTurn(slot, instructions, input, schema, signal, admitted, options)
     },
   }
 }
@@ -776,12 +776,12 @@ function countingBackend(inner: ModelBackend, calls: { count: number }): ModelBa
 export function hostErrorBackend(inner: ModelBackend, marks: readonly AttemptMark[]): ModelBackend {
   return {
     capabilities: (slot) => inner.capabilities(slot),
-    async runTurn(slot, instructions, input, schema, signal, admitted) {
+    async runTurn(slot, instructions, input, schema, signal, admitted, options) {
       const open = marks.filter((entry) => entry.settledAt === undefined && entry.claimed !== true)
       const mark = open.length === 1 ? open[0]! : undefined
       if (mark !== undefined) mark.claimed = true
       try {
-        const envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted)
+        const envelope = await inner.runTurn(slot, instructions, input, schema, signal, admitted, options)
         if (mark !== undefined) mark.hostError = hostErrorOf(envelope)
         return envelope
       } catch (error) {

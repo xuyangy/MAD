@@ -184,6 +184,11 @@ export function salvageFindings(raw: unknown): Salvage | undefined {
 export interface DiscoverInput {
   roster: Roster
   /**
+   * Plan item B6 — the reasoning variant every turn of this stage asks the host
+   * for, retries and replacements included. Absent: no variant is sent.
+   */
+  variant?: string
+  /**
    * The routes a refused pool slot may be replaced with, each bound in
    * `backend` under its slot id. Absent means no slot is replaced: a refused
    * slot is recorded as not replaced, with no plan.
@@ -455,6 +460,7 @@ async function runWithOneRetry(
         discoveryEnvelopeSchema,
         input.signal,
         admitted,
+        input.variant === undefined ? undefined : { variant: input.variant },
       )
     } catch (error) {
       // A backend is supposed to return failures, not throw them (spine,

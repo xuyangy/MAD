@@ -112,6 +112,12 @@ export interface RunJson {
     usageComplete: boolean
   }
   findingIds: "run-local"
+  /**
+   * Plan item B6 — present only when a stage was configured with a variant:
+   * the configuration, sent on the requests each stage issued, never a claim
+   * that it was applied.
+   */
+  reasoningVariantsConfigured?: { discover?: string; debate?: string; judge?: string }
   warnings: RunJsonWarning[]
   disclosures: RunJsonWarning[]
   findings: RunJsonFinding[]
@@ -207,6 +213,7 @@ export function runJson(record: RunRecord): RunJson {
       usageComplete: usageIsComplete(record.ledger),
     },
     findingIds: "run-local",
+    ...(record.reasoningVariants === undefined ? {} : { reasoningVariantsConfigured: { ...record.reasoningVariants } }),
     warnings: degradations.map(warningOf),
     disclosures: disclosures.map(warningOf),
     findings,
