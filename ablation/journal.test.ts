@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
+import { appendFile, chmod, mkdir, mkdtemp, open, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -8,7 +8,18 @@ import { OpencodeModelBackend } from "../adapters/opencode/model-backend.ts"
 import { createLateUsageSink } from "../core/ports/late-usage.ts"
 import { settlementOf } from "../core/stages/settlement.ts"
 import { z } from "zod"
-import { acquireLock, ATTEMPT_MODE_STOP_PREFIX, JOURNAL_FILE, LOCK_FILE, openJournal, type JournalIo, type JournalLine, type PairedJournal } from "./journal.ts"
+import {
+  acquireLock,
+  ATTEMPT_MODE_STOP_PREFIX,
+  JOURNAL_FILE,
+  LOCK_FILE,
+  openJournal,
+  type JournalIo,
+  type JournalLine,
+  type LockHandle,
+  type LockIo,
+  type PairedJournal,
+} from "./journal.ts"
 import { existsSync } from "node:fs"
 import { createExperimentGovernor, HALT_MARKER_FILE } from "./governor.ts"
 
@@ -55,6 +66,72 @@ describe("the lock — one writer per bundle root", () => {
     if (!second.ok) expect(second.reason).toContain("another writer holds")
     if (first.ok) expect(await first.lock.release()).toBeNull()
     expect((await acquireLock(root, now())).ok).toBe(true)
+  })
+
+  /**
+   * The real `wx` open and the real unlink, with the lock contents' write, its
+   * close or the cleanup unlink failing on demand. The close fault closes the
+   * real descriptor first, so only the reported outcome is simulated.
+   */
+  function faultyLockIo(fault: { write?: string; close?: string; unlink?: string }): LockIo {
+    return {
+      async open(file, flags, mode): Promise<LockHandle> {
+        const handle = await open(file, flags, mode)
+        return {
+          async writeFile(data, encoding) {
+            if (fault.write !== undefined) throw new Error(fault.write)
+            await handle.writeFile(data, encoding)
+          },
+          async close() {
+            await handle.close()
+            if (fault.close !== undefined) throw new Error(fault.close)
+          },
+        }
+      },
+      async unlink(file) {
+        if (fault.unlink !== undefined) throw new Error(fault.unlink)
+        await unlink(file)
+      },
+    }
+  }
+
+  for (const step of ["write", "close"] as const) {
+    test(`a lock whose ${step} fails after the file was created is removed, and the next writer gets in`, async () => {
+      const root = await tempDir()
+      const injected = `injected ${step} failure`
+      const outcome = await acquireLock(root, now(), faultyLockIo({ [step]: injected }))
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) {
+        expect(outcome.reason).toContain(`could not be written (${injected})`)
+        expect(outcome.reason).not.toContain("could not be removed")
+      }
+      expect(existsSync(join(root, LOCK_FILE))).toBe(false)
+
+      const next = await acquireLock(root, now())
+      expect(next.ok).toBe(true)
+      if (next.ok) expect(await next.lock.release()).toBeNull()
+    })
+  }
+
+  test("a cleanup that fails too is reported beside the first failure, and the lock it left still refuses", async () => {
+    const root = await tempDir()
+    const outcome = await acquireLock(
+      root,
+      now(),
+      faultyLockIo({ write: "injected write failure", unlink: "injected unlink failure" }),
+    )
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain(
+        "could not be written (injected write failure); the partial lock could not be removed either " +
+          "(injected unlink failure)",
+      )
+    }
+    expect(existsSync(join(root, LOCK_FILE))).toBe(true)
+
+    const next = await acquireLock(root, now())
+    expect(next.ok).toBe(false)
+    if (!next.ok) expect(next.reason).toContain("another writer holds")
   })
 
   test("an I/O error fails closed", async () => {

@@ -148,14 +148,34 @@ export interface HeldLock {
 
 export type LockOutcome = { ok: true; lock: HeldLock } | { ok: false; reason: string }
 
+/** The calls `acquireLock` makes on the lock file's open handle. */
+export interface LockHandle {
+  writeFile(data: string, encoding: "utf8"): Promise<void>
+  close(): Promise<void>
+}
+
+/**
+ * The lock file operations `acquireLock` performs, as `node:fs/promises`'s
+ * `open(file, "wx", 0o600)` and `unlink(file)`. A test replaces them to fail a
+ * step; every caller outside the tests takes the default.
+ */
+export interface LockIo {
+  open(file: string, flags: "wx", mode: number): Promise<LockHandle>
+  unlink(file: string): Promise<void>
+}
+
+const NODE_LOCK_IO: LockIo = { open, unlink }
+
 /**
  * Take the bundle root's single-writer lock.
  *
  * Created with `wx`, so an existing lock refuses and nothing is overwritten.
  * Every other I/O error refuses too: a writer that cannot establish it is alone
- * does not write.
+ * does not write. When the file was created but its contents could not be
+ * written or closed, this call removes it, and a failed removal is reported
+ * beside the first failure.
  */
-export async function acquireLock(bundleRoot: string, at: string): Promise<LockOutcome> {
+export async function acquireLock(bundleRoot: string, at: string, io: LockIo = NODE_LOCK_IO): Promise<LockOutcome> {
   const root = resolve(bundleRoot)
   const file = join(root, LOCK_FILE)
   try {
@@ -168,9 +188,9 @@ export async function acquireLock(bundleRoot: string, at: string): Promise<LockO
         `established and nothing was written.`,
     }
   }
-  let handle: Awaited<ReturnType<typeof open>>
+  let handle: LockHandle
   try {
-    handle = await open(file, "wx", 0o600)
+    handle = await io.open(file, "wx", 0o600)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
     return {
@@ -191,7 +211,7 @@ export async function acquireLock(bundleRoot: string, at: string): Promise<LockO
   } catch (error) {
     // THIS CALL CREATED THE FILE, so it removes it: a lock left behind by a
     // writer that never held it would refuse every later writer.
-    const cleanup = await unlink(file).then(
+    const cleanup = await io.unlink(file).then(
       () => "",
       (unlinkError: unknown) => `; the partial lock could not be removed either (${messageOf(unlinkError)})`,
     )
@@ -210,7 +230,7 @@ export async function acquireLock(bundleRoot: string, at: string): Promise<LockO
       async release() {
         if (released) return null
         try {
-          await unlink(file)
+          await io.unlink(file)
           released = true
           return null
         } catch (error) {
