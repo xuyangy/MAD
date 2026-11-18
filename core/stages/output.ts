@@ -192,64 +192,71 @@ function evidenceRank(finding: Finding): number {
  * documented precedence; nothing is combined into a score.
  */
 export function rankFindings(findings: Finding[]): Finding[] {
-  const ordered = [...findings].sort((a, b) => {
-    // 1. severity — read through `effectiveSeverity`, the SAME accessor the
-    // severity cell renders. Sorting on the raw `severity` field instead let a
-    // cluster that absorbed a member's `critical` print `critical` and rank
-    // below a `high`, because `clusterSeverity` is written exactly when the
-    // highest member severity is not the canonical's own (AD-10, AD-8: the raw
-    // field stays unwritten). Ordering and rendering must read one accessor.
-    const bySeverity = severityRank(effectiveSeverity(b)) - severityRank(effectiveSeverity(a))
-    if (bySeverity !== 0) return bySeverity
-
-    // 2. AD-9 amended — co-discovery is a criterion only when BOTH findings
-    // carry a prior. Compared as a ratio at sort time and never stored: raw
-    // `raised` counts would rank 2/9 above 1/1, inverting the signal the moment
-    // denominators differ — which they do from story 2 onward.
-    //
-    // A missing prior is NOT coerced to a ratio. `coDiscoveryRatio` returns `0`
-    // for an absent pair, and `0` already means "nobody answered" — a genuinely
-    // different fact. Reusing it here would rank a correct lens finding dead
-    // last as though every model had disagreed with it.
-    //
-    // THE PREDICATE IS `coDiscovery !== undefined`, NOT `source === 'pool'`, and
-    // that is not a contradiction of AD-9's "never discriminate on
-    // `coDiscovery === undefined`". The two ask different questions. RENDERING
-    // asks "is a prior claimable at all?" — permanently a question about
-    // `source`. ORDERING asks "does this finding carry a prior right now?" — and
-    // a POOL finding before clustering runs does not, so `source === 'pool'`
-    // would compare a pool finding's absent prior against a real one and
-    // reintroduce the coercion from the other side. Do not "correct" this.
-    const aPrior = a.coDiscovery !== undefined
-    const bPrior = b.coDiscovery !== undefined
-    if (aPrior && bPrior) {
-      const byCoDiscovery = coDiscoveryRatio(b) - coDiscoveryRatio(a)
-      if (byCoDiscovery !== 0) return byCoDiscovery
-    }
-    // 3. AD-9 amended, and this is the criterion story 6 was told to add: when
-    // co-discovery is skipped or ties, ordering falls through to VERDICT, then
-    // EVIDENCE, then locus. Each is read on its own — nothing is combined into a
-    // score, and nothing is stored.
-    const byVerdict = verdictRank(b) - verdictRank(a)
-    if (byVerdict !== 0) return byVerdict
-
-    // 4. what was actually produced. A verdict backed by a file somebody opened
-    // sorts above one backed by a model's confidence, which is CAP-6's whole
-    // claim about the evidence column applied to the order the columns appear in.
-    const byEvidence = evidenceRank(b) - evidenceRank(a)
-    if (byEvidence !== 0) return byEvidence
-
-    // 5. stable tiebreak on locus, so two runs of the same input print alike
-    const byFile = a.locus.file.localeCompare(b.locus.file)
-    if (byFile !== 0) return byFile
-    return (a.locus.startLine ?? 0) - (b.locus.startLine ?? 0)
-  })
+  const ordered = [...findings].sort(compareFindings)
 
   // `rank` is output's own field (AD-8).
   ordered.forEach((finding, index) => {
     finding.rank = index + 1
   })
   return ordered
+}
+
+/**
+ * The comparator `rankFindings` sorts with, exported so a renderer that must
+ * not write `rank` (`./output-json.ts`) orders findings exactly as the report
+ * does.
+ */
+export function compareFindings(a: Finding, b: Finding): number {
+  // 1. severity — read through `effectiveSeverity`, the SAME accessor the
+  // severity cell renders. Sorting on the raw `severity` field instead let a
+  // cluster that absorbed a member's `critical` print `critical` and rank
+  // below a `high`, because `clusterSeverity` is written exactly when the
+  // highest member severity is not the canonical's own (AD-10, AD-8: the raw
+  // field stays unwritten). Ordering and rendering must read one accessor.
+  const bySeverity = severityRank(effectiveSeverity(b)) - severityRank(effectiveSeverity(a))
+  if (bySeverity !== 0) return bySeverity
+
+  // 2. AD-9 amended — co-discovery is a criterion only when BOTH findings
+  // carry a prior. Compared as a ratio at sort time and never stored: raw
+  // `raised` counts would rank 2/9 above 1/1, inverting the signal the moment
+  // denominators differ — which they do from story 2 onward.
+  //
+  // A missing prior is NOT coerced to a ratio. `coDiscoveryRatio` returns `0`
+  // for an absent pair, and `0` already means "nobody answered" — a genuinely
+  // different fact. Reusing it here would rank a correct lens finding dead
+  // last as though every model had disagreed with it.
+  //
+  // THE PREDICATE IS `coDiscovery !== undefined`, NOT `source === 'pool'`, and
+  // that is not a contradiction of AD-9's "never discriminate on
+  // `coDiscovery === undefined`". The two ask different questions. RENDERING
+  // asks "is a prior claimable at all?" — permanently a question about
+  // `source`. ORDERING asks "does this finding carry a prior right now?" — and
+  // a POOL finding before clustering runs does not, so `source === 'pool'`
+  // would compare a pool finding's absent prior against a real one and
+  // reintroduce the coercion from the other side. Do not "correct" this.
+  const aPrior = a.coDiscovery !== undefined
+  const bPrior = b.coDiscovery !== undefined
+  if (aPrior && bPrior) {
+    const byCoDiscovery = coDiscoveryRatio(b) - coDiscoveryRatio(a)
+    if (byCoDiscovery !== 0) return byCoDiscovery
+  }
+  // 3. AD-9 amended, and this is the criterion story 6 was told to add: when
+  // co-discovery is skipped or ties, ordering falls through to VERDICT, then
+  // EVIDENCE, then locus. Each is read on its own — nothing is combined into a
+  // score, and nothing is stored.
+  const byVerdict = verdictRank(b) - verdictRank(a)
+  if (byVerdict !== 0) return byVerdict
+
+  // 4. what was actually produced. A verdict backed by a file somebody opened
+  // sorts above one backed by a model's confidence, which is CAP-6's whole
+  // claim about the evidence column applied to the order the columns appear in.
+  const byEvidence = evidenceRank(b) - evidenceRank(a)
+  if (byEvidence !== 0) return byEvidence
+
+  // 5. stable tiebreak on locus, so two runs of the same input print alike
+  const byFile = a.locus.file.localeCompare(b.locus.file)
+  if (byFile !== 0) return byFile
+  return (a.locus.startLine ?? 0) - (b.locus.startLine ?? 0)
 }
 
 /**
