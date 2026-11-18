@@ -6,7 +6,9 @@
  * NEVER IMPORTED BY `material.ts` NOR BY THE WORKTREE WRITER
  * (`ablation/adversarial-materialize.ts`). The runner reads it only to check the
  * seal; the reader reads it to score. `ablation/adversarial-materialize.test.ts`
- * checks the import lists and the written worktrees.
+ * checks the import lists and the written worktrees, and
+ * `scripts/lint-dependency-direction.ts` fails CI if the writer can load this
+ * file by any chain of imports.
  *
  * ## The target label
  *

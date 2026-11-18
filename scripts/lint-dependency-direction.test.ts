@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import {
-  ANSWER_KEY,
+  ANSWER_KEYS,
   ANSWER_KEY_ISOLATED_ROOTS,
   answerKeyViolations,
   bunResolver,
@@ -372,14 +372,17 @@ describe("the AD-1 and adapter rules see every import, a side-effect or dynamic 
   })
 })
 
-describe("the answer key never reaches the labelled worktree writer (ledger #13)", () => {
+describe("no answer key reaches a reviewed-worktree writer (ledger #13)", () => {
   const ROOT = "scripts/materialize-labelled-change.ts"
+  const ADVERSARIAL_ROOT = "ablation/adversarial-materialize.ts"
+  const ANSWER_KEY = "fixtures/seeded-defects/labels.ts"
+  const ADVERSARIAL_KEY = "fixtures/adversarial/assertions.ts"
   const MATERIAL = "fixtures/seeded-defects/material.ts"
   const reader = (files: Record<string, string>) => (path: string) => files[path]
 
-  test("the root is the labelled worktree writer and the labels are the answer key", () => {
-    expect(ANSWER_KEY_ISOLATED_ROOTS).toEqual([ROOT])
-    expect(ANSWER_KEY).toBe("fixtures/seeded-defects/labels.ts")
+  test("the roots are the two worktree writers and the keys are both fixtures' answer keys", () => {
+    expect(ANSWER_KEY_ISOLATED_ROOTS).toEqual([ROOT, ADVERSARIAL_ROOT])
+    expect(ANSWER_KEYS).toEqual([ANSWER_KEY, ADVERSARIAL_KEY])
   })
 
   test("a direct import is a violation naming the chain", () => {
@@ -616,6 +619,67 @@ describe("the answer key never reaches the labelled worktree writer (ledger #13)
     expect(violations[0]!.why).toContain(`it is reached as ${ROOT} -> ${ANSWER_KEY}`)
   })
 
+  test("the adversarial writer reaching its assertions through its seal is a violation", async () => {
+    const seal = "fixtures/adversarial/seal.ts"
+    const violations = answerKeyViolations(
+      [ADVERSARIAL_ROOT],
+      reader({
+        [ADVERSARIAL_ROOT]: `import { ADVERSARIAL_SEAL } from "../fixtures/adversarial/seal.ts"\n`,
+        [seal]: await Bun.file(new URL(`../${seal}`, import.meta.url)).text(),
+        "fixtures/adversarial/material.ts": "",
+        [ADVERSARIAL_KEY]: "",
+      }),
+    )
+    expect(violations.map((v) => [v.file, v.specifier])).toEqual([[seal, "./assertions.ts"]])
+    expect(violations[0]!.why).toContain(`the answer key \`${ADVERSARIAL_KEY}\` must not be loadable by \`${ADVERSARIAL_ROOT}\``)
+    expect(violations[0]!.why).toContain(`it is reached as ${ADVERSARIAL_ROOT} -> ${seal} -> ${ADVERSARIAL_KEY}`)
+  })
+
+  test("each writer is checked against the other fixture's answer key too", () => {
+    const keys = { [ANSWER_KEY]: "", [ADVERSARIAL_KEY]: "" }
+    const adversarialLeak = answerKeyViolations(
+      [ADVERSARIAL_ROOT],
+      reader({ ...keys, [ADVERSARIAL_ROOT]: `import { SEEDED_DEFECTS } from "../fixtures/seeded-defects/labels.ts"\n` }),
+    )
+    expect(adversarialLeak.map((v) => v.why)).toEqual([
+      expect.stringContaining(`it is reached as ${ADVERSARIAL_ROOT} -> ${ANSWER_KEY}`),
+    ])
+    const labelledLeak = answerKeyViolations(
+      [ROOT],
+      reader({ ...keys, [ROOT]: `import { ADVERSARIAL_ASSERTIONS } from "../fixtures/adversarial/assertions.ts"\n` }),
+    )
+    expect(labelledLeak.map((v) => v.why)).toEqual([expect.stringContaining(`it is reached as ${ROOT} -> ${ADVERSARIAL_KEY}`)])
+  })
+
+  test("one module loading both keys is one violation per key", () => {
+    const violations = answerKeyViolations(
+      [ROOT],
+      reader({
+        [ROOT]: `import "../fixtures/seeded-defects/labels.ts"\nimport "../fixtures/adversarial/assertions.ts"\n`,
+        [ANSWER_KEY]: "",
+        [ADVERSARIAL_KEY]: "",
+      }),
+    )
+    expect(violations.map((v) => v.specifier)).toEqual([
+      "../fixtures/seeded-defects/labels.ts",
+      "../fixtures/adversarial/assertions.ts",
+    ])
+  })
+
+  test("both real writers, read and resolved from disk as the lint does, load no answer key", () => {
+    const repository = join(import.meta.dir, "..")
+    const read = (path: string) => {
+      try {
+        return readFileSync(join(repository, path), "utf8")
+      } catch {
+        return undefined
+      }
+    }
+    for (const root of ANSWER_KEY_ISOLATED_ROOTS) {
+      expect(answerKeyViolations([root], read, bunResolver(repository))).toEqual([])
+    }
+  })
+
   test("a root that cannot be read is a violation, not a pass", () => {
     const violations = answerKeyViolations([ROOT], reader({}))
     expect(violations).toHaveLength(1)
@@ -633,8 +697,8 @@ describe("the answer key never reaches the labelled worktree writer (ledger #13)
       console.error = original
     }
     expect(errors.join("\n")).toContain(
-      `fixtures/seeded-defects/change.ts: imports "./labels.ts" — the answer key must not be loadable by ` +
-        "`fixtures/seeded-defects/arms.ts`",
+      `fixtures/seeded-defects/change.ts: imports "./labels.ts" — the answer key \`${ANSWER_KEY}\` must not be ` +
+        "loadable by `fixtures/seeded-defects/arms.ts`",
     )
     expect(errors.join("\n")).toContain(
       `it is reached as fixtures/seeded-defects/arms.ts -> fixtures/seeded-defects/change.ts -> ${ANSWER_KEY}`,

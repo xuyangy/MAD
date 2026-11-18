@@ -291,21 +291,31 @@ export function scanAdapterSource(file: string, source: string): Violation[] {
 }
 
 /**
- * The answer key never reaches the labelled worktree writer (story 2-4's AC2,
- * ledger #13).
+ * No answer key reaches a reviewed-worktree writer (story 2-4's AC2, story
+ * 2-7b, ledger #13).
  *
- * `scripts/materialize-labelled-change.ts` writes the worktree the models
- * review, and `fixtures/seeded-defects/labels.ts` holds the defects they are
- * scored against. No module the writer can load, followed transitively through
- * relative run-time imports, may load the labels. A direct import and one
- * through a helper, a barrel such as `fixtures/seeded-defects/change.ts`, or a
- * module that only hashes them such as `fixtures/seeded-defects/seal.ts`, are
- * all a leak: whatever loads the labels can export them.
+ * Each writer in {@link ANSWER_KEY_ISOLATED_ROOTS} writes a worktree the models
+ * review, and each file in {@link ANSWER_KEYS} holds what a fixture's runs are
+ * scored against. No module a writer can load, followed transitively through
+ * relative run-time imports, may load any answer key, its own fixture's or
+ * another's. A direct import and one through a helper, a barrel such as
+ * `fixtures/seeded-defects/change.ts`, or a module that only hashes a key such
+ * as either fixture's `seal.ts`, are all a leak: whatever loads a key can export
+ * it.
  */
-export const ANSWER_KEY = "fixtures/seeded-defects/labels.ts"
+export const ANSWER_KEYS: readonly string[] = [
+  "fixtures/seeded-defects/labels.ts",
+  "fixtures/adversarial/assertions.ts",
+]
 
-/** The modules that write a reviewed worktree, whose module graphs are checked. */
-export const ANSWER_KEY_ISOLATED_ROOTS: readonly string[] = ["scripts/materialize-labelled-change.ts"]
+/**
+ * The modules that write a reviewed worktree, whose module graphs are checked.
+ * Named, not discovered: a new writer is covered once it is added here.
+ */
+export const ANSWER_KEY_ISOLATED_ROOTS: readonly string[] = [
+  "scripts/materialize-labelled-change.ts",
+  "ablation/adversarial-materialize.ts",
+]
 
 /** Resolves a relative specifier in `file` to a repository path, or undefined. */
 export type ResolveImport = (specifier: string, file: string) => string | undefined
@@ -373,8 +383,8 @@ export function localReferences(
 }
 
 /**
- * Every way each root reaches {@link ANSWER_KEY}: one violation per module that
- * imports it, naming the chain from the root. Breadth-first, so each chain is a
+ * Every way each root reaches one of {@link ANSWER_KEYS}: one violation per
+ * module and key it imports, naming the chain from the root. Breadth-first, so each chain is a
  * shortest one, and each module is expanded once, so a cycle ends. A root that
  * cannot be read, a module in its graph that does not parse, and a relative
  * import that resolves to no file are violations too: what they load cannot be
@@ -428,13 +438,13 @@ export function answerKeyViolations(
           })
           continue
         }
-        if (path === ANSWER_KEY) {
+        if (ANSWER_KEYS.includes(path)) {
           violations.push({
             file,
             specifier,
             why:
-              `the answer key must not be loadable by \`${root}\`, which writes the reviewed ` +
-              `worktree (story 2-4 AC2); it is reached as ${chainTo(file)} -> ${path}`,
+              `the answer key \`${path}\` must not be loadable by \`${root}\`, which writes a ` +
+              `reviewed worktree (ledger #13); it is reached as ${chainTo(file)} -> ${path}`,
           })
           continue
         }
@@ -505,7 +515,7 @@ export async function main(
     `AD-1 dependency direction OK — ${checked} file(s) under core/ and adapters/ checked ` +
       `(${[...MUST_NOT_IMPORT].map((f) => `\`${f}\``).join(" and ")} import nothing; ` +
       `no stage builds a limiter or meters its own budget; ` +
-      `${answerKeyRoots.map((f) => `\`${f}\``).join(" and ")} cannot load \`${ANSWER_KEY}\`).`,
+      `${answerKeyRoots.map((f) => `\`${f}\``).join(" and ")} load no answer key).`,
   )
   return 0
 }
