@@ -121,7 +121,7 @@ describe("README — status", () => {
   test("the status line names the offline suite, the hand runs and the authorized runs the live sections report", () => {
     expect(README).toContain("**Status: checked offline; reviewed live on one host version.**")
     expect(README).toContain("No test here runs against a real OpenCode host.")
-    expect(README).toContain("On opencode-ai 1.19.5, two reviews were run by hand, and authorized reviews were run and recorded on each route from 2026-11-12 to 2026-11-17; *What a live review showed* and *Target host* below say what they did and did not show.")
+    expect(README).toContain("On opencode-ai 1.19.5, two reviews were run by hand, and authorized reviews were run and recorded on each route from 2026-11-12 to 2026-11-18; *What a live review showed* and *Target host* below say what they did and did not show.")
     expect(README).not.toContain("tried by hand on a live host")
     expect(README).toContain("- **What a live review showed.** A review was run by hand on opencode-ai 1.19.5")
     expect(README).not.toContain("not field-tested")
@@ -142,9 +142,16 @@ describe("README — status", () => {
     expect(PROSE).toContain("A route's compatibility is not established until a recorded, authorized live run on 1.19.5 shows it.")
     expect(PROSE).toContain("The two hand reviews below predate that record, and they are not validation.")
     expect(PROSE).toContain(
-      "This release's verdicts: both routes are *compatible with listed limitations*, `opencode run` from a run on 2026-11-16 and the TUI from a run on 2026-11-17. Each run returned a judged finding and left the reviewed repository unchanged. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. On `opencode run`, with three pinned models, `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. The TUI was not compatible after its 2026-11-16 run: three verified model lineages were selected, two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require; MAD then warned only after a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause, and the 2026-11-17 TUI run showed it: one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose `anthropic/claude-sonnet-4-6` and `opencode/deepseek-v4.1-flash-free` itself; `openai/gpt-6-luna` failed both attempts on its account's usage limit, the free model hit its usage limit, and the report warned that one of three verified lineages answered. The review rested on `anthropic/claude-sonnet-4-6` alone, which also judged its own finding. A free `opencode` model hit its usage limit in each run (`nemotron-3.5-lightning-free` on `opencode run`, `deepseek-v4.1-flash-free` in the TUI), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. Neither usage limit is treated as a refusal. The review took 16 seconds on `opencode run` and 2 minutes 43 seconds in the TUI, where each attempt on the pinned model's usage limit took about 75 seconds. The runs, the verdicts and every listed limitation are recorded as N5 and the 2026-11-16 verdict, and N8 and the 2026-11-17 TUI verdict, in the validation spec's live-evidence record, which is not among this repository's tracked files. `EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
+      "The current verdicts: both routes are *compatible with listed limitations*, the TUI from a run on 2026-11-17 and `opencode run` from a run on 2026-11-18. The v1.0.0 release gate rested on the 2026-11-17 TUI run and a 2026-11-16 `opencode run` run; the 2026-11-18 run came after the tag, on the same runtime code, and replaced the 2026-11-16 one as that route's evidence without changing its verdict. Each run returned a judged finding and left the reviewed repository unchanged. One run per route is a bounded compatibility check, not a claim about reliability or usefulness. The 2026-11-18 `opencode run` review pinned `anthropic/claude-sonnet-4-6`, `openai/gpt-6-luna` and the OpenRouter model `openrouter/nvidia/nemotron-3.5-lightning:free`; all three answered, no turn failed or was refused, MAD retried none, and it took 64 seconds. MAD's lineage table does not know the OpenRouter model's family, so the report counted two verified lineages, and said so. Which upstream served that model, and its logging and retention terms, are unknown. An earlier `opencode run` review, on 2026-11-16, pinned three models, and `anthropic/claude-opus-5-5`'s endpoint rejected the forced tool choice MAD's structured answers use, although the same model worked as the outer agent; MAD recognised the rejection as a capability refusal and did not retry it, and because the slot was pinned it was not replaced. Only `openai/gpt-6-luna` answered there, and the judge ran on that same model. The TUI was not compatible after its 2026-11-16 run: three verified model lineages were selected, two answered after an ordinary drop-out, and MAD's report did not warn that fewer verified lineages answered, a warning the criteria require; MAD then warned only after a refusal. MAD now warns whenever fewer verified lineages answer discovery than were selected, whatever the cause, and the 2026-11-17 TUI run showed it: one slot was pinned to `openai/gpt-6-luna` and `exclude` kept `anthropic/claude-opus-5-5` out; MAD chose `anthropic/claude-sonnet-4-6` and `opencode/deepseek-v4.1-flash-free` itself; `openai/gpt-6-luna` failed both attempts on its account's usage limit, the free model hit its usage limit, and the report warned that one of three verified lineages answered. The review rested on `anthropic/claude-sonnet-4-6` alone, which also judged its own finding. A free `opencode` model hit its usage limit in the 2026-11-16 `opencode run` review and the 2026-11-17 TUI review (`nemotron-3.5-lightning-free` and `deepseek-v4.1-flash-free`), and the host kept retrying it with its next try scheduled past MAD's turn deadline. MAD stopped waiting at its first read of the host's session status, about five seconds in, and retried each such turn once as an ordinary failure, which stopped the same way. Neither usage limit is treated as a refusal. The TUI review took 2 minutes 43 seconds, where each attempt on the pinned model's usage limit took about 75 seconds. The runs, the verdicts and every listed limitation are recorded as N7 and the 2026-11-18 `opencode run` verdict, and N8 and the 2026-11-17 TUI verdict, in the validation spec's live-evidence record, which is not among this repository's tracked files. `EVIDENCE.md` is the tracked summary of those verdicts, the runs they rest on and their limitations. The replacement of refused slots, the replacement session's policy check, a refusal in debate or the judge, a refusal stopping MAD from asking the slots it covers, and the tool-calling filter's exclusions have run only in the offline tests.",
     )
     expect(README).not.toContain("the offline-only outcome was chosen")
+    expect(README).not.toContain("`opencode run` from a run on 2026-11-16")
+    expect(README).not.toContain("This release's verdicts:")
+    expect(README).not.toContain("with no failed turn, retry or refusal")
+    expect(README).not.toContain("The review took 16 seconds on `opencode run`")
+    expect(README).not.toContain("recorded as N5 and the 2026-11-16 verdict")
+    expect(README).not.toContain("A free `opencode` model hit its usage limit in each run")
+    expect(README).not.toContain("from 2026-11-12 to 2026-11-17")
     expect(README).not.toContain("It warns only after a refusal.")
     expect(README).not.toContain("At that revision it warned only after a refusal.")
     expect(README).not.toContain("This release's verdicts were rendered on 2026-11-16")
@@ -193,7 +200,27 @@ describe("EVIDENCE.md — the tracked evidence summary", () => {
       expect(evidence![2]).toBe(readme![2])
     }
     expect(rowOf(EVIDENCE, "TUI")!.slice(3, 6)).toEqual(["2026-11-17", "N8", "`7622913`"])
-    expect(rowOf(EVIDENCE, "`opencode run`")!.slice(3, 6)).toEqual(["2026-11-16", "N5", "`e09ef1e`"])
+    expect(rowOf(EVIDENCE, "`opencode run`")!.slice(3, 6)).toEqual(["2026-11-18", "N7", "`59d27dd`"])
+    expect(EVIDENCE).toContain(
+      "| 2026-11-18 | `59d27dd` | (not re-rendered) | compatible with listed limitations | N7, above: an `opencode run` review with an OpenRouter model, on v1.0.0's runtime code |",
+    )
+    expect(EVIDENCE).toContain("| # | Offline | Live: TUI (N8) | Live: `opencode run` (N7) |")
+    expect(EVIDENCE).not.toContain("| # | Offline | Live: TUI (N8) | Live: `opencode run` (N5) |")
+    // N7's column of the runs table and its criteria cells.
+    const n7 = (label: string) => EVIDENCE.split("\n").find((line) => line.startsWith(`| ${label} |`))?.split("|").map((cell) => cell.trim())[2]
+    expect(n7("Date")).toBe("2026-11-18")
+    expect(n7("MAD revision")).toBe("`59d27dd`")
+    expect(n7("Duration of the review")).toBe("64 s")
+    expect(n7("Answered discovery")).toBe("3 of 3")
+    expect(n7("Why slots dropped out")).toBe("none dropped out; no turn failed")
+    expect(n7("Known tokens")).toBe("178984; no turn with unknown usage")
+    expect(EVIDENCE.split("\n").find((line) => line.startsWith("| V2 |"))?.split("|").map((cell) => cell.trim())[4]).toBe("not observed: no refusal (N5 passed it for a first-attempt refusal)")
+    expect(EVIDENCE.split("\n").find((line) => line.startsWith("| V3 |"))?.split("|").map((cell) => cell.trim())[4]).toBe("not observed: no refusal, and every slot was pinned")
+    expect(EVIDENCE.split("\n").find((line) => line.startsWith("| V4 |"))?.split("|").map((cell) => cell.trim())[4]).toBe("passed: no warning was due")
+    expect(EVIDENCE).toContain(
+      "- MAD's lineage table does not know the OpenRouter model `nvidia/nemotron-3.5-lightning:free`, so N7 counted two verified lineages of three slots. Which upstream OpenRouter routed it to, and that upstream's logging and retention terms, are unknown.",
+    )
+    expect(EVIDENCE).toContain("The release gate rested on N5 and N8; N7 ran after the tag, on the same runtime code, and now carries the `opencode run` verdict, which it left unchanged.")
     expect(EVIDENCE).toContain(
       "The TUI was *not compatible* on 2026-11-16 because V4's lineage warning was missing after an ordinary drop-out in N6",
     )
@@ -225,7 +252,19 @@ describe("RELEASE-NOTES.md — the v1 release notes", () => {
     expect(RELEASE_NOTES).not.toContain("Draft — not released")
     expect(RELEASE_NOTES).not.toContain("(draft)")
     expect(EVIDENCE).not.toContain("Release preparation is still to do")
-    expect(EVIDENCE).toContain("so N5's and N8's compatibility claims hold for the v1.0.0 candidate revision.")
+    expect(EVIDENCE).toContain("so N7's and N8's compatibility claims hold for the v1.0.0 candidate revision.")
+    expect(EVIDENCE).not.toContain("so N5's and N8's compatibility claims hold")
+    expect(RELEASE_NOTES).toContain(
+      "The release gate rested on one authorized live run per route: `opencode run` on 2026-11-16, and the TUI on 2026-11-17. The TUI's re-check run on 2026-11-16, N6, was *not compatible*:",
+    )
+    expect(RELEASE_NOTES).toContain(
+      "**Validation update after the release (2026-11-18).** An authorized `opencode run` run after the tag, N7, on the same runtime code as v1.0.0, now carries that route's verdict in place of the 2026-11-16 run; the verdict is unchanged.",
+    )
+    expect(RELEASE_NOTES).toContain("The tagged copy of these notes predates this update.")
+    expect(RELEASE_NOTES).toContain(
+      "- MAD's lineage table does not know every model's family; an unknown one is reported and not counted as a distinct lineage. Which upstream OpenRouter routes a model to, and its logging and retention terms, are not established by MAD.",
+    )
+    expect(RELEASE_NOTES).not.toContain("The TUI's first run, on 2026-11-16")
     expect(EVIDENCE).toContain("The annotated tag `v1.0.0` marks that revision.")
     expect(EVIDENCE).toContain("pass on `784c004`, the v1.0.0 candidate revision")
     expect(EVIDENCE).not.toContain("not yet tagged")

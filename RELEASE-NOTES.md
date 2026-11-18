@@ -13,7 +13,9 @@ v1 targets opencode-ai 1.19.5, used through the TUI and through `opencode run`. 
 | TUI | compatible with listed limitations |
 | `opencode run` | compatible with listed limitations |
 
-Each verdict rests on one authorized live run: `opencode run` on 2026-11-16, and the TUI on 2026-11-17. The TUI's first run, on 2026-11-16, was *not compatible*: fewer verified model lineages answered than were selected after an ordinary drop-out, and MAD did not warn about it. MAD now warns in that case, and the 2026-11-17 TUI run showed the warning. The runs, the criteria and the revisions they used are in [`EVIDENCE.md`](EVIDENCE.md).
+The release gate rested on one authorized live run per route: `opencode run` on 2026-11-16, and the TUI on 2026-11-17. The TUI's re-check run on 2026-11-16, N6, was *not compatible*: fewer verified model lineages answered than were selected after an ordinary drop-out, and MAD did not warn about it. MAD now warns in that case, and the 2026-11-17 TUI run showed the warning. The runs, the criteria and the revisions they used are in [`EVIDENCE.md`](EVIDENCE.md).
+
+**Validation update after the release (2026-11-18).** An authorized `opencode run` run after the tag, N7, on the same runtime code as v1.0.0, now carries that route's verdict in place of the 2026-11-16 run; the verdict is unchanged. It pinned three models, one of them an OpenRouter model, and all three answered. The tagged copy of these notes predates this update.
 
 ### What is in v1
 
@@ -45,8 +47,9 @@ These match [`EVIDENCE.md`, *Residual limitations*](EVIDENCE.md#residual-limitat
 - A model that declares tool calling can still have an endpoint that rejects MAD's forced tool choice. `exclude` keeps such a route out, for the reviews it is passed to.
 - A model at its usage limit, free or on a paid account, is retried once as an ordinary failure; it is not classified as a refusal.
 - Few models may answer, and a model may judge its own finding.
+- MAD's lineage table does not know every model's family; an unknown one is reported and not counted as a distinct lineage. Which upstream OpenRouter routes a model to, and its logging and retention terms, are not established by MAD.
 - The tool-calling filter's exclusions, and refusing a review when no offered model declares tool calling, were not exercised live.
-- The budget is an admission budget, not a spend cap. Every known token total is a floor, and the outer agent's usage is not metered.
+- The budget is an admission budget, not a spend cap. A known token total is a floor when a turn's usage is unknown, the host may bill steps MAD does not meter, and the outer agent's usage is not metered.
 - A finding's line is the reviewing model's citation; findings on one defect at different lines may not be merged.
 - Which version of the host's authentication plugin loaded is unknown, and the host's config merge was not read in full.
 - Four refusal shapes stay ordinary failures. `serverUrl` is not a supported plugin route.
