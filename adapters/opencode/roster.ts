@@ -78,6 +78,8 @@ export async function enumerateCandidates(client: Client): Promise<Candidate[]> 
         toolcall: model.capabilities?.toolcall === true,
         contextLimit: model.limit?.context,
         cost: model.cost ? { input: model.cost.input, output: model.cost.output } : undefined,
+        // B6 — the advertised variant names, only when the host gave a list.
+        ...advertisedVariants(model),
       })
     }
   }
@@ -142,4 +144,15 @@ export async function resolveRoster(
     hostGuidance: OPENCODE_HOST_GUIDANCE,
     requireToolcall: true,
   })
+}
+
+/**
+ * Plan item B6 — the variant names a host model entry advertises: the keys of
+ * its `variants` object when that is a plain object (an empty object gives
+ * `[]`), and nothing otherwise, so "no list" and "an empty list" stay apart.
+ */
+export function advertisedVariants(model: unknown): { variants?: readonly string[] } {
+  const variants = (model as { variants?: unknown } | null | undefined)?.variants
+  if (typeof variants !== "object" || variants === null || Array.isArray(variants)) return {}
+  return { variants: Object.keys(variants) }
 }

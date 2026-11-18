@@ -11,7 +11,7 @@
 
 import { MadStop, stopCauseOf, stoppedThisRun, type StopCause } from "../domain/stop-cause.ts"
 import { executionProviders, executionRoster, replacementsOf } from "../domain/recovery.ts"
-import type { RecoveryPlan, Roster } from "../domain/roster.ts"
+import type { Candidate, RecoveryPlan, Roster } from "../domain/roster.ts"
 import {
   clampConcurrency,
   clampPreset,
@@ -45,6 +45,7 @@ import type { ToolObservation } from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
 import { fenceFor, listCell, material, oneLine } from "../prompt/material.ts"
 import { cluster } from "../stages/cluster.ts"
+import { snapshotCandidates, variantAvailability } from "./variant-availability.ts"
 import { clampMaxRounds, debate } from "../stages/debate.ts"
 import { discover } from "../stages/discover.ts"
 import { judge } from "../stages/judge.ts"
@@ -331,6 +332,13 @@ export interface ReviewDeps {
    * discovery's.
    */
   reasoningVariants?: { discover?: string; debate?: string; judge?: string }
+  /**
+   * Plan item B6 — the host's candidates, with their advertised variant names,
+   * so the record can say which configured variants were advertised for the
+   * routes that issued requests (`RunRecord.variantAvailability`). Used only
+   * when a variant is configured; absent, nothing is computed.
+   */
+  variantCandidates?: readonly Candidate[]
 }
 
 /** B6 — the accepted shape of a variant name. */
@@ -655,6 +663,7 @@ export type ContinueDeps = Pick<
   | "debateReferences"
   | "debateMissingEvidence"
   | "reasoningVariants"
+  | "variantCandidates"
 >
 
 /**
@@ -1188,6 +1197,8 @@ export async function continueReview(
   // B6 — CHECKED BEFORE ANYTHING IS CONSUMED, with the policy above, and read
   // once: the snapshot is what the record names and what the stages send.
   const variants = snapshotReasoningVariants(deps.reasoningVariants)
+  // B6 — read once, here, before any await.
+  const candidates = snapshotCandidates(deps.variantCandidates)
   const inheritedDiscover = prepared.record.reasoningVariants?.discover
   const askedDiscover = variants?.discover
   if (askedDiscover !== undefined && askedDiscover !== inheritedDiscover) {
@@ -1463,6 +1474,14 @@ export async function continueReview(
     }
   }
 
+  // B6 — advertisement facts for the configured variants, from the finished
+  // ledger and the candidates as they were when this continuation started,
+  // before the record closes and renders. An unaudited ledger gives none.
+  if (record.reasoningVariants !== undefined && candidates !== undefined) {
+    const rows = variantAvailability(record, candidates)
+    if (rows !== undefined) record.variantAvailability = rows
+  }
+
   record.finishedAt = clock.now()
   const rendered = output(record)
   progressFinal(deps.progress, record)
@@ -1481,7 +1500,12 @@ export async function review(deps: ReviewDeps): Promise<ReviewResult> {
   // Absence is pinned too: both halves get this copy of `deps`, never the
   // caller's object, so a property the caller adds later is not seen.
   const variants = snapshotReasoningVariants(deps.reasoningVariants)
-  const { reasoningVariants: _callerOwned, ...rest } = deps
-  const pinned: ReviewDeps = variants === undefined ? rest : { ...rest, reasoningVariants: variants }
+  const candidates = snapshotCandidates(deps.variantCandidates)
+  const { reasoningVariants: _callerOwned, variantCandidates: _callerList, ...rest } = deps
+  const pinned: ReviewDeps = {
+    ...rest,
+    ...(variants === undefined ? {} : { reasoningVariants: variants }),
+    ...(candidates === undefined ? {} : { variantCandidates: candidates as readonly Candidate[] }),
+  }
   return continueReview(await prepareReview(pinned), pinned)
 }

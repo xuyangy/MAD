@@ -597,3 +597,18 @@ describe("README — kept limitations (CAP-8)", () => {
     expect(README).not.toMatch(/#\d{2,}\b/)
   })
 })
+
+describe("README — evaluation-only options (fusion-harness plan B5, B6)", () => {
+  test("mad_review exposes none of them, and the README says so and defines the three advertisement statuses", async () => {
+    const { args } = await registeredTool()
+    for (const name of ["debateReferences", "debateMissingEvidence", "reasoningVariants", "variantCandidates"]) {
+      expect(Object.keys(args)).not.toContain(name)
+    }
+    const readme = await Bun.file(new URL("../README.md", import.meta.url)).text()
+    const section = readme.slice(readme.indexOf("## Evaluation-only options"), readme.indexOf("## What a review runs, reads and changes"))
+    expect(section).toContain("`mad_review` does not expose these.")
+    expect(section).toContain("`advertised` (the model's variant list names it)")
+    expect(section).toContain("`not-advertised` (the model has a variant list, possibly empty, without it)")
+    expect(section).toContain("`unknown` (the host gave no variant list for that model, or listed no such model)")
+  })
+})

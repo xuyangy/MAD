@@ -72,6 +72,13 @@ export interface ArmSpec {
    * runs exactly as an arm did before it existed. See `ablation/DEBATE-VARIANTS.md`.
    */
   debate?: { references?: boolean; missingEvidence?: boolean }
+  /**
+   * Plan item B6 — reasoning variants per stage for this arm
+   * (`ReviewDeps.reasoningVariants`). When set, the arm's candidates are passed
+   * too, so the record says which variants the host advertised for the routes
+   * that issued requests. Absent: the arm runs exactly as before.
+   */
+  reasoningVariants?: { discover?: string; debate?: string; judge?: string }
 }
 
 export interface ArmRun {
@@ -211,6 +218,9 @@ export async function runArm(spec: ArmSpec, deps: ArmDeps, repeat = 0): Promise<
     priorWarnings: resolved.warnings,
     ...(spec.debate?.references === true ? { debateReferences: true } : {}),
     ...(spec.debate?.missingEvidence === true ? { debateMissingEvidence: true } : {}),
+    ...(spec.reasoningVariants === undefined
+      ? {}
+      : { reasoningVariants: spec.reasoningVariants, variantCandidates: deps.candidates }),
     ...(deps.dials ?? {}),
     // BELOW THE DIALS SPREAD, for the reason `stopOnUnknownUsage` is below it:
     // `dials` is the caller's object and this is not the caller's to unset. The

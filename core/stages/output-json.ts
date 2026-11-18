@@ -35,7 +35,7 @@
 
 import { unknownUsageCount, spentTokens, usageIsComplete } from "../budget/ledger.ts"
 import { effectiveSeverity, type Finding, type Severity, type Stage, type Verdict } from "../domain/finding.ts"
-import type { RunRecord } from "../domain/run-record.ts"
+import type { RunRecord, VariantAvailabilityRow } from "../domain/run-record.ts"
 import { DISCLOSURE_CODES, type Warning, type WarningCode } from "../domain/warning.ts"
 import { compareFindings } from "./output.ts"
 
@@ -118,6 +118,8 @@ export interface RunJson {
    * that it was applied.
    */
   reasoningVariantsConfigured?: { discover?: string; debate?: string; judge?: string }
+  /** Plan item B6 — present only when the record holds it: advertisement evidence per stage and slot. */
+  variantAvailability?: VariantAvailabilityRow[]
   warnings: RunJsonWarning[]
   disclosures: RunJsonWarning[]
   findings: RunJsonFinding[]
@@ -214,6 +216,9 @@ export function runJson(record: RunRecord): RunJson {
     },
     findingIds: "run-local",
     ...(record.reasoningVariants === undefined ? {} : { reasoningVariantsConfigured: { ...record.reasoningVariants } }),
+    ...(record.variantAvailability === undefined
+      ? {}
+      : { variantAvailability: record.variantAvailability.map((row) => ({ ...row })) }),
     warnings: degradations.map(warningOf),
     disclosures: disclosures.map(warningOf),
     findings,

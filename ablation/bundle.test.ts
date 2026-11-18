@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { emptyLedger, type RunRecord } from "../core/domain/run-record.ts"
 import { selectRoster } from "../core/roster/select.ts"
 import { FakeBackend, candidate, fakeChange, fakeClock } from "../core/test-support/fakes.ts"
-import { runAblation, type ArmRun } from "./arms.ts"
+import { runAblation, runArm, type ArmRun } from "./arms.ts"
 import {
   BUNDLE_FILE,
   PREFIX_FILE,
@@ -1053,5 +1053,49 @@ describe("codeRevisionFrom hashes in bounded batches", () => {
     if (revision.kind !== "unknown") throw new Error("a partial revision was recorded")
     expect(revision.why).toContain("(batch 2 of 2, paths 129 to 200 of 200")
     expect(revision.why).toContain("fatal: later")
+  })
+})
+
+describe("plan item B6b — a variant arm's advertisement facts reach the bundle", () => {
+  const FEE = { claim: "Fee is computed before the rate is validated.", reasoning: "r", severity: "high", file: "src/pay.ts", startLine: 12, endLine: 14 }
+  const CANDIDATES = [
+    { ...candidate("anthropic", "claude-sonnet-4-5"), variants: ["high"] },
+    { ...candidate("openai", "gpt-5"), variants: [] as string[] },
+  ]
+  async function armDump(reasoningVariants?: { discover?: string }) {
+    const backend = new FakeBackend({
+      "discovery-1": [{ kind: "ok", value: { findings: [FEE] } }, { kind: "ok", value: { turns: [] } }],
+      "discovery-2": [{ kind: "ok", value: { findings: [FEE] } }, { kind: "ok", value: { turns: [] } }],
+    })
+    const run = await runArm(
+      { id: "v", label: "variant", provenance: "scripted", slots: 2, ...(reasoningVariants === undefined ? {} : { reasoningVariants }) },
+      { backend, clock: fakeClock(), change: fakeChange(), candidates: CANDIDATES, providerConfigKey: "provider" },
+    )
+    const root = await tempDir("mad-bundle-variant-")
+    await writeArmDump({ bundleRoot: root, run, change: fakeChange(), identity, worktree: "/Users/somebody/project" })
+    const dir = join(root, "v", "0", run.record.runId)
+    return {
+      run,
+      record: JSON.parse(await readFile(join(dir, "record.json"), "utf8")) as RunRecord,
+      report: await readFile(join(dir, "report.txt"), "utf8"),
+    }
+  }
+
+  test("configured: record.json and report.txt carry each route's status", async () => {
+    const { record, report } = await armDump({ discover: "high" })
+    expect(record.reasoningVariants).toEqual({ discover: "high" })
+    expect(Object.fromEntries((record.variantAvailability ?? []).map((r) => [r.providerId, r.status]))).toEqual({
+      anthropic: "advertised",
+      openai: "not-advertised",
+    })
+    expect(report).toContain("as advertised in the host's model list")
+    expect(report).toMatch(/openai\/gpt-5 high: NOT advertised/)
+  })
+
+  test("off: neither file mentions variants, and the arm is the arm it was", async () => {
+    const { record, report } = await armDump()
+    expect("variantAvailability" in record).toBe(false)
+    expect("reasoningVariants" in record).toBe(false)
+    expect(report).not.toContain("REASONING VARIANTS")
   })
 })

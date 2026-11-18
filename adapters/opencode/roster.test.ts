@@ -242,3 +242,15 @@ describe("opencode's wording for selection's remedies (OPENCODE_HOST_GUIDANCE)",
     })
   })
 })
+
+describe("plan item B6b — advertisedVariants", () => {
+  test("a plain object gives its keys, an empty one gives [], anything else gives no list", async () => {
+    const { advertisedVariants } = await import("./roster.ts")
+    expect(advertisedVariants({ variants: { high: {}, max: { effort: "max" } } })).toEqual({ variants: ["high", "max"] })
+    expect(advertisedVariants({ variants: {} })).toEqual({ variants: [] })
+    expect(advertisedVariants({})).toEqual({})
+    expect(advertisedVariants({ variants: ["high"] })).toEqual({})
+    expect(advertisedVariants({ variants: null })).toEqual({})
+    expect(advertisedVariants(undefined)).toEqual({})
+  })
+})

@@ -22,6 +22,12 @@ export interface Candidate {
   contextLimit?: number
   /** Host-declared cost, if any. Used only for tie-breaking (never budgeted on — AD-15). */
   cost?: { input: number; output: number }
+  /**
+   * Plan item B6 — the reasoning variant names the host's model list advertises
+   * for this model. Absent: the host gave no list. `[]`: it gave a list with
+   * none. Advertisement only; it says nothing about what a provider applies.
+   */
+  variants?: readonly string[]
 }
 
 /** One filled discovery slot. */

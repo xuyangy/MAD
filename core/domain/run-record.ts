@@ -480,6 +480,13 @@ export interface RunRecord {
    * or provider applied it. Absent when no stage was configured.
    */
   reasoningVariants?: { discover?: string; debate?: string; judge?: string }
+  /**
+   * Plan item B6 — for each configured stage and each slot that issued a
+   * request in it, whether the host's model list advertised the variant for
+   * that slot's exact route. Advertisement evidence only. Present only when a
+   * variant was configured and the caller supplied the host's candidates.
+   */
+  variantAvailability?: VariantAvailabilityRow[]
   cancelled?: {
     stage: Stage
     /**
@@ -1060,4 +1067,19 @@ export interface JudgeCounts {
    * always, and they differ exactly when a turn needed its one retry.
    */
   attempts: number
+}
+
+/** Plan item B6 — one stage and slot's advertisement fact (see `RunRecord.variantAvailability`). */
+export interface VariantAvailabilityRow {
+  stage: "discover" | "debate" | "judge"
+  slot: string
+  providerId: string
+  modelId: string
+  variant: string
+  /**
+   * `advertised`: the route's list holds the name. `not-advertised`: the route
+   * has a list (possibly empty) without it. `unknown`: no candidate matches the
+   * route, or the host gave it no list.
+   */
+  status: "advertised" | "not-advertised" | "unknown"
 }

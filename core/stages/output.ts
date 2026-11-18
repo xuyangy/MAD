@@ -1997,6 +1997,22 @@ export function renderRunRecord(record: RunRecord): string {
       `REASONING VARIANTS CONFIGURED — ${asked.join(", ")}. Each is sent on the requests its stage ` +
         `issues, and on none for a stage that issued no turn; whether a provider applied it is not established.`,
     )
+    // B6 — what the host's model list advertised for each route that issued a
+    // request in a configured stage. Advertisement evidence only.
+    if (record.variantAvailability !== undefined && record.variantAvailability.length > 0) {
+      lines.push(`  as advertised in the host's model list (advertisement only, not evidence a provider applied it):`)
+      for (const row of record.variantAvailability) {
+        const status =
+          row.status === "advertised"
+            ? "advertised"
+            : row.status === "not-advertised"
+              ? "NOT advertised"
+              : "unknown — the host gave no variant list for this route"
+        lines.push(
+          `    ${row.stage} ${oneLine(row.slot)} ${oneLine(row.providerId)}/${oneLine(row.modelId)} ${oneLine(row.variant)}: ${status}`,
+        )
+      }
+    }
   }
   // SPEC.md "Evaluation exception" / AD-15 amended — A FORKED RUN'S FIGURES ARE
   // ATTRIBUTED. A branch's ledger holds the prefix it inherited as well as its

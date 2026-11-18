@@ -134,6 +134,13 @@ Examples of what an agent would pass:
 { "exclude": ["anthropic/claude-opus-5-5"] }
 ```
 
+## Evaluation-only options
+
+`mad_review` does not expose these. They are options of the core `review()` (`ReviewDeps`) and of an evaluation arm (`ArmSpec` in `ablation/arms.ts`), all off by default, for measuring whether a change to the debate or to reasoning effort helps before it becomes a default.
+
+- **Debate references** (`debateReferences`, arm `debate.references`) and **open questions** (`debateMissingEvidence`, arm `debate.missingEvidence`). The comparison that would make either a default is fixed in `ablation/DEBATE-VARIANTS.md`.
+- **Reasoning variants** (`reasoningVariants`, arm `reasoningVariants`): a host variant name per stage (`discover`, `debate`, `judge`), sent as the prompt's `variant` on every request that stage issues. The report says which variants were configured, and that whether a provider applied one is not established. When the host's model list is supplied as well (`variantCandidates`, which an arm passes), the record and the report list, for each configured stage and each slot that issued a request in it, what the host advertised for that slot's provider and model: `advertised` (the model's variant list names it), `not-advertised` (the model has a variant list, possibly empty, without it) or `unknown` (the host gave no variant list for that model, or listed no such model). This is what the host advertised, not what a provider did.
+
 ## What a review runs, reads and changes
 
 **It changes nothing in your repository.** MAD's repository access has no write operation. Outside the repository, the environment variable `MAD_ARTIFACTS` turns on a debug dump of each run, and only that:
