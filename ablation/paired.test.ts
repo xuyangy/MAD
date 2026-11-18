@@ -7,13 +7,14 @@
 
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, unlinkSync } from "node:fs"
-import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { ZodType } from "zod"
 
 import { spentTokens, usageByOrigin } from "../core/budget/ledger.ts"
+import { forkPreparedReview } from "../core/run/review.ts"
 import { emptyTokenUsage, type RunRecord, type TokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
 import { CODING_LENS_INSTRUCTIONS } from "../core/instructions/coding/lenses.ts"
@@ -604,6 +605,42 @@ describe("the manifest writer's binding check", () => {
     expect(bindingProblem(schedule, { ...binding, arm: "off" }, record)).toContain("not a slot")
     expect(bindingProblem(schedule, { ...binding, prefixRunId: "run-9" }, record)).toContain("forkedFrom")
     expect(bindingProblem(schedule, { ...binding, scheduleHash: "sha256:t" }, record)).toContain("schedule hash")
+  })
+
+  test("the runner refuses the manifest of a continuation whose fork parent is not the prefix, and ends admission", async () => {
+    // The real fork, with only the first branch's parent changed; bindingProblem
+    // and the manifest writer are the runner's own.
+    const { input, root, calls } = await sealed({ coin: "heads" })
+    let prefixRunId: string | undefined
+    const outcome = await runPairedBlocks({
+      ...input,
+      fork(prepared, clock, count) {
+        prefixRunId = prepared.record.runId
+        const branches = forkPreparedReview(prepared, clock, count)
+        branches[0]!.record.forkedFrom = "run-not-the-prefix"
+        return branches
+      },
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(prefixRunId).toBeDefined()
+
+    const diagnostic = `its prefix \`${prefixRunId}\` is not the run's forkedFrom \`run-not-the-prefix\``
+    const first = outcome.slots[0]!
+    expect(`${first.block}:${first.arm}:${first.status}`).toBe("1:on:completed")
+    expect(first.manifest).toEqual({ kind: "refused", reason: diagnostic })
+    expect(outcome.slots.slice(1).map((slot) => slot.status)).toEqual(Array(5).fill("not-attempted"))
+    const stop = `the manifest for block 1 ON was not written: ${diagnostic}`
+    expect(outcome.governor.runnerStop).toContain(stop)
+    expect(outcome.bill.stop).toContain(stop)
+    expect(outcome.slots[1]!.reason).toContain(stop)
+    expect(outcome.complete).toBe(false)
+
+    // No arm manifest anywhere in the bundle, and no request after block 1's ON continuation.
+    const files = await readdir(root, { recursive: true })
+    expect(files.filter((path) => path.endsWith(MANIFEST_FILE))).toEqual([])
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every((call) => call.block === 1 && (call.phase === "prefix" || call.phase === "on"))).toBe(true)
+    expect(calls.some((call) => call.phase === "on")).toBe(true)
   })
 })
 

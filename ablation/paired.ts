@@ -149,6 +149,13 @@ export interface RunPairedBlocksInput {
   tools?: Tools
   signal?: AbortSignal
   /**
+   * Forks a block's shared prefix into its two continuations. Every caller but
+   * the runner's own tests takes the default, `forkPreparedReview`; a test that
+   * alters a branch reaches the manifest writer's binding check, which a correct
+   * fork never trips.
+   */
+  fork?: typeof forkPreparedReview
+  /**
    * A backend for one phase. `lateUsage` is the runner's reporter for that phase:
    * each report reaches the run's own sink and, as a separate copy, the journal.
    * Execution ids must be unique across every backend of one invocation; a
@@ -511,7 +518,7 @@ async function execute(
 
       let branches: PreparedReview[]
       try {
-        branches = forkPreparedReview(prepared!, input.clock, 2)
+        branches = (input.fork ?? forkPreparedReview)(prepared!, input.clock, 2)
       } catch (error) {
         const reason = `block ${block}'s shared prefix could not be forked: ${messageOf(error)}`
         await recordPrefix(block, { record: prepared!.record, forked: false, reason, failure: messageOf(error) })
