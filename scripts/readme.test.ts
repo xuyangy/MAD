@@ -226,6 +226,9 @@ describe("RELEASE-NOTES.md — the v1 release notes", () => {
     expect(RELEASE_NOTES).not.toContain("(draft)")
     expect(EVIDENCE).not.toContain("Release preparation is still to do")
     expect(EVIDENCE).toContain("so N5's and N8's compatibility claims hold for the v1.0.0 candidate revision.")
+    expect(EVIDENCE).toContain("The annotated tag `v1.0.0` marks that revision.")
+    expect(EVIDENCE).toContain("pass on `784c004`, the v1.0.0 candidate revision")
+    expect(EVIDENCE).not.toContain("not yet tagged")
   })
 
   test("its route verdicts are the README's", () => {

@@ -72,7 +72,7 @@ Commits after `7622913` change documentation, tests and `package.json` metadata 
 
 ## Release gates today
 
-v1 is a tagged source release. Both routes meet its route bar, *compatible with listed limitations*. The offline suite, typecheck and lint pass on the v1.0.0 candidate revision, and every v1 gate holds for it. v1.0.0 is not yet tagged; tagging is left to the owner.
+v1 is a tagged source release. Both routes meet its route bar, *compatible with listed limitations*. The offline suite, typecheck and lint pass on `784c004`, the v1.0.0 candidate revision, and every v1 gate holds for it. The annotated tag `v1.0.0` marks that revision.
 
 ## History
 
