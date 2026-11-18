@@ -420,15 +420,37 @@ async function publishSchedule(input: CreateScheduleInput, root: string): Promis
 export type Published = { ok: true; file: string } | { ok: false; reason: string }
 
 /**
+ * The two steps of `publishExclusive` a test controls: the temporary file's
+ * name, and the directory sync after the link. Creation, linking and removal
+ * always use the real file system.
+ */
+export interface PublishHooks {
+  /** The temporary name for `name`, inside the same directory. */
+  temporaryName(name: string): string
+  syncDirectory(directory: string): Promise<void>
+}
+
+const DEFAULT_PUBLISH_HOOKS: PublishHooks = {
+  temporaryName: (name) => `${name}.${process.pid}.${Date.now()}.tmp`,
+  syncDirectory,
+}
+
+/**
  * Publish `text` at `<root>/<name>` without ever replacing a file there: written
  * and synced under a temporary name, then hard-linked into place, so an existing
  * file refuses (`EEXIST`) and a partial file never appears under the final name.
  * `what` names the document in a refusal (`a schedule`). Throws only where the
  * caller's own `try` already reports it.
  */
-export async function publishExclusive(root: string, name: string, text: string, what: string): Promise<Published> {
+export async function publishExclusive(
+  root: string,
+  name: string,
+  text: string,
+  what: string,
+  hooks: PublishHooks = DEFAULT_PUBLISH_HOOKS,
+): Promise<Published> {
   const file = join(root, name)
-  const temporary = join(root, `${name}.${process.pid}.${Date.now()}.tmp`)
+  const temporary = join(root, hooks.temporaryName(name))
   // Only a temporary file THIS call created is removed afterwards, and only an
   // EEXIST from `link` means the document already exists.
   let createdTemporary = false
@@ -457,7 +479,7 @@ export async function publishExclusive(root: string, name: string, text: string,
       }
     }
     try {
-      await syncDirectory(root)
+      await hooks.syncDirectory(root)
     } catch (error) {
       return {
         ok: false,

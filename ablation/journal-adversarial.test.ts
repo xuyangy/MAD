@@ -6,6 +6,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,6 +20,7 @@ import {
   JOURNAL_FILE,
   openJournal,
   replayPersistedJournal,
+  syncDirectory,
   type JournalIo,
   type JournalLine,
   type PairedJournal,
@@ -662,6 +664,47 @@ describe("publishExclusive", () => {
     expect(second.ok).toBe(false)
     if (!second.ok) expect(second.reason).toContain("an adversarial schedule already exists at")
     expect(await readFile(join(root, "doc.json"), "utf8")).toBe("one\n")
+  })
+
+  test("a file already at the temporary name refuses, and is neither removed nor published", async () => {
+    // Real exclusive creation: only the temporary name is fixed, so the `wx`
+    // open meets a file this call did not create.
+    const root = await tempDir()
+    const sentinel = Buffer.from([0x00, 0xff, 0x0a, 0x73, 0x65, 0x6e, 0x74, 0x69, 0x6e, 0x65, 0x6c])
+    await writeFile(join(root, "doc.json.collide.tmp"), sentinel)
+    const outcome = await publishExclusive(root, "doc.json", "one\n", "a schedule", {
+      temporaryName: () => "doc.json.collide.tmp",
+      syncDirectory,
+    })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain(`a schedule's temporary file \`${join(root, "doc.json.collide.tmp")}\` could not be written`)
+      expect(outcome.reason).toContain("EEXIST")
+    }
+    expect(Buffer.compare(await readFile(join(root, "doc.json.collide.tmp")), sentinel)).toBe(0)
+    expect(existsSync(join(root, "doc.json"))).toBe(false)
+  })
+
+  test("a directory sync that fails after the link refuses as published-but-unsynced, and the temporary file is gone", async () => {
+    const root = await tempDir()
+    const synced: string[] = []
+    const outcome = await publishExclusive(root, "doc.json", "one\n", "a schedule", {
+      temporaryName: (name) => `${name}.sync-fault.tmp`,
+      async syncDirectory(directory) {
+        synced.push(directory)
+        throw new Error("injected directory sync failure")
+      },
+    })
+    expect(synced).toEqual([root])
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain(
+        `a schedule was published at \`${join(root, "doc.json")}\`, but its directory could not be synced ` +
+          "(injected directory sync failure)",
+      )
+    }
+    expect(await readFile(join(root, "doc.json"), "utf8")).toBe("one\n")
+    expect(existsSync(join(root, "doc.json.sync-fault.tmp"))).toBe(false)
   })
 
   test("a temporary file that cannot be written refuses in the caller's words", async () => {
