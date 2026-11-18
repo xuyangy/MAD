@@ -180,6 +180,23 @@ export interface Entry {
    * and always sets it.
    */
   exitReason?: ExitReason
+  /**
+   * Plan item B5 (opt-in `debateReferences`) — the id MAD gave this debate-round
+   * entry, `R<room>E<n>`: room-separated, independent of the speaker label, and
+   * the one source every later rendering of the entry uses. Absent when the
+   * option is off.
+   */
+  refId?: string
+  /** B5 — the `refId`s this entry cited that MAD found among the ids it showed this speaker for this room before the round. */
+  references?: string[]
+  /** B5 — how many cited ids were not among them. Never stored as text. */
+  invalidReferences?: number
+  /**
+   * B5 — MAD-computed: `positionChanged` is true and no cited id was valid. A
+   * valid citation shows only that the cited entry exists, never that it
+   * supports the change.
+   */
+  shiftWithoutValidReference?: boolean
 }
 
 /**

@@ -310,6 +310,12 @@ export interface ReviewDeps {
    * the record and the rendered report are the same either way.
    */
   progress?: ProgressSink
+  /**
+   * Plan item B5 — the opt-in debate references experiment
+   * (`DebateInput.references`). Absent or false: debate is exactly what it is
+   * without this field. Only an evaluation arm sets it.
+   */
+  debateReferences?: boolean
 }
 
 export interface ReviewResult {
@@ -603,6 +609,7 @@ export type ContinueDeps = Pick<
   | "toolObservation"
   | "observationTimeoutMs"
   | "progress"
+  | "debateReferences"
 >
 
 /**
@@ -1194,6 +1201,7 @@ export async function continueReview(
     limiter,
     signal,
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
+    ...(deps.debateReferences === true ? { references: true } : {}),
   })
   // Re-stamped from the stage's return for routing's reason exactly: the record
   // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is

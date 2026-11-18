@@ -204,6 +204,25 @@ export const debateEnvelopeSchema = z.object({
 
 export type DebateEnvelope = z.infer<typeof debateEnvelopeSchema>
 
+/** B5 — the most entry ids one turn may cite for one finding, and the longest id accepted. */
+export const MAX_REFERENCES = 8
+export const MAX_REFERENCE_LENGTH = 16
+
+/**
+ * Plan item B5 — the turn schema sent when `debateReferences` is on: the same
+ * turn plus an optional `references` list of entry ids. A separate object, so
+ * the schema sent when the option is off is unchanged. `.optional()`, never
+ * `.default()`, for `citations`' reason above. The bounds are part of the
+ * schema, so a turn past them is schema-invalid like any other malformed turn.
+ */
+export const debateTurnWithReferencesSchema = debateTurnSchema.extend({
+  references: z.array(z.string().max(MAX_REFERENCE_LENGTH)).max(MAX_REFERENCES).optional(),
+})
+export const debateEnvelopeWithReferencesSchema = z.object({
+  turns: z.array(debateTurnWithReferencesSchema),
+})
+type DebateEnvelopeWithReferences = z.infer<typeof debateEnvelopeWithReferencesSchema>
+
 /**
  * The one place an absent citation list becomes an empty one. Post-parse, so the
  * wire schema can keep `citations` optional (see the field's note) while every
@@ -261,6 +280,15 @@ export interface DebateInput {
    * `runDebateTurn`.
    */
   admission?: RequestAdmission
+  /**
+   * Plan item B5 — opt-in, off when absent. On: each debate-round entry gets a
+   * room-separated MAD id, prompts show the ids and ask a speaker who changed
+   * position to cite the entries that changed it, the turn schema accepts
+   * `references`, and each entry records its valid citations and
+   * `shiftWithoutValidReference`. Off: prompts, schema and record are exactly
+   * what they are without this field.
+   */
+  references?: boolean
 }
 
 export interface DebateStageResult extends DebateCounts {
@@ -307,6 +335,8 @@ interface Room {
   coFinders: Set<string>
   /** AD-17a hygiene — `slot -> "participant N"`, stable for this debate. */
   labels: Map<string, string>
+  /** B5 — 1-based position of this room in the debate, the `R<room>` of its entry ids. */
+  index: number
 }
 
 /**
@@ -416,6 +446,10 @@ async function runDebateTurn(
   cleanups: { slot: string; why: string }[],
 ): Promise<DebateTurnOutcome> {
   let last: Envelope<DebateEnvelope> | undefined
+  // B5 — the wider schema only when the option is on; its value is a superset.
+  const schema = (input.references === true ? debateEnvelopeWithReferencesSchema : debateEnvelopeSchema) as z.ZodType<
+    DebateEnvelopeWithReferences
+  >
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     // AD-2 amended / AD-6f — never ISSUE a turn the user stopped, and never
     // retry one. `core/stages/discover.ts` carries the full argument; the rule
@@ -454,7 +488,7 @@ async function runDebateTurn(
         slot,
         instructions,
         prompt,
-        debateEnvelopeSchema,
+        schema,
         input.signal,
         admitted,
       )
@@ -534,6 +568,15 @@ async function runDebateTurn(
  * labelled span — a debate turn nobody took. `oneLine` closes that and nothing
  * else; see its comment on why an encoding here is not the filter AD-18 forbids.
  */
+/**
+ * The debate entries a prompt shows as "the exchange so far", and so (plan
+ * item B5) the only entries whose ids a speaker can validly cite. One
+ * predicate for both, so an id can never be valid without having been shown.
+ */
+function exchangeRows(finding: Finding): Entry[] {
+  return finding.history.filter((entry) => entry.stage === "debate" && entry.round !== undefined)
+}
+
 function buildPrompt(
   input: DebateInput,
   slot: string,
@@ -544,6 +587,15 @@ function buildPrompt(
     `# Debate round ${round}`,
     ``,
     `You are one participant. ${rooms.length} finding(s) are put to you this round; answer every one of them, by id.`,
+    // B5 — MAD's own instruction, outside every span, only when the option is on.
+    ...(input.references === true
+      ? [
+          ``,
+          `Each earlier entry in an exchange below starts with its id in brackets, such as [R1E2]. If your ` +
+            `position on a finding has changed since your last turn, list in \`references\` the ids of the ` +
+            `earlier entries that changed it. Holding a minority position with a stated reason is acceptable.`,
+        ]
+      : []),
     ``,
     input.input,
     ``,
@@ -602,7 +654,7 @@ function buildPrompt(
     }
     lines.push(material("finding locus, claim and reasoning", claimLines.join("\n")))
 
-    const transcript = finding.history.filter((entry) => entry.stage === "debate" && entry.round !== undefined)
+    const transcript = exchangeRows(finding)
     if (transcript.length === 0) {
       // MAD-authored, so it gets NO span: framing MAD's own sentence as material
       // would tell the model to disregard the one line here that is an
@@ -624,8 +676,10 @@ function buildPrompt(
         // the fallback is unreachable — and printing `undefined` at a debater
         // would be worse than printing nothing.
         const position = oneLine(entry.position ?? "")
+        // B5 — the entry's MAD id, recorded with it, when the option is on.
+        const id = input.references === true && entry.refId !== undefined ? `[${entry.refId}] ` : ""
         rows.push(
-          `- round ${entry.round}, ${who} — ${position}: ${oneLine(entry.body)}${cited}${conceded}`,
+          `- ${id}round ${entry.round}, ${who} — ${position}: ${oneLine(entry.body)}${cited}${conceded}`,
         )
       }
       lines.push(``, `Exchange so far:`, material("debate exchange so far", rows.join("\n")))
@@ -960,10 +1014,10 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
   const answeredInRosterOrder = [...input.answeredSlots].sort((a, b) => orderOf(a) - orderOf(b))
 
   const contested = findings.filter((finding) => finding.route === "debate")
-  const rooms: Room[] = contested.map((finding) => {
+  const rooms: Room[] = contested.map((finding, roomIndex) => {
     const { members, coFinders } = roomFor(finding, pool, answeredInRosterOrder)
     const labels = new Map(members.map((slot, index) => [slot, `participant ${index + 1}`]))
-    return { finding, members, coFinders, labels }
+    return { finding, members, coFinders, labels, index: roomIndex + 1 }
   })
 
   /**
@@ -1078,6 +1132,23 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
     // failure envelope, so no slot can abort the round, and `Promise.all`
     // resolves POSITIONALLY, so the record is in participant order however the
     // network behaved.
+    // B5 — THE IDS SHOWN THIS ROUND, frozen before the fan-out. A citation is
+    // valid only if it names one of these for its room: entries other seats
+    // append later in this same round were never shown, and an id from another
+    // room is not in this room's set.
+    const presentedIds =
+      input.references === true
+        ? new Map<Room, Set<string>>(
+            rooms.map((room) => [
+              room,
+              new Set(
+                exchangeRows(room.finding)
+                  .filter((entry) => entry.refId !== undefined)
+                  .map((entry) => entry.refId!),
+              ),
+            ]),
+          )
+        : undefined
     const outcomes: ({ slot: string; rooms: Room[] } & DebateTurnOutcome)[] = await Promise.all(
       permitted.map(async (slot) => ({
         slot,
@@ -1317,6 +1388,21 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
         }
         spokePerFinding.get(room.finding.id)?.add(outcome.slot)
 
+        // B5 — recorded only when the option is on. The id counts this room's
+        // debate-round entries so far, so it is unique within the debate.
+        const referenceFields: Partial<Entry> = {}
+        if (input.references === true) {
+          const shown = presentedIds?.get(room) ?? new Set<string>()
+          const cited = [...new Set((turn as { references?: string[] }).references ?? [])]
+          const valid = cited.filter((id) => shown.has(id))
+          const ordinal =
+            room.finding.history.filter((entry) => entry.stage === "debate" && entry.kind === "debate-round").length + 1
+          referenceFields.refId = `R${room.index}E${ordinal}`
+          referenceFields.references = valid
+          referenceFields.invalidReferences = cited.length - valid.length
+          referenceFields.shiftWithoutValidReference = positionChanged && valid.length === 0
+        }
+
         // AD-7 — append-only, and this is the entry story 6's judge reads.
         appendEntry(room.finding, {
           stage: "debate",
@@ -1329,6 +1415,7 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
           positionChanged,
           ...(turn.concession === undefined ? {} : { concession: turn.concession }),
           citations: citationsOf(turn),
+          ...referenceFields,
         })
       }
     }
