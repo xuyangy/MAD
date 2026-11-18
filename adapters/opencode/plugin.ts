@@ -45,6 +45,7 @@ import {
 } from "./artifacts.ts"
 import { hostSessionFromPluginClient } from "./host-session.ts"
 import { OpencodeModelBackend, type PolicyProbe } from "./model-backend.ts"
+import { MAX_DISCOVERY_SLOTS, MAX_EXCLUSIONS, splitModelRef } from "./model-ref.ts"
 import { DEFAULT_PLUGIN_BUDGET, pluginBudget } from "./plugin-budget.ts"
 import { createLateUsageSink } from "../../core/ports/late-usage.ts"
 import { changeReadStopGuidance } from "./change-read-guidance.ts"
@@ -101,7 +102,6 @@ export const DEFAULT_DISCOVERY_SLOTS = 3
  * so an unbounded value is an unbounded charge. Well above any roster a real
  * host resolves; there to stop `slots: 200`, not to tune anything.
  */
-export const MAX_DISCOVERY_SLOTS = 12
 
 /**
  * Clamp at BOTH ends. The tool schema bounds the argument too, but the value
@@ -163,27 +163,18 @@ export const MAX_LENS_SLOTS = 8
 function normalizePins(models: readonly string[] | undefined): Pin[] {
   if (!models || !Array.isArray(models)) return []
   const kept: Pin[] = []
-  for (const raw of models) {
-    const value = typeof raw === "string" ? raw.trim() : ""
-    const cut = value.indexOf("/")
-    // No separator: kept as a MALFORMED pin rather than dropped, so the core
-    // reports it. An empty `providerId` is what `resolvePins` reads as malformed.
-    if (cut < 0) kept.push({ providerId: "", modelId: value })
-    else kept.push({ providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() })
-  }
+  // No separator: kept as a MALFORMED pin rather than dropped, so the core
+  // reports it. An empty `providerId` is what `resolvePins` reads as malformed.
+  for (const raw of models) kept.push(splitModelRef(raw))
   return kept
 }
+
+export { MAX_DISCOVERY_SLOTS, MAX_EXCLUSIONS }
 
 export function clampPins(models: readonly string[] | undefined): Pin[] {
   return normalizePins(models).slice(0, MAX_DISCOVERY_SLOTS)
 }
 
-/**
- * The most routes one `exclude` argument may name. A list past it is REFUSED,
- * never truncated: a dropped exclusion is a route the caller forbade and MAD
- * would then use.
- */
-export const MAX_EXCLUSIONS = 64
 
 /**
  * The caller's `exclude` argument as `Exclusion`s, or the reason it is refused.
@@ -203,15 +194,7 @@ export function parseExclusions(exclude: readonly string[] | undefined): { exclu
       refused: `\`exclude\` names ${exclude.length} models; at most ${MAX_EXCLUSIONS} are accepted, and MAD does not drop an exclusion you asked for`,
     }
   }
-  return {
-    exclusions: exclude.map((raw) => {
-      const value = typeof raw === "string" ? raw.trim() : ""
-      const cut = value.indexOf("/")
-      return cut < 0
-        ? { providerId: "", modelId: value }
-        : { providerId: value.slice(0, cut).trim(), modelId: value.slice(cut + 1).trim() }
-    }),
-  }
+  return { exclusions: exclude.map(splitModelRef) }
 }
 
 function normalizeLenses(lenses: readonly string[] | undefined): string[] {

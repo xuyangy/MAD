@@ -111,6 +111,19 @@ function fold(p: string): string {
   return process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p
 }
 
+/**
+ * Whether `target` is `root` or below it, compared on folded, resolved paths
+ * with a separator-terminated prefix, so a sibling named `my-repo-backup` is
+ * not taken for a child of `my-repo`, and a root that is a filesystem root
+ * (already ending in the separator) contains everything.
+ */
+export function isWithin(target: string, root: string): boolean {
+  const t = fold(resolve(target))
+  const r = fold(resolve(root))
+  const prefix = r.endsWith(sep) ? r : r + sep
+  return t === r || t.startsWith(prefix)
+}
+
 export function refusalFor(root: string, worktree: string): string | undefined {
   if (!isAbsolute(root)) {
     return (
@@ -128,8 +141,7 @@ export function refusalFor(root: string, worktree: string): string | undefined {
   // containing nothing. Reached through `realRefusalFor(repoRoot, directory)`,
   // which `scripts/ablation.ts` uses to refuse a `--directory` that CONTAINS this
   // repository; `/` is exactly the argument that made it matter.
-  const prefix = repo.endsWith(sep) ? repo : repo + sep
-  if (target === repo || target.startsWith(prefix)) {
+  if (isWithin(target, repo)) {
     return (
       `\`${ARTIFACTS_ENV}\` points inside the repository under review (\`${repo}\`). MAD never ` +
       `writes there — the change under review is read-only by construction (AD-16). Point it at ` +
