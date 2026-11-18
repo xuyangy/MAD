@@ -21,6 +21,8 @@ import {
   PRESET_DIALS,
   type Preset,
   type SpendShares,
+  spentTokens,
+  unknownUsageCount,
 } from "../budget/ledger.ts"
 import type { Stage } from "../domain/finding.ts"
 import {
@@ -37,6 +39,7 @@ import type { RequestAdmission } from "../ports/admission.ts"
 import type { Clock } from "../ports/clock.ts"
 import type { LateUsageSink } from "../ports/late-usage.ts"
 import type { ModelBackend } from "../ports/model-backend.ts"
+import { reportProgress, type ProgressSink, type ProgressStage } from "../ports/progress.ts"
 import type { ChangeSet } from "../ports/repo.ts"
 import type { ToolObservation } from "../ports/tool-observation.ts"
 import type { Tools } from "../ports/tools.ts"
@@ -298,6 +301,15 @@ export interface ReviewDeps {
    * has to be passed twice.
    */
   observationTimeoutMs?: number
+  /**
+   * B1 — the progress observer (`core/ports/progress.ts`).
+   *
+   * Optional, and observe-only like `toolObservation`: absent, the run is
+   * unchanged; present, it receives one snapshot as each stage is entered and a
+   * last one after `finishedAt` is stamped. A sink that throws is ignored, so
+   * the record and the rendered report are the same either way.
+   */
+  progress?: ProgressSink
 }
 
 export interface ReviewResult {
@@ -582,7 +594,15 @@ export interface PreparedReview {
  */
 export type ContinueDeps = Pick<
   ReviewDeps,
-  "backend" | "clock" | "tools" | "signal" | "lateUsage" | "admission" | "toolObservation" | "observationTimeoutMs"
+  | "backend"
+  | "clock"
+  | "tools"
+  | "signal"
+  | "lateUsage"
+  | "admission"
+  | "toolObservation"
+  | "observationTimeoutMs"
+  | "progress"
 >
 
 /**
@@ -592,6 +612,48 @@ export type ContinueDeps = Pick<
  * finished run is not kept alive.
  */
 const continued = new WeakSet<RunRecord>()
+
+/** Milliseconds between two ISO timestamps, or `null` if either does not parse. */
+function elapsedBetween(from: string, to: string): number | null {
+  const start = Date.parse(from)
+  const end = Date.parse(to)
+  return Number.isNaN(start) || Number.isNaN(end) ? null : end - start
+}
+
+/**
+ * B1 — one running snapshot, read from the record as it stands. Called as a
+ * stage is entered, so the figures are what the run had spent before it.
+ */
+function progressAt(sink: ProgressSink | undefined, record: RunRecord, clock: Clock, stage: ProgressStage): void {
+  if (sink === undefined) return
+  reportProgress(sink, {
+    runId: record.runId,
+    stage,
+    state: "running",
+    elapsedMs: elapsedBetween(record.startedAt, clock.now()),
+    observedTokens: spentTokens(record.ledger.total),
+    unknownUsageTurns: unknownUsageCount(record.ledger),
+    cap: record.ledger.cap,
+  })
+}
+
+/**
+ * B1 — the last snapshot. Read after late usage is reconciled and `finishedAt`
+ * is stamped, so its totals are the record's and its elapsed time ends where
+ * the record's does.
+ */
+function progressFinal(sink: ProgressSink | undefined, record: RunRecord): void {
+  if (sink === undefined) return
+  reportProgress(sink, {
+    runId: record.runId,
+    stage: "output",
+    state: record.cancelled === undefined ? "finished" : "stopped",
+    elapsedMs: record.finishedAt === undefined ? null : elapsedBetween(record.startedAt, record.finishedAt),
+    observedTokens: spentTokens(record.ledger.total),
+    unknownUsageTurns: unknownUsageCount(record.ledger),
+    cap: record.ledger.cap,
+  })
+}
 
 /**
  * One destination row for the whole run. When discovery dispatched a
@@ -737,6 +799,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   const framedChange = buildInput(change)
 
   // ---- stage 1: discover ----
+  progressAt(deps.progress, record, clock, "discover")
   const discovered = await discover({
     roster,
     backend,
@@ -782,6 +845,7 @@ export async function prepareReview(deps: ReviewDeps): Promise<PreparedReview> {
   // shim produced: every finding is a singleton reading `{raised: 1, answered}`.
   // The only rendering that changes is the one that should — findings that are
   // actually equivalent.
+  progressAt(deps.progress, record, clock, "cluster")
   const clustered = await cluster({ findings: record.pool, answered: discovered.answered, clock })
   record.findings = clustered.findings
 
@@ -1088,6 +1152,7 @@ export async function continueReview(
   // The CANONICAL set, never `record.pool`: an absorbed member is not a finding
   // the pipeline decides about, and routing one would produce a decision nothing
   // downstream ever reads.
+  progressAt(deps.progress, record, clock, "route")
   const routed = route({ findings: record.findings, threshold: record.threshold, clock, policy })
   if (policy === "debate-off") record.routingPolicy = policy
   // The record reports what the STAGE did, not what the caller asked for and not
@@ -1113,6 +1178,7 @@ export async function continueReview(
   //
   // `answeredSlots` and `framedChange` come from `prepared`: discovery decided
   // who is still eligible, and the span is the one discovery saw.
+  progressAt(deps.progress, record, clock, "debate")
   const debated = await debate({
     findings: record.findings,
     // The pre-cluster union, so a cluster's CO-FINDERS are resolvable from
@@ -1166,6 +1232,7 @@ export async function continueReview(
   // `runId` seeds the anonymizer's permutation together with each finding's id,
   // so two runs over one input produce one record (AD-17b, and the spine's
   // ordering convention).
+  progressAt(deps.progress, record, clock, "judge")
   const judged = await judge({
     findings: record.findings,
     roster,
@@ -1242,6 +1309,7 @@ export async function continueReview(
   }
 
   // ---- stage 6: output ----
+  progressAt(deps.progress, record, clock, "output")
   //
   // OUTPUT RUNS EVEN WHEN THE RUN WAS CANCELLED, and `finishedAt` is still
   // stamped (AD-6f). A cancelled run finished REPORTING; it did not finish
@@ -1315,6 +1383,7 @@ export async function continueReview(
 
   record.finishedAt = clock.now()
   const rendered = output(record)
+  progressFinal(deps.progress, record)
 
   return { record, rendered }
 }
