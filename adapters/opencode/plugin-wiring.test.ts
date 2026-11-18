@@ -1038,17 +1038,17 @@ describe("mad_review.execute — the preset's own lens list is inside the clamp 
     // The resolved list is named once and used twice — clamped, and reported.
     expect(source).toContain("const requestedLenses = args.lenses !== undefined ? args.lenses : [...dials.lenses]")
     expect(source).toContain("const lenses = clampLenses(requestedLenses)")
-    expect(source).toContain("truncatedListWarnings({ models: args.models, lenses: requestedLenses })")
+    expect(source).toContain("truncatedListWarnings({ models: effective.models as string[] | undefined, lenses: requestedLenses })")
     // And the regression itself is gone.
     expect(source).not.toContain("truncatedListWarnings(args)")
   })
 
   test("the assertion above can FAIL — the old shape does not satisfy it", async () => {
     const reverted = (await pluginSource()).replace(
-      "truncatedListWarnings({ models: args.models, lenses: requestedLenses })",
+      "truncatedListWarnings({ models: effective.models as string[] | undefined, lenses: requestedLenses })",
       "truncatedListWarnings(args)",
     )
-    expect(reverted).not.toContain("truncatedListWarnings({ models: args.models, lenses: requestedLenses })")
+    expect(reverted).not.toContain("truncatedListWarnings({ models: effective.models as string[] | undefined, lenses: requestedLenses })")
     expect(reverted).toContain("truncatedListWarnings(args)")
   })
 })

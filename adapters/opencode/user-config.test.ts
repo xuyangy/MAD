@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import nodePath, { join } from "node:path"
 
 import { MAX_DISCOVERY_SLOTS, MAX_EXCLUSIONS } from "./model-ref.ts"
-import { decompose, parseUserConfig, readUserConfig, userConfigPath } from "./user-config.ts"
+import { decompose, mergeConfig, parseUserConfig, readUserConfig, userConfigPath, type UserConfigRead } from "./user-config.ts"
 
 const VALID = {
   defaults: { exclude: ["anthropic/claude-opus-5-5"], preset: "quick" },
@@ -358,9 +358,73 @@ describe("B4a — readUserConfig", () => {
     }
   })
 
-  test("refused when the worktree cannot be resolved", async () => {
+  test("a worktree that cannot be resolved: no file is absent, an existing file is refused", async () => {
     const xdg = await dir("xdg")
-    const read = await readUserConfig({ env: { XDG_CONFIG_HOME: xdg }, worktree: join(xdg, "no-such-repo") })
+    const worktree = join(xdg, "no-such-repo")
+    expect((await readUserConfig({ env: { XDG_CONFIG_HOME: xdg }, worktree })).kind).toBe("absent")
+    await writeConfig(xdg)
+    const read = await readUserConfig({ env: { XDG_CONFIG_HOME: xdg }, worktree })
     expect(read.kind === "refused" && read.why).toMatch(/could not resolve the worktree/)
+  })
+})
+
+describe("B4b — mergeConfig", () => {
+  const loaded = (text: unknown): UserConfigRead => {
+    const parsed = parseUserConfig(JSON.stringify(text))
+    if ("why" in parsed) throw new Error(parsed.why)
+    return { kind: "loaded", path: "/cfg/mad/config.json", config: parsed.config }
+  }
+  const FILE = loaded({
+    defaults: { models: ["a/one"], exclude: ["b/two"], preset: "quick" },
+    stacks: { s: { exclude: [], preset: "paranoid" }, bare: {} },
+  })
+
+  test("no file and no stack: every field is the argument's or none, and nothing is added", () => {
+    const merged = mergeConfig({ models: ["x/y"] }, { kind: "absent", path: "/cfg/mad/config.json" }, undefined)
+    expect(merged).toEqual({
+      effective: {
+        models: ["x/y"],
+        sources: {
+          models: { source: "argument", explicitEmpty: false },
+          exclude: { source: "none", explicitEmpty: false },
+          preset: { source: "none" },
+        },
+        configPath: "/cfg/mad/config.json",
+      },
+    })
+    if ("effective" in merged) {
+      expect("exclude" in merged.effective).toBe(false)
+      expect("preset" in merged.effective).toBe(false)
+    }
+  })
+
+  test("argument > stack > defaults, field by field, and an empty list from the stack clears the defaults", () => {
+    const merged = mergeConfig({ models: ["arg/model"] }, FILE, "s")
+    if (!("effective" in merged)) throw new Error("refused")
+    expect(merged.effective.models).toEqual(["arg/model"])
+    expect(merged.effective.exclude).toEqual([])
+    expect(merged.effective.preset).toBe("paranoid")
+    expect(merged.effective.sources).toEqual({
+      models: { source: "argument", explicitEmpty: false },
+      exclude: { source: "stack", explicitEmpty: true },
+      preset: { source: "stack" },
+    })
+  })
+
+  test("a stack that omits a field inherits it from defaults; an explicit empty argument clears too", () => {
+    const merged = mergeConfig({ exclude: [] }, FILE, "bare")
+    if (!("effective" in merged)) throw new Error("refused")
+    expect(merged.effective.models).toEqual(["a/one"])
+    expect(merged.effective.exclude).toEqual([])
+    expect(merged.effective.preset).toBe("quick")
+    expect(merged.effective.sources.models).toEqual({ source: "defaults", explicitEmpty: false })
+    expect(merged.effective.sources.exclude).toEqual({ source: "argument", explicitEmpty: true })
+  })
+
+  test("refused: a refused file, an unknown stack, a stack with no file, an inherited property name", () => {
+    expect(mergeConfig({}, { kind: "refused", path: "/p", why: "bad" }, undefined)).toEqual({ refused: "config", why: "bad", path: "/p" })
+    expect(mergeConfig({}, FILE, "missing")).toMatchObject({ refused: "stack" })
+    expect(mergeConfig({}, FILE, "constructor")).toMatchObject({ refused: "stack" })
+    expect(mergeConfig({}, { kind: "absent", path: "/p" }, "s")).toMatchObject({ refused: "stack" })
   })
 })

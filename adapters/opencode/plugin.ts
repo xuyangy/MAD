@@ -61,6 +61,7 @@ import {
   type Answer,
 } from "./result-format.ts"
 import { opencodeTools, type BlameCleanupUnresolved } from "./tools.ts"
+import { configParticipates, mergeConfig, readUserConfig, STACK_NAME, type EffectiveArgs } from "./user-config.ts"
 import { worktreeIdentity, worktreeKeyOrThrow, type RealpathOf } from "./worktree-identity.ts"
 import { MadStop } from "../../core/domain/stop-cause.ts"
 import {
@@ -395,6 +396,15 @@ function stoppedAfterRoster(): { title: string; output: string } {
   }
 }
 
+function stoppedAfterConfig(): { title: string; output: string } {
+  return {
+    title: "MAD — review stopped",
+    output:
+      "MAD reviewed nothing: the review was stopped while MAD was checking for its own user config file, before it " +
+      "read the host's model list or any repository content, or asked any model.",
+  }
+}
+
 function stoppedAfterRead(disclosure = ""): { title: string; output: string } {
   return {
     title: "MAD — review stopped",
@@ -513,6 +523,15 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 `review before any model is asked. MAD remembers nothing between reviews, so pass it ` +
                 `again each time.`,
             ),
+          stack: tool.schema
+            .string()
+            .regex(STACK_NAME)
+            .optional()
+            .describe(
+              `OPTIONAL name of a stack in MAD's user config file (~/.config/mad/config.json, or under ` +
+                `$XDG_CONFIG_HOME): its models, exclude and preset apply where this call does not pass ` +
+                `them. An unknown stack refuses the review before any model is asked.`,
+            ),
           format: tool.schema
             .enum(["text", "json"])
             .optional()
@@ -553,6 +572,28 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 }),
               )
             }
+            // B4 — MAD'S OWN USER CONFIG FILE, never plugin options and never the
+            // repository (`./user-config.ts`). Read before the roster, so a refused
+            // file or an unknown stack costs no host request, and merged field by
+            // field: the call's argument, then the named stack, then `defaults`.
+            const configRead = await readUserConfig({ env: process.env, worktree })
+            if (runControl.signal.aborted) return finish(notRun("stopped", stoppedAfterConfig()))
+            const merged = mergeConfig(args, configRead, args.stack)
+            if ("refused" in merged) {
+              return finish(
+                notRun("refused", {
+                  title: merged.refused === "config" ? "MAD — invalid user config" : "MAD — unknown stack",
+                  output:
+                    merged.refused === "config"
+                      ? `MAD did not review anything: its user config file${merged.path === null ? "" : ` (${oneLine(merged.path)})`} ` +
+                        `is refused: ${oneLine(merged.why)}. Fix or remove the file; MAD never applies part of it.`
+                      : `MAD did not review anything: ${oneLine(merged.why)}.`,
+                }),
+              )
+            }
+            const effective = merged.effective
+            const participates = configParticipates(configRead, args.stack)
+
             // Belt and braces: the schema bounds it, and so does this, because the
             // value arrives from a model call and each slot costs real money.
             const slots = clampDiscoverySlots(args.slots)
@@ -572,7 +613,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // explicit `lenses: []` under `paranoid` is a caller declining the lens
             // pass, and a truthiness test would silently sell them three billed
             // discovery turns they just refused.
-            const preset = clampPreset(args.preset)
+            const preset = clampPreset(effective.preset as Preset | undefined)
             const dials = PRESET_DIALS[preset]
             // NAMED, so the truncation warning can inspect the list that was
             // ACTUALLY clamped (ledger triage 2026-09-09). `truncatedListWarnings`
@@ -586,10 +627,10 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             const lenses = clampLenses(requestedLenses)
             // AD-3 amended (story 8A) — bounded here, RESOLVED in the core. This
             // clamp deliberately discards nothing a user asked for.
-            const pins = clampPins(args.models)
+            const pins = clampPins(effective.models as string[] | undefined)
             // Refused here, before the roster read, when the list is too long;
             // a malformed entry is refused by the core, below.
-            const parsedExclusions = parseExclusions(args.exclude)
+            const parsedExclusions = parseExclusions(effective.exclude as string[] | undefined)
             if ("refused" in parsedExclusions) {
               return finish(
                 notRun("refused", {
@@ -951,7 +992,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               // `review()` copies `priorWarnings` onto the record verbatim, so this
               // is the supported way for this layer to be heard at all.
               priorWarnings: [
-                ...truncatedListWarnings({ models: args.models, lenses: requestedLenses }),
+                ...truncatedListWarnings({ models: effective.models as string[] | undefined, lenses: requestedLenses }),
                 ...resolved.warnings,
               ],
               // CAP-7 (story 8) — the two user-facing dials, and the only two on
@@ -974,7 +1015,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
               // directly, which is the same gap `clampLenses`' own header names,
               // and `clampPreset` downstream is what answers it (code review
               // 2026-09-08).
-              preset: args.preset as Preset | undefined,
+              preset: effective.preset as Preset | undefined,
               // CAP-6 — the plugin's default budget when the caller names none; an
               // explicit budget, 0 included, is passed through raw for the
               // accountant to clamp, like the preset above.
@@ -1078,7 +1119,7 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
             // worktree.
             // B2 — the notes after the span, built once so the text and JSON
             // paths carry the same bytes outside it.
-            const notesAfter = `${budgetNote(record, args.budget, preset)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${issuedTurnsNote(record)}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}`
+            const notesAfter = `${budgetNote(record, args.budget, preset)}${SUBMODULE_SCOPE_NOTE}${probeCleanupNote}${issuedTurnsNote(record)}${stoppedBlameNote(stopLatchedBlame)}${artifactNote(artifacts)}${participates ? configNote(effective.configPath, args.stack, effective.sources) : ""}`
             return finish({
               kind: "run",
               record,
@@ -1093,6 +1134,9 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                 stoppedBlame: stoppedBlameFacts(stopLatchedBlame),
                 artifacts: artifacts.kind,
                 policyStop: policyStop === undefined ? null : { diagnostic: policyStop.problem },
+                ...(participates
+                  ? { config: { path: effective.configPath, stack: args.stack ?? null, sources: effective.sources } }
+                  : {}),
               },
               text: {
                 title: `MAD review — ${cancelledLabel}${record.findings.length} ${findingLabel}, ${record.answered}/${record.roster.requested} models answered${lensLabel}${replacedLabel}`,
@@ -1197,6 +1241,8 @@ export const MadPlugin: Plugin = async ({ client, directory, worktree, $ }) => {
                   // it outright. The kind is the discriminant; the directory is data.
                   artifactsOutcome: artifacts.kind,
                   artifacts: artifacts.kind === "written" ? artifacts.directory : undefined,
+                  // B4 — present only when MAD's user config took part.
+                  ...(participates ? { configSources: effective.sources } : {}),
                 },
               },
             })
@@ -1360,3 +1406,24 @@ function artifactNote(outcome: ArtifactOutcome): string {
 }
 
 export default MadPlugin
+
+/**
+ * B4 — where the pins, exclusions and preset came from, when MAD's user config
+ * file took part. MAD's own sentence, outside the span. The path is one line
+ * through `oneLine`, because a filename can hold a line break or text that
+ * looks like a report row; the JSON `host.config.path` keeps it intact.
+ */
+export function configNote(path: string, stack: string | undefined, sources: EffectiveArgs["sources"]): string {
+  const where = (source: string) => (source === "stack" ? `stack \`${stack}\`` : "its defaults")
+  const parts: string[] = []
+  for (const [field, list] of [["models", sources.models], ["exclude", sources.exclude]] as const) {
+    if (list.source === "stack" || list.source === "defaults") {
+      parts.push(`${field} from ${where(list.source)}${list.explicitEmpty ? " (an empty list, clearing any inherited one)" : ""}`)
+    }
+  }
+  if (sources.preset.source === "stack" || sources.preset.source === "defaults") {
+    parts.push(`preset from ${where(sources.preset.source)}`)
+  }
+  const taken = parts.length === 0 ? "nothing was taken from it" : parts.join("; ")
+  return `\n\nMAD read its user config file at ${oneLine(path)}: ${taken}. Arguments passed to this call override it.`
+}

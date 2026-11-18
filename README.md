@@ -86,6 +86,7 @@ The plugin adds one tool, `mad_review`. You ask your OpenCode agent to call it, 
 | `preset` | `quick`, `normal` or `paranoid` | `normal` | one of the three |
 | `models` | list of `provider/model` | MAD chooses the whole roster | at most 12 |
 | `exclude` | list of `provider/model` | nothing excluded | at most 64 |
+| `stack` | stack name | none | letters, digits, `-` and `_`, at most 64 |
 | `format` | `text` or `json` | `text` | one of the two |
 
 - **`target`.** Omit it to review uncommitted work: tracked edits and untracked files, against `HEAD`. Pass a ref, a commit or a range such as `main...HEAD` to review that instead; untracked files are then not read. A target that starts with `-` is refused before anything runs, because git would read it as an option.
@@ -95,9 +96,25 @@ The plugin adds one tool, `mad_review`. You ask your OpenCode agent to call it, 
 - **`preset`.** Moves the numbers in the table below, never the policy.
 - **`models`.** Models to pin, filling slots in the order given before MAD chooses the rest. A model the host does not offer is reported, and its slot is filled automatically. MAD holds no credentials and adds no provider.
 - **`exclude`.** Models MAD must not use in this review. Each entry names one provider's offering of one exact model id; the provider is matched without regard to case. The same model through another provider, and another model id the same provider lists for it, stay eligible. An excluded model fills no slot, no lens and no replacement, and a model you both pin and exclude is reported as excluded and its slot is filled automatically. The report names every exclusion and how many offerings it removed, including an exclusion that matched nothing. An entry that is not `provider/model`, or a list longer than 64, refuses the review before any model is asked, and a list that excludes every offering is refused too. MAD does not remember a refusal from one review to the next, so a route you know rejects MAD, such as one that returned the capability refusal described under `slots`, is excluded only for the reviews you pass it to. Why `anthropic/claude-opus-5-5` rejected the forced tool choice in the 2026-11-12 and 2026-11-16 runs is not established.
+- **`stack`.** The name of a stack in MAD's user config file (see *User config file* below). Its `models`, `exclude` and `preset` apply where this call does not pass them. A stack the file does not hold, or a stack named when there is no file, refuses the review before any model is asked.
 - **`format`.** `text` returns the text report. `json` returns one JSON document in its place, in the same labelled `review report` span, on every result `mad_review` returns, and leaves the title, the result metadata and MAD's notes outside the span unchanged. The document's `schema` is `mad.review/1`. A completed run gives its `state` (`clean`, `degraded` or `stopped`), who stopped it, the numbers of models requested and answered, the budget with observed tokens and turns of unknown usage, warnings and disclosures, the ranked findings, and under `host` the facts MAD's notes state. Each finding has a debate status, a judgment status and a verdict as separate fields, and its claim and path under `untrusted`. When no review ran, `state` is `not-run` and `outcome` says why (`stopped`, `refused`, `failed` or `nothing-to-review`), with MAD's message as `diagnostic` and any cleanup facts under `facts`; such a document has no findings list. Finding ids are local to the run. Warning and other `diagnostic` text is MAD's, but it can quote git, provider and argument text. To read it, take the whole tool output, find the line that opens the `review report` span, find the closing line (the same run of backticks, alone on its line), and parse the lines between them. A transcript a host shortened may have lost the closing line, and nothing makes that parseable.
 
 An argument you pass always beats the preset, including an explicit empty `lenses` list under `paranoid`.
+
+### User config file
+
+MAD reads one config file of its own: `$XDG_CONFIG_HOME/mad/config.json` when `XDG_CONFIG_HOME` is an absolute path, and `~/.config/mad/config.json` otherwise. It never reads plugin options for this, nor the repository under review, the working directory or `OPENCODE_CONFIG`, because OpenCode merges a project's `opencode.json` into the plugin's options, and a change under review must not choose its own reviewers. The file is optional; without it nothing changes.
+
+```json
+{
+  "defaults": { "exclude": ["anthropic/claude-opus-5-5"] },
+  "stacks": { "cheap": { "models": ["openai/gpt-6-luna"], "preset": "quick" } }
+}
+```
+
+`defaults` and each stack may set `models`, `exclude` and `preset`, under the same rules as the arguments. For each of the three, the argument you pass wins, then the stack you name with `stack`, then `defaults`, then MAD's own default. An empty list is a value: it clears the list it would have inherited. `lenses`, `slots`, `budget` and `format` come only from the call.
+
+MAD resolves the file's path itself, symlink by symlink. A file that exists is refused when any step of that resolution is inside the repository under review, by name or as the same directory. A file that is malformed, unreadable, not a regular file, or holds an unknown key or an invalid entry is refused as a whole. A refused file refuses the review before any model is asked; MAD never applies part of it. When the file took part, or a stack was named, a note outside the report names the file's path and which of the three came from it. The result metadata's `configSources` gives each of the three's source (`argument`, `stack`, `defaults` or `none`) and whether an explicit empty list took effect. The JSON document's `host.config` gives the file's path, the stack named (or `null`) and the same sources.
 
 | Preset | Co-discovery threshold | Lenses | Peak concurrent turns | Default budget (tokens) |
 |--------|------------------------|--------|-----------------------|-------------------------|

@@ -28,6 +28,7 @@ import type { ArtifactOutcome } from "./artifacts.ts"
 import type { PolicyProbe } from "./model-backend.ts"
 import type { ChangeReadStopped } from "./repo.ts"
 import type { BlameCleanupUnresolved } from "./tools.ts"
+import type { EffectiveArgs } from "./user-config.ts"
 
 export type ResultFormat = "text" | "json"
 
@@ -85,6 +86,8 @@ export interface RunHostFacts {
   artifacts: ArtifactOutcome["kind"]
   /** MAD stopped the run because a session's permission rules differed; the host's description. */
   policyStop: { diagnostic: string } | null
+  /** Present only when MAD's user config took part: its path, the stack named, and each field's source. */
+  config?: { path: string; stack: string | null; sources: EffectiveArgs["sources"] }
 }
 
 export type Answer =

@@ -71,7 +71,8 @@ export type UserConfigRead =
   | { kind: "loaded"; path: string; config: UserConfig }
   | { kind: "refused"; path: string | null; why: string }
 
-const STACK_NAME = /^[A-Za-z0-9_-]{1,64}$/
+/** A stack's name, in the file and in the `stack` argument. */
+export const STACK_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const ENTRY_KEYS = new Set(["models", "exclude", "preset"])
 const TOP_KEYS = new Set(["defaults", "stacks"])
 
@@ -264,31 +265,36 @@ export async function readUserConfig(options: ReadUserConfigOptions): Promise<Us
   const path = located.path
   const refuse = (why: string): UserConfigRead => ({ kind: "refused", path, why })
 
-  let realWorktree: string
+  // The worktree's resolved path and identity. When it cannot be resolved,
+  // the walk still runs: a missing file is absent whatever the worktree is,
+  // and an existing file is refused, because MAD cannot show it is outside.
+  let worktree: { real: string; dev: number; ino: number } | { problem: string }
   try {
-    realWorktree = await realpath(resolve(options.worktree))
+    const real = await realpath(resolve(options.worktree))
+    const id = await stat(real)
+    worktree = { real, dev: id.dev, ino: id.ino }
   } catch (error) {
-    return refuse(`MAD could not resolve the worktree under review (${errnoOf(error) ?? String(error)}), so it cannot show the config file is outside it`)
+    worktree = { problem: errnoOf(error) ?? String(error) }
   }
   // By name, as given and as resolved; and by identity, because a filesystem
   // can treat two spellings of one directory as the same directory (on Darwin,
   // composed and decomposed Unicode) while the strings differ. The walk enters
   // every directory on the way down, so entering the worktree under any
   // spelling is entering a directory with the worktree's device and inode.
-  let worktreeId: { dev: number; ino: number }
-  try {
-    worktreeId = await stat(realWorktree)
-  } catch (error) {
-    return refuse(`MAD could not inspect the worktree under review (${errnoOf(error) ?? String(error)})`)
-  }
   const within: Within = (location, stats) =>
-    isWithin(location, realWorktree) ||
     isWithin(location, options.worktree) ||
-    (stats !== undefined && stats.isDirectory() && stats.dev === worktreeId.dev && stats.ino === worktreeId.ino)
+    ("real" in worktree &&
+      (isWithin(location, worktree.real) ||
+        (stats !== undefined && stats.isDirectory() && stats.dev === worktree.dev && stats.ino === worktree.ino)))
 
   const chain = await resolveChain(path, within)
   if (chain.kind === "missing") return { kind: "absent", path }
   if (chain.kind === "refused") return refuse(chain.why)
+  if ("problem" in worktree) {
+    return refuse(
+      `MAD could not resolve the worktree under review (${worktree.problem}), so it cannot show the config file is outside it`,
+    )
+  }
   if (chain.throughWorktree) {
     return refuse(
       "a step of the config file's path is inside the repository under review, which must not choose its own reviewers",
@@ -324,4 +330,81 @@ export async function readUserConfig(options: ReadUserConfigOptions): Promise<Us
   const parsed = parseUserConfig(text)
   if ("why" in parsed) return refuse(parsed.why)
   return { kind: "loaded", path, config: parsed.config }
+}
+
+/** Where one effective value came from. */
+export type ConfigSource = "argument" | "stack" | "defaults" | "none"
+
+export interface ListSource {
+  source: ConfigSource
+  /** The list that took effect was an explicit empty list, which clears an inherited one. */
+  explicitEmpty: boolean
+}
+
+export interface EffectiveArgs {
+  /** `undefined` when no source names one: the call path's own default applies. */
+  models?: unknown
+  exclude?: unknown
+  preset?: unknown
+  sources: { models: ListSource; exclude: ListSource; preset: { source: ConfigSource } }
+  /** The config file's path, whether or not a file is there. */
+  configPath: string
+}
+
+/**
+ * The call arguments merged with the config, field by field: the call's own
+ * argument, then the named stack, then `defaults`, then nothing (the call
+ * path's defaults apply). A present empty list is a value and clears what it
+ * would have inherited; an omitted field inherits. Argument values pass through
+ * untouched, so the call path validates them exactly as before. Refused when
+ * the file was refused, or when `stack` is named and the loaded file has no
+ * such stack (or there is no file).
+ */
+export function mergeConfig(
+  args: { models?: unknown; exclude?: unknown; preset?: unknown },
+  read: UserConfigRead,
+  stack: string | undefined,
+): { effective: EffectiveArgs } | { refused: "config"; why: string; path: string | null } | { refused: "stack"; why: string } {
+  if (read.kind === "refused") return { refused: "config", why: read.why, path: read.path }
+  const config = read.kind === "loaded" ? read.config : undefined
+  let named: ConfigEntry | undefined
+  if (stack !== undefined) {
+    named = config?.stacks.get(stack)
+    if (named === undefined) {
+      return {
+        refused: "stack",
+        why:
+          config === undefined
+            ? `the stack \`${stack}\` was requested, but there is no user config file at ${read.path}`
+            : `the user config file has no stack named \`${stack}\``,
+      }
+    }
+  }
+  const pick = <K extends "models" | "exclude" | "preset">(key: K): { value: unknown; source: ConfigSource } => {
+    if (args[key] !== undefined) return { value: args[key], source: "argument" }
+    if (named?.[key] !== undefined) return { value: named[key], source: "stack" }
+    if (config?.defaults[key] !== undefined) return { value: config.defaults[key], source: "defaults" }
+    return { value: undefined, source: "none" }
+  }
+  const list = (key: "models" | "exclude") => {
+    const { value, source } = pick(key)
+    return { value, sourceOf: { source, explicitEmpty: Array.isArray(value) && value.length === 0 } }
+  }
+  const models = list("models")
+  const exclude = list("exclude")
+  const preset = pick("preset")
+  return {
+    effective: {
+      ...(models.value === undefined ? {} : { models: models.value }),
+      ...(exclude.value === undefined ? {} : { exclude: exclude.value }),
+      ...(preset.value === undefined ? {} : { preset: preset.value }),
+      sources: { models: models.sourceOf, exclude: exclude.sourceOf, preset: { source: preset.source } },
+      configPath: read.path,
+    },
+  }
+}
+
+/** Whether the config took part in this call: a file was loaded or a stack was named. */
+export function configParticipates(read: UserConfigRead, stack: string | undefined): boolean {
+  return read.kind === "loaded" || stack !== undefined
 }

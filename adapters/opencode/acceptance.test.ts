@@ -75,6 +75,7 @@ import {
 } from "./test-support/repo-snapshot.ts"
 import { isolateGitHome } from "./test-support/git-home.ts"
 import { outsideReviewReport, reviewReportBody } from "./test-support/review-report.ts"
+import { mkdir as mkdirConfig, rm as rmConfig, writeFile as writeConfigFile } from "node:fs/promises"
 
 isolateGitHome()
 
@@ -522,6 +523,137 @@ describe("acceptance — the fake host refuses what it cannot answer honestly", 
         ])
       } finally {
         await host.stop()
+      }
+    },
+    TIMEOUT_MS,
+  )
+})
+
+describe("acceptance — B4, MAD's user config file through the shipped plugin entry", () => {
+  /** The isolated test home's config file (`isolateGitHome` points XDG_CONFIG_HOME at it). */
+  const configFile = () => join(process.env.XDG_CONFIG_HOME!, "mad", "config.json")
+  async function withConfig<T>(content: unknown, body: () => Promise<T>): Promise<T> {
+    await mkdirConfig(join(process.env.XDG_CONFIG_HOME!, "mad"), { recursive: true })
+    await writeConfigFile(configFile(), typeof content === "string" ? content : JSON.stringify(content))
+    try {
+      return await body()
+    } finally {
+      await rmConfig(join(process.env.XDG_CONFIG_HOME!, "mad"), { recursive: true, force: true })
+    }
+  }
+  const host = { discovery: [FEE_FINDING], judge: { "fact-check": FEE_FACT_CHECK } }
+
+  test(
+    "no file: the result has no config note, no configSources and no host.config",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const text = await runScenario(repo, host, { args: { preset: "quick" } })
+        const json = await runScenario(repo, host, { args: { format: "json" } })
+        expectClean(text)
+        expect(text.result.output).not.toContain("user config file")
+        expect(Object.keys(text.result.metadata ?? {})).not.toContain("configSources")
+        expect("config" in JSON.parse(reviewReportBody(json.result.output)).host).toBe(false)
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "defaults and a stack apply under the argument, an empty stack list clears the defaults, and the sources are disclosed",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        await withConfig(
+          { defaults: { exclude: ["openai/gpt-5"], preset: "paranoid" }, stacks: { open: { exclude: [], preset: "quick" } } },
+          async () => {
+            // Defaults: openai is excluded, so no prompt asks gpt-5.
+            const byDefaults = await runScenario(repo, host, { args: { format: "json" } })
+            expectClean(byDefaults)
+            expect(byDefaults.host.prompts.some((p) => p.model === "gpt-5")).toBe(false)
+            expect((byDefaults.result.metadata as Record<string, unknown> | undefined)?.["preset"]).toBe("paranoid")
+            const doc = JSON.parse(reviewReportBody(byDefaults.result.output))
+            expect(doc.host.config).toEqual({
+              path: configFile(),
+              stack: null,
+              sources: {
+                models: { source: "none", explicitEmpty: false },
+                exclude: { source: "defaults", explicitEmpty: false },
+                preset: { source: "defaults" },
+              },
+            })
+            expect(outsideReviewReport(byDefaults.result.output).after).toContain(
+              "exclude from its defaults; preset from its defaults",
+            )
+
+            // The stack's empty list clears the exclusion; its preset applies.
+            const byStack = await runScenario(repo, host, { args: { stack: "open" } })
+            expectClean(byStack)
+            expect(byStack.host.prompts.some((p) => p.model === "gpt-5")).toBe(true)
+            expect((byStack.result.metadata as Record<string, unknown> | undefined)?.["preset"]).toBe("quick")
+            expect((byStack.result.metadata as Record<string, unknown>)["configSources"]).toEqual({
+              models: { source: "none", explicitEmpty: false },
+              exclude: { source: "stack", explicitEmpty: true },
+              preset: { source: "stack" },
+            })
+            expect(byStack.result.output).toContain("exclude from stack `open` (an empty list, clearing any inherited one)")
+
+            // The argument wins over both.
+            const byArgument = await runScenario(repo, host, { args: { stack: "open", preset: "normal" } })
+            expect((byArgument.result.metadata as Record<string, unknown> | undefined)?.["preset"]).toBe("normal")
+          },
+        )
+      } finally {
+        await repo.remove()
+      }
+    },
+    TIMEOUT_MS,
+  )
+
+  test(
+    "refused before any host request: an invalid file, an unknown stack, a stack with no file; and a stop during the read",
+    async () => {
+      const repo = await makeReviewRepo({ dirty: true })
+      try {
+        const none = { providers: 0, create: 0, prompt: 0, delete: 0, abort: 0, status: 0 }
+        const noFileStack = await runScenario(repo, host, { args: { stack: "open" } })
+        expect(noFileStack.result.title).toBe("MAD — unknown stack")
+        expect(noFileStack.host.counts).toEqual(none)
+
+        await withConfig('{"defaults":{"exclude":["opus"]}}', async () => {
+          const invalid = await runScenario(repo, host, { args: { format: "json" } })
+          expectClean(invalid)
+          expect(invalid.result.title).toBe("MAD — invalid user config")
+          expect(invalid.host.counts).toEqual(none)
+          const doc = JSON.parse(reviewReportBody(invalid.result.output))
+          expect(doc).toMatchObject({ state: "not-run", outcome: "refused" })
+          expect(doc.diagnostic).toContain("defaults.exclude[0]")
+        })
+
+        await withConfig({ stacks: { open: {} } }, async () => {
+          const unknown = await runScenario(repo, host, { args: { stack: "closed" } })
+          expect(unknown.result.title).toBe("MAD — unknown stack")
+          expect(unknown.host.counts).toEqual(none)
+        })
+
+        const controller = new AbortController()
+        const stopped = await runScenario(repo, host, {
+          abort: controller.signal,
+          // The stop lands once execute is awaiting the config read.
+          aroundExecute: async (body) => {
+            const pending = body()
+            controller.abort()
+            return pending
+          },
+        })
+        expectClean(stopped)
+        expect(stopped.result.title).toBe("MAD — review stopped")
+        expect(stopped.result.output).toContain("while MAD was checking for its own user config file")
+        expect(stopped.host.counts).toEqual(none)
+      } finally {
+        await repo.remove()
       }
     },
     TIMEOUT_MS,
