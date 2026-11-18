@@ -316,6 +316,11 @@ export interface ReviewDeps {
    * without this field. Only an evaluation arm sets it.
    */
   debateReferences?: boolean
+  /**
+   * Plan item B5 — the opt-in open-questions experiment
+   * (`DebateInput.missingEvidence`), independent of `debateReferences`.
+   */
+  debateMissingEvidence?: boolean
 }
 
 export interface ReviewResult {
@@ -610,6 +615,7 @@ export type ContinueDeps = Pick<
   | "observationTimeoutMs"
   | "progress"
   | "debateReferences"
+  | "debateMissingEvidence"
 >
 
 /**
@@ -1202,6 +1208,7 @@ export async function continueReview(
     signal,
     ...(deps.admission === undefined ? {} : { admission: deps.admission }),
     ...(deps.debateReferences === true ? { references: true } : {}),
+    ...(deps.debateMissingEvidence === true ? { missingEvidence: true } : {}),
   })
   // Re-stamped from the stage's return for routing's reason exactly: the record
   // reports what the STAGE did. Both sides call `clampMaxRounds`, so this is

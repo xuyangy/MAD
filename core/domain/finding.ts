@@ -197,6 +197,13 @@ export interface Entry {
    * supports the change.
    */
   shiftWithoutValidReference?: boolean
+  /**
+   * B5 (opt-in `debateMissingEvidence`) — questions the speaker listed about
+   * facts it could not check. Model-authored, stored as the schema bounded
+   * them; questions, never evidence. Absent when the option is off or the
+   * speaker listed none.
+   */
+  missingEvidence?: string[]
 }
 
 /**

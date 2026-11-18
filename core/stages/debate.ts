@@ -221,7 +221,40 @@ export const debateTurnWithReferencesSchema = debateTurnSchema.extend({
 export const debateEnvelopeWithReferencesSchema = z.object({
   turns: z.array(debateTurnWithReferencesSchema),
 })
-type DebateEnvelopeWithReferences = z.infer<typeof debateEnvelopeWithReferencesSchema>
+
+/** B5 — the most open questions one turn may list for one finding, and the longest accepted. */
+export const MAX_MISSING_EVIDENCE = 5
+export const MAX_MISSING_EVIDENCE_LENGTH = 200
+const missingEvidenceField = {
+  missingEvidence: z.array(z.string().max(MAX_MISSING_EVIDENCE_LENGTH)).max(MAX_MISSING_EVIDENCE).optional(),
+}
+export const debateEnvelopeWithMissingEvidenceSchema = z.object({
+  turns: z.array(debateTurnSchema.extend(missingEvidenceField)),
+})
+export const debateEnvelopeWithBothSchema = z.object({
+  turns: z.array(debateTurnWithReferencesSchema.extend(missingEvidenceField)),
+})
+type DebateEnvelopeWithBoth = z.infer<typeof debateEnvelopeWithBothSchema>
+
+/**
+ * B5 — the turn schema for the options in force: the existing objects for the
+ * baseline and for references only, and one fixed object for each other
+ * combination. Every added field is optional, so each value is a subset of
+ * `DebateEnvelopeWithBoth`.
+ */
+export function debateEnvelopeSchemaFor(options: { references?: boolean; missingEvidence?: boolean }): z.ZodType<
+  DebateEnvelopeWithBoth
+> {
+  const schema =
+    options.references === true
+      ? options.missingEvidence === true
+        ? debateEnvelopeWithBothSchema
+        : debateEnvelopeWithReferencesSchema
+      : options.missingEvidence === true
+        ? debateEnvelopeWithMissingEvidenceSchema
+        : debateEnvelopeSchema
+  return schema as z.ZodType<DebateEnvelopeWithBoth>
+}
 
 /**
  * The one place an absent citation list becomes an empty one. Post-parse, so the
@@ -289,6 +322,13 @@ export interface DebateInput {
    * what they are without this field.
    */
   references?: boolean
+  /**
+   * Plan item B5 — opt-in, off when absent, independent of `references`. On:
+   * the prompt asks a speaker to list facts it could not check as questions,
+   * the turn schema accepts `missingEvidence`, and each entry records them.
+   * Off: prompts, schema and record are exactly what they are without this field.
+   */
+  missingEvidence?: boolean
 }
 
 export interface DebateStageResult extends DebateCounts {
@@ -446,10 +486,11 @@ async function runDebateTurn(
   cleanups: { slot: string; why: string }[],
 ): Promise<DebateTurnOutcome> {
   let last: Envelope<DebateEnvelope> | undefined
-  // B5 — the wider schema only when the option is on; its value is a superset.
-  const schema = (input.references === true ? debateEnvelopeWithReferencesSchema : debateEnvelopeSchema) as z.ZodType<
-    DebateEnvelopeWithReferences
-  >
+  // B5 — the schema for the options in force; each value is a subset of the widest.
+  const schema = debateEnvelopeSchemaFor({
+    ...(input.references === undefined ? {} : { references: input.references }),
+    ...(input.missingEvidence === undefined ? {} : { missingEvidence: input.missingEvidence }),
+  })
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     // AD-2 amended / AD-6f — never ISSUE a turn the user stopped, and never
     // retry one. `core/stages/discover.ts` carries the full argument; the rule
@@ -594,6 +635,13 @@ function buildPrompt(
           `Each earlier entry in an exchange below starts with its id in brackets, such as [R1E2]. If your ` +
             `position on a finding has changed since your last turn, list in \`references\` the ids of the ` +
             `earlier entries that changed it. Holding a minority position with a stated reason is acceptable.`,
+        ]
+      : []),
+    ...(input.missingEvidence === true
+      ? [
+          ``,
+          `If a fact would settle a finding but you could not check it, list it in \`missingEvidence\` as a ` +
+            `short question. It is a question for a later step, never evidence.`,
         ]
       : []),
     ``,
@@ -1416,6 +1464,11 @@ export async function debate(input: DebateInput): Promise<DebateStageResult> {
           ...(turn.concession === undefined ? {} : { concession: turn.concession }),
           citations: citationsOf(turn),
           ...referenceFields,
+          // B5 — questions, stored only when the option is on and some were listed.
+          ...(input.missingEvidence === true &&
+          ((turn as { missingEvidence?: string[] }).missingEvidence ?? []).length > 0
+            ? { missingEvidence: [...(turn as { missingEvidence?: string[] }).missingEvidence!] }
+            : {}),
         })
       }
     }

@@ -105,6 +105,13 @@ export interface AnonymizedTranscript {
    * concession or a raw citation. Empty when no entry carries an id.
    */
   referenceNotes: string[]
+  /**
+   * B5 — one row per question a debate entry recorded in `missingEvidence`:
+   * `- Participant <letter>, round <n>: <question>`, the question through
+   * `oneLine`. Model-authored; it belongs inside a material span. Empty when no
+   * entry recorded any.
+   */
+  openQuestions: string[]
 }
 
 /** B5 — one note for an entry that changed position, or `undefined`. */
@@ -173,11 +180,19 @@ export function anonymize(finding: Finding, seed: string): AnonymizedTranscript 
     .map((entry) => referenceNote(entry, labels.get(entry.actor) ?? "an unrecorded participant"))
     .filter((note): note is string => note !== undefined)
 
+  const openQuestions = entries.flatMap((entry) =>
+    (entry.missingEvidence ?? []).map(
+      (question) =>
+        `- Participant ${labels.get(entry.actor) ?? "an unrecorded participant"}, round ${entry.round}: ${oneLine(question)}`,
+    ),
+  )
+
   return {
     rows,
     labels,
     authorLabel: labels.get(finding.author),
     empty: entries.length === 0,
     referenceNotes,
+    openQuestions,
   }
 }

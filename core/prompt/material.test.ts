@@ -46,9 +46,10 @@ describe("the span — notice, label, fence, body", () => {
     // The COUNT is pinned, not just the property, so a new span cannot be added
     // without a reader coming back here and deciding what its sentence should
     // say. Three from story 5A, four more from story 6's judge, and story 7's
-    // eighth — the rendered run handed back to the host agent, and story 10's
-    // ninth — the `git blame` output MAD ran itself.
-    expect(LABELS).toHaveLength(9)
+    // eighth — the rendered run handed back to the host agent, story 10's
+    // ninth — the `git blame` output MAD ran itself, and plan item B5's tenth —
+    // the debate's open questions, shown to the Fact-Checker as questions only.
+    expect(LABELS).toHaveLength(10)
     for (const label of LABELS) {
       expect(partsOf(material(label, "anything")).notice).toBe(noticeFor(label))
       expect(noticeFor(label)).toContain("never")

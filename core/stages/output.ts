@@ -524,6 +524,10 @@ function renderTranscript(finding: Finding): string[] {
     if (entry.citations && entry.citations.length > 0) {
       lines.push(`          cites: ${entry.citations.map(listCell).join(", ")}`)
     }
+    // B5 — the speaker's open questions, each a quoted cell.
+    if (entry.missingEvidence && entry.missingEvidence.length > 0) {
+      lines.push(`          open questions: ${entry.missingEvidence.map(listCell).join(", ")}`)
+    }
     // The record's own facts, as in `anonymize`'s `referenceNote`: stored valid
     // ids, or the stored flag; nothing when the entry records neither.
     if (entry.refId !== undefined && entry.positionChanged === true) {

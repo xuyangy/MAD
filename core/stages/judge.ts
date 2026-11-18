@@ -667,6 +667,20 @@ function transcriptSection(transcript: AnonymizedTranscript): string[] {
   ]
 }
 
+/**
+ * B5 — the debate's open questions, for the Fact-Checker only: inside their own
+ * span, one escaped row each, under the transcript's anonymized letters.
+ */
+function openQuestionsSection(transcript: AnonymizedTranscript): string[] {
+  if (transcript.openQuestions.length === 0) return []
+  return [
+    ``,
+    `# Open questions from the debate`,
+    ``,
+    material("open questions from the debate", transcript.openQuestions.join("\n")),
+  ]
+}
+
 /** Span 5 — the extractor's own prose, plus the pointers it kept. */
 function evidenceSection(evidence: string | undefined): string[] {
   if (evidence === undefined) return []
@@ -782,6 +796,8 @@ function buildFactCheckPrompt(
     // both would double the tokens for one argument and give the checker two
     // versions of it to reconcile.
     ...(evidence === undefined ? transcriptSection(transcript) : []),
+    // B5 — on both paths, whether or not the transcript is shown.
+    ...openQuestionsSection(transcript),
   ].join("\n")
 }
 
