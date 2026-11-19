@@ -3077,26 +3077,25 @@ describe("--design debate-variants", () => {
     expect(read.text).toContain("MAD debate-variants report")
   })
 
-  test("the shipped table refuses at stage 1 on gate 14 alone: the committed frozen protocol verifies against its pin; nothing is reserved or started", async () => {
+  test("with the shipped table and the committed protocol (fakes only, a temporary reservation root), the gates and the protocol pass and the run is reserved", async () => {
     const env = await setup()
-    const { overrides, host, meter } = overridesFor(env)
+    const real = join(REPO_ROOT, VARIANT_EVALUATION_RUN.reservation)
+    const before = existsSync(real) ? await readFile(real, "utf8") : null
+    const { overrides } = overridesFor(env)
     const result = await captured(() => main(variantArgv(env), overrides))
-    expect(result.code).toBe(1)
+    expect(result.code, result.text).toBe(0)
     expect(result.text).toContain(`PASS  frozen protocol`)
     expect(result.text).toContain(`${VARIANT_PROTOCOL.id} v${VARIANT_PROTOCOL.version} ${VARIANT_PROTOCOL.frozenHash}, the protocol \`VARIANT_PROTOCOL\` pins`)
-    expect(result.text).not.toContain("no frozen PROTOCOL-mad-debate-variants is pinned")
-    expect(result.text).not.toContain("REFUSED: gate 13")
-    expect(result.text).toContain("REFUSED: gate 14 (debate-variants evaluation spend authorization) is OPEN")
-    expect(host.started).toEqual([])
-    expect(meter.started).toEqual([])
-    expect(existsSync(reservationFile(env))).toBe(false)
-    await nothingScheduled(env.out, env.scratchParent)
+    expect(result.text).not.toContain("REFUSED")
+    expect(JSON.parse(await readFile(reservationFile(env), "utf8"))).toMatchObject({ run: 1, design: "debate-variants", protocol: { hash: VARIANT_PROTOCOL.frozenHash } })
+    // The repository's own reservation is left as it was, whether or not a real run has made it.
+    expect(existsSync(real) ? await readFile(real, "utf8") : null).toBe(before)
   })
 
   test("gate 9 closed does not stand in for gate 14, and an OPEN shared engineering gate blocks it", async () => {
     const protocol = await frozenVariantProtocol()
     for (const [table, reason] of [
-      [closedGates.map((gate) => (gate.number === 14 ? PAIRED_GATES.find((entry) => entry.number === 14)! : gate)), "gate 14 (debate-variants evaluation spend authorization) is OPEN"],
+      [closedGates.map((gate) => (gate.number === 14 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate)), "gate 14 (debate-variants evaluation spend authorization) is OPEN"],
       [closedGates.map((gate) => (gate.number === 5 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate)), "gate 5 (worktree identity) is OPEN"],
     ] as const) {
       const env = await setup()

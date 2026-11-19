@@ -44,7 +44,7 @@ describe("PAIRED_GATES", () => {
       [11, "adversarial attempt accounting", "engineering", "adversarial", "story 2-7f2", "CLOSED"],
       [12, "bounded materializer termination", "engineering", "adversarial", "story 2-7e2", "CLOSED"],
       [13, "debate-variants launcher wiring", "engineering", "debate-variants", "the debate-variants launcher work", "CLOSED"],
-      [14, "debate-variants evaluation spend authorization", "authorization", "debate-variants", HUMAN_BUDGET_OWNER, "OPEN"],
+      [14, "debate-variants evaluation spend authorization", "authorization", "debate-variants", HUMAN_BUDGET_OWNER, "CLOSED"],
     ])
     // Routes: gates 1 and 9 cover the api-key route, gates 4, 7, 8 and 10 to 12 the oauth route, and every other gate both.
     expect(PAIRED_GATES.map((gate) => [gate.number, gate.routes ?? "every route"])).toEqual([
@@ -274,11 +274,11 @@ describe("PAIRED_GATES", () => {
     }
   })
 
-  test("exactly gates 3, 4, 8, 9, 10 and 14 are authorization gates, owned by the human budget owner, and OPEN", () => {
+  test("exactly gates 3, 4, 8, 9, 10 and 14 are authorization gates, owned by the human budget owner; 14 is CLOSED and the rest OPEN", () => {
     const authorization = PAIRED_GATES.filter((gate) => gate.kind === "authorization")
     expect(authorization.map((gate) => gate.number)).toEqual([3, 4, 8, 9, 10, 14])
     for (const gate of authorization) expect(gate.owner).toBe(HUMAN_BUDGET_OWNER)
-    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "OPEN"])
+    expect(authorization.map((gate) => gate.status)).toEqual(["OPEN", "OPEN", "OPEN", "OPEN", "OPEN", "CLOSED"])
   })
 
   test("the closed engineering gates name the launcher checks and their tests", () => {
@@ -1146,11 +1146,11 @@ describe("the debate-variants phase", () => {
   const variantGates = (table: readonly PairedGate[] = PAIRED_GATES) =>
     table.map((gate) => (gate.phase === "debate-variants" ? closed(gate) : gate))
 
-  test("gates 13 and 14 are its own and api-key only, 13 CLOSED on the launcher's tests and 14 OPEN; gates 1, 2, 5 and 6 are shared with it, and no authorization is", () => {
+  test("gates 13 and 14 are its own and api-key only, 13 CLOSED on the launcher's tests and 14 on the budget owner's authorization of run 1; gates 1, 2, 5 and 6 are shared with it, and no authorization is", () => {
     const own = PAIRED_GATES.filter((gate) => gate.phase === "debate-variants")
     expect(own.map((gate) => [gate.number, gate.kind, gate.routes, gate.status])).toEqual([
       [13, "engineering", ["api-key"], "CLOSED"],
-      [14, "authorization", ["api-key"], "OPEN"],
+      [14, "authorization", ["api-key"], "CLOSED"],
     ])
     const shared = PAIRED_GATES.filter((gate) => gate.alsoRequiredFor?.includes("debate-variants"))
     expect(shared.map((gate) => gate.number)).toEqual([1, 2, 5, 6])
@@ -1160,10 +1160,17 @@ describe("the debate-variants phase", () => {
     expect(variantEvaluationEvidencePattern(1).test("debate-variants-evaluation-run-1-2026-11-19.json")).toBe(true)
   })
 
-  test("the shipped table refuses on gate 14 alone: the protocol frozen on 2026-11-19 is pinned", () => {
+  test("the shipped table opens the phase on the api-key route: gate 14 authorizes run 1 and the frozen protocol is pinned", () => {
     const result = gatePreflight(PAIRED_GATES, "debate-variants", "api-key")
-    expect(result.ok).toBe(false)
-    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 14"])
+    expect(result.problems).toEqual([])
+    expect(result.ok).toBe(true)
+    const gate14 = PAIRED_GATES.find((gate) => gate.number === 14)!
+    for (const text of ["I authorize debate-variants run 1", "2026-11-19", VARIANT_EVALUATION_RUN.reservation, "2,585,000", "1,985,000", "admission thresholds, not a bill", "was not started"]) {
+      expect(gate14.evidence, text).toContain(text)
+    }
+    // Still never the routing evaluation, and never oauth.
+    expect(gatePreflight(PAIRED_GATES, "evaluation", "api-key").problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 9"])
+    expect(gatePreflight(PAIRED_GATES, "debate-variants", "oauth").ok).toBe(false)
     expect(PAIRED_GATES.find((gate) => gate.number === 13)!.evidence).toContain("Over fakes only")
     expect(VARIANT_PROTOCOL).toMatchObject({ id: VARIANT_PROTOCOL_ID, version: 1, frozenHash: "sha256:c7f7ee681c49b71f47591cc465f3e3d94bf44c905a57003a64192e65a81908ec" })
     expect(variantProtocolPinProblem()).toBeNull()
@@ -1174,7 +1181,9 @@ describe("the debate-variants phase", () => {
 
   test("with its own gates closed and a protocol pinned it opens; gate 9 closed never stands in for gate 14", () => {
     expect(gatePreflight(variantGates(), "debate-variants", "api-key", undefined, undefined, pinned).ok).toBe(true)
-    const nineOnly = PAIRED_GATES.map((gate) => (gate.number === 9 ? closed(gate) : gate))
+    const nineOnly = PAIRED_GATES.map((gate) =>
+      gate.number === 9 ? closed(gate) : gate.number === 14 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate,
+    )
     const refused = gatePreflight(nineOnly, "debate-variants", "api-key", undefined, undefined, pinned)
     expect(refused.problems.some((problem) => problem.startsWith("gate 14"))).toBe(true)
     // And gate 14 closed never opens the routing evaluation.

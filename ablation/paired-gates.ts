@@ -48,8 +48,9 @@
  * gate 14 the budget owner's authorization of the one run
  * `VARIANT_EVALUATION_RUN` names, under the frozen protocol `VARIANT_PROTOCOL`
  * pins. Gate 13 is CLOSED on the launcher's fake-only tests; `VARIANT_PROTOCOL`
- * pins the protocol frozen on 2026-11-19; gate 14 is OPEN, so `gatePreflight`
- * refuses the phase and no run is authorized. The engineering gates 1, 2, 5 and 6,
+ * pins the protocol frozen on 2026-11-19; gate 14 is CLOSED on the budget
+ * owner's authorization of run 1 alone (2026-11-19), and the launcher's
+ * reservation makes a second start refuse. The engineering gates 1, 2, 5 and 6,
  * which check the host, the worktree and the Tools port that launch shares,
  * name the phase in `alsoRequiredFor` and are required for it too. Only an
  * engineering gate may name another phase: gate 9, the routing evaluation's
@@ -398,8 +399,8 @@ export const EVALUATION_PROTOCOL = {
  * The frozen protocol a debate-variants run would be authorized under
  * (`ablation/DEBATE-VARIANTS.md`): where it lives, the id a debate-variants
  * schedule binds (`VARIANT_PROTOCOL_ID`), and the version and `frozen_hash`
- * the human froze on 2026-11-19. The pin authorizes nothing: gate 14 is the
- * budget owner's authorization of a run, and it is OPEN.
+ * the human froze on 2026-11-19. The pin authorizes nothing by itself: gate 14
+ * is the budget owner's authorization of run 1.
  */
 export const VARIANT_PROTOCOL: {
   readonly path: string
@@ -1034,7 +1035,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "debate-variants",
     routes: ["api-key"],
     owner: HUMAN_BUDGET_OWNER,
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       `the budget owner freezes ${VARIANT_PROTOCOL_ID} at ${VARIANT_PROTOCOL.path}, records its version and frozen_hash in ` +
       `\`VARIANT_PROTOCOL\`, and authorizes run ${VARIANT_EVALUATION_RUN.run} (\`VARIANT_EVALUATION_RUN\`) of the three ` +
@@ -1042,7 +1043,17 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "VARIANT_ALLOWANCES, unchanged. One run only: the launcher creates " +
       `${VARIANT_EVALUATION_RUN.reservation} exclusively before it starts a host or a relay, and refuses while it exists on ` +
       "disk or is committed at HEAD. Gate 9 authorizes the routing evaluation only and never stands in for it, nor does " +
-      "this gate for gate 9. No story closes it"
+      "this gate for gate 9. No story closes it",
+    evidence:
+      "the human budget owner, on 2026-11-19, typed as the argument of `/backlog-bridge-loop` in the Claude Code session of " +
+      '2026-11-19: "I authorize debate-variants run 1: close gate 14 in ablation/paired-gates.ts with my authorization as ' +
+      'evidence, using the frozen VARIANT_ALLOWANCES — do not start the run". It authorizes run 1 only ' +
+      `(\`VARIANT_EVALUATION_RUN\`, reservation ${VARIANT_EVALUATION_RUN.reservation}), on the api-key route, under ` +
+      `${VARIANT_PROTOCOL_ID} v1 (frozen 2026-11-19, pinned in \`VARIANT_PROTOCOL\`), in ledger tokens at the frozen ` +
+      "thresholds: global 2,585,000, Blocks 1,985,000, prefix 60,000 per block, continuation 195,000 per arm per block, " +
+      "run cap 255,000. These are admission thresholds, not a bill: admitted work may overshoot them, the host may make " +
+      "requests MAD does not meter, and nothing here bounds provider pricing or quota. The run was not started by this " +
+      "closure; once its reservation exists, the authorization is used whatever the outcome"
   },
 ]
 
