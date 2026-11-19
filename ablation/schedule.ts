@@ -40,6 +40,7 @@ import type { GateRoute } from "./paired-gates.ts"
 import { resolveInstructions } from "../core/instructions/registry.ts"
 import { acquireLock, syncDirectory } from "./journal.ts"
 import { changeIdFor, type CodeRevision, type Maybe } from "./manifest.ts"
+import { VARIANT_PROTOCOL_ID } from "./variants.ts"
 
 export const SCHEDULE_FILE = "paired-schedule.json"
 export const START_MARKER_FILE = "paired-start.json"
@@ -287,6 +288,16 @@ export function attemptRosterProblem(config: PairedConfig, roster: Roster): stri
   )
 }
 
+/**
+ * Why an ON/OFF schedule may not bind this protocol, or `null`: the
+ * debate-variants protocol defines a different comparison
+ * (`ablation/variant-schedule.ts`).
+ */
+export function routingProtocolProblem(protocol: { id: string; version: number }): string | null {
+  if (protocol.id !== VARIANT_PROTOCOL_ID) return null
+  return `an ON/OFF schedule cannot bind ${protocol.id} version ${protocol.version}, the debate-variants protocol`
+}
+
 // ---------------------------------------------------------------------------
 // The protocol
 // ---------------------------------------------------------------------------
@@ -387,7 +398,7 @@ async function publishSchedule(input: CreateScheduleInput, root: string): Promis
     if (configProblem !== null) return { ok: false, reason: `${configProblem}; nothing was tossed` }
     const protocol = await readFrozenProtocol(input.protocolFile)
     if (!protocol.ok) return { ok: false, reason: protocol.reason }
-    const protocolProblem = attemptProtocolProblem(input.config, protocol)
+    const protocolProblem = attemptProtocolProblem(input.config, protocol) ?? routingProtocolProblem(protocol)
     if (protocolProblem !== null) return { ok: false, reason: `${protocolProblem}; nothing was tossed` }
 
     const face = (input.coin ?? cryptoCoin)()
@@ -540,7 +551,7 @@ export async function verifySchedule(bundleRoot: string, binding: ScheduleBindin
   if (configProblem !== null) return { ok: false, reason: configProblem }
   const protocol = await readFrozenProtocol(binding.protocolFile)
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
-  const protocolProblem = attemptProtocolProblem(binding.config, protocol)
+  const protocolProblem = attemptProtocolProblem(binding.config, protocol) ?? routingProtocolProblem(protocol)
   if (protocolProblem !== null) return { ok: false, reason: protocolProblem }
   if (canonicalJson(schedule.protocol) !== canonicalJson({ id: protocol.id, version: protocol.version, hash: protocol.hash })) {
     return refuse(`is bound to protocol ${canonicalJson(schedule.protocol)}, not to the frozen protocol this runner read`)
@@ -583,7 +594,9 @@ export type ScheduleRead = { ok: true; schedule: PairedSchedule; file: string } 
  *      carries one it does not hash to was sealed and then edited. Saying
  *      "edited after it was sealed" about the first accuses a writer of
  *      something the evidence does not show.
- *   4. `coin → firstArms → slots`, one chain: the coin decides the first arms
+ *   4. The protocol is not the debate-variants protocol, which no ON/OFF
+ *      schedule binds (`routingProtocolProblem`).
+ *   5. `coin → firstArms → slots`, one chain: the coin decides the first arms
  *      and the first arms decide the six slots, so each link is compared against
  *      what the link before it gives rather than against a literal. An order its
  *      own coin does not give is a realized order written after the fact.
@@ -627,6 +640,10 @@ export async function readSchedule(bundleRoot: string): Promise<ScheduleRead> {
   }
   if (scheduleHashOf(document as unknown as PairedSchedule) !== document.scheduleHash) {
     return refuse("does not match its own scheduleHash, so it was edited after it was sealed")
+  }
+  {
+    const reserved = routingProtocolProblem(protocol as { id: string; version: number })
+    if (reserved !== null) return refuse(`is bound to the wrong protocol: ${reserved}`)
   }
   if (document.coin !== "heads" && document.coin !== "tails") {
     return refuse(`carries no coin (it says ${JSON.stringify(document.coin)})`)

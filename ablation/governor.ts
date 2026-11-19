@@ -100,6 +100,7 @@ import {
 import type { ArmRun } from "./arms.ts"
 import type { UniqueExecutionBill } from "./journal.ts"
 import type { TokenExposure } from "./manifest.ts"
+import type { VariantArm } from "./variants.ts"
 
 /**
  * The halt marker's filename, at the bundle root, beside `bundle.json`.
@@ -587,7 +588,7 @@ export type PairedPhase = "prefix" | "on" | "off"
  * What the request gates read: known persisted spend from the journal's
  * unique-execution bill, plus the two latched states.
  */
-export interface RequestGateView {
+export interface RequestGateView<P extends string = PairedPhase> {
   /** Why the runner stopped admitting (a journal or persistence failure), or `null`. */
   stop: string | null
   /** The first unknown-usage, uncertainty or integrity reason, or `null`. Never cleared. */
@@ -595,7 +596,7 @@ export interface RequestGateView {
   /** Known spend over every category, each physical execution once. */
   globalSpent: number
   categorySpent(category: AllowanceCategory): number
-  phaseSpent(block: number, phase: PairedPhase): number
+  phaseSpent(block: number, phase: P): number
   /**
    * Story 2-8c3a — present only for an attempt-mode journal. Every figure above
    * is then a count of admitted attempts, never tokens, and `requestGate`
@@ -640,7 +641,31 @@ export function requestGate(
   view: RequestGateView,
   target: { block: number; phase: PairedPhase },
 ): RequestGateResult {
-  if (view.mode === "attempts") return attemptGate(view, target)
+  return view.mode === "attempts"
+    ? attemptGate(view, target, ATTEMPT_ALLOWANCES, routingPhaseLabel)
+    : tokenGate(view, target, PAIRED_ALLOWANCES, routingPhaseLabel)
+}
+
+/** The routing design's name for a phase in a refusal: `shared prefix`, `ON continuation`, `OFF continuation`. */
+function routingPhaseLabel(phase: PairedPhase): string {
+  return phase === "prefix" ? "shared prefix" : `${phase.toUpperCase()} continuation`
+}
+
+/** The token thresholds a Blocks gate applies. */
+interface TokenGateLimits {
+  readonly global: number
+  readonly blocks: number
+  readonly prefix: number
+  readonly continuation: number
+}
+
+/** The Blocks gate in tokens: stop, halt, global, the Blocks allowance, then the phase. */
+function tokenGate<P extends string>(
+  view: RequestGateView<P>,
+  target: { block: number; phase: P },
+  limits: TokenGateLimits,
+  label: (phase: P) => string,
+): RequestGateResult {
   if (view.stop !== null) {
     return {
       ok: false,
@@ -657,30 +682,28 @@ export function requestGate(
         `not resume automatically (\`evaluation-protocol.md:332-339\`).`,
     }
   }
-  if (!(view.globalSpent < PAIRED_ALLOWANCES.global)) {
+  if (!(view.globalSpent < limits.global)) {
     return {
       ok: false,
       cause: "budget",
-      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${PAIRED_ALLOWANCES.global} tokens`,
+      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${limits.global} tokens`,
     }
   }
   const blocks = view.categorySpent("blocks")
-  if (!(blocks < PAIRED_ALLOWANCES.blocks)) {
+  if (!(blocks < limits.blocks)) {
     return {
       ok: false,
       cause: "budget",
-      reason: `the Blocks allowance is exhausted: ${blocks} of ${PAIRED_ALLOWANCES.blocks} tokens`,
+      reason: `the Blocks allowance is exhausted: ${blocks} of ${limits.blocks} tokens`,
     }
   }
-  const limit = target.phase === "prefix" ? PAIRED_ALLOWANCES.prefix : PAIRED_ALLOWANCES.continuation
+  const limit = target.phase === "prefix" ? limits.prefix : limits.continuation
   const phase = view.phaseSpent(target.block, target.phase)
   if (!(phase < limit)) {
     return {
       ok: false,
       cause: "budget",
-      reason:
-        `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
-        `allowance is exhausted: ${phase} of ${limit} newly executed tokens`,
+      reason: `block ${target.block}'s ${label(target.phase)} allowance is exhausted: ${phase} of ${limit} newly executed tokens`,
     }
   }
   return { ok: true }
@@ -694,7 +717,12 @@ export function requestGate(
  * message says attempts. A halt here never comes from missing token figures;
  * its reason says what it does come from.
  */
-function attemptGate(view: RequestGateView, target: { block: number; phase: PairedPhase }): RequestGateResult {
+function attemptGate<P extends string>(
+  view: RequestGateView<P>,
+  target: { block: number; phase: P },
+  limits: AttemptAllowances,
+  label: (phase: P) => string,
+): RequestGateResult {
   // The adversarial suite's root admits no Blocks work (protocol v3 B5).
   if (view.scope === "adversarial") {
     return {
@@ -730,41 +758,98 @@ function attemptGate(view: RequestGateView, target: { block: number; phase: Pair
       reason: `the experiment is HALTED: ${view.halt}. Admission does not resume automatically.`,
     }
   }
-  if (!(view.globalSpent < ATTEMPT_ALLOWANCES.global)) {
+  if (!(view.globalSpent < limits.global)) {
     return {
       ok: false,
       cause: "budget",
-      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${ATTEMPT_ALLOWANCES.global} admitted attempts`,
+      reason: `the experiment's global cap is exhausted: ${view.globalSpent} of ${limits.global} admitted attempts`,
     }
   }
   const blocks = view.categorySpent("blocks")
-  if (!(blocks < ATTEMPT_ALLOWANCES.blocks)) {
+  if (!(blocks < limits.blocks)) {
     return {
       ok: false,
       cause: "budget",
-      reason: `the Blocks allowance is exhausted: ${blocks} of ${ATTEMPT_ALLOWANCES.blocks} admitted attempts`,
+      reason: `the Blocks allowance is exhausted: ${blocks} of ${limits.blocks} admitted attempts`,
     }
   }
   const block = view.blockSpent(target.block)
-  if (!(block < ATTEMPT_ALLOWANCES.block)) {
+  if (!(block < limits.block)) {
     return {
       ok: false,
       cause: "budget",
-      reason: `block ${target.block}'s allowance is exhausted: ${block} of ${ATTEMPT_ALLOWANCES.block} admitted attempts`,
+      reason: `block ${target.block}'s allowance is exhausted: ${block} of ${limits.block} admitted attempts`,
     }
   }
-  const limit = target.phase === "prefix" ? ATTEMPT_ALLOWANCES.prefix : ATTEMPT_ALLOWANCES.continuation
+  const limit = target.phase === "prefix" ? limits.prefix : limits.continuation
   const phase = view.phaseSpent(target.block, target.phase)
   if (!(phase < limit)) {
     return {
       ok: false,
       cause: "budget",
       reason:
-        `block ${target.block}'s ${target.phase === "prefix" ? "shared prefix" : `${target.phase.toUpperCase()} continuation`} ` +
-        `allowance is exhausted: ${phase} of ${limit} admitted attempts`,
+        `block ${target.block}'s ${label(target.phase)} allowance is exhausted: ${phase} of ${limit} admitted attempts`,
     }
   }
   return { ok: true }
+}
+
+// ---------------------------------------------------------------------------
+// The debate-variants design (`ablation/DEBATE-VARIANTS.md`)
+// ---------------------------------------------------------------------------
+
+/** The number of blocks a schedule plans, `PAIRED_BLOCKS.length` in `schedule.ts`, which imports this module. */
+const PAIRED_BLOCK_COUNT = 3
+
+/** Where a debate-variants Blocks request is spent: a block's shared prefix or one arm's continuation. */
+export type VariantPhase = "prefix" | VariantArm
+
+/**
+ * The debate-variants design's token thresholds. A block has three
+ * continuations instead of two, each with the routing design's own prefix and
+ * continuation limits and run cap. `blocks` and `global` grow by one
+ * continuation per block, so the Blocks headroom (50,000) and the global
+ * margin over Blocks (600,000) are the routing design's.
+ */
+export const VARIANT_ALLOWANCES = {
+  global: PAIRED_ALLOWANCES.global + PAIRED_BLOCK_COUNT * PAIRED_ALLOWANCES.continuation,
+  blocks: PAIRED_ALLOWANCES.blocks + PAIRED_BLOCK_COUNT * PAIRED_ALLOWANCES.continuation,
+  prefix: PAIRED_ALLOWANCES.prefix,
+  continuation: PAIRED_ALLOWANCES.continuation,
+  runCap: PAIRED_ALLOWANCES.runCap,
+} as const
+
+/**
+ * The debate-variants design's attempt thresholds: the routing design's prefix
+ * and continuation, `block` = 10 + 3 × 45 = 145, and `blocks` and `global` the
+ * three blocks, 435.
+ */
+export const VARIANT_ATTEMPT_ALLOWANCES: AttemptAllowances = {
+  global: ATTEMPT_ALLOWANCES.global + PAIRED_BLOCK_COUNT * ATTEMPT_ALLOWANCES.continuation,
+  blocks: ATTEMPT_ALLOWANCES.blocks + PAIRED_BLOCK_COUNT * ATTEMPT_ALLOWANCES.continuation,
+  block: ATTEMPT_ALLOWANCES.block + ATTEMPT_ALLOWANCES.continuation,
+  prefix: ATTEMPT_ALLOWANCES.prefix,
+  continuation: ATTEMPT_ALLOWANCES.continuation,
+}
+
+/**
+ * `requestGate` for the debate-variants design: the same checks in the same
+ * order, against `VARIANT_ALLOWANCES` or, for an attempt-mode view,
+ * `VARIANT_ATTEMPT_ALLOWANCES`. Every arm's continuation has the same limit.
+ * No journal admits through this gate yet.
+ */
+export function variantRequestGate(
+  view: RequestGateView<VariantPhase>,
+  target: { block: number; phase: VariantPhase },
+): RequestGateResult {
+  return view.mode === "attempts"
+    ? attemptGate(view, target, VARIANT_ATTEMPT_ALLOWANCES, variantPhaseLabel)
+    : tokenGate(view, target, VARIANT_ALLOWANCES, variantPhaseLabel)
+}
+
+/** The debate-variants design's name for a phase in a refusal: `shared prefix` or `<arm> continuation`. */
+function variantPhaseLabel(phase: VariantPhase): string {
+  return phase === "prefix" ? "shared prefix" : `${phase} continuation`
 }
 
 /**
