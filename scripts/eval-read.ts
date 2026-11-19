@@ -47,6 +47,15 @@
  * it threw, is handed to the evaluation report, so a reader that threw leaves
  * its own quantities unavailable and every other section still prints.
  *
+ * A BUNDLE WHOSE SCHEDULE IS A DEBATE-VARIANTS ONE GETS THE DEBATE-VARIANTS
+ * REPORT in place of the paired, labelled, adjudication and evaluation reports,
+ * which read only the routing design. The schedule document is read once: its
+ * bytes decide the design (`claimedDesign`) and are what that design's
+ * validator checks. The variant reader binds that validated schedule and the
+ * bundle read above, and precision and promotion are computed from that one
+ * read. When the bundle index cannot be read, its refusal prints and the
+ * variant report still frames the nine sealed slots.
+ *
  * Story 2-7b — AN EXPERIMENT ROOT CARRYING AN ADVERSARIAL SCHEDULE GETS THE
  * ADVERSARIAL REPORT, last, from `<root>/adversarial/`. It is reached whether or
  * not the root holds a `bundle.json`. An experiment root may hold only the
@@ -72,7 +81,12 @@ import { readPairedAttemptJournal } from "../ablation/journal-read.ts"
 import { readLabelledBundle, renderLabelledBundle } from "../ablation/labelled-read.ts"
 import { readPairedBundle, renderPairedBundle } from "../ablation/paired-read.ts"
 import { readBundle, renderBundle } from "../ablation/read-bundle.ts"
-import { readSchedule } from "../ablation/schedule.ts"
+import { readScheduleDocument, validateSchedule, type ScheduleDocument } from "../ablation/schedule.ts"
+import { evaluatePromotion, precisionUnavailable, readVariantPrecision } from "../ablation/variant-promotion.ts"
+import { readVariantBundle } from "../ablation/variant-read.ts"
+import { renderVariantRefusal, renderVariantReport } from "../ablation/variant-render.ts"
+import { claimedDesign, validateVariantSchedule } from "../ablation/variant-schedule.ts"
+import type { BundleReadOutcome } from "../ablation/read-bundle.ts"
 
 function flagIndex(argv: readonly string[], name: string): number {
   return argv.findIndex((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`))
@@ -124,26 +138,36 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
     )
   }
   const adversarial = await hasAdversarialSchedule(target)
-  if (adversarial && !existsSync(join(resolve(target), BUNDLE_FILE))) {
+  // THE SCHEDULE DOCUMENT IS READ ONCE, here. Whether one is there, which
+  // design it claims, and what that design's validator checks all come from
+  // these bytes; `readBundle` is told whether one is there rather than looking.
+  const document = await readScheduleDocument(target)
+  const variant = document.kind === "read" && claimedDesign(document.raw) === "debate-variants" ? document : null
+  if (adversarial && variant === null && !existsSync(join(resolve(target), BUNDLE_FILE))) {
     console.log(
       `MAD evaluation reader — \`${target}\` holds no paired or ordinary bundle (no \`${BUNDLE_FILE}\`); the adversarial report follows.`,
     )
     await printAdversarial(target)
     return 0
   }
-  const result = await readBundle(target)
+  const result = await readBundle(target, { sealedSchedule: document.kind !== "absent" })
   if ("error" in result) {
     console.log(`MAD evaluation reader — ${result.error}`)
+    // A debate-variants schedule still frames its nine slots, each reporting the
+    // evidence it lacks.
+    if (variant !== null) await printVariant(target, variant, result)
     if (adversarial) await printAdversarial(target)
     return 0
   }
 
   console.log(renderBundle(result))
 
-  if (result.sealedSchedule) {
+  if (result.sealedSchedule && variant !== null) {
+    await printVariant(target, variant, result)
+  } else if (result.sealedSchedule) {
     const paired = await readPairedBundle(target, {
       bundle: result,
-      schedule: await readSchedule(target),
+      schedule: document.kind === "read" ? validateSchedule(document.raw, document.file) : { ok: false, reason: document.reason },
     })
     // `readBundle` above already succeeded and is handed straight through, so
     // `error` is unreachable on this path. It is printed rather than asserted
@@ -189,6 +213,33 @@ export async function main(argv: readonly string[] = Bun.argv, readers: Partial<
   }
   if (adversarial) await printAdversarial(target)
   return 0
+}
+
+/**
+ * The debate-variants report: the schedule validated from the document already
+ * read, the variant read over the bundle already read, and precision and
+ * promotion from that one read. Each step is guarded like the readers above; a
+ * precision reader that throws leaves the precision gate failing with its
+ * reason, and everything else still prints.
+ */
+async function printVariant(root: string, document: Extract<ScheduleDocument, { kind: "read" }>, bundle: BundleReadOutcome): Promise<void> {
+  try {
+    const schedule = validateVariantSchedule(document.raw, document.file)
+    if (!schedule.ok) {
+      console.log(renderVariantRefusal(schedule.reason))
+      return
+    }
+    const read = await readVariantBundle(root, { schedule, bundle })
+    if (read.kind !== "read") {
+      console.log(renderVariantRefusal(read.reason))
+      return
+    }
+    const precision = await settle(() => readVariantPrecision(read))
+    const labels = precision.kind === "threw" ? precisionUnavailable(read, `the precision reader failed: ${precision.message}`) : precision.value
+    console.log(renderVariantReport(read, labels, evaluatePromotion(read, labels)))
+  } catch (error) {
+    console.log(renderVariantRefusal(`the report could not be produced: ${error instanceof Error ? error.message : String(error)}`))
+  }
 }
 
 /** The adversarial reader promises not to throw; it gets its own `try` anyway, like the readers above. */

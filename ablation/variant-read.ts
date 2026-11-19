@@ -85,9 +85,9 @@ import { JOURNAL_FILE, replayPersistedJournal, type BilledRequest } from "./jour
 import { changeIdFor } from "./manifest.ts"
 import { loadPrefixRecord, scoreUpheld } from "./labelled-read.ts"
 import { readPrefixEvidence, type PrefixReport } from "./paired-read.ts"
-import { readBundle, type ArmRow } from "./read-bundle.ts"
+import { readBundle, type ArmRow, type BundleReadOutcome } from "./read-bundle.ts"
 import { canonicalJson, readStatusLines, SLOT_STATUS_FILE, type SlotStatus } from "./schedule.ts"
-import { readVariantSchedule, type VariantSchedule, type VariantSlot } from "./variant-schedule.ts"
+import { readVariantSchedule, type VariantSchedule, type VariantScheduleRead, type VariantSlot } from "./variant-schedule.ts"
 import type { VariantArm } from "./variants.ts"
 
 export type Measure<T> =
@@ -161,6 +161,14 @@ export type VariantReadOutcome =
 export interface VariantReadOptions {
   /** Defaults to the shipped lexical matcher. */
   matcher?: DefectMatcher
+  /**
+   * The schedule the caller already validated (`validateVariantSchedule`), so
+   * the read binds the very document the caller classified. Read from the
+   * bundle root when absent.
+   */
+  schedule?: VariantScheduleRead
+  /** The bundle the caller already read, or its error, so it is not read again. Read from the bundle root when absent. */
+  bundle?: BundleReadOutcome
 }
 
 /** The record file every run dump holds beside its manifest. */
@@ -172,21 +180,26 @@ const measured = <T>(value: T) => ({ kind: "measured" as const, value })
 
 export async function readVariantBundle(root: string, options: VariantReadOptions = {}): Promise<VariantReadOutcome> {
   try {
-    return await read(root, options.matcher ?? lexicalDefectMatcher)
+    return await read(root, options.matcher ?? lexicalDefectMatcher, options.schedule, options.bundle)
   } catch (error) {
     return { kind: "refused", reason: `the debate-variants reader failed: ${messageOf(error)}` }
   }
 }
 
-async function read(root: string, matcher: DefectMatcher): Promise<VariantReadOutcome> {
-  const scheduled = await readVariantSchedule(root)
+async function read(
+  root: string,
+  matcher: DefectMatcher,
+  given: VariantScheduleRead | undefined,
+  loaded: BundleReadOutcome | undefined,
+): Promise<VariantReadOutcome> {
+  const scheduled = given ?? (await readVariantSchedule(root))
   if (!scheduled.ok) return { kind: "refused", reason: scheduled.reason }
   const schedule = scheduled.schedule
 
   const sealProblem = sealProblemOf(schedule)
   const statuses = await slotStatuses(root, schedule)
   const journal = await journalRows(root, schedule)
-  const bundle = await readBundle(root)
+  const bundle = loaded ?? (await readBundle(root))
   const rows = "error" in bundle ? null : bundle
   const bundleProblem = "error" in bundle ? `the bundle could not be read: ${bundle.error}` : null
 

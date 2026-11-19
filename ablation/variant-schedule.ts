@@ -41,7 +41,7 @@
  */
 
 import { getRandomValues } from "node:crypto"
-import { lstat, readFile } from "node:fs/promises"
+import { lstat } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 import type { Roster } from "../core/domain/roster.ts"
@@ -58,6 +58,7 @@ import {
   pairedRunConfig,
   publishExclusive,
   readFrozenProtocol,
+  readScheduleDocument,
   SCHEDULE_FILE,
   sha256,
   type PairedConfig,
@@ -301,16 +302,27 @@ export type VariantScheduleRead = { ok: true; schedule: VariantSchedule; file: s
  * after an edit to any of those is still refused. Never throws.
  */
 export async function readVariantSchedule(bundleRoot: string): Promise<VariantScheduleRead> {
-  const file = join(resolve(bundleRoot), SCHEDULE_FILE)
-  let raw: unknown
-  try {
-    raw = JSON.parse(await readFile(file, "utf8"))
-  } catch (error) {
-    return { ok: false, reason: `no readable schedule at \`${file}\`: ${messageOf(error)}` }
-  }
+  const document = await readScheduleDocument(bundleRoot)
+  return document.kind === "read" ? validateVariantSchedule(document.raw, document.file) : { ok: false, reason: document.reason }
+}
+
+/** `readVariantSchedule`'s checks, on a document already parsed from `file`. */
+export function validateVariantSchedule(raw: unknown, file: string): VariantScheduleRead {
   const problem = selfProblem(raw)
   if (problem !== null) return { ok: false, reason: `the schedule at \`${file}\` ${problem}` }
   return { ok: true, schedule: raw as VariantSchedule, file }
+}
+
+/**
+ * Which design a parsed schedule document CLAIMS to be: a debate-variants one
+ * when it says schedule version 2 or design `debate-variants`, whatever else
+ * it gets wrong, so its refusal comes from this design's validator; anything
+ * else is left to the routing validator. A claim is not a validation.
+ */
+export function claimedDesign(raw: unknown): "debate-variants" | "routing" {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return "routing"
+  const document = raw as Record<string, unknown>
+  return document.scheduleVersion === VARIANT_SCHEDULE_VERSION || document.design === VARIANT_DESIGN ? "debate-variants" : "routing"
 }
 
 /** What the document's own fields contradict, or `null`. */

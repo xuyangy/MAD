@@ -122,6 +122,14 @@ function intervalOf(
   return measured({ tp: classified.trueDefects.length, u, n, filled })
 }
 
+/**
+ * The precision of a read whose precision reader failed: no labels, and the
+ * failure as the sheet-wide reason, so the precision gate fails naming it.
+ */
+export function precisionUnavailable(read: VariantRead, reason: string): PrecisionRead {
+  return { scheduleHash: read.schedule.scheduleHash, sheet: "unreadable", sheetProblem: reason, blocks: [] }
+}
+
 // ---------------------------------------------------------------------------
 // The gates
 // ---------------------------------------------------------------------------

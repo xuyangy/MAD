@@ -175,7 +175,7 @@ export type BundleReadOutcome = BundleReadResult | { error: string }
  *
  * Every other failure is per-arm and lands in `unreadable` or `missing`.
  */
-export async function readBundle(root: string): Promise<BundleReadOutcome> {
+export async function readBundle(root: string, options: { sealedSchedule?: boolean } = {}): Promise<BundleReadOutcome> {
   let raw: unknown
   try {
     raw = JSON.parse(await readFile(join(root, BUNDLE_FILE), "utf8"))
@@ -208,7 +208,9 @@ export async function readBundle(root: string): Promise<BundleReadOutcome> {
   return {
     root,
     index: index.value,
-    sealedSchedule: await hasSealedSchedule(root),
+    // A caller that already read the schedule document says whether one is
+    // there, so the bundle and the schedule are not looked up twice.
+    sealedSchedule: options.sealedSchedule ?? (await hasSealedSchedule(root)),
     ...partition,
     missing,
     unreadable,

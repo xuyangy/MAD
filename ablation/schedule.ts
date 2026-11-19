@@ -604,13 +604,34 @@ export type ScheduleRead = { ok: true; schedule: PairedSchedule; file: string } 
  * Never throws. An absent, unreadable or unparsable file is a typed refusal.
  */
 export async function readSchedule(bundleRoot: string): Promise<ScheduleRead> {
+  const document = await readScheduleDocument(bundleRoot)
+  return document.kind === "read" ? validateSchedule(document.raw, document.file) : { ok: false, reason: document.reason }
+}
+
+/**
+ * The schedule document at a bundle root, read and parsed once, so a caller
+ * that must decide which design it is and then validate it does both on the
+ * same bytes. Never throws.
+ */
+export type ScheduleDocument =
+  | { kind: "read"; file: string; raw: unknown }
+  /** No file at all (ENOENT): the bundle carries no sealed schedule. */
+  | { kind: "absent"; file: string; reason: string }
+  /** A file that could not be read or parsed; unreadable is not absent, as `hasSealedSchedule` says. */
+  | { kind: "unreadable"; file: string; reason: string }
+
+export async function readScheduleDocument(bundleRoot: string): Promise<ScheduleDocument> {
   const file = join(resolve(bundleRoot), SCHEDULE_FILE)
-  let raw: unknown
   try {
-    raw = JSON.parse(await readFile(file, "utf8"))
+    return { kind: "read", file, raw: JSON.parse(await readFile(file, "utf8")) }
   } catch (error) {
-    return { ok: false, reason: `no readable schedule at \`${file}\`: ${messageOf(error)}` }
+    const reason = `no readable schedule at \`${file}\`: ${messageOf(error)}`
+    return { kind: (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable", file, reason }
   }
+}
+
+/** `readSchedule`'s checks, on a document already parsed from `file`. */
+export function validateSchedule(raw: unknown, file: string): ScheduleRead {
   const refuse = (why: string): ScheduleRead => ({ ok: false, reason: `the schedule at \`${file}\` ${why}` })
 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return refuse("is not an object")
