@@ -875,7 +875,7 @@ describe("LIVE-RUN.md documents the paired launcher that is actually shipped", (
       "Gate 10 is OPEN, because its run-1 authorization is used, and gates 11 and 12 are CLOSED; all three are required only for the adversarial suite on the oauth route (see \"Before the sixteen live runs\" below), so they too are printed and not consulted for the evaluation.",
     )
     expect(text).toContain(
-      "Gates 13 and 14 are OPEN; both are required only for the debate-variants phase on the api-key route, so they too are printed and not consulted for the evaluation.",
+      "Gate 13 is CLOSED and gate 14 OPEN; both are required only for the debate-variants phase on the api-key route, so they too are printed and not consulted for the evaluation.",
     )
     expect(PAIRED_GATES.filter((gate) => gate.phase !== "evaluation").map((gate) => gate.number)).toEqual([3, 8, 10, 11, 12, 13, 14])
     expect(PAIRED_GATES.filter((gate) => gate.phase === "adversarial").map((gate) => gate.status)).toEqual(["OPEN", "CLOSED", "CLOSED"])

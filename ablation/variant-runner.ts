@@ -48,8 +48,15 @@ import { START_MARKER_FILE, writeStartMarker } from "./schedule.ts"
 import { variantConfigProblem, verifyVariantSchedule, type VariantSchedule, type VariantSlot } from "./variant-schedule.ts"
 import { VARIANT_ARM_OPTIONS, VARIANT_ARMS, type VariantArm, type VariantArmOptions } from "./variants.ts"
 
-/** The same inputs as `runPairedBlocks`; the schedule at the bundle root is a debate-variants one. */
-export type RunVariantBlocksInput = RunPairedBlocksInput
+/**
+ * The same inputs as `runPairedBlocks`; the schedule at the bundle root is a
+ * debate-variants one. `expected`, when given, is what the caller already
+ * sealed and verified: the schedule must have that hash and be bound to that
+ * protocol, checked under the lock before the start marker.
+ */
+export type RunVariantBlocksInput = RunPairedBlocksInput & {
+  expected?: { scheduleHash?: string; protocol?: { id: string; version: number; hash: string } }
+}
 
 export type VariantBlocksOutcome =
   | { ok: false; reason: string }
@@ -119,6 +126,20 @@ export async function runVariantBlocks(given: RunVariantBlocksInput): Promise<Va
     const verified = await verifyVariantSchedule(root, input)
     if (!verified.ok) return await refuse(verified.reason)
     const schedule = verified.schedule
+    const expected = input.expected
+    if (expected?.scheduleHash !== undefined && schedule.scheduleHash !== expected.scheduleHash) {
+      return await refuse(`the schedule at the bundle root has hash ${schedule.scheduleHash}, not the expected ${expected.scheduleHash}`)
+    }
+    const protocol = expected?.protocol
+    if (
+      protocol !== undefined &&
+      (schedule.protocol.id !== protocol.id || schedule.protocol.version !== protocol.version || schedule.protocol.hash !== protocol.hash)
+    ) {
+      return await refuse(
+        `the schedule is bound to ${schedule.protocol.id} v${schedule.protocol.version} ${schedule.protocol.hash}, not the expected ` +
+          `${protocol.id} v${protocol.version} ${protocol.hash}`,
+      )
+    }
 
     // The arm options and allowances are read from the verified schedule, and
     // checked again here because they are what the runs will be given.
@@ -170,8 +191,8 @@ function frozenCopy<T>(value: T): T {
 
 /**
  * The runner's input with its data fields replaced by frozen copies: the
- * bundle root, worktree, protocol file, fixture, code revision, roster, change
- * and config, and each prior warning copied one level deep, as `runPairedBlocks`
+ * bundle root, worktree, protocol file, fixture, code revision, roster, change,
+ * config and the caller's expectations, and each prior warning copied one level deep, as `runPairedBlocks`
  * copies them for a prefix.
  */
 function boundInput(given: RunVariantBlocksInput): RunVariantBlocksInput {
@@ -185,6 +206,7 @@ function boundInput(given: RunVariantBlocksInput): RunVariantBlocksInput {
     roster: frozenCopy(given.roster),
     change: frozenCopy(given.change),
     config: frozenCopy(given.config),
+    ...(given.expected === undefined ? {} : { expected: frozenCopy(given.expected) }),
     ...(given.priorWarnings === undefined ? {} : { priorWarnings: given.priorWarnings.map((warning) => ({ ...warning })) }),
   }
 }

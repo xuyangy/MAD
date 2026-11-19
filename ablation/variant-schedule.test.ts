@@ -218,6 +218,29 @@ describe("createVariantSchedule", () => {
     expect(await readlink(file)).toBe(join(root, "nowhere.json"))
   })
 
+  test("an expected protocol that is not the one read refuses, drawing and publishing nothing", async () => {
+    const root = await tempDir()
+    let drawn = 0
+    const input = await inputFor(root, { draw: () => ((drawn += 1), 3) })
+    const created = await createVariantSchedule({ ...input, expectedProtocol: { id: VARIANT_PROTOCOL_ID, version: 1, hash: `sha256:${"d".repeat(64)}` } })
+    expect(!created.ok && created.reason).toContain("not the expected")
+    expect(drawn).toBe(0)
+    await expect(readFile(join(root, SCHEDULE_FILE))).rejects.toThrow()
+  })
+
+  test("the expected protocol is the one supplied at the call: changing the caller's object afterwards changes nothing", async () => {
+    const root = await tempDir()
+    const input = await inputFor(root)
+    const expectedProtocol = { id: VARIANT_PROTOCOL_ID, version: 1, hash: `sha256:${"d".repeat(64)}` }
+    const pending = createVariantSchedule({ ...input, expectedProtocol })
+    // The right hash, written into the caller's object after the call.
+    const protocol = (await import("./schedule.ts")).readFrozenProtocol
+    const read = await protocol(input.protocolFile)
+    if (read.ok) expectedProtocol.hash = read.hash
+    const created = await pending
+    expect(!created.ok && created.reason).toContain("not the expected")
+  })
+
   test("a second variant schedule refuses and leaves the first unchanged", async () => {
     const root = await tempDir()
     expect((await createVariantSchedule(await inputFor(root))).ok).toBe(true)

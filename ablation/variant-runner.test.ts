@@ -264,6 +264,32 @@ describe("runVariantBlocks — refusals before the start marker", () => {
     await expect(readFile(join(root, START_MARKER_FILE))).rejects.toThrow()
   })
 
+  test("an expected schedule hash or protocol that is not the sealed one refuses under the lock, before the start marker and any model turn", async () => {
+    for (const expected of [
+      { scheduleHash: `sha256:${"e".repeat(64)}` },
+      { protocol: { id: VARIANT_PROTOCOL_ID, version: 1, hash: `sha256:${"f".repeat(64)}` } },
+    ]) {
+      const { root, input, calls } = await sealed()
+      const outcome = await runVariantBlocks({ ...input, expected })
+      expect(!outcome.ok && outcome.reason).toContain("not the expected")
+      expect(calls).toEqual([])
+      await expect(readFile(join(root, START_MARKER_FILE))).rejects.toThrow()
+    }
+    const { input, schedule } = await sealed()
+    expect((await runVariantBlocks({ ...input, expected: { scheduleHash: schedule.scheduleHash, protocol: schedule.protocol } })).ok).toBe(true)
+  })
+
+  test("the expectation is the one supplied at the call: correcting the caller's object afterwards still refuses", async () => {
+    const { root, input, calls, schedule } = await sealed()
+    const expected = { scheduleHash: `sha256:${"e".repeat(64)}`, protocol: { ...schedule.protocol } }
+    const pending = runVariantBlocks({ ...input, expected })
+    expected.scheduleHash = schedule.scheduleHash
+    const outcome = await pending
+    expect(!outcome.ok && outcome.reason).toContain("not the expected")
+    expect(calls).toEqual([])
+    await expect(readFile(join(root, START_MARKER_FILE))).rejects.toThrow()
+  })
+
   test("a started schedule is never run again", async () => {
     const { input } = await sealed()
     expect((await runVariantBlocks(input)).ok).toBe(true)

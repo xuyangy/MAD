@@ -40,7 +40,10 @@ import {
 import type { PairedPhaseContext } from "../ablation/paired.ts"
 import { API_KEY_EVALUATION_RUN, EVALUATION_PROTOCOL, EVALUATION_RUN, PAIRED_GATES, type PairedGate } from "../ablation/paired-gates.ts"
 import type { RequestMeter, RequestMeterOptions } from "../ablation/request-meter.ts"
-import { readFrozenProtocol, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, type PairedSchedule } from "../ablation/schedule.ts"
+import { readFrozenProtocol, SCHEDULE_FILE, SLOT_STATUS_FILE, START_MARKER_FILE, sha256, type PairedSchedule } from "../ablation/schedule.ts"
+import { VARIANT_EVALUATION_RUN, VARIANT_PROTOCOL } from "../ablation/paired-gates.ts"
+import type { VariantSchedule } from "../ablation/variant-schedule.ts"
+import { VARIANT_PROTOCOL_ID } from "../ablation/variants.ts"
 import { emptyTokenUsage } from "../core/domain/run-record.ts"
 import { CODING_DISCOVERY_GENERALIST } from "../core/instructions/coding/discovery.ts"
 import type { LateUsageReporter } from "../core/ports/late-usage.ts"
@@ -75,6 +78,7 @@ import {
   reserveApiKeyEvaluationRun,
   reserveEvaluationRun,
   toolsIdentity,
+  variantGatesIdentity,
   type ApiKeyEvaluationReservation,
   type EvaluationReservation,
   type PairedOverrides,
@@ -3020,5 +3024,211 @@ describe("paired blocks keep the tool's historical git", () => {
 
     // No filter preflight, no policy argv, no policy environment.
     expect(seen).toEqual([{ cmd: ["git", "blame", "-L", "1,1", "--porcelain", "--", "src/pay.ts"], env: undefined }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// --design debate-variants: the three-arm schedule behind its own authority
+// ---------------------------------------------------------------------------
+
+describe("--design debate-variants", () => {
+  /** A temporary frozen debate-variants protocol, and the pin that names it. */
+  async function frozenVariantProtocol(): Promise<{ file: string; pin: typeof VARIANT_PROTOCOL }> {
+    const dir = await tempDir()
+    const pending = `---\nid: ${VARIANT_PROTOCOL_ID}\nstatus: frozen\nversion: 1\nfrozen_hash: PENDING\n---\n\n# test\n`
+    const file = join(dir, "debate-variants-protocol.md")
+    const hash = sha256(pending)
+    await writeFile(file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${hash}`))
+    return { file, pin: { ...VARIANT_PROTOCOL, version: 1, frozenHash: hash } }
+  }
+  const variantArgv = (env: { directory: string; out: string }, extra: string[] = []) => argvFor(env.directory, env.out, ["--design", "debate-variants", ...extra])
+  const reservationFile = (env: { scratchParent: string }) => join(dirname(env.scratchParent), "reservation-root", VARIANT_EVALUATION_RUN.reservation)
+
+  test("with its gates closed and the pinned protocol, it seals the three-arm schedule, runs nine slots, reserves its own run, and eval-read reads it", async () => {
+    const env = await setup()
+    const protocol = await frozenVariantProtocol()
+    const { overrides, host, meter } = overridesFor(env, { gates: closedGates, variantProtocolFile: protocol.file, variantProtocol: protocol.pin })
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code, result.text).toBe(0)
+    expect(result.text).toContain("phase debate-variants")
+    expect(result.text).toContain("stage 4 of 4: createVariantSchedule, then runVariantBlocks")
+    expect(result.text).toContain("all nine slots completed")
+    expect(host.stops()).toBe(1)
+    expect(meter.stops()).toBe(1)
+    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as VariantSchedule
+    expect(schedule).toMatchObject({ scheduleVersion: 2, design: "debate-variants" })
+    expect(schedule.protocol).toEqual({ id: VARIANT_PROTOCOL_ID, version: 1, hash: protocol.pin.frozenHash! })
+    expect(schedule.config.gates).toBe(variantGatesIdentity(GATES_BLOB, closedGates))
+    expect(String(schedule.config.gates)).toContain("; phase debate-variants; route api-key; ")
+    const reservation = JSON.parse(await readFile(reservationFile(env), "utf8"))
+    expect(reservation).toMatchObject({
+      run: 1,
+      design: "debate-variants",
+      route: "api-key",
+      gateTableBlob: GATES_BLOB,
+      protocol: { id: VARIANT_PROTOCOL_ID, version: 1, hash: protocol.pin.frozenHash },
+      pins: [PIN],
+      models: MODELS,
+      out: env.out,
+    })
+    // Gate 9's reservation is never made by this design.
+    expect(existsSync(join(dirname(env.scratchParent), "reservation-root", API_KEY_EVALUATION_RUN.reservation))).toBe(false)
+    const read = await captured(() => evalReadMain(["bun", "eval-read", "--bundle", env.out]))
+    expect(read.text).toContain("MAD debate-variants report")
+  })
+
+  test("the shipped table refuses at stage 1: gate 14 is OPEN and no protocol is pinned; nothing is reserved or started", async () => {
+    const env = await setup()
+    const { overrides, host, meter } = overridesFor(env)
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("no frozen PROTOCOL-mad-debate-variants is pinned")
+    expect(result.text).not.toContain("REFUSED: gate 13")
+    expect(result.text).toContain("REFUSED: gate 14 (debate-variants evaluation spend authorization) is OPEN")
+    expect(host.started).toEqual([])
+    expect(meter.started).toEqual([])
+    expect(existsSync(reservationFile(env))).toBe(false)
+    await nothingScheduled(env.out, env.scratchParent)
+  })
+
+  test("gate 9 closed does not stand in for gate 14, and an OPEN shared engineering gate blocks it", async () => {
+    const protocol = await frozenVariantProtocol()
+    for (const [table, reason] of [
+      [closedGates.map((gate) => (gate.number === 14 ? PAIRED_GATES.find((entry) => entry.number === 14)! : gate)), "gate 14 (debate-variants evaluation spend authorization) is OPEN"],
+      [closedGates.map((gate) => (gate.number === 5 ? { ...gate, status: "OPEN" as const, evidence: undefined } : gate)), "gate 5 (worktree identity) is OPEN"],
+    ] as const) {
+      const env = await setup()
+      const { overrides, host } = overridesFor(env, { gates: table, variantProtocolFile: protocol.file, variantProtocol: protocol.pin })
+      const result = await captured(() => main(variantArgv(env), overrides))
+      expect(result.code, reason).toBe(1)
+      expect(result.text).toContain(`REFUSED: ${reason}`)
+      expect(host.started).toEqual([])
+      expect(existsSync(reservationFile(env))).toBe(false)
+    }
+  })
+
+  test("its own used reservation refuses at stage 1; gate 9's used reservation does not", async () => {
+    const protocol = await frozenVariantProtocol()
+    const env = await setup()
+    await mkdir(dirname(reservationFile(env)), { recursive: true })
+    await writeFile(reservationFile(env), "{}")
+    const { overrides, host } = overridesFor(env, { gates: closedGates, variantProtocolFile: protocol.file, variantProtocol: protocol.pin })
+    const used = await captured(() => main(variantArgv(env), overrides))
+    expect(used.code).toBe(1)
+    expect(used.text).toContain(`the reservation \`${VARIANT_EVALUATION_RUN.reservation}\` already exists: gate 14's one authorized evaluation (run 1) was already used`)
+    expect(host.started).toEqual([])
+
+    const other = await setup()
+    const routingReservation = join(dirname(other.scratchParent), "reservation-root", API_KEY_EVALUATION_RUN.reservation)
+    await mkdir(dirname(routingReservation), { recursive: true })
+    await writeFile(routingReservation, "{}")
+    const fine = overridesFor(other, { gates: closedGates, variantProtocolFile: protocol.file, variantProtocol: protocol.pin })
+    const result = await captured(() => main(variantArgv(other), fine.overrides))
+    expect(result.code, result.text).toBe(0)
+  })
+
+  test("a protocol file changed after stage 1 is refused when the schedule would be sealed: nothing is published or run", async () => {
+    const env = await setup()
+    const protocol = await frozenVariantProtocol()
+    const { overrides, backend } = overridesFor(env, {
+      gates: closedGates,
+      variantProtocolFile: protocol.file,
+      variantProtocol: protocol.pin,
+      beforeRecheck: async () => {
+        const pending = `---\nid: ${VARIANT_PROTOCOL_ID}\nstatus: frozen\nversion: 1\nfrozen_hash: PENDING\n---\n\n# changed\n`
+        await writeFile(protocol.file, pending.replace("frozen_hash: PENDING", `frozen_hash: ${sha256(pending)}`))
+      },
+    })
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("REFUSED by createVariantSchedule")
+    expect(result.text).toContain("not the expected")
+    expect(existsSync(join(env.out, SCHEDULE_FILE))).toBe(false)
+    expect(existsSync(join(env.out, START_MARKER_FILE))).toBe(false)
+    expect(backend.calls).toEqual([])
+  })
+
+  test("a gate table changed or unreadable at the stage-3 recheck refuses; the sealed gate identity is stage 1's", async () => {
+    const protocol = await frozenVariantProtocol()
+    for (const later of [{ ok: true as const, blob: "f".repeat(40) }, { ok: false as const, why: "git broke" }]) {
+      const env = await setup()
+      let reads = 0
+      const { overrides, host } = overridesFor(env, {
+        gates: closedGates,
+        variantProtocolFile: protocol.file,
+        variantProtocol: protocol.pin,
+        gateTable: async () => ((reads += 1), reads === 1 ? { ok: true, blob: GATES_BLOB } : later),
+      })
+      const result = await captured(() => main(variantArgv(env), overrides))
+      expect(result.code).toBe(1)
+      expect(result.text).toContain("stage 3")
+      expect(result.text).toContain(later.ok ? `not stage 1's ${GATES_BLOB}` : "could not be confirmed at the recheck: git broke")
+      expect(existsSync(join(env.out, SCHEDULE_FILE))).toBe(false)
+      expect(host.stops()).toBe(1)
+    }
+    // A gate status changed in memory after stage 1 is not what gets sealed.
+    const env = await setup()
+    const gates = closedGates.map((gate) => ({ ...gate }))
+    const { overrides } = overridesFor(env, {
+      gates,
+      variantProtocolFile: protocol.file,
+      variantProtocol: protocol.pin,
+      beforeRecheck: async () => {
+        ;(gates[13] as { status: string }).status = "OPEN"
+      },
+    })
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code, result.text).toBe(0)
+    const schedule = JSON.parse(await readFile(join(env.out, SCHEDULE_FILE), "utf8")) as VariantSchedule
+    expect(schedule.config.gates).toBe(variantGatesIdentity(GATES_BLOB, closedGates))
+    expect(String(schedule.config.gates)).toContain("gate 14 CLOSED")
+  })
+
+  test("a protocol file that is not the pinned one refuses at stage 1", async () => {
+    const env = await setup()
+    const protocol = await frozenVariantProtocol()
+    const other = { ...protocol.pin, frozenHash: `sha256:${"b".repeat(64)}` }
+    const { overrides, host } = overridesFor(env, { gates: closedGates, variantProtocolFile: protocol.file, variantProtocol: other })
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain(`the frozen protocol read has hash ${protocol.pin.frozenHash}, and the pin names ${other.frozenHash}`)
+    expect(host.started).toEqual([])
+    expect(existsSync(reservationFile(env))).toBe(false)
+  })
+
+  test("--design debate-variants with --provider-mode oauth, or an unknown design, is a flag refusal", () => {
+    expect(parseFlags(["bun", "paired", "--live", "--design", "debate-variants", "--provider-mode", "oauth"]).problems).toContain(
+      "--design debate-variants runs on the api-key route only; drop --provider-mode oauth.",
+    )
+    expect(parseFlags(["bun", "paired", "--live", "--design", "three"]).problems).toContain("--design is routing or debate-variants. It received `three`.")
+    expect(parseFlags(argvFor("/a", "/b")).design).toBe("routing")
+  })
+
+  test("a schedule sealed under another protocol than stage 1 verified is refused before the runner", async () => {
+    const env = await setup()
+    const protocol = await frozenVariantProtocol()
+    let ran = false
+    const { overrides } = overridesFor(env, {
+      gates: closedGates,
+      variantProtocolFile: protocol.file,
+      variantProtocol: protocol.pin,
+      runner: {
+        createVariantSchedule: async (input) => {
+          const { createVariantSchedule } = await import("../ablation/variant-schedule.ts")
+          const created = await createVariantSchedule(input)
+          if (!created.ok) return created
+          return { ...created, schedule: { ...created.schedule, protocol: { ...created.schedule.protocol, hash: `sha256:${"c".repeat(64)}` } } }
+        },
+        runVariantBlocks: async () => {
+          ran = true
+          throw new Error("must not run")
+        },
+      },
+    })
+    const result = await captured(() => main(variantArgv(env), overrides))
+    expect(result.code).toBe(1)
+    expect(result.text).toContain("not the protocol stage 1 verified")
+    expect(ran).toBe(false)
+    expect(existsSync(join(env.out, START_MARKER_FILE))).toBe(false)
   })
 })

@@ -47,9 +47,10 @@
  * on the api-key route only: gate 13 is the launcher's engineering wiring, and
  * gate 14 the budget owner's authorization of the one run
  * `VARIANT_EVALUATION_RUN` names, under the frozen protocol `VARIANT_PROTOCOL`
- * pins. Both are OPEN, and `VARIANT_PROTOCOL` pins no version or hash, so
- * `gatePreflight` refuses the phase; the run and the protocol path are
- * placeholders for a future authorization. The engineering gates 1, 2, 5 and 6,
+ * pins. Gate 13 is CLOSED on the launcher's fake-only tests; gate 14 is OPEN,
+ * and `VARIANT_PROTOCOL` pins no version or hash, so `gatePreflight` refuses
+ * the phase; the run and the protocol path are placeholders for a future
+ * authorization. The engineering gates 1, 2, 5 and 6,
  * which check the host, the worktree and the Tools port that launch shares,
  * name the phase in `alsoRequiredFor` and are required for it too. Only an
  * engineering gate may name another phase: gate 9, the routing evaluation's
@@ -1009,14 +1010,24 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     phase: "debate-variants",
     routes: ["api-key"],
     owner: "the debate-variants launcher work",
-    status: "OPEN",
+    status: "CLOSED",
     requires:
       "`bun run paired --live --design debate-variants` seals a debate-variants schedule (createVariantSchedule) and runs it " +
       "(runVariantBlocks) behind the same stage-1 to stage-3 checks as the evaluation, refuses unsupported design and route " +
       "combinations before anything is reserved, verifies the pinned frozen debate-variants protocol by id, version and hash, " +
       "consults this phase's gates and never gate 9, and reserves the debate-variants run's own reservation; with tests over " +
       "fakes only. The shared engineering gates 1, 2, 5 and 6 cover the host accounting, the real host, the worktree and the " +
-      "Tools port that launch shares; they say nothing about the debate-variants schedule, runner or journal"
+      "Tools port that launch shares; they say nothing about the debate-variants schedule, runner or journal",
+    evidence:
+      "scripts/paired.ts `--design debate-variants`: a flag refusal with --provider-mode oauth; stage 1 checks the frozen " +
+      "protocol against `VARIANT_PROTOCOL` (file, id, version and hash), `gatePreflight` for this phase (gates 13 and 14 " +
+      "and the shared gates 1, 2, 5 and 6, never gate 9) and `VARIANT_EVALUATION_RUN`, then reserves that run's own " +
+      "reservation with the verified protocol; stage 3 rechecks the committed gate table; stage 4 seals under the " +
+      "verified protocol (`createVariantSchedule` with `expectedProtocol`) the gate identity captured at stage 1, and " +
+      "`runVariantBlocks` checks the expected schedule hash and protocol under its lock before the start marker. Over " +
+      "fakes only (scripted host, relay and backends, a temporary protocol and reservation root); no live run. Tests: " +
+      "scripts/paired.test.ts (`--design debate-variants`), ablation/variant-runner.test.ts, " +
+      "ablation/variant-schedule.test.ts"
   },
   {
     number: 14,

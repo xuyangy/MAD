@@ -217,6 +217,11 @@ export interface CreateVariantScheduleInput {
   createdAt: string
   /** Injected for tests. Defaults to `cryptoVariantDraw`; never a non-cryptographic generator. */
   draw?: () => number
+  /**
+   * The frozen protocol the caller verified. When given, the protocol read here
+   * must be exactly it, or nothing is drawn or published.
+   */
+  expectedProtocol?: { id: string; version: number; hash: string }
 }
 
 export type VariantScheduleCreated = { ok: true; schedule: VariantSchedule; file: string } | { ok: false; reason: string }
@@ -226,7 +231,11 @@ export type VariantScheduleCreated = { ok: true; schedule: VariantSchedule; file
  * when a schedule of either design already exists, the config cannot run, or
  * the protocol is not the frozen debate-variants protocol. Bills nothing.
  */
-export async function createVariantSchedule(input: CreateVariantScheduleInput): Promise<VariantScheduleCreated> {
+export async function createVariantSchedule(given: CreateVariantScheduleInput): Promise<VariantScheduleCreated> {
+  // The caller's expectation is copied before the first await, so what it
+  // supplied is what is enforced.
+  const input: CreateVariantScheduleInput =
+    given.expectedProtocol === undefined ? given : { ...given, expectedProtocol: Object.freeze({ ...given.expectedProtocol }) }
   const root = resolve(input.bundleRoot)
   const lock = await acquireLock(root, input.createdAt)
   if (!lock.ok) return { ok: false, reason: lock.reason }
@@ -258,6 +267,15 @@ async function publishVariantSchedule(input: CreateVariantScheduleInput, root: s
   if (!protocol.ok) return { ok: false, reason: protocol.reason }
   const protocolProblem = variantProtocolProblem(protocol)
   if (protocolProblem !== null) return { ok: false, reason: `${protocolProblem}; nothing was drawn` }
+  const expected = input.expectedProtocol
+  if (expected !== undefined && (protocol.id !== expected.id || protocol.version !== expected.version || protocol.hash !== expected.hash)) {
+    return {
+      ok: false,
+      reason:
+        `the protocol read is ${protocol.id} v${protocol.version} ${protocol.hash}, not the expected ${expected.id} ` +
+        `v${expected.version} ${expected.hash}; nothing was drawn`,
+    }
+  }
 
   const draw = (input.draw ?? cryptoVariantDraw)()
   if (!isDraw(draw)) {

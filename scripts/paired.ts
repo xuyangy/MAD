@@ -97,6 +97,25 @@
  * facts. When the port reports unconfirmed blame cleanup, the run is aborted
  * through its signal and the process id is printed.
  *
+ * ## The debate-variants design
+ *
+ *   bun run paired --live --design debate-variants --pin … --provider-url … \
+ *     --provider-key-env … --provider-model … --directory … --out …
+ *
+ * `--design debate-variants` (`ablation/DEBATE-VARIANTS.md`) runs on the api-key
+ * route only; with `--provider-mode oauth` it is a flag refusal. Stage 1 then
+ * checks the frozen protocol `VARIANT_PROTOCOL` pins (its file, id, version and
+ * hash must all be the pin's; the shipped pin names none, so this refuses),
+ * the gates of phase `debate-variants` (gates 13 and 14 and the shared
+ * engineering gates 1, 2, 5 and 6; gate 9 never stands in for gate 14), and
+ * `VARIANT_EVALUATION_RUN` by the shared run-identity rules, then reserves that
+ * run's own reservation, recording the protocol it verified. Stages 2 and 3 are
+ * the evaluation's. Stage 4 seals the three-arm schedule (`createVariantSchedule`)
+ * under the verified protocol, with `config.gates` naming the phase, refuses
+ * before the runner when the sealed protocol is not the verified one, and runs
+ * the nine slots (`runVariantBlocks`). Exit 0 only when the runner's result
+ * reads `complete: true`.
+ *
  * ## The OAuth route (story 2-8c3b)
  *
  *   bun run paired --live --provider-mode oauth \
@@ -184,11 +203,21 @@ import {
   evaluationReservation,
   gatePreflight,
   PAIRED_GATES,
+  VARIANT_EVALUATION_RUN,
+  VARIANT_PROTOCOL,
+  VARIANT_ROUTE,
+  variantEvaluationEvidencePattern,
+  variantEvaluationReservation,
+  variantProtocolPinProblem,
   type ApiKeyEvaluationRun,
   type EvaluationPriorRun,
+  type GatePhase,
   type GateRoute,
   type PairedGate,
+  type VariantEvaluationRun,
 } from "../ablation/paired-gates.ts"
+import { runVariantBlocks } from "../ablation/variant-runner.ts"
+import { createVariantSchedule } from "../ablation/variant-schedule.ts"
 import { isLaunchEvidenceFile, LAUNCH_EVIDENCE_DIR, launchIdentityProblems, reserveExclusive, stageOneBinary, type ReserveResult } from "../ablation/launch-contract.ts"
 import {
   createSchedule,
@@ -393,7 +422,7 @@ export async function evaluationRunProblems(pins: readonly string[], seam: Evalu
  * committed at HEAD. Reads only the repository.
  */
 async function reservationStateProblems(
-  gate: 4 | 9,
+  gate: 4 | 9 | 14,
   run: { run: number; reservation: string; prior: readonly { run: number; reservation: string; evidence: string }[] },
   seam: EvaluationReservationSeam,
 ): Promise<string[]> {
@@ -509,6 +538,66 @@ export async function reserveApiKeyEvaluationRun(
   })
 }
 
+/**
+ * What the debate-variants run's reservation records. No secret: the run, the
+ * design, the route, the gate table's blob, the frozen protocol it was
+ * authorized under, the pins, the `--provider-model` list and `--out`.
+ */
+export interface VariantEvaluationReservation {
+  run: number
+  design: "debate-variants"
+  route: "api-key"
+  createdAt: string
+  gateTableBlob: string
+  protocol: { id: string; version: number; hash: string }
+  pins: string[]
+  models: string[]
+  out: string
+}
+
+/** The shared run-identity rules (`launchIdentityProblems`) for `VARIANT_EVALUATION_RUN`, with its own reservation and evidence names. */
+export function variantEvaluationIdentityProblems(run: VariantEvaluationRun = VARIANT_EVALUATION_RUN): string[] {
+  return launchIdentityProblems(run, {
+    label: "VARIANT_EVALUATION_RUN",
+    floor: 1,
+    reservationOf: variantEvaluationReservation,
+    ownReservation: true,
+    extra: (identity, shape) => {
+      const problems: string[] = []
+      if (!shape.wellFormed) return problems
+      for (const prior of identity.prior as unknown as Record<string, unknown>[]) {
+        const priorRun = prior.run as number
+        const evidence = prior.evidence
+        if (isLaunchEvidenceFile(evidence) && !variantEvaluationEvidencePattern(priorRun).test(posix.basename(evidence))) {
+          problems.push(
+            `VARIANT_EVALUATION_RUN.prior names run ${priorRun}'s evidence \`${evidence}\`, which is not run ${priorRun}'s debate-variants evaluation evidence name in ${LAUNCH_EVIDENCE_DIR}`,
+          )
+        }
+      }
+      return problems
+    },
+  })
+}
+
+/** Stage 1 for `--design debate-variants`: the run passes its identity rules, then its reservation is unused (gate 14's). */
+export async function variantEvaluationRunProblems(seam: EvaluationReservationSeam, run: VariantEvaluationRun = VARIANT_EVALUATION_RUN): Promise<string[]> {
+  const identity = variantEvaluationIdentityProblems(run)
+  if (identity.length > 0) return identity
+  return reservationStateProblems(14, run, seam)
+}
+
+/** Creates the debate-variants run's reservation exclusively, as the routing runs' are. Never removed. */
+export async function reserveVariantEvaluationRun(
+  root: string,
+  reservation: VariantEvaluationReservation,
+  run: VariantEvaluationRun = VARIANT_EVALUATION_RUN,
+): Promise<ReserveResult> {
+  return reserveExclusive(root, run.reservation, reservation, {
+    exists: (relative) => `the reservation \`${relative}\` already exists: another invocation reserved gate 14's one authorized debate-variants run first`,
+    failed: (relative, message) => `the reservation \`${relative}\` could not be created (${message})`,
+  })
+}
+
 /** The api-key route: the relay to one api-key provider, and the launcher's default. */
 export const LAUNCH_ROUTE: GateRoute = "api-key"
 
@@ -524,6 +613,11 @@ export const OAUTH_LENSES = ["security", "reliability"] as const
 /** The `config.gates` identity: the committed table's blob, the route it was checked for and every gate's status. */
 export function gatesIdentity(blob: string, gates: readonly PairedGate[], route: GateRoute): string {
   return `${GATE_TABLE_FILE} blob ${blob}; route ${route}; ${gates.map((gate) => `gate ${gate.number} ${gate.status}`).join(", ")}`
+}
+
+/** The `config.gates` identity of a debate-variants schedule: the same, naming the phase it was checked for. */
+export function variantGatesIdentity(blob: string, gates: readonly PairedGate[]): string {
+  return `${GATE_TABLE_FILE} blob ${blob}; phase debate-variants; route ${VARIANT_ROUTE}; ${gates.map((gate) => `gate ${gate.number} ${gate.status}`).join(", ")}`
 }
 
 /** The `config.tools` identity: the adapter and both blame deadlines, as the factory reported them. */
@@ -566,6 +660,8 @@ export interface SignalSource {
 export interface Runner {
   createSchedule: typeof createSchedule
   runPairedBlocks: typeof runPairedBlocks
+  createVariantSchedule: typeof createVariantSchedule
+  runVariantBlocks: typeof runVariantBlocks
 }
 
 /** What `main` takes from outside. Every default is the shipped behaviour. */
@@ -602,6 +698,12 @@ export interface PairedOverrides {
   evaluationReservation?: EvaluationReservationSeam
   /** Test-only: the run gate 9 authorizes on the api-key route. Defaults to `API_KEY_EVALUATION_RUN`. */
   apiKeyEvaluationRun?: ApiKeyEvaluationRun
+  /** Test-only: the debate-variants protocol file. Defaults to `VARIANT_PROTOCOL.path` in this repository. */
+  variantProtocolFile?: string
+  /** Test-only: the debate-variants protocol pin. Defaults to `VARIANT_PROTOCOL`, which pins nothing today. */
+  variantProtocol?: typeof VARIANT_PROTOCOL
+  /** Test-only: the run gate 14 authorizes. Defaults to `VARIANT_EVALUATION_RUN`. */
+  variantEvaluationRun?: VariantEvaluationRun
   /** The bounded launcher's spawn, for the preflight's git calls. Defaults to `preflightSpawn`. */
   spawnGit?: SpawnBlame
   /** Test-only: the preflight's git deadlines. The shipped values are the constants above. */
@@ -634,6 +736,7 @@ const VALUE_FLAGS = new Set([
   "oauth-provider",
   "oauth-data-dir",
   "oauth-prepared",
+  "design",
 ])
 const API_KEY_FLAGS = ["provider-url", "provider-key-env", "provider-model"] as const
 const OAUTH_FLAGS = ["oauth-provider", "oauth-data-dir", "oauth-prepared"] as const
@@ -673,6 +776,8 @@ export function parsePin(value: string): Pin | undefined {
 
 export interface ParsedFlags {
   problems: string[]
+  /** `--design`: the routing evaluation (`routing`, the default) or `debate-variants`. */
+  design: "routing" | "debate-variants"
   /** Story 2-8c3b — `--provider-mode`, `api-key` when absent. */
   mode: ProviderMode
   /** The api-key mode's one `--pin`. Absent in OAuth mode, whose pins are all in `pins`. */
@@ -693,7 +798,7 @@ export interface ParsedFlags {
 export function parseFlags(argv: readonly string[]): ParsedFlags {
   const args = argv.slice(2)
   const problems: string[] = []
-  const parsed: ParsedFlags = { problems, mode: "api-key", pins: [], unusable: {} }
+  const parsed: ParsedFlags = { problems, design: "routing", mode: "api-key", pins: [], unusable: {} }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!
@@ -702,7 +807,7 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
       if (!KNOWN_FLAGS.has(name)) {
         problems.push(
           `\`${arg}\` is not a flag this command knows. It takes --live, --pin, --directory, --out, --provider-url, ` +
-            "--provider-key-env and --provider-model only; with --provider-mode oauth, --oauth-provider, --oauth-data-dir " +
+            "--provider-key-env, --provider-model and --design only; with --provider-mode oauth, --oauth-provider, --oauth-data-dir " +
             "and --oauth-prepared in place of the three --provider-* flags.",
         )
       } else if (VALUE_FLAGS.has(name) && !arg.includes("=") && args[index + 1] !== undefined && !args[index + 1]!.startsWith("-")) {
@@ -727,6 +832,16 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
   else if (mode.value !== undefined && mode.value !== "api-key" && mode.value !== "oauth") {
     problems.push(`--provider-mode is api-key or oauth. It received \`${mode.value}\`.`)
   } else if (mode.value === "oauth") parsed.mode = "oauth"
+
+  const design = valueFlag(args, "design")
+  if (!design.ok) problems.push(design.message)
+  else if (design.value !== undefined && design.value !== "routing" && design.value !== "debate-variants") {
+    problems.push(`--design is routing or debate-variants. It received \`${design.value}\`.`)
+  } else if (design.value === "debate-variants") {
+    parsed.design = "debate-variants"
+    // The debate-variants design runs on the api-key route only; refused here, before anything is checked or reserved.
+    if (parsed.mode !== "api-key") problems.push("--design debate-variants runs on the api-key route only; drop --provider-mode oauth.")
+  }
 
   if (parsed.mode === "api-key") {
     const pin = valueFlag(args, "pin")
@@ -1443,6 +1558,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   const runner: Runner = {
     createSchedule: overrides.runner?.createSchedule ?? createSchedule,
     runPairedBlocks: overrides.runner?.runPairedBlocks ?? runPairedBlocks,
+    createVariantSchedule: overrides.runner?.createVariantSchedule ?? createVariantSchedule,
+    runVariantBlocks: overrides.runner?.runVariantBlocks ?? runVariantBlocks,
   }
   const controller = new AbortController()
   const unresolved: BlameCleanupUnresolved[] = []
@@ -1484,6 +1601,11 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     mode: ProviderMode
     /** MAD's own revision, read before any reservation is written. */
     codeRevision: Maybe<CodeRevision>
+    design: "routing" | "debate-variants"
+    /** The debate-variants design's frozen protocol, as stage 1 verified it against the pin. */
+    variantProtocol?: { file: string; id: string; version: number; hash: string }
+    /** The debate-variants design's `config.gates`, captured when its preflight passed. */
+    variantGates?: string
   }
   try {
     // ---- STAGE 1: offline checks ----
@@ -1525,9 +1647,27 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
 
     const oauthMode = flags.mode === "oauth"
+    const variant = flags.design === "debate-variants"
     const route = routeFor(flags.mode)
+    const variantPin = overrides.variantProtocol ?? VARIANT_PROTOCOL
+    const variantProtocolFile = overrides.variantProtocolFile ?? join(REPO_ROOT, VARIANT_PROTOCOL.path)
+    let verifiedVariantProtocol: { file: string; id: string; version: number; hash: string } | undefined
     checks.push(
       await guarded("frozen protocol", async () => {
+        if (variant) {
+          // The pin in the committed gate table is the authority; the file must be exactly what it pins.
+          const pinProblem = variantProtocolPinProblem(variantPin)
+          if (pinProblem !== null) return fail("frozen protocol", [pinProblem])
+          const protocol = await readFrozenProtocol(variantProtocolFile)
+          if (!protocol.ok) return fail("frozen protocol", [`the debate-variants protocol is not frozen: ${protocol.reason}`])
+          const problems: string[] = []
+          if (protocol.id !== variantPin.id) problems.push(`the frozen protocol read is ${protocol.id}, and the pin names ${variantPin.id}`)
+          if (protocol.version !== variantPin.version) problems.push(`the frozen protocol read is version ${protocol.version}, and the pin names version ${variantPin.version}`)
+          if (protocol.hash !== variantPin.frozenHash) problems.push(`the frozen protocol read has hash ${protocol.hash}, and the pin names ${variantPin.frozenHash}`)
+          if (problems.length > 0) return fail("frozen protocol", problems)
+          verifiedVariantProtocol = { file: variantProtocolFile, id: protocol.id, version: protocol.version, hash: protocol.hash }
+          return pass("frozen protocol", [`${protocol.id} v${protocol.version} ${protocol.hash}, the protocol \`VARIANT_PROTOCOL\` pins`])
+        }
         if (oauthMode) {
           const protocol = await readFrozenProtocol(overrides.protocolV2File ?? PROTOCOL_V2_FILE)
           if (!protocol.ok) return fail("frozen protocol", [`protocol v2 is not frozen: ${protocol.reason}`])
@@ -1554,7 +1694,10 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       }),
     )
 
-    const gateCheck = gatePreflight(gates, "evaluation", route)
+    const phase: GatePhase = variant ? "debate-variants" : "evaluation"
+    // The variant gate identity is the statuses this preflight read, captured now and sealed as read.
+    const variantGateStatuses = gates.map((gate) => ({ ...gate }))
+    const gateCheck = variant ? gatePreflight(gates, phase, route, undefined, undefined, variantPin) : gatePreflight(gates, phase, route)
     let table: GateTableState
     try {
       table = await (overrides.gateTable ?? (() => gateTableState(git, REPO_ROOT)))()
@@ -1568,8 +1711,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     )
     checks.push(
       gateCheck.ok
-        ? pass("paired gates (ablation/paired-gates.ts, phase evaluation)", gateCheck.lines)
-        : fail("paired gates (ablation/paired-gates.ts, phase evaluation)", [
+        ? pass(`paired gates (ablation/paired-gates.ts, phase ${phase})`, gateCheck.lines)
+        : fail(`paired gates (ablation/paired-gates.ts, phase ${phase})`, [
             ...gateCheck.lines,
             ...gateCheck.problems.map((problem) => `REFUSED: ${problem}`),
             "A gate closes only by a reviewed, committed change to ablation/paired-gates.ts; no flag, variable or file can close one.",
@@ -1592,6 +1735,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     const pinNames = flags.pins.map((pin) => `${pin.providerId}/${pin.modelId}`)
     const apiKeyRun = overrides.apiKeyEvaluationRun ?? API_KEY_EVALUATION_RUN
+    const variantRun = overrides.variantEvaluationRun ?? VARIANT_EVALUATION_RUN
     if (oauthMode) {
       oauthRoute = await oauthChecks(flags, home, overrides.payloadPins ?? OAUTH_PAYLOAD, checks, [
         { name: "--directory", path: directory },
@@ -1656,6 +1800,15 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       }
       checks.push(
         await guarded("authorized evaluation run", async () => {
+          if (variant) {
+            const problems = await variantEvaluationRunProblems(reservationSeam, variantRun)
+            return problems.length === 0
+              ? pass("authorized evaluation run", [
+                  `gate 14 authorizes run ${variantRun.run} (VARIANT_EVALUATION_RUN) and no roster; gate 9 does not stand in for it`,
+                  `run ${variantRun.run}'s reservation \`${variantRun.reservation}\` is unused; it is created before the relay and the host start`,
+                ])
+              : fail("authorized evaluation run", problems)
+          }
           const problems = await apiKeyEvaluationRunProblems(reservationSeam, apiKeyRun)
           return problems.length === 0
             ? pass("authorized evaluation run", [
@@ -1722,7 +1875,8 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
       out === undefined ||
       wiring === undefined ||
       reference === undefined ||
-      !table.ok
+      !table.ok ||
+      (variant && verifiedVariantProtocol === undefined)
     ) {
       return refusal(
         "stage 1 (offline checks)",
@@ -1780,6 +1934,29 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
         )
       }
       console.log(`  reserved gate 4's evaluation run ${EVALUATION_RUN.run}: ${EVALUATION_RUN.reservation} (never removed)`)
+    } else if (variant) {
+      // The debate-variants design uses gate 14's one authorization here, before the relay or the host starts.
+      const record: VariantEvaluationReservation = {
+        run: variantRun.run,
+        design: "debate-variants",
+        route: "api-key",
+        createdAt: new Date().toISOString(),
+        gateTableBlob: table.blob,
+        protocol: { id: verifiedVariantProtocol!.id, version: verifiedVariantProtocol!.version, hash: verifiedVariantProtocol!.hash },
+        pins: pinNames,
+        models: [...provider!.models],
+        out,
+      }
+      const reserved = await reserveVariantEvaluationRun(reservationSeam.root, record, variantRun)
+      if (!reserved.ok) {
+        return refusal(
+          "stage 1 (evaluation reservation)",
+          [reserved.why],
+          "gate 14 authorizes one debate-variants run; a further run needs the budget owner's new authorization in a reviewed change.",
+          preexisting,
+        )
+      }
+      console.log(`  reserved gate 14's debate-variants run ${variantRun.run}: ${variantRun.reservation} (never removed)`)
     } else {
       // The api-key route uses gate 9's one authorization here, before the relay or the host starts.
       const record: ApiKeyEvaluationReservation = {
@@ -1924,7 +2101,20 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     const outAgain = await outContainment(out, directory)
     const rootAgain = await bundleRoot(out)
+    // The debate-variants design also rechecks that the committed gate table is still the one stage 1 verified.
+    let tableAgain: string | null = null
+    if (variant) {
+      let state: GateTableState
+      try {
+        state = await (overrides.gateTable ?? (() => gateTableState(git, REPO_ROOT)))()
+      } catch (error) {
+        state = { ok: false, why: `whether ${GATE_TABLE_FILE} is committed could not be established: ${messageOf(error)}` }
+      }
+      if (!state.ok) tableAgain = `the committed gate table could not be confirmed at the recheck: ${state.why}`
+      else if (state.blob !== table.blob) tableAgain = `the committed gate table is blob ${state.blob} at the recheck, not stage 1's ${table.blob}`
+    }
     const failures = [
+      ...(tableAgain === null ? [] : [tableAgain]),
       ...(recheck.length > 0 ? ["--directory changed after the first comparison and is no longer the sealed labelled change"] : []),
       ...(outAgain.state === "fail" ? ["--out containment failed at the recheck"] : []),
       ...(rootAgain.check.state === "fail" ? ["the bundle root changed after stage 1"] : []),
@@ -1943,7 +2133,21 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
     }
     console.log(`  PASS  \`${directory}\` is still exactly the sealed labelled change`)
     if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
-    prepared = { pins: flags.pins, directory, out, host, wiring, roster, warnings, gatesBlob: table.blob, mode: flags.mode, codeRevision }
+    prepared = {
+      pins: flags.pins,
+      directory,
+      out,
+      host,
+      wiring,
+      roster,
+      warnings,
+      gatesBlob: table.blob,
+      mode: flags.mode,
+      codeRevision,
+      design: flags.design,
+      ...(verifiedVariantProtocol === undefined ? {} : { variantProtocol: verifiedVariantProtocol }),
+      ...(variant ? { variantGates: variantGatesIdentity(table.blob, variantGateStatuses) } : {}),
+    }
   } finally {
     // The scratch copy is removed while the handlers are still on, so no interrupt lands between the two stages' handlers.
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true })
@@ -1955,7 +2159,12 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   if (interrupted) return refusal("stage 3 (recheck)", ["the preflight was interrupted"], "run the command again.")
 
   // ---- STAGE 4: schedule, then the three blocks ----
-  console.log("\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks")
+  const variantDesign = prepared.design === "debate-variants"
+  console.log(
+    variantDesign
+      ? "\nbun run paired — stage 4 of 4: createVariantSchedule, then runVariantBlocks"
+      : "\nbun run paired — stage 4 of 4: createSchedule, then runPairedBlocks",
+  )
   const { directory, out, wiring, roster, warnings, gatesBlob, mode, codeRevision } = prepared
   // SIGINT/SIGTERM during the run: abort through the runner's signal, which keeps every piece of evidence.
   const runInterrupt = (): void => {
@@ -1968,7 +2177,7 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   signals.on("SIGINT", runInterrupt)
   signals.on("SIGTERM", runInterrupt)
   try {
-    return await stageFour()
+    return await (variantDesign ? stageFourVariant() : stageFour())
   } catch (error) {
     const marker = await presence(join(out, START_MARKER_FILE))
     console.log(
@@ -1985,6 +2194,94 @@ async function launch(argv: readonly string[], overrides: PairedOverrides, manag
   } finally {
     signals.off("SIGINT", runInterrupt)
     signals.off("SIGTERM", runInterrupt)
+  }
+
+  /** The backend every phase gets: the injected one, or the opencode adapter on the managed host. */
+  function phaseBackend(context: PairedPhaseContext, lateUsage: LateUsageReporter, resolved: Roster): ModelBackend {
+    if (overrides.backendFor !== undefined) return overrides.backendFor(context, lateUsage, resolved)
+    return (overrides.createBackend ?? ((options: OpencodeBackendOptions) => new OpencodeModelBackend(options)))({
+      serverUrl: prepared.host.url,
+      directory,
+      slots: [...resolved.slots, ...resolved.lensSlots],
+      lateUsage,
+      // One journal holds every phase's execution ids, and each phase gets its own backend.
+      executionIdPrefix: `block-${context.block}-${context.phase}/`,
+      tools: PAIRED_HOST_TOOLS,
+      ...(managed.meter === undefined ? {} : { meter: managed.meter }),
+    })
+  }
+
+  /**
+   * Stage 4 for `--design debate-variants`: seal the three-arm schedule under
+   * the protocol stage 1 verified and the variant gate identity, refuse when the
+   * sealed protocol is not that one, then run the nine slots.
+   */
+  async function stageFourVariant(): Promise<number> {
+    const verified = prepared.variantProtocol!
+    const config: PairedConfig = {
+      provenance: "live",
+      tools: toolsIdentity(wiring),
+      gates: prepared.variantGates!,
+      route: "api-key",
+    }
+    const base = { bundleRoot: out, protocolFile: verified.file, fixture: LABELLED_CHANGE_SEAL, codeRevision, roster, change: SEEDED_CHANGE, config }
+    const expectedProtocol = { id: verified.id, version: verified.version, hash: verified.hash }
+    const created = await runner.createVariantSchedule({ ...base, createdAt: clock.now(), expectedProtocol })
+    if (!created.ok) {
+      console.log(`\nREFUSED by createVariantSchedule: ${created.reason}\nNothing was billed. Next step: ${scheduleNextStep(created.reason)}`)
+      return 1
+    }
+    const sealed = created.schedule.protocol
+    if (sealed.id !== verified.id || sealed.version !== verified.version || sealed.hash !== verified.hash) {
+      console.log(
+        `\nREFUSED: the schedule was sealed under ${sealed.id} v${sealed.version} ${sealed.hash}, not the protocol stage 1 verified ` +
+          `(${verified.id} v${verified.version} ${verified.hash}). Nothing was billed. The sealed schedule stays at ${created.file} as ` +
+          "evidence. Next step: restore the pinned protocol and start from a new bundle root.",
+      )
+      return 1
+    }
+    console.log(`  schedule sealed at ${created.file} (draw ${created.schedule.draw}; ${created.schedule.order.map((arms, index) => `block ${index + 1}: ${arms.join(", ")}`).join("; ")})`)
+
+    const outcome = await runner.runVariantBlocks({
+      ...base,
+      // The runner holds the bundle lock while it checks these, before its start marker.
+      expected: { scheduleHash: created.schedule.scheduleHash, protocol: expectedProtocol },
+      worktree: directory,
+      priorWarnings: warnings,
+      clock,
+      tools: wiring.tools,
+      signal: controller.signal,
+      backendFor: (context, lateUsage) => phaseBackend(context, lateUsage, roster),
+    })
+    if (!outcome.ok) {
+      console.log(
+        `\nREFUSED by runVariantBlocks before its start marker: ${outcome.reason}\n` +
+          `Nothing was billed. The sealed schedule stays at ${created.file} as evidence. Next step: fix the cause and ` +
+          "start from a new bundle root.",
+      )
+      return 1
+    }
+    const flushed = await outcome.reconciliation.flush()
+    console.log("\nSlots:")
+    for (const slot of outcome.slots) console.log(`  block ${slot.block} ${slot.arm} (${slot.position}): ${slot.status} — ${slot.reason}`)
+    const bill = outcome.bill
+    console.log(`\nBill: ${bill.requests.length} request(s) journaled; halt: ${bill.halt ?? "none"}; stop: ${bill.stop ?? "none"}`)
+    console.log(
+      `Late usage flush: ${flushed.persisted} persisted, ${flushed.conflicts.length} conflict(s), ` +
+        `${flushed.unmatched.length} unmatched${flushed.failed === null ? "" : `; failed: ${flushed.failed}`}`,
+    )
+    for (const warning of outcome.warnings) console.log(`warning: ${warning}`)
+    for (const fact of unresolved) {
+      console.log(`BLAME CLEANUP UNCONFIRMED: check process ${fact.pid} by hand (${fact.operation}: ${fact.why}).`)
+    }
+    console.log(
+      (outcome.complete
+        ? "\nThe runner's result reads `complete: true`: all nine slots completed, with no halt, stop, or unknown or in-flight request.\n"
+        : "\nThe run is INCOMPLETE (`complete: false`): every slot above names its reason, and the evidence is kept.\n") +
+        "A change made to --directory during the run is not detected by this command.\n" +
+        `Read it: bun run eval-read --bundle ${out}`,
+    )
+    return outcome.complete ? 0 : 1
   }
 
   async function stageFour(): Promise<number> {
