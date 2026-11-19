@@ -556,7 +556,11 @@ async function resolved(path: string): Promise<{ ok: true; real: string } | { ok
  * containment, run-id and roster checks below are exactly what makes the answer
  * binding rather than a path guess.
  */
-export async function loadPrefixRecord(root: string, schedule: PairedSchedule, block: PairedBlock): Promise<Loaded> {
+export async function loadPrefixRecord(
+  root: string,
+  schedule: Pick<PairedSchedule, "roster">,
+  block: { block: number; prefix: Pick<PairedBlock["prefix"], "problem" | "evidence"> },
+): Promise<Loaded> {
   const prefix = block.prefix
   if (prefix.problem !== null) return { kind: "unavailable", reasons: [prefix.problem] }
   const evidence = prefix.evidence
@@ -1093,31 +1097,33 @@ function readArms(block: PairedBlock, matcher: DefectMatcher): ArmLabelRead[] {
         result: { kind: "unavailable" as const, reason: `the paired block is withheld: ${block.result.reasons.join("; ")}` },
       }
     }
-    const upheld = arm.row.findings.filter((finding) => verdictState(finding) === "upheld")
-    for (const finding of upheld) {
-      const problem = findingProblem(finding)
-      if (problem !== null) {
-        return {
-          ...base,
-          result: { kind: "unavailable" as const, reason: `upheld finding \`${fieldText(finding.id)}\` ${problem}` },
-        }
-      }
-    }
-    try {
-      const partition = adjudicate(SEEDED_DEFECTS, upheld, matcher)
-      return {
-        ...base,
-        result: {
-          kind: "measured" as const,
-          upheld: upheld.length,
-          matches: partition.matched.map((match) => ({ defectId: match.defectId, findingId: match.finding.id })),
-          unlabelled: partition.unlabelled.map((finding) => finding.id),
-        },
-      }
-    } catch (error) {
-      return { ...base, result: { kind: "unavailable" as const, reason: `scoring failed: ${messageOf(error)}` } }
-    }
+    return { ...base, result: scoreUpheld(arm.row.findings, matcher) }
   })
+}
+
+/**
+ * One arm's upheld findings scored against the planted labels: which label each
+ * matched, and which matched none. Exported so every reader of a labelled
+ * bundle, routing or debate-variants, scores an arm by the same rule. The
+ * caller has already established that the bundle reviewed the labelled change.
+ */
+export function scoreUpheld(findings: readonly Finding[], matcher: DefectMatcher): ArmLabelResult {
+  const upheld = findings.filter((finding) => verdictState(finding) === "upheld")
+  for (const finding of upheld) {
+    const problem = findingProblem(finding)
+    if (problem !== null) return { kind: "unavailable", reason: `upheld finding \`${fieldText(finding.id)}\` ${problem}` }
+  }
+  try {
+    const partition = adjudicate(SEEDED_DEFECTS, upheld, matcher)
+    return {
+      kind: "measured",
+      upheld: upheld.length,
+      matches: partition.matched.map((match) => ({ defectId: match.defectId, findingId: match.finding.id })),
+      unlabelled: partition.unlabelled.map((finding) => finding.id),
+    }
+  } catch (error) {
+    return { kind: "unavailable", reason: `scoring failed: ${messageOf(error)}` }
+  }
 }
 
 // ---------------------------------------------------------------------------

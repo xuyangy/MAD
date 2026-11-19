@@ -576,7 +576,7 @@ function isSlotLine(value: unknown): value is SlotStatusLine {
  * `readSchedule` compares `scheduleVersion` first: a document whose shape this
  * reader does not know is refused for that, not for the first field it fails.
  */
-async function readPrefixEvidence(root: string, schedule: PairedSchedule, block: number): Promise<PrefixReport> {
+export async function readPrefixEvidence(root: string, schedule: Pick<PairedSchedule, "scheduleHash">, block: number): Promise<PrefixReport> {
   const file = join(armDirectory(root, PREFIX_DIRECTORY, block - 1), PREFIX_FILE)
   const at = `its prefix evidence \`${file}\``
   let raw: unknown
