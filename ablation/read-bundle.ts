@@ -84,6 +84,7 @@ import {
   type RunManifest,
 } from "./manifest.ts"
 import { hasSealedSchedule, PAIRED_BLOCKS } from "./schedule.ts"
+import { VARIANT_ARM_OPTIONS, VARIANT_ARMS, type VariantArm } from "./variants.ts"
 
 /**
  * The four fields cross-arm comparability is decided on.
@@ -659,6 +660,10 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
   if ("experiment" in value && "adversarial" in value) {
     return fail("carries both a paired `experiment` and an `adversarial` binding")
   }
+  // A debate-variants arm is neither, so no reader of one design reads another's arm.
+  if ("variant" in value && ("experiment" in value || "adversarial" in value)) {
+    return fail(`carries a debate-variants \`variant\` binding beside ${"experiment" in value ? "a paired `experiment`" : "an `adversarial`"} binding`)
+  }
 
   // ---- experiment (story 2-5c) ----
   // OPTIONAL. Absent is an ordinary arm, and absence never qualifies a manifest
@@ -728,6 +733,54 @@ export function parseManifest(value: unknown): Parsed<RunManifest> {
       ("accounting" in adversarial && adversarial.accounting !== "attempts")
     ) {
       return fail("has a malformed `adversarial`")
+    }
+  }
+
+  // ---- variant (ablation/DEBATE-VARIANTS.md) ----
+  // OPTIONAL. Present, its shape is checked, its options must be its arm's, its
+  // routing policy the one those options name, and its prefix the run's own
+  // parent. Which slot of which schedule it names is the variant reader's question.
+  if ("variant" in value) {
+    const variant = value.variant
+    if (
+      !isRecord(variant) ||
+      typeof variant.scheduleHash !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(variant.scheduleHash) ||
+      !isCount(variant.block) ||
+      variant.block < 1 ||
+      variant.block > PAIRED_BLOCKS.length ||
+      typeof variant.arm !== "string" ||
+      !(VARIANT_ARMS as readonly string[]).includes(variant.arm) ||
+      (variant.position !== "first" && variant.position !== "second" && variant.position !== "third") ||
+      !isText(variant.prefixRunId) ||
+      ("failure" in variant && !isText(variant.failure))
+    ) {
+      return fail("has a malformed `variant`")
+    }
+    const options = VARIANT_ARM_OPTIONS[variant.arm as VariantArm]
+    const given = variant.options
+    const same =
+      isRecord(given) &&
+      Object.keys(given).length === Object.keys(options).length &&
+      (Object.keys(options) as (keyof typeof options)[]).every((key) => given[key] === options[key])
+    if (!same) {
+      return fail(`has \`variant.options\` ${JSON.stringify(variant.options)}, which are not arm ${variant.arm}'s ${JSON.stringify(options)}`)
+    }
+    if ("failure" in variant) {
+      const finished = run.finishedAt as { kind?: unknown } | undefined
+      if (status.completion !== "unfinished" || finished?.kind !== "unknown") {
+        return fail("has a `variant.failure`, but its run reads as finished")
+      }
+    }
+    if (dials.routingPolicy !== options.policy) {
+      return fail(
+        `has a \`variant.arm\` of ${variant.arm}, but its \`dials.routingPolicy\` is ${JSON.stringify(dials.routingPolicy)} ` +
+          `(every debate-variants arm runs ${options.policy})`,
+      )
+    }
+    const parent = run.forkedFrom as { kind?: unknown; value?: unknown } | undefined
+    if (parent?.kind !== "known" || parent.value !== variant.prefixRunId) {
+      return fail("has a `variant.prefixRunId` that is not its `run.forkedFrom`")
     }
   }
 

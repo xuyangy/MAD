@@ -94,8 +94,9 @@ import {
 } from "../core/run/review.ts"
 import type { ArtifactOutcome } from "../adapters/opencode/artifacts.ts"
 import type { LabelledChangeSeal } from "../fixtures/seeded-defects/seal.ts"
+import type { RoutingPolicy } from "../core/domain/run-record.ts"
 import type { ArmRun, ArmSpec } from "./arms.ts"
-import { writeArmDump, writeBundleIndex, writePrefixEvidence } from "./bundle.ts"
+import { writeArmDump, writeBundleIndex, writePrefixEvidence, type WriteArmDumpInput } from "./bundle.ts"
 import {
   governorStateFromBill,
   PAIRED_ALLOWANCES,
@@ -112,12 +113,14 @@ import {
   type PairedJournal,
   type ReconciliationHandle,
   type RefusedAdmission,
+  type JournalPhase,
   type UniqueExecutionBill,
 } from "./journal.ts"
-import { known, type CodeRevision, type ExperimentBinding, type Maybe } from "./manifest.ts"
+import { known, type CodeRevision, type ExperimentBinding, type Maybe, type VariantBinding } from "./manifest.ts"
 import {
   accountingConfigProblem,
-  appendSlotStatus,
+  appendStatusLine,
+  SLOT_STATUS_FILE,
   START_MARKER_FILE,
   verifySchedule,
   writeStartMarker,
@@ -127,10 +130,10 @@ import {
   type SlotStatus,
 } from "./schedule.ts"
 
-/** The phase a backend is built for. */
+/** The phase a backend is built for: a routing phase, or a debate-variants phase. */
 export interface PairedPhaseContext {
   block: number
-  phase: PairedPhase
+  phase: JournalPhase
 }
 
 export interface RunPairedBlocksInput {
@@ -164,8 +167,15 @@ export interface RunPairedBlocksInput {
   backendFor(context: PairedPhaseContext, lateUsage: LateUsageReporter): ModelBackend
 }
 
+/** One planned continuation slot of either design: the routing design's `PlannedSlot` or a debate-variants `VariantSlot`. */
+export interface DesignSlot {
+  block: number
+  arm: string
+  position: string
+}
+
 /** The final status of one planned arm slot. */
-export interface SlotReport extends PlannedSlot {
+export type SlotReport<S extends DesignSlot = PlannedSlot> = S & {
   status: SlotStatus
   reason: string
   runId?: string
@@ -173,8 +183,8 @@ export interface SlotReport extends PlannedSlot {
   manifest?: ArtifactOutcome
 }
 
-export interface PairedArmRun {
-  slot: PlannedSlot
+export interface PairedArmRun<S extends DesignSlot = PlannedSlot> {
+  slot: S
   run: ArmRun
   prefixRunId: string
 }
@@ -303,23 +313,118 @@ export async function runPairedBlocks(input: RunPairedBlocksInput): Promise<Pair
   } catch (error) {
     return await refuse(`the runner failed before the start marker was written: ${messageOf(error)}`)
   }
-  // Outside the `try` above: once the schedule is started, `execute` owns the
-  // journal, gives every slot a terminal status and returns the reconciliation
-  // handle whatever happens inside it.
-  return execute(input, root, prepared.schedule, prepared.journal)
+  // Outside the `try` above: once the schedule is started, `executeBlocks` owns
+  // the journal, gives every slot a terminal status and returns the
+  // reconciliation handle whatever happens inside it.
+  const executed = await executeBlocks(input, root, routingDesign(input, prepared.schedule), prepared.journal)
+  return { ok: true, schedule: prepared.schedule, ...executed }
 }
 
-async function execute(
-  input: RunPairedBlocksInput,
+/** The routing design: ON runs the shipped policy, OFF the debate-off policy, and each arm's manifest carries an `experiment` binding. */
+function routingDesign(input: RunPairedBlocksInput, schedule: PairedSchedule): BlockDesign<PlannedSlot> {
+  const config = input.config
+  return {
+    slots: schedule.slots,
+    scheduleHash: schedule.scheduleHash,
+    identity: identityOf(schedule),
+    forkedReason: "forked into the scheduled ON and OFF continuations",
+    armName: (arm) => arm.toUpperCase(),
+    continuation: (slot) => ({ policy: slot.arm === "on" ? "shipped" : "debate-off" }),
+    spec: (slot) => ({
+      id: slot.arm,
+      label: slot.arm === "on" ? "debate on" : "debate off",
+      provenance: config.provenance,
+      slots: input.roster.slots.length,
+    }),
+    binding(slot, prefixRunId, record, failure) {
+      const experiment: ExperimentBinding = {
+        scheduleHash: schedule.scheduleHash,
+        block: slot.block,
+        arm: slot.arm,
+        position: slot.position,
+        prefixRunId,
+        ...(failure === undefined ? {} : { failure }),
+        ...(accountingOf(config) === "attempts" ? { accounting: "attempts" as const } : {}),
+      }
+      const problem = bindingProblem(schedule, experiment, record)
+      return problem === null ? { ok: true, binding: { experiment } } : { ok: false, reason: problem }
+    },
+    runCap: PAIRED_ALLOWANCES.runCap,
+  }
+}
+
+/** The evaluation identity every arm manifest of a schedule carries. */
+export function identityOf(schedule: {
+  protocol: { version: number; hash: string }
+  fixture: LabelledChangeSeal
+  codeRevision: Maybe<CodeRevision>
+}): BlockDesign<DesignSlot>["identity"] {
+  return {
+    protocolVersion: known(schedule.protocol.version),
+    protocolHash: known(schedule.protocol.hash),
+    fixtureVersion: known(schedule.fixture.version),
+    fixtureHash: known(schedule.fixture.materialHash),
+    codeRevision: schedule.codeRevision,
+  }
+}
+
+/**
+ * What differs between the two designs `executeBlocks` runs: the planned
+ * slots, how an arm is named in a reason, which policy and debate options its
+ * continuation runs with, its arm spec, and the manifest binding it writes.
+ */
+export interface BlockDesign<S extends DesignSlot> {
+  slots: readonly S[]
+  scheduleHash: string
+  identity: WriteArmDumpInput["identity"]
+  /** The prefix report's reason when a block was forked. */
+  forkedReason: string
+  /** How a reason names the arm: `ON`, `OFF`, or a debate-variants arm's own name. */
+  armName(arm: S["arm"]): string
+  /** The policy and the debate options this slot's continuation runs with. Options are passed only when true. */
+  continuation(slot: S): { policy: RoutingPolicy; debateReferences?: boolean; debateMissingEvidence?: boolean }
+  spec(slot: S): ArmSpec
+  /** The manifest binding for this slot's run, or why it would misstate the run. */
+  binding(
+    slot: S,
+    prefixRunId: string,
+    record: RunRecord,
+    failure?: string,
+  ): { ok: true; binding: { experiment: ExperimentBinding } | { variant: VariantBinding } } | { ok: false; reason: string }
+  /** Every prefix's `tokenCap` in token mode. */
+  runCap: number
+}
+
+/** What `executeBlocks` reads of a runner's input: everything but the schedule binding. */
+export type ExecuteBlocksInput = Pick<
+  RunPairedBlocksInput,
+  "worktree" | "roster" | "priorWarnings" | "change" | "config" | "clock" | "tools" | "signal" | "fork" | "backendFor"
+>
+
+/** What `executeBlocks` returns; each runner adds its own schedule. */
+type ExecutedBlocks<S extends DesignSlot> = Omit<Extract<PairedBlocksOutcome, { ok: true }>, "ok" | "schedule" | "slots" | "runs"> & {
+  slots: SlotReport<S>[]
+  runs: PairedArmRun<S>[]
+}
+
+/**
+ * Run a started schedule's blocks: each block's shared prefix, its fork into
+ * one branch per planned slot, and each continuation in the scheduled order,
+ * with the evidence, slot statuses and terminal accounting described in the
+ * module header. `design` supplies what differs between the routing and
+ * debate-variants designs.
+ */
+export async function executeBlocks<S extends DesignSlot>(
+  input: ExecuteBlocksInput,
   root: string,
-  schedule: PairedSchedule,
+  design: BlockDesign<S>,
   journal: PairedJournal,
-): Promise<PairedBlocksOutcome> {
+): Promise<ExecutedBlocks<S>> {
   const warnings: string[] = []
-  const reports = new Map<string, SlotReport>()
-  const keyOf = (slot: PlannedSlot): string => `${slot.block}:${slot.arm}`
+  const reports = new Map<string, SlotReport<S>>()
+  const keyOf = (slot: S): string => `${slot.block}:${slot.arm}`
   const prefixes: PrefixReport[] = []
-  const runs: PairedArmRun[] = []
+  const runs: PairedArmRun<S>[] = []
   const config = input.config
 
   /** Once set, admission has ended and every remaining slot is not attempted for this reason. */
@@ -337,13 +442,13 @@ async function execute(
    * the reason is returned so the caller can skip it.
    */
   const mark = async (
-    slot: PlannedSlot,
+    slot: S,
     status: SlotStatus,
     reason: string,
-    extra: Partial<SlotReport> = {},
+    extra: { runId?: string; manifest?: ArtifactOutcome } = {},
   ): Promise<string | null> => {
     const previous = reports.get(keyOf(slot))
-    const report: SlotReport = { ...previous, ...slot, status, reason, ...extra }
+    const report = { ...previous, ...slot, status, reason, ...extra } as SlotReport<S>
     reports.set(keyOf(slot), report)
     let at: string
     try {
@@ -351,7 +456,7 @@ async function execute(
     } catch (error) {
       at = `unknown (the clock failed: ${messageOf(error)})`
     }
-    const problem = await appendSlotStatus(root, {
+    const problem = await appendStatusLine(join(root, SLOT_STATUS_FILE), {
       ...slot,
       status,
       reason,
@@ -366,7 +471,7 @@ async function execute(
   }
 
   /** The reason no further block may start, read off the journal. */
-  const blocker = (block: number, phase: PairedPhase): string | null => {
+  const blocker = (block: number, phase: JournalPhase): string | null => {
     const bill = journal.bill()
     if (bill.halt !== null) return `the experiment halted: ${bill.halt}`
     if (bill.stop !== null) return `the runner stopped: ${bill.stop}`
@@ -377,52 +482,27 @@ async function execute(
     return null
   }
 
-  const identity = {
-    protocolVersion: known(schedule.protocol.version),
-    protocolHash: known(schedule.protocol.hash),
-    fixtureVersion: known(schedule.fixture.version),
-    fixtureHash: known(schedule.fixture.materialHash),
-    codeRevision: schedule.codeRevision,
-  }
-
-  const specOf = (slot: PlannedSlot): ArmSpec => ({
-    id: slot.arm,
-    label: slot.arm === "on" ? "debate on" : "debate off",
-    provenance: config.provenance,
-    slots: input.roster.slots.length,
-  })
-
   /** Write one arm slot's manifest, or the refusal that stopped it. */
   const writeManifest = async (
-    slot: PlannedSlot,
+    slot: S,
     record: RunRecord,
     rendered: string,
     prefixId: string,
     failure?: string,
   ): Promise<ArtifactOutcome> => {
-    const experiment: ExperimentBinding = {
-      scheduleHash: schedule.scheduleHash,
-      block: slot.block,
-      arm: slot.arm,
-      position: slot.position,
-      prefixRunId: prefixId,
-      ...(failure === undefined ? {} : { failure }),
-      ...(accountingOf(config) === "attempts" ? { accounting: "attempts" as const } : {}),
-    }
-    const problem = bindingProblem(schedule, experiment, record)
-    const manifest: ArtifactOutcome =
-      problem !== null
-        ? { kind: "refused", reason: problem }
-        : await writeArmDump({
-            bundleRoot: root,
-            run: { spec: specOf(slot), repeat: slot.block - 1, record, rendered },
-            change: input.change,
-            identity,
-            worktree: input.worktree,
-            experiment,
-          })
+    const bound = design.binding(slot, prefixId, record, failure)
+    const manifest: ArtifactOutcome = !bound.ok
+      ? { kind: "refused", reason: bound.reason }
+      : await writeArmDump({
+          bundleRoot: root,
+          run: { spec: design.spec(slot), repeat: slot.block - 1, record, rendered },
+          change: input.change,
+          identity: design.identity,
+          worktree: input.worktree,
+          ...bound.binding,
+        })
     if (manifest.kind !== "written") {
-      endWith(`the manifest for block ${slot.block} ${slot.arm.toUpperCase()} was not written: ${manifestReason(manifest)}`)
+      endWith(`the manifest for block ${slot.block} ${design.armName(slot.arm)} was not written: ${manifestReason(manifest)}`)
     }
     return manifest
   }
@@ -436,7 +516,7 @@ async function execute(
       bundleRoot: root,
       worktree: input.worktree,
       change: input.change,
-      scheduleHash: schedule.scheduleHash,
+      scheduleHash: design.scheduleHash,
       block,
       ...prefix,
     })
@@ -454,8 +534,8 @@ async function execute(
   }
 
   const runBlocks = async (): Promise<void> => {
-    for (const block of [...new Set(schedule.slots.map((slot) => slot.block))]) {
-      const planned = schedule.slots.filter((slot) => slot.block === block)
+    for (const block of [...new Set(design.slots.map((slot) => slot.block))]) {
+      const planned = design.slots.filter((slot) => slot.block === block)
       if (ended === null && input.signal?.aborted) endWith(`the run was cancelled before block ${block} started`)
       if (ended !== null) {
         for (const slot of planned) await mark(slot, "not-attempted", ended)
@@ -483,7 +563,7 @@ async function execute(
           // Copied one level, not cloned: a caller's `warning.detail` is kept as
           // it came, and a value that cannot be copied is refused by the fork.
           priorWarnings: (input.priorWarnings ?? []).map((warning) => ({ ...warning })),
-          ...runDials(config),
+          ...runDials(config, design.runCap),
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           admission: journal.admission({ block, phase: "prefix", runId: () => prefixRunId }),
         })
@@ -518,7 +598,7 @@ async function execute(
 
       let branches: PreparedReview[]
       try {
-        branches = (input.fork ?? forkPreparedReview)(prepared!, input.clock, 2)
+        branches = (input.fork ?? forkPreparedReview)(prepared!, input.clock, planned.length)
       } catch (error) {
         const reason = `block ${block}'s shared prefix could not be forked: ${messageOf(error)}`
         await recordPrefix(block, { record: prepared!.record, forked: false, reason, failure: messageOf(error) })
@@ -529,10 +609,10 @@ async function execute(
       await recordPrefix(block, {
         record: prepared!.record,
         forked: true,
-        reason: "forked into the scheduled ON and OFF continuations",
+        reason: design.forkedReason,
       })
 
-      // ---- the two continuations, in scheduled order ----
+      // ---- the continuations, in scheduled order ----
       for (const [position, slot] of planned.entries()) {
         if (ended !== null) {
           await mark(slot, "not-attempted", ended)
@@ -540,7 +620,8 @@ async function execute(
         }
         const branch = branches[position]!
         const runId = branch.record.runId
-        const unrecorded = await mark(slot, "started", `the ${slot.arm.toUpperCase()} continuation of block ${block} started`, { runId })
+        const arm = design.armName(slot.arm)
+        const unrecorded = await mark(slot, "started", `the ${arm} continuation of block ${block} started`, { runId })
         if (unrecorded !== null) {
           // The start is not on disk, so the continuation does not run.
           await mark(slot, "not-attempted", ended!)
@@ -552,7 +633,8 @@ async function execute(
         let result: ReviewResult | undefined
         let failure: string | undefined
         try {
-          backend = input.backendFor({ block, phase: slot.arm }, journal.reporter(sink))
+          backend = input.backendFor({ block, phase: slot.arm as JournalPhase }, journal.reporter(sink))
+          const { policy, debateReferences, debateMissingEvidence } = design.continuation(slot)
           result = await continueReview(
             branch,
             {
@@ -561,9 +643,11 @@ async function execute(
               lateUsage: sink,
               ...(input.tools === undefined ? {} : { tools: input.tools }),
               ...(input.signal === undefined ? {} : { signal: input.signal }),
-              admission: journal.admission({ block, phase: slot.arm, runId: () => runId }),
+              ...(debateReferences === true ? { debateReferences: true } : {}),
+              ...(debateMissingEvidence === true ? { debateMissingEvidence: true } : {}),
+              admission: journal.admission({ block, phase: slot.arm as JournalPhase, runId: () => runId }),
             },
-            slot.arm === "on" ? "shipped" : "debate-off",
+            policy,
           )
         } catch (error) {
           failure = messageOf(error) || "the continuation threw an error with no message"
@@ -577,15 +661,15 @@ async function execute(
           const manifest = await writeManifest(
             slot,
             branch.record,
-            `No report: the ${slot.arm.toUpperCase()} continuation of block ${block} threw before its output was ` +
+            `No report: the ${arm} continuation of block ${block} threw before its output was ` +
               `assembled (${failure}). The record is what the branch held when it threw.\n`,
             prefixId,
             failure,
           )
-          await mark(slot, "failed", `the ${slot.arm.toUpperCase()} continuation threw: ${failure}`, { manifest })
+          await mark(slot, "failed", `the ${arm} continuation threw: ${failure}`, { manifest })
         } else {
           const run: ArmRun = {
-            spec: specOf(slot),
+            spec: design.spec(slot),
             repeat: block - 1,
             record: result.record,
             rendered: result.rendered,
@@ -595,19 +679,19 @@ async function execute(
           const manifest = await writeManifest(slot, result.record, result.rendered, prefixId)
           const cancelled = result.record.cancelled !== undefined
           if (cancelled || input.signal?.aborted) endWith(`the run was cancelled during block ${block}`)
-          const denied = cancelled ? null : deniedWork(result.record, journal.bill().refused, block, slot.arm)
+          const denied = cancelled ? null : deniedWork(result.record, journal.bill().refused, block, slot.arm as JournalPhase)
           await mark(
             slot,
             cancelled ? "cancelled" : denied !== null ? "failed" : "completed",
             cancelled
-              ? `the run was cancelled during the ${result.record.cancelled!.stage} stage of block ${block}'s ${slot.arm.toUpperCase()} continuation`
+              ? `the run was cancelled during the ${result.record.cancelled!.stage} stage of block ${block}'s ${arm} continuation`
               : denied !== null
-                ? `the ${slot.arm.toUpperCase()} continuation of block ${block} returned, but a gate denied it planned work: ${denied}`
-                : `the ${slot.arm.toUpperCase()} continuation of block ${block} finished`,
+                ? `the ${arm} continuation of block ${block} returned, but a gate denied it planned work: ${denied}`
+                : `the ${arm} continuation of block ${block} finished`,
             { manifest },
           )
         }
-        const reason = blocker(block, slot.arm)
+        const reason = blocker(block, slot.arm as JournalPhase)
         if (reason !== null) endWith(reason)
       }
     }
@@ -622,7 +706,7 @@ async function execute(
     endWith(`the runner failed: ${messageOf(error)}`)
     warnings.push(`the runner failed: ${messageOf(error)}`)
   }
-  for (const slot of schedule.slots) {
+  for (const slot of design.slots) {
     const report = reports.get(keyOf(slot))
     if (report === undefined) await mark(slot, "not-attempted", ended ?? "the runner ended before this slot")
     else if (report.status === "started") await mark(slot, "failed", ended ?? "the runner ended while this slot was running")
@@ -633,7 +717,7 @@ async function execute(
   const { handle, releaseError } = await journal.close()
   if (releaseError !== null) warnings.push(releaseError)
   const bill = handle.bill()
-  const slots = schedule.slots.map((slot) => reports.get(keyOf(slot))!)
+  const slots = design.slots.map((slot) => reports.get(keyOf(slot))!)
   const complete =
     slots.every((slot) => slot.status === "completed") &&
     bill.halt === null &&
@@ -642,8 +726,6 @@ async function execute(
     bill.inFlight.length === 0 &&
     bill.stop === null
   return {
-    ok: true,
-    schedule,
     slots,
     prefixes,
     runs,
@@ -670,7 +752,7 @@ export function deniedWork(
   record: RunRecord,
   refused: readonly RefusedAdmission[],
   block: number,
-  arm: "on" | "off",
+  arm: JournalPhase,
 ): string | null {
   const parts: string[] = []
   const skipped = record.skippedForBudget ?? []
@@ -705,7 +787,7 @@ export function deniedWork(
  * (`core/budget/ledger.ts`), and this run simply does not turn it on, so no
  * host-reported token figure gates a turn.
  */
-function runDials(config: PairedConfig): {
+function runDials(config: PairedConfig, runCap: number): {
   tokenCap?: number
   stopOnUnknownUsage: boolean
   threshold?: number
@@ -715,7 +797,7 @@ function runDials(config: PairedConfig): {
 } {
   const attempts = accountingOf(config) === "attempts"
   return {
-    ...(attempts ? {} : { tokenCap: PAIRED_ALLOWANCES.runCap }),
+    ...(attempts ? {} : { tokenCap: runCap }),
     stopOnUnknownUsage: !attempts,
     ...(config.threshold === undefined ? {} : { threshold: config.threshold }),
     ...(config.maxRounds === undefined ? {} : { maxRounds: config.maxRounds }),

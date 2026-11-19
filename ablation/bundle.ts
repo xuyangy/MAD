@@ -60,6 +60,7 @@ import {
   known,
   unknownValue,
   type AdversarialBinding,
+  type VariantBinding,
   type CodeRevision,
   type DirtyEntry,
   type EvaluationIdentity,
@@ -200,6 +201,8 @@ export interface WriteArmDumpInput {
   experiment?: ExperimentBinding
   /** Story 2-7b — the adversarial runner's slot binding, likewise. */
   adversarial?: AdversarialBinding
+  /** The debate-variants runner's slot binding, likewise. */
+  variant?: VariantBinding
 }
 
 /**
@@ -212,6 +215,11 @@ export interface WriteArmDumpInput {
  */
 export async function writeArmDump(input: WriteArmDumpInput): Promise<ArtifactOutcome> {
   const { run } = input
+  // A run is at most one design's arm, so no reader of one design reads another's.
+  const bindings = (["experiment", "adversarial", "variant"] as const).filter((name) => input[name] !== undefined)
+  if (bindings.length > 1) {
+    return { kind: "refused", reason: `a manifest carries at most one binding, and this one was given ${bindings.join(" and ")}` }
+  }
   const manifest = buildManifest({
     record: run.record,
     change: input.change,
@@ -225,6 +233,7 @@ export async function writeArmDump(input: WriteArmDumpInput): Promise<ArtifactOu
         : known(input.turns.length),
     ...(input.experiment === undefined ? {} : { experiment: input.experiment }),
     ...(input.adversarial === undefined ? {} : { adversarial: input.adversarial }),
+    ...(input.variant === undefined ? {} : { variant: input.variant }),
   })
 
   return dumpRunArtifacts({

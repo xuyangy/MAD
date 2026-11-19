@@ -60,6 +60,7 @@ import type {
 import type { LensSlot, RosterSlot } from "../core/domain/roster.ts"
 import { DISCLOSURE_CODES, type Warning, type WarningCode, type WarningOrigin } from "../core/domain/warning.ts"
 import type { ChangeSet } from "../core/ports/repo.ts"
+import type { VariantArm, VariantArmOptions } from "./variants.ts"
 
 /**
  * The manifest's own version, and the ONLY compatibility promise this story
@@ -81,6 +82,8 @@ import type { ChangeSet } from "../core/ports/repo.ts"
  *   forked (`ablation/read-bundle.ts`); exactly one present is refused.
  * - `experiment` (story 2-5c). Absent: the manifest is not a paired arm.
  * - `adversarial` (story 2-7b). Absent: the manifest is not an adversarial run.
+ * - `variant` (`ablation/DEBATE-VARIANTS.md`). Absent: the manifest is not a
+ *   debate-variants arm.
  * - `dials.routingPolicy` (story 2.5A). Absent reads as `shipped`.
  * - `usageCompleteness: "unverified"` with `spend.source:
  *   "host-reported-unverified"` (story 2-8c4). Absent `spend.source`: the
@@ -376,6 +379,31 @@ export interface AdversarialBinding {
   accounting?: "attempts"
 }
 
+/**
+ * Which planned continuation of a sealed debate-variants schedule this run is
+ * (`ablation/variant-schedule.ts`), and the options it ran with.
+ *
+ * Written only by the debate-variants runner, after it checked the slot against
+ * the schedule. Optional and additive like `experiment`:
+ * `MANIFEST_SCHEMA_VERSION` stays 1, and a manifest without it is never read as
+ * a debate-variants arm. A manifest carries at most one of `experiment`,
+ * `adversarial` and `variant`, so no reader of one design reads another's arm.
+ */
+export interface VariantBinding {
+  /** The sealed debate-variants schedule's `scheduleHash`. */
+  scheduleHash: string
+  /** 1-based block number. */
+  block: number
+  arm: VariantArm
+  position: "first" | "second" | "third"
+  /** The shared prefix run all three arms of the block were forked from. Equal to `run.forkedFrom`. */
+  prefixRunId: string
+  /** The options the continuation ran with, from the sealed schedule. */
+  options: VariantArmOptions
+  /** Present only when the continuation threw, as for `ExperimentBinding.failure`. */
+  failure?: string
+}
+
 export interface RunManifest {
   schemaVersion: number
   identity: EvaluationIdentity & { changeId: ChangeId }
@@ -512,6 +540,8 @@ export interface RunManifest {
   experiment?: ExperimentBinding
   /** Story 2-7b — present only on an adversarial run. See `AdversarialBinding`. */
   adversarial?: AdversarialBinding
+  /** Present only on a debate-variants arm. See `VariantBinding`. */
+  variant?: VariantBinding
 }
 
 export interface BuildManifestInput {
@@ -523,9 +553,14 @@ export interface BuildManifestInput {
   experiment?: ExperimentBinding
   /** Omitted when absent, likewise. */
   adversarial?: AdversarialBinding
+  /** Omitted when absent, likewise. */
+  variant?: VariantBinding
 }
 
+/** Throws when `input` carries more than one of `experiment`, `adversarial` and `variant`: a run is at most one design's arm. */
 export function buildManifest(input: BuildManifestInput): RunManifest {
+  const bindings = (["experiment", "adversarial", "variant"] as const).filter((name) => input[name] !== undefined)
+  if (bindings.length > 1) throw new Error(`a manifest carries at most one binding, and this one was given ${bindings.join(" and ")}`)
   const { record, change, identity } = input
   const warnings = record.warnings.map(toManifestWarning)
   const attempts = input.experiment?.accounting === "attempts" || input.adversarial?.accounting === "attempts"
@@ -604,6 +639,7 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     stageOutputs: { recordFile: "record.json", turnFiles: input.turnFiles },
     ...(input.experiment === undefined ? {} : { experiment: { ...input.experiment } }),
     ...(input.adversarial === undefined ? {} : { adversarial: { ...input.adversarial } }),
+    ...(input.variant === undefined ? {} : { variant: { ...input.variant, options: { ...input.variant.options } } }),
   }
 }
 
