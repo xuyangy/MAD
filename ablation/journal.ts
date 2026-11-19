@@ -66,8 +66,20 @@
  *
  * The scope is durable on every `issued` line and validated on replay: a file
  * mixing scopes, a scoped line that is not an Adversarial attempt, and a file
- * opened in a scope other than its own are each refused. A token-mode journal
- * has no scope.
+ * opened in a scope other than its own are each refused.
+ *
+ * ## The debate-variants scope
+ *
+ * A token-mode journal is `paired` (the routing design, its lines carrying no
+ * `scope` field) or `debate-variants` (`ablation/DEBATE-VARIANTS.md`): every
+ * `issued` line of the latter, its shared prefix's included, says
+ * `scope: "debate-variants"`. It holds only Blocks requests, in the phases
+ * `prefix`, `baseline`, `references` and `open-questions`, and a paired journal
+ * only `prefix`, `on` and `off`. A phase from the other scope is refused at
+ * admission, before anything is appended, and on replay. Admission gates with
+ * `variantRequestGate` against the same limits the overshoot report reads: the
+ * sealed `VARIANT_ALLOWANCES` copy `openJournal` was given, or the constants.
+ * Adversarial admission is refused. The scope exists only in token mode.
  *
  * AD-1: this tree may import from `core/`. Nothing under `core/` imports it.
  */
@@ -100,40 +112,76 @@ import {
   HALT_MARKER_FILE,
   PAIRED_ALLOWANCES,
   requestGate,
+  sealedVariantAllowances,
+  VARIANT_ALLOWANCES,
+  variantRequestGate,
   type AccountingMode,
   type AllowanceCategory,
   type PairedPhase,
   type RequestGateResult,
   type RequestGateView,
+  type VariantAllowances,
+  type VariantPhase,
 } from "./governor.ts"
+import { VARIANT_ARMS } from "./variants.ts"
 
 export const JOURNAL_FILE = "paired-journal.jsonl"
 export const LOCK_FILE = "paired.lock"
 
-/** Story 2-7e — whose allowances an attempt-mode journal applies. See the module header. */
-export type JournalScope = "paired" | "adversarial"
+/** Whose allowances a journal applies: story 2-7e's two, and the debate-variants design's. See the module header. */
+export type JournalScope = "paired" | "adversarial" | "debate-variants"
+
+/** Where a Blocks request is spent: a routing phase, or a debate-variants phase. */
+export type JournalPhase = PairedPhase | VariantPhase
+
+/** The Blocks phases each scope admits and replays. The adversarial scope admits no Blocks work. */
+const ROUTING_PHASES: readonly JournalPhase[] = ["prefix", "on", "off"]
+const DESIGN_PHASES: readonly JournalPhase[] = ["prefix", ...VARIANT_ARMS]
 
 /**
- * The attempt allowances an attempt-mode journal's overshoot report is computed
- * against: the paired shape for the paired scope, the adversarial shape for the
- * adversarial scope. A runner passes its sealed schedule's; a caller with no
- * schedule passes none, and the scope's constants apply. Admission always uses
- * the constants.
+ * The allowances a journal's overshoot report is computed against. For an
+ * attempt-mode journal: the paired shape for the paired scope, the adversarial
+ * shape for the adversarial scope; admission uses the constants. For the
+ * debate-variants scope, a token journal: `VARIANT_ALLOWANCES`' shape, and the
+ * same copy is what admission gates against. A runner passes its sealed
+ * schedule's; a caller with no schedule passes none, and the scope's constants
+ * apply.
  */
-export type JournalAllowances = AttemptAllowances | AdversarialAttemptAllowances
+export type JournalAllowances = AttemptAllowances | AdversarialAttemptAllowances | VariantAllowances
 
 /**
- * Why `allowances` cannot be this journal's, or `null`. Absent allowances always
- * fit. Given allowances need `mode` named as `attempts` and `scope` named, so
- * they are checked against the shape of the scope the file is replayed in.
+ * The journal's own copy of `allowances`, or why they cannot be this journal's.
+ * Absent allowances are no copy. Given allowances need `scope` named and,
+ * unless it is the debate-variants scope, `mode` named as `attempts`, so they
+ * are checked against the shape of the scope the file is replayed in. The copy
+ * is the validated, frozen one: a caller that changes its own object later
+ * changes nothing the journal gates or reports.
  */
-function allowancesProblem(mode: AccountingMode | undefined, scope: JournalScope | undefined, allowances: JournalAllowances | undefined): string | null {
-  if (allowances === undefined) return null
-  if (mode === undefined) return "attempt allowances were given without the accounting mode named as attempts"
-  if (mode !== "attempts") return `attempt allowances were given to a journal read in ${mode} mode, which counts no attempts`
-  if (scope === undefined) return "attempt allowances were given without the scope named, so their shape cannot be checked against it"
-  const checked = scope === "adversarial" ? sealedAdversarialAttemptAllowances(allowances) : sealedAttemptAllowances(allowances)
-  return checked.ok ? null : `the attempt allowances given are not the ${scope} scope's: ${checked.reason}`
+function sealedJournalAllowances(
+  mode: AccountingMode | undefined,
+  scope: JournalScope | undefined,
+  allowances: JournalAllowances | undefined,
+): { ok: true; allowances: JournalAllowances | undefined } | { ok: false; reason: string } {
+  if (allowances === undefined) return { ok: true, allowances: undefined }
+  const copy = (checked: { ok: true; allowances: JournalAllowances } | { ok: false; reason: string }, what: string) =>
+    checked.ok ? { ok: true as const, allowances: Object.freeze({ ...checked.allowances }) } : { ok: false as const, reason: `${what}: ${checked.reason}` }
+  if (scope === "debate-variants") {
+    if (mode !== undefined && mode !== "tokens") return { ok: false, reason: `debate-variants allowances were given to a journal read in ${mode} mode` }
+    return copy(sealedVariantAllowances(allowances), "the allowances given are not the debate-variants scope's")
+  }
+  if (mode === undefined) return { ok: false, reason: "attempt allowances were given without the accounting mode named as attempts" }
+  if (mode !== "attempts") return { ok: false, reason: `attempt allowances were given to a journal read in ${mode} mode, which counts no attempts` }
+  if (scope === undefined) return { ok: false, reason: "attempt allowances were given without the scope named, so their shape cannot be checked against it" }
+  return copy(
+    scope === "adversarial" ? sealedAdversarialAttemptAllowances(allowances) : sealedAttemptAllowances(allowances),
+    `the attempt allowances given are not the ${scope} scope's`,
+  )
+}
+
+/** Why `scope`, when given, is not a journal scope, or `null`. */
+function scopeValueProblem(scope: JournalScope | undefined): string | null {
+  if (scope === undefined || scope === "paired" || scope === "adversarial" || scope === "debate-variants") return null
+  return `the journal scope ${JSON.stringify(scope)} is neither paired, adversarial nor debate-variants`
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +299,7 @@ export interface IssuedLine {
   category: AllowanceCategory
   /** 1-based block for the Blocks category; `null` for any other category. */
   block: number | null
-  phase: PairedPhase | null
+  phase: JournalPhase | null
   stage: string
   slot: string
   attempt: number
@@ -260,8 +308,8 @@ export interface IssuedLine {
   runId: string
   /** Story 2-8c3a — present exactly in an attempt-mode journal: this line is an admitted attempt. */
   mode?: "attempts"
-  /** Story 2-7e — present exactly in the adversarial suite's journal. */
-  scope?: "adversarial"
+  /** Present exactly in the adversarial suite's journal (story 2-7e) and in a debate-variants journal. */
+  scope?: "adversarial" | "debate-variants"
 }
 
 export interface SettledLine {
@@ -286,7 +334,7 @@ export interface BilledRequest {
   physicalId: string
   category: AllowanceCategory
   block: number | null
-  phase: PairedPhase | null
+  phase: JournalPhase | null
   stage: string
   slot: string
   attempt: number
@@ -294,8 +342,8 @@ export interface BilledRequest {
   runId: string
   /** Story 2-8c3a — carried from the `issued` line of an attempt-mode journal. */
   mode?: "attempts"
-  /** Story 2-7e — carried from the `issued` line of the adversarial suite's journal. */
-  scope?: "adversarial"
+  /** Carried from the `issued` line of the adversarial suite's journal (story 2-7e) or a debate-variants journal. */
+  scope?: "adversarial" | "debate-variants"
   state: RequestState
   /** The settled figure (`usage`). In an attempt-mode journal, a host-reported diagnostic. */
   tokens?: TokenUsage
@@ -319,7 +367,7 @@ export interface IntegrityFailure {
 export interface PhaseBill {
   category: AllowanceCategory
   block: number | null
-  phase: PairedPhase | null
+  phase: JournalPhase | null
   tokens: TokenUsage
   requests: number
   unknown: number
@@ -384,14 +432,17 @@ export interface UniqueExecutionBill {
    * host-reported diagnostics, never a bill.
    */
   mode?: "attempts"
-  /** Story 2-7e — present only for the adversarial suite's journal. `overshoot` then reads against its allowances. */
-  scope?: "adversarial"
+  /**
+   * Present only for the adversarial suite's journal (story 2-7e) and a
+   * debate-variants journal. `overshoot` then reads against that scope's allowances.
+   */
+  scope?: "adversarial" | "debate-variants"
 }
 
 /** One refused admission: where it would have been spent, and why it was not. */
 export interface RefusedAdmission {
   block: number
-  phase: PairedPhase
+  phase: JournalPhase
   /** Absent when the run had no id yet. */
   runId?: string
   stage: string
@@ -420,7 +471,7 @@ export interface OvershootReport {
   /** Story 2-7b — the Adversarial allowance. */
   adversarial: { limit: number; spent: number; overshoot: number }
   /** One row per Blocks phase that holds any request. */
-  phases: { block: number; phase: PairedPhase; limit: number; spent: number; overshoot: number }[]
+  phases: { block: number; phase: JournalPhase; limit: number; spent: number; overshoot: number }[]
   /** Story 2-8c3a — present only in attempt mode, where every figure above counts admitted attempts. */
   unit?: "attempts"
   /** Story 2-8c3a — attempt mode only: one row per block that holds any attempt, against its 100. */
@@ -699,8 +750,13 @@ class JournalState {
     return undefined
   }
 
-  view(): RequestGateView {
-    const view: RequestGateView = {
+  /** The debate-variants token limits admission and the overshoot report both read: the sealed copy, or the constants. */
+  variantLimits(): VariantAllowances {
+    return (this.allowances as VariantAllowances | undefined) ?? VARIANT_ALLOWANCES
+  }
+
+  view(): RequestGateView<JournalPhase> {
+    const view: RequestGateView<JournalPhase> = {
       stop: this.stop,
       halt: this.halt,
       globalSpent: this.spentWhere(() => true),
@@ -792,7 +848,13 @@ class JournalState {
       refusedAdversarial: refusedAdversarial.map((refusal) => ({ ...refusal })),
       overshoot:
         this.mode !== "attempts"
-          ? overshootOf(known, byCategory.blocks, byCategory.adversarial, [...phases.values()])
+          ? overshootOf(
+              known,
+              byCategory.blocks,
+              byCategory.adversarial,
+              [...phases.values()],
+              this.scope === "debate-variants" ? this.variantLimits() : PAIRED_ALLOWANCES,
+            )
           : this.scope === "adversarial"
             ? adversarialAttemptOvershootOf(requests, (this.allowances as AdversarialAttemptAllowances | undefined) ?? ADVERSARIAL_ATTEMPT_ALLOWANCES)
             : attemptOvershootOf([...phases.values()], (this.allowances as AttemptAllowances | undefined) ?? ATTEMPT_ALLOWANCES),
@@ -800,30 +862,33 @@ class JournalState {
       operational: [...this.operational],
       ...(this.mode === "attempts" ? { mode: "attempts" as const } : {}),
       ...(this.mode === "attempts" && this.scope === "adversarial" ? { scope: "adversarial" as const } : {}),
+      ...(this.scope === "debate-variants" ? { scope: "debate-variants" as const } : {}),
     }
   }
 }
 
 const CATEGORIES: readonly AllowanceCategory[] = ["blocks", "adversarial", "calibration", "pilot"]
-const PHASES: readonly (PairedPhase | null)[] = ["prefix", "on", "off", null]
+const PHASES: readonly (JournalPhase | null)[] = [...ROUTING_PHASES, ...VARIANT_ARMS, null]
 
+/** The token report against `limits`: the routing constants, or a debate-variants journal's limits. */
 function overshootOf(
   known: TokenUsage,
   blocks: TokenUsage | undefined,
   adversarial: TokenUsage | undefined,
   phases: readonly PhaseBill[],
+  limits: { readonly global: number; readonly blocks: number; readonly prefix: number; readonly continuation: number },
 ): OvershootReport {
   const row = (limit: number, spent: number) => ({ limit, spent, overshoot: Math.max(0, spent - limit) })
   return {
-    global: row(PAIRED_ALLOWANCES.global, spentTokens(known)),
-    blocks: row(PAIRED_ALLOWANCES.blocks, blocks === undefined ? 0 : spentTokens(blocks)),
+    global: row(limits.global, spentTokens(known)),
+    blocks: row(limits.blocks, blocks === undefined ? 0 : spentTokens(blocks)),
     adversarial: row(ADVERSARIAL_ALLOWANCES.adversarial, adversarial === undefined ? 0 : spentTokens(adversarial)),
     phases: phases
       .filter((phase) => phase.category === "blocks" && phase.block !== null && phase.phase !== null)
       .map((phase) => ({
         block: phase.block!,
         phase: phase.phase!,
-        ...row(phase.phase === "prefix" ? PAIRED_ALLOWANCES.prefix : PAIRED_ALLOWANCES.continuation, spentTokens(phase.tokens)),
+        ...row(phase.phase === "prefix" ? limits.prefix : limits.continuation, spentTokens(phase.tokens)),
       })),
   }
 }
@@ -899,7 +964,7 @@ function isLine(value: unknown): value is JournalLine {
   if (typeof line.physicalId !== "string" || line.physicalId.length === 0) return false
   if (line.type === "issued") {
     if (!CATEGORIES.includes(line.category as AllowanceCategory)) return false
-    if (!PHASES.includes(line.phase as PairedPhase | null)) return false
+    if (!PHASES.includes(line.phase as JournalPhase | null)) return false
     const blocks = line.category === "blocks"
     // A Blocks request always names its block and phase. Another category has no
     // phase, and may name a block.
@@ -915,7 +980,7 @@ function isLine(value: unknown): value is JournalLine {
       typeof line.runId === "string" &&
       line.runId.length > 0 &&
       (line.mode === undefined || line.mode === "attempts") &&
-      (line.scope === undefined || line.scope === "adversarial")
+      (line.scope === undefined || line.scope === "adversarial" || line.scope === "debate-variants")
     )
   }
   if (line.type === "settled") {
@@ -936,6 +1001,17 @@ function isLine(value: unknown): value is JournalLine {
 }
 
 type Replayed = { ok: true; state: JournalState; existed: boolean } | { ok: false; reason: string }
+
+/** Why a journal of `scope` cannot be read in `mode`, or `null`: the adversarial suite counts attempts, a debate-variants journal tokens. */
+function scopeModeProblem(file: string, scope: JournalScope, mode: AccountingMode): string | null {
+  if (scope === "adversarial" && mode !== "attempts") {
+    return `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${mode} mode`
+  }
+  if (scope === "debate-variants" && mode !== "tokens") {
+    return `integrity failure: the journal \`${file}\` is scoped to the debate-variants design, which counts tokens, and it is read in ${mode} mode`
+  }
+  return null
+}
 
 /**
  * Read and replay a journal file. An absent file is an empty journal.
@@ -961,14 +1037,11 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
     text = await readFile(file, "utf8")
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      // An absent file has no lines to say what it counts, so the adversarial
-      // scope is held to the same rule `openJournal` applies: attempts only.
-      if (scope === "adversarial" && (mode ?? "tokens") !== "attempts") {
-        return {
-          ok: false,
-          reason: `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${mode ?? "tokens"} mode`,
-        }
-      }
+      // An absent file has no lines to say what it counts, so each scope is
+      // held to the rule \`openJournal\` applies: the adversarial suite counts
+      // attempts, a debate-variants journal tokens.
+      const problem = scopeModeProblem(file, scope ?? "paired", mode ?? "tokens")
+      if (problem !== null) return { ok: false, reason: problem }
       return { ok: true, state: new JournalState(mode, scope, allowances), existed: false }
     }
     return { ok: false, reason: `the journal \`${file}\` could not be read: ${messageOf(error)}` }
@@ -1003,16 +1076,26 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
     }
   }
   const replayMode = mode ?? fileMode ?? "tokens"
-  const scoped = issued.filter((line) => line.scope === "adversarial").length
-  if (scoped > 0 && scoped < issued.length) {
+  const declaredScopes = [...new Set(issued.map((line) => line.scope ?? "paired"))]
+  if (declaredScopes.length > 1) {
+    const counted = (name: string) => issued.filter((line) => (line.scope ?? "paired") === name).length
+    if (declaredScopes.length === 2 && declaredScopes.includes("paired") && declaredScopes.includes("adversarial")) {
+      return {
+        ok: false,
+        reason:
+          `integrity failure: the journal \`${file}\` mixes scopes (${counted("adversarial")} issued line(s) declare the adversarial ` +
+          `suite and ${counted("paired")} declare none), so it is read in neither`,
+      }
+    }
+    const counts = declaredScopes.map((name) => `${counted(name)} ${name}`)
     return {
       ok: false,
       reason:
-        `integrity failure: the journal \`${file}\` mixes scopes (${scoped} issued line(s) declare the adversarial ` +
-        `suite and ${issued.length - scoped} declare none), so it is read in neither`,
+        `integrity failure: the journal \`${file}\` mixes scopes (issued lines: ${counts.join(", ")}; a paired line ` +
+        "declares none), so it is read in none",
     }
   }
-  const fileScope: JournalScope | null = issued.length === 0 ? null : scoped > 0 ? "adversarial" : "paired"
+  const fileScope: JournalScope | null = issued.length === 0 ? null : (declaredScopes[0] as JournalScope)
   if (scope !== undefined && fileScope !== null && fileScope !== scope) {
     return {
       ok: false,
@@ -1020,13 +1103,9 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
     }
   }
   const replayScope = scope ?? fileScope ?? "paired"
+  const modeProblem = scopeModeProblem(file, replayScope, replayMode)
+  if (modeProblem !== null) return { ok: false, reason: modeProblem }
   if (replayScope === "adversarial") {
-    if (replayMode !== "attempts") {
-      return {
-        ok: false,
-        reason: `integrity failure: the journal \`${file}\` is scoped to the adversarial suite, which counts attempts, and it is read in ${replayMode} mode`,
-      }
-    }
     const foreign = lines.findIndex((line) => line.type === "issued" && line.category !== "adversarial")
     if (foreign >= 0) {
       return {
@@ -1035,6 +1114,24 @@ async function replayFile(file: string, mode?: AccountingMode, scope?: JournalSc
           `integrity failure: line ${foreign + 1} of the journal \`${file}\` is a ` +
           `${(lines[foreign] as IssuedLine).category} request, which the adversarial suite's journal never holds`,
       }
+    }
+  }
+  // Each scope's Blocks lines name only its own phases, and a debate-variants
+  // journal holds nothing but Blocks requests.
+  const phases = replayScope === "debate-variants" ? DESIGN_PHASES : ROUTING_PHASES
+  const misplaced = lines.findIndex(
+    (line) =>
+      line.type === "issued" &&
+      ((replayScope === "debate-variants" && line.category !== "blocks") ||
+        (line.category === "blocks" && !phases.includes(line.phase!))),
+  )
+  if (misplaced >= 0) {
+    const line = lines[misplaced] as IssuedLine
+    return {
+      ok: false,
+      reason:
+        `integrity failure: line ${misplaced + 1} of the journal \`${file}\` is a ${line.category} request` +
+        `${line.phase === null ? "" : ` in phase ${line.phase}`}, which a ${replayScope} journal never holds`,
     }
   }
   for (const [position, line] of lines.entries()) {
@@ -1058,9 +1155,11 @@ export type PersistedReplay =
  * Story 2-8c3a — a persisted journal, replayed by the rules `openJournal` uses,
  * for a reader. Nothing is appended and no lock is taken. An `issued` line with
  * no settlement reads UNCERTAIN, exactly as on reopen. `mode` and `scope`, when
- * given, must be the file's own. `allowances`, when given, are the ones the
- * bill's overshoot report uses (see `JournalAllowances`); they need `mode`
- * named as `attempts`, `scope` named, and the shape of that scope.
+ * given, must be the file's own, and a `scope` that is not a journal scope
+ * refuses whatever the file holds. `allowances`, when given, are the ones the
+ * bill's overshoot report uses (see `JournalAllowances`); they need `scope`
+ * named, `mode` named as `attempts` unless the scope is debate-variants, and
+ * the shape of that scope. The replay uses a validated copy.
  */
 export async function replayPersistedJournal(
   file: string,
@@ -1068,9 +1167,11 @@ export async function replayPersistedJournal(
   scope?: JournalScope,
   allowances?: JournalAllowances,
 ): Promise<PersistedReplay> {
-  const problem = allowancesProblem(mode, scope, allowances)
-  if (problem !== null) return { ok: false, reason: problem }
-  const replayed = await replayFile(file, mode, scope, allowances)
+  const scopeProblem = scopeValueProblem(scope)
+  if (scopeProblem !== null) return { ok: false, reason: scopeProblem }
+  const sealed = sealedJournalAllowances(mode, scope, allowances)
+  if (!sealed.ok) return { ok: false, reason: sealed.reason }
+  const replayed = await replayFile(file, mode, scope, sealed.allowances)
   if (!replayed.ok) return replayed
   replayed.state.interrupt()
   return {
@@ -1089,7 +1190,8 @@ export async function replayPersistedJournal(
 /** Which Blocks allowance a stage's requests are admitted against, and for which run. */
 export interface AdmissionBinding {
   block: number
-  phase: PairedPhase
+  /** A phase of the journal's own scope; any other refuses and stops the runner. */
+  phase: JournalPhase
   /**
    * The run the requests belong to, read at admission time, because a prefix
    * mints its run id inside `prepareReview`. `undefined` means no run id exists
@@ -1322,11 +1424,15 @@ export type JournalOpened = { ok: true; journal: PairedJournal } | { ok: false; 
  *
  * ## The allowances
  *
- * `allowances` are the attempt allowances the bill's overshoot report is
- * computed against: the runner's sealed schedule's, or the scope's constants
- * when absent. They must have the scope's shape, and only an attempt-mode
- * journal takes them. The gates admit against the constants whatever is given;
- * schedule load refuses a sealed config that differs from them.
+ * `allowances` are the allowances the bill's overshoot report is computed
+ * against: the runner's sealed schedule's, or the scope's constants when
+ * absent. They must have the scope's shape. The paired and adversarial scopes
+ * take attempt allowances, in attempt mode only, and their gates admit against
+ * the constants whatever is given; schedule load refuses a sealed config that
+ * differs from them. The debate-variants scope takes token allowances, and its
+ * gate admits against the same copy the report reads. The journal keeps its
+ * own validated copy, taken when it opens, for the replay, the gates, the bill
+ * and every later `flush()`.
  */
 export async function openJournal(
   bundleRoot: string,
@@ -1340,15 +1446,20 @@ export async function openJournal(
   const root = resolve(bundleRoot)
   const file = join(root, JOURNAL_FILE)
   const markerPath = join(root, HALT_MARKER_FILE)
-  if (scope !== "paired" && scope !== "adversarial") {
-    return { ok: false, reason: `the journal scope ${JSON.stringify(scope)} is neither paired nor adversarial` }
-  }
+  const scopeProblem = scopeValueProblem(scope)
+  if (scopeProblem !== null) return { ok: false, reason: scopeProblem }
   if (scope === "adversarial" && mode !== "attempts") {
     return { ok: false, reason: `the adversarial suite's journal counts attempts, and it was opened in ${mode} mode` }
   }
-  const allowanceProblem = allowancesProblem(mode, scope, allowances)
-  if (allowanceProblem !== null) return { ok: false, reason: allowanceProblem }
-  const replayed = await replayFile(file, mode, scope, allowances)
+  if (scope === "debate-variants" && mode !== "tokens") {
+    return { ok: false, reason: `a debate-variants journal counts tokens, and it was opened in ${mode} mode` }
+  }
+  // The journal's own copy, taken before the first await and used by the
+  // replay, the gates, the bill and every later flush.
+  const sealed = sealedJournalAllowances(mode, scope, allowances)
+  if (!sealed.ok) return { ok: false, reason: sealed.reason }
+  const limits = sealed.allowances
+  const replayed = await replayFile(file, mode, scope, limits)
   if (!replayed.ok) return { ok: false, reason: replayed.reason }
   const state = replayed.state
   state.interrupt()
@@ -1624,6 +1735,7 @@ export async function openJournal(
           runId,
           ...(mode === "attempts" ? { mode: "attempts" as const } : {}),
           ...(scope === "adversarial" ? { scope: "adversarial" as const } : {}),
+          ...(scope === "debate-variants" ? { scope: "debate-variants" as const } : {}),
         }
         try {
           await writeLine(line)
@@ -1651,10 +1763,14 @@ export async function openJournal(
   }
 
   const journal: PairedJournal = {
-    admission(binding) {
+    admission(given) {
       return {
         admit(request: AdmissionRequest): Promise<AdmissionDecision> {
           if (request?.step !== undefined) return Promise.resolve(stepOutsideTurn(request))
+          // Where this request is spent is read once: the check, the gate, the
+          // line and any refusal all use the same block and phase, whatever the
+          // caller does to its binding while the admission waits in the queue.
+          const binding: AdmissionBinding = { block: given.block, phase: given.phase, runId: given.runId }
           if (scope === "adversarial") {
             // The suite's own root holds no other category's work (protocol v3
             // B5). Asking for it is a caller on the wrong journal, so it stops the
@@ -1674,8 +1790,38 @@ export async function openJournal(
             })
             return Promise.resolve(refusal)
           }
+          // A phase this scope does not hold is a caller on the wrong journal:
+          // it stops the runner before anything is appended, whatever the type
+          // system let through.
+          const phases = scope === "debate-variants" ? DESIGN_PHASES : ROUTING_PHASES
+          const misplaced = !phases.includes(binding.phase)
+          if (misplaced || (scope === "debate-variants" && !isWhole(binding.block, 1))) {
+            state.stop ??= misplaced
+              ? `a Blocks admission for phase ${JSON.stringify(binding.phase)} (block ${binding.block}) was asked of a ` +
+                `${scope} journal, which admits only ${phases.join(", ")}`
+              : `a Blocks admission for block ${JSON.stringify(binding.block)} was asked of a debate-variants journal, ` +
+                "which admits only a whole block number from 1"
+            const refusal = refuseAsStop() as AdmissionDecision & { ok: false }
+            const runId = runIdOf(binding.runId)
+            refused.push({
+              block: binding.block,
+              phase: binding.phase,
+              ...(runId === undefined ? {} : { runId }),
+              ...whereOf(request),
+              cause: refusal.cause,
+              reason: refusal.reason,
+            })
+            return Promise.resolve(refusal)
+          }
           return admitWith(request, {
-            gate: () => requestGate(state.view(), { block: binding.block, phase: binding.phase }),
+            gate: () =>
+              scope === "debate-variants"
+                ? variantRequestGate(
+                    state.view() as RequestGateView<VariantPhase>,
+                    { block: binding.block, phase: binding.phase as VariantPhase },
+                    state.variantLimits(),
+                  )
+                : requestGate(state.view() as RequestGateView, { block: binding.block, phase: binding.phase as PairedPhase }),
             line: { category: "blocks", block: binding.block, phase: binding.phase },
             who: `block ${binding.block}'s ${binding.phase}`,
             runner: "paired runner",
@@ -1712,6 +1858,14 @@ export async function openJournal(
               cause: decision.cause,
               reason: decision.reason,
             })
+          }
+          if (scope === "debate-variants") {
+            // The debate-variants design has no Adversarial allowance, so asking
+            // for one stops the runner before anything is appended.
+            state.stop ??= "an Adversarial admission was asked of a debate-variants journal, which has no Adversarial allowance"
+            const refusal = refuseAsStop("adversarial runner") as AdmissionDecision & { ok: false }
+            record(refusal, request)
+            return Promise.resolve(refusal)
           }
           if (mode === "attempts" && scope !== "adversarial") {
             // Protocol v2's attempt unit has no Adversarial allowance. Asking for
@@ -1966,7 +2120,7 @@ export async function openJournal(
           return outcome
         }
         try {
-          const disk = await replayFile(file, mode, scope, allowances)
+          const disk = await replayFile(file, mode, scope, limits)
           if (!disk.ok) return fail(disk.reason)
           const persist = async (line: JournalLine): Promise<boolean> => {
             try {
@@ -2064,6 +2218,7 @@ async function writeHaltMarker(markerPath: string, state: JournalState): Promise
     operational: [...state.operational],
     ...(state.mode === "attempts" ? { accounting: "attempts" } : {}),
     ...(state.mode === "attempts" && state.scope === "adversarial" ? { scope: "adversarial" } : {}),
+    ...(state.scope === "debate-variants" ? { scope: "debate-variants" } : {}),
   }
   try {
     const handle = await open(markerPath, "wx", 0o600)

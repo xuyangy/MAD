@@ -1354,7 +1354,8 @@ export function blockAttempts(
   }
   const rows = new Map<string, AttemptRow>()
   for (const request of issued) {
-    const phase = request.phase!
+    // The journal was replayed in the paired scope, which holds only routing phases.
+    const phase = request.phase! as PairedPhase
     const key = `${phase}\0${request.stage}\0${request.slot}`
     let row = rows.get(key)
     if (row === undefined) {

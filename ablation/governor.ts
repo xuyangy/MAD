@@ -819,6 +819,14 @@ export const VARIANT_ALLOWANCES = {
   runCap: PAIRED_ALLOWANCES.runCap,
 } as const
 
+/** Debate-variants token allowances of `VARIANT_ALLOWANCES`' shape, with any values: the constants, or a sealed config's. */
+export type VariantAllowances = { readonly [K in keyof typeof VARIANT_ALLOWANCES]: number }
+
+/** A debate-variants schedule's sealed `config.allowances`, validated against `VARIANT_ALLOWANCES`' keys. */
+export function sealedVariantAllowances(value: unknown): SealedAllowances<VariantAllowances> {
+  return sealedAllowancesOf<VariantAllowances>(value, VARIANT_ALLOWANCES, "config.allowances")
+}
+
 /**
  * The debate-variants design's attempt thresholds: the routing design's prefix
  * and continuation, `block` = 10 + 3 × 45 = 145, and `blocks` and `global` the
@@ -834,17 +842,19 @@ export const VARIANT_ATTEMPT_ALLOWANCES: AttemptAllowances = {
 
 /**
  * `requestGate` for the debate-variants design: the same checks in the same
- * order, against `VARIANT_ALLOWANCES` or, for an attempt-mode view,
- * `VARIANT_ATTEMPT_ALLOWANCES`. Every arm's continuation has the same limit.
- * No journal admits through this gate yet.
+ * order, against `limits` (`VARIANT_ALLOWANCES` when absent; a journal passes
+ * the sealed copy its overshoot report also reads) or, for an attempt-mode
+ * view, `VARIANT_ATTEMPT_ALLOWANCES`. Every arm's continuation has the same
+ * limit.
  */
 export function variantRequestGate(
   view: RequestGateView<VariantPhase>,
   target: { block: number; phase: VariantPhase },
+  limits: VariantAllowances = VARIANT_ALLOWANCES,
 ): RequestGateResult {
   return view.mode === "attempts"
     ? attemptGate(view, target, VARIANT_ATTEMPT_ALLOWANCES, variantPhaseLabel)
-    : tokenGate(view, target, VARIANT_ALLOWANCES, variantPhaseLabel)
+    : tokenGate(view, target, limits, variantPhaseLabel)
 }
 
 /** The debate-variants design's name for a phase in a refusal: `shared prefix` or `<arm> continuation`. */

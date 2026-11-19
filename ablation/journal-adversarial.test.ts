@@ -513,7 +513,7 @@ describe("the journal scope is durable and validated (B5)", () => {
   test("the adversarial scope exists only in attempt mode, and an unknown scope is refused", async () => {
     for (const [mode, scope, why] of [
       ["tokens", "adversarial", "counts attempts, and it was opened in tokens mode"],
-      ["attempts", "calibration", "is neither paired nor adversarial"],
+      ["attempts", "calibration", "is neither paired, adversarial nor debate-variants"],
     ] as const) {
       const root = await tempDir()
       const lock = await acquireLock(root, now())
