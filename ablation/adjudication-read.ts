@@ -261,7 +261,7 @@ export type SheetRead =
 /** What a truth-dependent quantity reads when the sheet gives no labels. */
 export const NO_SHEET_REASON = "no adjudication sheet"
 
-async function readSheet(root: string, schedule: PairedSchedule): Promise<SheetRead> {
+export async function readSheet(root: string, schedule: Pick<PairedSchedule, "scheduleHash">): Promise<SheetRead> {
   const file = join(root, ADJUDICATION_SHEET_FILE)
   // CONTAINED BY REAL PATH, exactly as `loadPrefixRecord` contains everything it
   // opens. The sheet is the one file here a human puts in place by hand, so a
@@ -788,66 +788,9 @@ function labelled(
   matcher: DefectMatcher,
   arms: { on: ArmFindings; off: ArmFindings },
 ): TruthRead {
-  if (sheet.kind === "absent") return { kind: "unavailable", reasons: [sheet.why] }
-  if (sheet.kind === "unreadable") return { kind: "unavailable", reasons: [sheet.why] }
-  if (sheet.kind === "malformed") return { kind: "unavailable", reasons: [`the sheet \`${sheet.file}\` is malformed: ${sheet.why}`] }
-  if (sheet.kind === "refused") return { kind: "refused", reasons: [`the sheet \`${sheet.file}\` is refused: ${sheet.why}`] }
-
-  const page = sheet.blocks.find((entry) => entry.block === block)
-  if (page === undefined) {
-    // A stray page is named here rather than only at the top of the report,
-    // because a page that says `block: 9` is usually the page that was meant for
-    // this one, and the two facts are only useful together.
-    const strays =
-      sheet.strayPages.length === 0
-        ? ""
-        : `; the sheet carries ${sheet.strayPages.length} page(s) naming no planned block ` +
-          `(${sheet.strayPages.map((stray) => `\`blocks[${stray.at}].block\` = ${stray.block}`).join(", ")})`
-    // A PAGE REJECTED FOR THIS BLOCK IS THE REASON THIS BLOCK HAS NONE, so it is
-    // named here rather than only at the top of the report. A page carrying no
-    // readable block number is named too, without guessing which block it meant.
-    const rejected = sheet.rejectedPages.filter((entry) => entry.block === block || entry.block === null)
-    const why = rejected.map((entry) => `; \`blocks[${entry.at}]\` was rejected because ${entry.why}`).join("")
-    return {
-      kind: "unavailable",
-      reasons: [`the sheet \`${sheet.file}\` carries no valid page for block ${block}${why}${strays}`],
-    }
-  }
-  if (page.prefixRunId !== prefixRunId) {
-    return {
-      kind: "refused",
-      reasons: [
-        `the sheet \`${sheet.file}\` labels block ${block} against prefix run \`${page.prefixRunId}\`, and this block's ` +
-          `verified prefix record \`${recordFile}\` is run \`${prefixRunId}\`; it is a sheet about another execution`,
-      ],
-    }
-  }
-
-  const poolIds = new Set(pool.findings.map((finding) => finding.id))
-  const rows = new Map<string, SheetRow>()
-  const duplicates: string[] = []
-  const strays: string[] = []
-  for (const row of page.rows) {
-    // NEITHER OVERWRITTEN NOR DROPPED. A second row for one candidate is two
-    // humans disagreeing, or one sheet edited twice, and picking either row
-    // would publish a truth label nobody agreed on.
-    if (rows.has(row.candidateId)) duplicates.push(row.candidateId)
-    else rows.set(row.candidateId, row)
-    if (!poolIds.has(row.candidateId)) strays.push(row.candidateId)
-  }
-  const reasons: string[] = []
-  if (duplicates.length > 0) {
-    reasons.push(`it carries more than one row for candidate(s) ${quoted(new Set(duplicates))}`)
-  }
-  if (strays.length > 0) {
-    reasons.push(
-      `it carries row(s) for ${quoted(new Set(strays))}, which the block's prefix pool of ${poolIds.size} canonical ` +
-        `candidate(s) does not hold`,
-    )
-  }
-  if (reasons.length > 0) {
-    return { kind: "refused", reasons: reasons.map((reason) => `the sheet \`${sheet.file}\` is refused: ${reason}`) }
-  }
+  const bound = bindSheetPage(sheet, block, prefixRunId, recordFile, pool)
+  if (bound.kind !== "bound") return bound
+  const { rows, poolIds, file } = bound
 
   // ONE PASS OF THE MATCHER OVER THE WHOLE CANONICAL POOL, so a candidate's
   // suggestion does not depend on which arm it is read through. It labels
@@ -950,7 +893,7 @@ function labelled(
   const distinct = new Set(buckets.flat()).size
   return {
     kind: "labelled",
-    file: sheet.file,
+    file,
     prefixRunId,
     // Every remaining row is in the pool: an out-of-pool row refused the block
     // above, so this is a count of rows, not a filtered one.
@@ -975,6 +918,86 @@ function labelled(
 }
 
 /**
+ * One block's page of the sheet, bound to the block's verified prefix record:
+ * the page exists, names the record's run, carries at most one row per
+ * candidate and no row for a candidate outside the record's canonical pool.
+ * Exported so every reader of a bundle with a shared prefix binds a page by the
+ * same rule.
+ */
+export function bindSheetPage(
+  sheet: SheetRead,
+  block: number,
+  prefixRunId: string,
+  recordFile: string,
+  pool: Extract<FindingList, { kind: "read" }>,
+):
+  | { kind: "bound"; file: string; rows: Map<string, SheetRow>; poolIds: ReadonlySet<string> }
+  | { kind: "unavailable" | "refused"; reasons: string[] } {
+  if (sheet.kind === "absent") return { kind: "unavailable", reasons: [sheet.why] }
+  if (sheet.kind === "unreadable") return { kind: "unavailable", reasons: [sheet.why] }
+  if (sheet.kind === "malformed") return { kind: "unavailable", reasons: [`the sheet \`${sheet.file}\` is malformed: ${sheet.why}`] }
+  if (sheet.kind === "refused") return { kind: "refused", reasons: [`the sheet \`${sheet.file}\` is refused: ${sheet.why}`] }
+
+  const page = sheet.blocks.find((entry) => entry.block === block)
+  if (page === undefined) {
+    // A stray page is named here rather than only at the top of the report,
+    // because a page that says `block: 9` is usually the page that was meant for
+    // this one, and the two facts are only useful together.
+    const strays =
+      sheet.strayPages.length === 0
+        ? ""
+        : `; the sheet carries ${sheet.strayPages.length} page(s) naming no planned block ` +
+          `(${sheet.strayPages.map((stray) => `\`blocks[${stray.at}].block\` = ${stray.block}`).join(", ")})`
+    // A PAGE REJECTED FOR THIS BLOCK IS THE REASON THIS BLOCK HAS NONE, so it is
+    // named here rather than only at the top of the report. A page carrying no
+    // readable block number is named too, without guessing which block it meant.
+    const rejected = sheet.rejectedPages.filter((entry) => entry.block === block || entry.block === null)
+    const why = rejected.map((entry) => `; \`blocks[${entry.at}]\` was rejected because ${entry.why}`).join("")
+    return {
+      kind: "unavailable",
+      reasons: [`the sheet \`${sheet.file}\` carries no valid page for block ${block}${why}${strays}`],
+    }
+  }
+  if (page.prefixRunId !== prefixRunId) {
+    return {
+      kind: "refused",
+      reasons: [
+        `the sheet \`${sheet.file}\` labels block ${block} against prefix run \`${page.prefixRunId}\`, and this block's ` +
+          `verified prefix record \`${recordFile}\` is run \`${prefixRunId}\`; it is a sheet about another execution`,
+      ],
+    }
+  }
+
+  const poolIds = new Set(pool.findings.map((finding) => finding.id))
+  const rows = new Map<string, SheetRow>()
+  const duplicates: string[] = []
+  const strays: string[] = []
+  for (const row of page.rows) {
+    // NEITHER OVERWRITTEN NOR DROPPED. A second row for one candidate is two
+    // humans disagreeing, or one sheet edited twice, and picking either row
+    // would publish a truth label nobody agreed on.
+    if (rows.has(row.candidateId)) duplicates.push(row.candidateId)
+    else rows.set(row.candidateId, row)
+    if (!poolIds.has(row.candidateId)) strays.push(row.candidateId)
+  }
+  const reasons: string[] = []
+  if (duplicates.length > 0) {
+    reasons.push(`it carries more than one row for candidate(s) ${quoted(new Set(duplicates))}`)
+  }
+  if (strays.length > 0) {
+    reasons.push(
+      `it carries row(s) for ${quoted(new Set(strays))}, which the block's prefix pool of ${poolIds.size} canonical ` +
+        `candidate(s) does not hold`,
+    )
+  }
+  if (reasons.length > 0) {
+    return { kind: "refused", reasons: reasons.map((reason) => `the sheet \`${sheet.file}\` is refused: ${reason}`) }
+  }
+  return { kind: "bound", file: sheet.file, rows, poolIds }
+
+}
+
+/**
  * One arm's false positives: findings it UPHELD that the sheet calls
  * `not-a-defect`.
  *
@@ -985,10 +1008,20 @@ function labelled(
  * denominator it came out of.
  */
 function falsePositivesOf(arm: ArmFindings, rows: Map<string, SheetRow>, poolIds: ReadonlySet<string>): ArmFalsePositives {
-  const upheld = arm.findings.filter((finding) => verdictBucket(verdictState(finding)) === "upheld")
-  const result: ArmFalsePositives = {
-    arm: arm.arm,
-    runId: arm.runId,
+  return { arm: arm.arm, runId: arm.runId, ...classifyUpheld(arm.findings, rows, poolIds) }
+}
+
+/**
+ * The upheld findings of one arm, by their row on a bound page. Exported so
+ * every reader classifies an arm's upheld findings by the same rule.
+ */
+export function classifyUpheld(
+  findings: readonly Finding[],
+  rows: ReadonlyMap<string, SheetRow>,
+  poolIds: ReadonlySet<string>,
+): Omit<ArmFalsePositives, "arm" | "runId"> {
+  const upheld = findings.filter((finding) => verdictBucket(verdictState(finding)) === "upheld")
+  const result: Omit<ArmFalsePositives, "arm" | "runId"> = {
     upheld: upheld.length,
     falsePositives: [],
     trueDefects: [],

@@ -120,6 +120,8 @@ export interface ContinuationRead {
   completed: boolean
   /** Present only for a bound slot. */
   measures?: ContinuationMeasures
+  /** The bound manifest's canonical findings, for a later reader of the same binding. Present only for a bound slot. */
+  findings?: readonly Finding[]
 }
 
 export interface PrefixRead {
@@ -570,7 +572,15 @@ async function readContinuation(
   const completion = row.manifest.status.completion
   const finished = (completion === "completed" || completion === "degraded") && row.manifest.run.finishedAt.kind === "known"
   const completed = status.kind === "read" && status.status === "completed" && status.runId === runId && finished
-  return { slot, status, runId, problems, completed, measures: measuresOf(slot.arm, row.findings, record.ledger, journal, slot.block, runId, sealProblem, matcher) }
+  return {
+    slot,
+    status,
+    runId,
+    problems,
+    completed,
+    measures: measuresOf(slot.arm, row.findings, record.ledger, journal, slot.block, runId, sealProblem, matcher),
+    findings: row.findings,
+  }
 }
 
 function measuresOf(
