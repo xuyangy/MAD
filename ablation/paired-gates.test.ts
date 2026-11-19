@@ -1160,12 +1160,16 @@ describe("the debate-variants phase", () => {
     expect(variantEvaluationEvidencePattern(1).test("debate-variants-evaluation-run-1-2026-11-19.json")).toBe(true)
   })
 
-  test("the shipped table refuses: gate 14 is OPEN and no frozen protocol is pinned", () => {
+  test("the shipped table refuses on gate 14 alone: the protocol frozen on 2026-11-19 is pinned", () => {
     const result = gatePreflight(PAIRED_GATES, "debate-variants", "api-key")
     expect(result.ok).toBe(false)
-    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 14", "no frozen"])
+    expect(result.problems.map((problem) => problem.split(" ").slice(0, 2).join(" "))).toEqual(["gate 14"])
     expect(PAIRED_GATES.find((gate) => gate.number === 13)!.evidence).toContain("Over fakes only")
-    expect(VARIANT_PROTOCOL).toMatchObject({ id: VARIANT_PROTOCOL_ID, version: null, frozenHash: null })
+    expect(VARIANT_PROTOCOL).toMatchObject({ id: VARIANT_PROTOCOL_ID, version: 1, frozenHash: "sha256:c7f7ee681c49b71f47591cc465f3e3d94bf44c905a57003a64192e65a81908ec" })
+    expect(variantProtocolPinProblem()).toBeNull()
+    // An empty pin still refuses the phase.
+    const empty = { ...VARIANT_PROTOCOL, version: null, frozenHash: null }
+    expect(gatePreflight(PAIRED_GATES, "debate-variants", "api-key", undefined, undefined, empty).problems.join("\n")).toContain("no frozen PROTOCOL-mad-debate-variants is pinned")
   })
 
   test("with its own gates closed and a protocol pinned it opens; gate 9 closed never stands in for gate 14", () => {

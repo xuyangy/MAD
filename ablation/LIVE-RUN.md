@@ -962,7 +962,8 @@ hash), the gates of phase `debate-variants` (gates 13 and 14 below, and the shar
 gate 9 never stands in for gate 14) and `VARIANT_EVALUATION_RUN`, and reserves that run's own reservation, which
 records the protocol it verified. Stages 2 and 3 are unchanged. Stage 4 seals the three-arm schedule under that
 protocol, with `config.gates` naming the phase, refuses before the runner if the sealed protocol is another, and runs
-the nine slots. **With the shipped table it always refuses:** gate 14 is OPEN and no protocol is pinned.
+the nine slots. **With the shipped table it always refuses:** gate 14 is OPEN. The protocol frozen on
+2026-11-19 is pinned.
 Read the bundle with `bun run eval-read --bundle <out>`, which prints the debate-variants report.
 
 ### The paired gates
@@ -1004,8 +1005,8 @@ refused.
 `PAIRED_GATES`. Gates 10 to 12 belong to the adversarial suite on the oauth route and never open or
 block the paired blocks. Gates 13 and 14 belong to the `debate-variants` phase (`ablation/DEBATE-VARIANTS.md`),
 on the api-key route only; that phase also requires the shared engineering gates 1, 2, 5 and 6
-(`alsoRequiredFor`), and `gatePreflight` refuses it while no frozen debate-variants protocol is pinned in
-`VARIANT_PROTOCOL`. Gate 14 and gate 9 never stand in for each other. That suite's own prerequisite list, with the one candidate non-gate that is
+(`alsoRequiredFor`), and `gatePreflight` refuses it unless `VARIANT_PROTOCOL` pins a frozen debate-variants
+protocol, as it does since 2026-11-19. Gate 14 and gate 9 never stand in for each other. That suite's own prerequisite list, with the one candidate non-gate that is
 not a row of this table, is under "Before the sixteen live runs". The 400,000-token allowance of the
 api-key adversarial design is no gate here.
 

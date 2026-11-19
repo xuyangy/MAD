@@ -1,8 +1,9 @@
 ---
 id: PROTOCOL-mad-debate-variants
-status: draft
+status: frozen
 version: 1
-frozen_hash: PENDING
+frozen_on: 2026-11-19
+frozen_hash: sha256:c7f7ee681c49b71f47591cc465f3e3d94bf44c905a57003a64192e65a81908ec
 governs: the debate-variants comparison of ablation/DEBATE-VARIANTS.md (baseline, references, open questions)
 companion_of: SPEC.md
 decided_by:
@@ -10,14 +11,20 @@ decided_by:
     2026-11-19: draft this protocol from ablation/DEBATE-VARIANTS.md, with the variant allowances as literals,
     for the human to review and freeze; do not freeze it or pin VARIANT_PROTOCOL. This file is that draft.
     Freezing it, pinning it and authorizing a run remain the human's decisions."
+  - "2026-11-19 — the human, typed as the argument of `/backlog-bridge-loop` in the Claude Code session of
+    2026-11-19: \"I approve the draft as written: freeze
+    _bmad-output/specs/spec-mad-orchestrator/debate-variants-protocol.md (status frozen, frozen_on today,
+    frozen_hash by the reader's rule) and pin its version and hash in VARIANT_PROTOCOL in
+    ablation/paired-gates.ts — do not close gate 14\". This records that freeze. It authorizes no spend:
+    gate 14 stays OPEN."
 ---
 
-# Debate-variants protocol — version 1 (DRAFT)
+# Debate-variants protocol — version 1
 
-> **This is a DRAFT. It is not frozen and it authorizes nothing.** No schedule can bind it: the
-> reader (`readFrozenProtocol`, `ablation/schedule.ts`) refuses any file whose `status` is not
-> `frozen`, and the launcher refuses the debate-variants design while `VARIANT_PROTOCOL` in
-> `ablation/paired-gates.ts` pins no version and hash.
+> **This protocol is FROZEN at version 1 as of 2026-11-19, with every number and rule as drafted.
+> The freeze authorizes nothing.** `VARIANT_PROTOCOL` in `ablation/paired-gates.ts` pins this
+> version and `frozen_hash`; a run still needs the budget owner's authorization (3. below), and gate
+> 14 is OPEN.
 >
 > **Freezing, pinning and authorizing are three separate decisions, all the human's.**
 >

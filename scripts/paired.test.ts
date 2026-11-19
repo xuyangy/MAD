@@ -3077,12 +3077,14 @@ describe("--design debate-variants", () => {
     expect(read.text).toContain("MAD debate-variants report")
   })
 
-  test("the shipped table refuses at stage 1: gate 14 is OPEN and no protocol is pinned; nothing is reserved or started", async () => {
+  test("the shipped table refuses at stage 1 on gate 14 alone: the committed frozen protocol verifies against its pin; nothing is reserved or started", async () => {
     const env = await setup()
     const { overrides, host, meter } = overridesFor(env)
     const result = await captured(() => main(variantArgv(env), overrides))
     expect(result.code).toBe(1)
-    expect(result.text).toContain("no frozen PROTOCOL-mad-debate-variants is pinned")
+    expect(result.text).toContain(`PASS  frozen protocol`)
+    expect(result.text).toContain(`${VARIANT_PROTOCOL.id} v${VARIANT_PROTOCOL.version} ${VARIANT_PROTOCOL.frozenHash}, the protocol \`VARIANT_PROTOCOL\` pins`)
+    expect(result.text).not.toContain("no frozen PROTOCOL-mad-debate-variants is pinned")
     expect(result.text).not.toContain("REFUSED: gate 13")
     expect(result.text).toContain("REFUSED: gate 14 (debate-variants evaluation spend authorization) is OPEN")
     expect(host.started).toEqual([])

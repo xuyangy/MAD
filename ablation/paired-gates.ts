@@ -47,10 +47,9 @@
  * on the api-key route only: gate 13 is the launcher's engineering wiring, and
  * gate 14 the budget owner's authorization of the one run
  * `VARIANT_EVALUATION_RUN` names, under the frozen protocol `VARIANT_PROTOCOL`
- * pins. Gate 13 is CLOSED on the launcher's fake-only tests; gate 14 is OPEN,
- * and `VARIANT_PROTOCOL` pins no version or hash, so `gatePreflight` refuses
- * the phase; the run and the protocol path are placeholders for a future
- * authorization. The engineering gates 1, 2, 5 and 6,
+ * pins. Gate 13 is CLOSED on the launcher's fake-only tests; `VARIANT_PROTOCOL`
+ * pins the protocol frozen on 2026-11-19; gate 14 is OPEN, so `gatePreflight`
+ * refuses the phase and no run is authorized. The engineering gates 1, 2, 5 and 6,
  * which check the host, the worktree and the Tools port that launch shares,
  * name the phase in `alsoRequiredFor` and are required for it too. Only an
  * engineering gate may name another phase: gate 9, the routing evaluation's
@@ -397,11 +396,10 @@ export const EVALUATION_PROTOCOL = {
 
 /**
  * The frozen protocol a debate-variants run would be authorized under
- * (`ablation/DEBATE-VARIANTS.md`): where it is expected to live, the id a
- * debate-variants schedule binds (`VARIANT_PROTOCOL_ID`), and its version and
- * `frozen_hash` once a person freezes it. Both are `null` today: no such
- * protocol is frozen, so `gatePreflight` refuses the debate-variants phase and
- * nothing here authorizes a run.
+ * (`ablation/DEBATE-VARIANTS.md`): where it lives, the id a debate-variants
+ * schedule binds (`VARIANT_PROTOCOL_ID`), and the version and `frozen_hash`
+ * the human froze on 2026-11-19. The pin authorizes nothing: gate 14 is the
+ * budget owner's authorization of a run, and it is OPEN.
  */
 export const VARIANT_PROTOCOL: {
   readonly path: string
@@ -411,8 +409,8 @@ export const VARIANT_PROTOCOL: {
 } = Object.freeze({
   path: "_bmad-output/specs/spec-mad-orchestrator/debate-variants-protocol.md",
   id: VARIANT_PROTOCOL_ID,
-  version: null,
-  frozenHash: null,
+  version: 1,
+  frozenHash: "sha256:c7f7ee681c49b71f47591cc465f3e3d94bf44c905a57003a64192e65a81908ec",
 })
 
 /**

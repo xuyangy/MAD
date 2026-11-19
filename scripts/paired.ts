@@ -700,7 +700,7 @@ export interface PairedOverrides {
   apiKeyEvaluationRun?: ApiKeyEvaluationRun
   /** Test-only: the debate-variants protocol file. Defaults to `VARIANT_PROTOCOL.path` in this repository. */
   variantProtocolFile?: string
-  /** Test-only: the debate-variants protocol pin. Defaults to `VARIANT_PROTOCOL`, which pins nothing today. */
+  /** Test-only: the debate-variants protocol pin. Defaults to `VARIANT_PROTOCOL`. */
   variantProtocol?: typeof VARIANT_PROTOCOL
   /** Test-only: the run gate 14 authorizes. Defaults to `VARIANT_EVALUATION_RUN`. */
   variantEvaluationRun?: VariantEvaluationRun
