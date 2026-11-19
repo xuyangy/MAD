@@ -10,7 +10,7 @@
  * nothing else about readiness, refuses while this file differs from HEAD, and
  * records its committed blob and every gate's status in the sealed schedule.
  *
- * ## Four phases, and no probe or pilot exception
+ * ## Five phases, and no probe or pilot exception
  *
  * Each gate names the phase it is required for: `accounting-probe` (story 2-8c's
  * bounded, authorized probe), `oauth-pilot` (story 2-8c5's bounded OpenAI OAuth
@@ -40,6 +40,21 @@
  * malformed the preflight refuses, and no list a caller supplies replaces it.
  * Story 2-7f resolved it `NON-GATING` on the evidence of `bun run adversarial`'s
  * full import closure.
+ *
+ * ## The debate-variants phase
+ *
+ * Gates 13 and 14 are required for `debate-variants` (`ablation/DEBATE-VARIANTS.md`)
+ * on the api-key route only: gate 13 is the launcher's engineering wiring, and
+ * gate 14 the budget owner's authorization of the one run
+ * `VARIANT_EVALUATION_RUN` names, under the frozen protocol `VARIANT_PROTOCOL`
+ * pins. Both are OPEN, and `VARIANT_PROTOCOL` pins no version or hash, so
+ * `gatePreflight` refuses the phase; the run and the protocol path are
+ * placeholders for a future authorization. The engineering gates 1, 2, 5 and 6,
+ * which check the host, the worktree and the Tools port that launch shares,
+ * name the phase in `alsoRequiredFor` and are required for it too. Only an
+ * engineering gate may name another phase: gate 9, the routing evaluation's
+ * authorization, never covers this phase, and gate 14 never covers the
+ * evaluation.
  *
  * ## Routes (story 2-8c3a)
  *
@@ -80,10 +95,11 @@
  */
 
 import { launchIdentityProblems } from "./launch-contract.ts"
+import { VARIANT_PROTOCOL_ID } from "./variants.ts"
 
 export type GateKind = "engineering" | "authorization"
-export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation" | "adversarial"
-export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation", "adversarial"]
+export type GatePhase = "accounting-probe" | "oauth-pilot" | "evaluation" | "adversarial" | "debate-variants"
+export const GATE_PHASES: readonly GatePhase[] = ["accounting-probe", "oauth-pilot", "evaluation", "adversarial", "debate-variants"]
 export type GateStatus = "OPEN" | "CLOSED"
 /** Story 2-8c3a — how the managed host reaches its providers. */
 export type GateRoute = "api-key" | "oauth"
@@ -95,6 +111,13 @@ export interface PairedGate {
   kind: GateKind
   /** The phase this gate is required for. */
   phase: GatePhase
+  /**
+   * Other phases an ENGINEERING gate is also required for, because the launch it
+   * checks is shared (the debate-variants launch drives the same host, worktree
+   * and Tools port as the evaluation). Absent means none. An authorization gate
+   * never carries it: an authorization covers exactly its own phase.
+   */
+  alsoRequiredFor?: readonly GatePhase[]
   /** Story 2-8c3a — the routes this gate covers. Absent means every route. */
   routes?: readonly GateRoute[]
   owner: string
@@ -372,6 +395,114 @@ export const EVALUATION_PROTOCOL = {
 } as const
 
 /**
+ * The frozen protocol a debate-variants run would be authorized under
+ * (`ablation/DEBATE-VARIANTS.md`): where it is expected to live, the id a
+ * debate-variants schedule binds (`VARIANT_PROTOCOL_ID`), and its version and
+ * `frozen_hash` once a person freezes it. Both are `null` today: no such
+ * protocol is frozen, so `gatePreflight` refuses the debate-variants phase and
+ * nothing here authorizes a run.
+ */
+export const VARIANT_PROTOCOL: {
+  readonly path: string
+  readonly id: string
+  readonly version: number | null
+  readonly frozenHash: string | null
+} = Object.freeze({
+  path: "_bmad-output/specs/spec-mad-orchestrator/debate-variants-protocol.md",
+  id: VARIANT_PROTOCOL_ID,
+  version: null,
+  frozenHash: null,
+})
+
+/**
+ * The gates the debate-variants phase requires by number, whatever a table
+ * holds: the shared engineering gates 1, 2, 5 and 6 and the phase's own
+ * engineering gate 13, each an engineering gate that applies to the phase on
+ * the api-key route, and gate 14, the phase's own authorization, owned by the
+ * human budget owner. A missing row, or one of the wrong kind, phase or route,
+ * is a refusal, so deleting or re-scoping a prerequisite never opens the phase.
+ */
+export const VARIANT_REQUIRED_ENGINEERING_GATES: readonly number[] = [1, 2, 5, 6, 13]
+export const VARIANT_AUTHORIZATION_GATE = 14
+/** The one route the debate-variants design runs on. */
+export const VARIANT_ROUTE: GateRoute = "api-key"
+
+/** Every reason `gates` and `route` cannot carry the debate-variants phase, independent of any gate's status. */
+export function variantGateProblems(gates: readonly PairedGate[], route: GateRoute): string[] {
+  const problems: string[] = []
+  if (route !== VARIANT_ROUTE) {
+    problems.push(`the debate-variants phase runs on the ${VARIANT_ROUTE} route only, and the route checked is ${JSON.stringify(route)}`)
+  }
+  const onVariantRoute = (gate: PairedGate): boolean =>
+    gate.routes === undefined || (Array.isArray(gate.routes) && gate.routes.includes(VARIANT_ROUTE))
+  const applies = (gate: PairedGate): boolean =>
+    gate.phase === "debate-variants" || (Array.isArray(gate.alsoRequiredFor) && gate.alsoRequiredFor.includes("debate-variants"))
+  for (const number of VARIANT_REQUIRED_ENGINEERING_GATES) {
+    const gate = gates.find((entry) => entry.number === number)
+    if (gate === undefined) problems.push(`the table holds no gate ${number}, which the debate-variants phase requires`)
+    else if (gate.kind !== "engineering" || !applies(gate) || !onVariantRoute(gate)) {
+      problems.push(`gate ${number} (${gate.name}) is not an engineering gate required for debate-variants on the ${VARIANT_ROUTE} route, and the phase requires it as one`)
+    }
+  }
+  const authorization = gates.find((entry) => entry.number === VARIANT_AUTHORIZATION_GATE)
+  if (authorization === undefined) {
+    problems.push(`the table holds no gate ${VARIANT_AUTHORIZATION_GATE}, the debate-variants phase's authorization`)
+  } else if (
+    authorization.kind !== "authorization" ||
+    authorization.phase !== "debate-variants" ||
+    authorization.owner !== HUMAN_BUDGET_OWNER ||
+    !onVariantRoute(authorization)
+  ) {
+    problems.push(
+      `gate ${VARIANT_AUTHORIZATION_GATE} (${authorization.name}) is not the debate-variants authorization on the ${VARIANT_ROUTE} route ` +
+        "owned by the human budget owner, and no other gate stands in for it",
+    )
+  }
+  return problems
+}
+
+/** Why `protocol` pins no frozen debate-variants protocol, or `null`. */
+export function variantProtocolPinProblem(protocol: typeof VARIANT_PROTOCOL = VARIANT_PROTOCOL): string | null {
+  if (protocol.id !== VARIANT_PROTOCOL_ID) return `the debate-variants protocol pin names ${JSON.stringify(protocol.id)}, not ${VARIANT_PROTOCOL_ID}`
+  if (protocol.version === null || protocol.frozenHash === null) {
+    return `no frozen ${VARIANT_PROTOCOL_ID} is pinned (\`VARIANT_PROTOCOL\` records no version and frozen_hash for ${protocol.path})`
+  }
+  if (!Number.isInteger(protocol.version) || protocol.version < 1 || !/^sha256:[0-9a-f]{64}$/.test(protocol.frozenHash)) {
+    return "the debate-variants protocol pin carries a malformed version or frozen_hash"
+  }
+  return null
+}
+
+/** The debate-variants evaluation run gate 14 covers, and every run before it, in order. */
+export interface VariantEvaluationRun {
+  readonly run: number
+  /** The reservation the launcher creates exclusively before it starts the relay or a host, relative to the repository. */
+  readonly reservation: string
+  readonly prior: readonly ApiKeyEvaluationPriorRun[]
+}
+
+/** Debate-variants evaluation run N's reservation, relative to the repository. */
+export function variantEvaluationReservation(run: number): string {
+  return `ablation/evidence/debate-variants-evaluation-run-${run}.reservation`
+}
+
+/** Debate-variants evaluation run N's committed evidence file name: `debate-variants-evaluation-run-N-YYYY-MM-DD.json`. */
+export function variantEvaluationEvidencePattern(run: number): RegExp {
+  return new RegExp(`^debate-variants-evaluation-run-${run}-\\d{4}-\\d{2}-\\d{2}\\.json$`)
+}
+
+/**
+ * The one debate-variants evaluation run gate 14 would authorize, on the
+ * api-key route: a placeholder identity for a future authorization, not one.
+ * No such run has happened, so `prior` is empty, and no pin is named.
+ */
+export const VARIANT_EVALUATION_RUN: VariantEvaluationRun = Object.freeze({
+  run: 1,
+  reservation: variantEvaluationReservation(1),
+  prior: Object.freeze([]),
+})
+
+/**
  * Story 2-7e — the one OAuth adversarial run gate 10 authorized: its run, its
  * roster pin and its reservation, with every earlier run. Run 1 ran on
  * 2026-10-14 and its reservation is committed; gate 10 is OPEN, because its
@@ -551,6 +682,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "host request accounting",
     kind: "engineering",
     phase: "evaluation",
+    alsoRequiredFor: ["debate-variants"],
     routes: ["api-key"],
     owner: "story 2-8c2",
     status: "CLOSED",
@@ -577,6 +709,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "shared gates verified on a real host",
     kind: "engineering",
     phase: "evaluation",
+    alsoRequiredFor: ["debate-variants"],
     owner: "story 2-8c",
     status: "CLOSED",
     requires: "the journal's global, Blocks and phase gates verified against a real host before the first paid request",
@@ -654,6 +787,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "worktree identity",
     kind: "engineering",
     phase: "evaluation",
+    alsoRequiredFor: ["debate-variants"],
     owner: "story 2-8b",
     status: "CLOSED",
     requires: "the handed --directory is proved to be exactly the sealed labelled change before the coin toss",
@@ -669,6 +803,7 @@ export const PAIRED_GATES: readonly PairedGate[] = [
     name: "production Tools wiring",
     kind: "engineering",
     phase: "evaluation",
+    alsoRequiredFor: ["debate-variants"],
     owner: "story 2-8b",
     status: "CLOSED",
     requires: "the run drives the production Tools port with its shipped blame deadlines",
@@ -867,6 +1002,39 @@ export const PAIRED_GATES: readonly PairedGate[] = [
       "cleanup. Materialization may finish its remaining git steps (five in total) and filesystem operations before " +
       "returning; no cancellation-response or guaranteed wall-clock bound is established",
   },
+  {
+    number: 13,
+    name: "debate-variants launcher wiring",
+    kind: "engineering",
+    phase: "debate-variants",
+    routes: ["api-key"],
+    owner: "the debate-variants launcher work",
+    status: "OPEN",
+    requires:
+      "`bun run paired --live --design debate-variants` seals a debate-variants schedule (createVariantSchedule) and runs it " +
+      "(runVariantBlocks) behind the same stage-1 to stage-3 checks as the evaluation, refuses unsupported design and route " +
+      "combinations before anything is reserved, verifies the pinned frozen debate-variants protocol by id, version and hash, " +
+      "consults this phase's gates and never gate 9, and reserves the debate-variants run's own reservation; with tests over " +
+      "fakes only. The shared engineering gates 1, 2, 5 and 6 cover the host accounting, the real host, the worktree and the " +
+      "Tools port that launch shares; they say nothing about the debate-variants schedule, runner or journal"
+  },
+  {
+    number: 14,
+    name: "debate-variants evaluation spend authorization",
+    kind: "authorization",
+    phase: "debate-variants",
+    routes: ["api-key"],
+    owner: HUMAN_BUDGET_OWNER,
+    status: "OPEN",
+    requires:
+      `the budget owner freezes ${VARIANT_PROTOCOL_ID} at ${VARIANT_PROTOCOL.path}, records its version and frozen_hash in ` +
+      `\`VARIANT_PROTOCOL\`, and authorizes run ${VARIANT_EVALUATION_RUN.run} (\`VARIANT_EVALUATION_RUN\`) of the three ` +
+      "debate-variants blocks' spend on the api-key route in ledger tokens: three continuations per block under " +
+      "VARIANT_ALLOWANCES, unchanged. One run only: the launcher creates " +
+      `${VARIANT_EVALUATION_RUN.reservation} exclusively before it starts a host or a relay, and refuses while it exists on ` +
+      "disk or is committed at HEAD. Gate 9 authorizes the routing evaluation only and never stands in for it, nor does " +
+      "this gate for gate 9. No story closes it"
+  },
 ]
 
 /**
@@ -1050,6 +1218,7 @@ export function gatePreflight(
   route: GateRoute,
   candidates?: readonly CandidateNonGate[] | null,
   run: AdversarialRun = ADVERSARIAL_RUN,
+  variantProtocol: typeof VARIANT_PROTOCOL = VARIANT_PROTOCOL,
 ): GatePreflight {
   const lines: string[] = []
   const problems: string[] = []
@@ -1067,21 +1236,37 @@ export function gatePreflight(
     gate.routes === undefined || !knownRoute || !wellFormedRoutes(gate) || gate.routes.includes(route)
   for (const gate of gates) {
     const onRoute = covers(gate)
-    const required = gate.phase === phase && onRoute
+    const shared = Array.isArray(gate.alsoRequiredFor) && gate.alsoRequiredFor.includes(phase)
+    const required = (gate.phase === phase || shared) && onRoute
     const evidence = gate.status === "CLOSED" ? ` — evidence: ${gate.evidence ?? "NONE RECORDED"}` : ""
     const note = gate.note === undefined ? "" : ` — note: ${gate.note}`
     const routes =
       gate.routes === undefined ? "" : wellFormedRoutes(gate) ? ` on route ${gate.routes.join(", ")}` : ` on routes ${JSON.stringify(gate.routes)}`
-    const skipped = gate.phase !== phase ? ` (not consulted for ${phase})` : onRoute ? "" : ` (not consulted for route ${route})`
+    // Named only where it matters: in the preflight of a phase that shares the gate.
+    const also = shared ? `; also required for ${phase}` : ""
+    const skipped =
+      gate.phase !== phase && !shared ? ` (not consulted for ${phase})` : onRoute ? "" : ` (not consulted for route ${route})`
     lines.push(
       `gate ${gate.number} — ${gate.name} — ${gate.kind}, required for ${gate.phase}${routes}` +
-        `${skipped}, owner ${gate.owner} — ${gate.status}${evidence}${note}`,
+        `${skipped}${also}, owner ${gate.owner} — ${gate.status}${evidence}${note}`,
     )
     if (gate.kind !== "engineering" && gate.kind !== "authorization") {
       problems.push(`gate ${gate.number} (${gate.name}) has kind ${JSON.stringify(gate.kind)}, which is neither engineering nor authorization`)
     }
     if (!GATE_PHASES.includes(gate.phase)) {
-      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is not accounting-probe, oauth-pilot, evaluation or adversarial`)
+      problems.push(`gate ${gate.number} (${gate.name}) has phase ${JSON.stringify(gate.phase)}, which is not accounting-probe, oauth-pilot, evaluation, adversarial or debate-variants`)
+    }
+    if (gate.alsoRequiredFor !== undefined) {
+      const list = gate.alsoRequiredFor as unknown
+      if (gate.kind !== "engineering") {
+        problems.push(`gate ${gate.number} (${gate.name}) is not an engineering gate and names other phases it is required for; an authorization covers only its own phase`)
+      } else if (
+        !Array.isArray(list) ||
+        list.length === 0 ||
+        !list.every((entry: unknown) => typeof entry === "string" && GATE_PHASES.includes(entry as GatePhase) && entry !== gate.phase)
+      ) {
+        problems.push(`gate ${gate.number} (${gate.name}) has alsoRequiredFor ${JSON.stringify(list)}, which is not a non-empty list of other known phases`)
+      }
     }
     if (!wellFormedRoutes(gate)) {
       problems.push(`gate ${gate.number} (${gate.name}) has routes ${JSON.stringify(gate.routes)}, which are not a non-empty list of api-key and oauth`)
@@ -1111,6 +1296,12 @@ export function gatePreflight(
   }
   if (!gates.some((gate) => gate.phase === phase && gate.kind === "authorization" && covers(gate))) {
     problems.push(`the table holds no authorization gate for ${phase} on route ${route}, so nothing authorizes its spend`)
+  }
+  if (phase === "debate-variants") {
+    for (const problem of variantGateProblems(gates, route)) problems.push(problem)
+    lines.push(`debate-variants protocol ${variantProtocol.id} at ${variantProtocol.path} — ${variantProtocol.frozenHash ?? "not frozen"}`)
+    const pin = variantProtocolPinProblem(variantProtocol)
+    if (pin !== null) problems.push(pin)
   }
   if (phase === "adversarial") {
     const runProblem = adversarialRunProblem(run)
